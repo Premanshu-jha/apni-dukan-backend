@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.web.MockMultipartFile;
@@ -20,6 +21,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -30,6 +32,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -45,12 +48,14 @@ class FileServiceTest {
     @Mock StoredFileRepository repository;
     @Mock FileStorage storage;
     @Mock CurrentUserProvider currentUser;
+    @Mock FileUsageChecker usageChecker;
 
     FileService service;
 
     @BeforeEach
     void setUp() {
-        service = new FileService(repository, storage, currentUser, Clock.fixed(NOW, ZoneOffset.UTC), 5);
+        service = new FileService(repository, storage, currentUser, Clock.fixed(NOW, ZoneOffset.UTC), 5,
+                List.of(usageChecker));
         when(currentUser.get()).thenReturn(new CurrentUser(USER, SHOP));
     }
 
@@ -134,5 +139,50 @@ class FileServiceTest {
 
         assertThat(link.url()).isEqualTo("https://r2.example/signed");
         assertThat(link.expiresAt()).isEqualTo(NOW.plus(Duration.ofMinutes(5)));
+    }
+
+    @Test
+    void deletesAnUnusedFileFromTheDatabaseThenFromR2() {
+        StoredFile file = billPhoto();
+        when(repository.findByIdAndShopId(file.getId(), SHOP)).thenReturn(Optional.of(file));
+        when(usageChecker.isInUse(file)).thenReturn(false);
+
+        service.delete(file.getId());
+
+        InOrder order = inOrder(repository, storage);
+        order.verify(repository).delete(file);
+        order.verify(repository).flush();
+        order.verify(storage).delete(file.getStorageKey());
+    }
+
+    @Test
+    void refusesToDeleteAFileThatIsAttachedToARecord() {
+        StoredFile file = billPhoto();
+        when(repository.findByIdAndShopId(file.getId(), SHOP)).thenReturn(Optional.of(file));
+        when(usageChecker.isInUse(file)).thenReturn(true);
+
+        assertThatThrownBy(() -> service.delete(file.getId()))
+                .isInstanceOf(ApiException.class)
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo("FILE_IN_USE");
+        verify(repository, never()).delete(any(StoredFile.class));
+        verify(storage, never()).delete(anyString());
+    }
+
+    @Test
+    void cannotDeleteAnotherShopsFile() {
+        UUID fileId = UUID.randomUUID();
+        when(repository.findByIdAndShopId(fileId, SHOP)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.delete(fileId))
+                .isInstanceOf(ApiException.class)
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo("NOT_FOUND");
+        verify(storage, never()).delete(anyString());
+    }
+
+    private static StoredFile billPhoto() {
+        return new StoredFile(UUID.randomUUID(), SHOP, FilePurpose.BILL, "shops/s/bills/f.jpg",
+                "image/jpeg", 10, "c".repeat(64), "KD-4471.jpg", USER, NOW);
     }
 }

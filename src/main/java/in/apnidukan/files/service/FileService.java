@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -24,6 +25,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -42,17 +44,20 @@ public class FileService {
     private final CurrentUserProvider currentUser;
     private final Clock clock;
     private final Duration linkValidity;
+    private final List<FileUsageChecker> usageCheckers;
 
     public FileService(StoredFileRepository repository,
                        FileStorage storage,
                        CurrentUserProvider currentUser,
                        Clock clock,
-                       @Value("${app.files.link-minutes:5}") long linkMinutes) {
+                       @Value("${app.files.link-minutes:5}") long linkMinutes,
+                       List<FileUsageChecker> usageCheckers) {
         this.repository = repository;
         this.storage = storage;
         this.currentUser = currentUser;
         this.clock = clock;
         this.linkValidity = Duration.ofMinutes(linkMinutes);
+        this.usageCheckers = usageCheckers;
     }
 
     public FileUploadResult upload(MultipartFile upload, FilePurpose purpose) {
@@ -112,6 +117,25 @@ public class FileService {
         String downloadName = download ? downloadName(file) : null;
         String url = storage.signedLink(file.getStorageKey(), linkValidity, downloadName);
         return new FileLink(url, Instant.now(clock).plus(linkValidity));
+    }
+
+    /**
+     * Deletes a file from both Neon (its row) and R2 (its bytes). Only files not attached to anything can be deleted.
+     * The row is deleted first, inside a transaction; if R2 then refuses, the transaction rolls back and the row stays,
+     * so the database never points to a file that is gone.
+     */
+    @Transactional
+    public void delete(UUID fileId) {
+        CurrentUser user = currentUser.get();
+        StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
+                .orElseThrow(() -> ApiException.notFound("File"));
+        if (usageCheckers.stream().anyMatch(checker -> checker.isInUse(file))) {
+            throw new ApiException(HttpStatus.CONFLICT, "FILE_IN_USE",
+                    "This file is attached to a record and can't be deleted");
+        }
+        repository.delete(file);
+        repository.flush();
+        storage.delete(file.getStorageKey());
     }
 
     private static Inspection inspect(MultipartFile upload) {

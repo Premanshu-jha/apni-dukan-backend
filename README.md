@@ -9,7 +9,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | Module | Status |
 | --- | --- |
 | `common` | Error format, current user/shop (development headers for now), clock |
-| `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links |
+| `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 
 ## How file handling works
 
@@ -70,6 +70,20 @@ sequenceDiagram
     end
 ```
 
+### Delete: `DELETE /api/v1/files/{id}`
+
+```mermaid
+flowchart TD
+    A["DELETE /files/{id}"] --> B{"File belongs to this shop?"}
+    B -- no --> E1["404 NOT_FOUND"]
+    B -- yes --> C{"Attached to a bill, payment<br/>or shop record?"}
+    C -- yes --> E2["409 FILE_IN_USE<br/>nothing deleted"]
+    C -- no --> D["In one transaction:<br/>delete the row from Neon"]
+    D --> F["Delete the bytes from R2"]
+    F -- ok --> G["Commit · 204 No Content"]
+    F -- "R2 fails" --> H["Roll back: row stays<br/>500, try again later"]
+```
+
 ## Run it on your laptop
 
 1. **Install:** JDK 21 (IntelliJ can download it). IntelliJ's bundled Maven is enough.
@@ -119,6 +133,17 @@ curl "http://localhost:8080/api/v1/files/<id>/link" \
 
 Open the returned `url` in a browser. Add `?download=true` to get a link that saves the file instead.
 A different `X-Dev-Shop-Id` gets `404`: shops can't see each other's files.
+
+**Delete a file** (removes it from both Neon and R2)
+
+```bash
+curl -X DELETE "http://localhost:8080/api/v1/files/<id>" \
+  -H "X-Dev-Shop-Id: 11111111-1111-1111-1111-111111111111" \
+  -H "X-Dev-User-Id: 22222222-2222-2222-2222-222222222222"
+```
+
+Returns `204`. A file attached to a bill, payment or shop record returns `409 FILE_IN_USE` and stays.
+Another shop's file returns `404`.
 
 ## Errors
 
