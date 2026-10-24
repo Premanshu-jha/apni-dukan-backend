@@ -73,12 +73,14 @@ sequenceDiagram
 ## Run it on your laptop
 
 1. **Install:** JDK 21 (IntelliJ can download it). IntelliJ's bundled Maven is enough.
-2. **Secrets:** copy `.env.example` to `.env` in this folder and fill in:
+2. **Settings:** every `${...}` name in `src/main/resources/application.properties` needs a value.
+   Put them in IntelliJ: Run → Edit Configurations → `ApniDukanApplication` → Environment variables
+   (or in a `.env` file in this folder; it's ignored by Git).
    - `DB_URL`, `DB_URL_DIRECT`, `DB_USER`, `DB_PASSWORD` from Neon (use the `dev` branch).
      The pooled URL has `-pooler` in the host; the direct one doesn't.
    - `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY`, `R2_SECRET_KEY` from Cloudflare R2.
-   - Keep `DEV_AUTH_ENABLED=true`.
-   `.env` is in `.gitignore`. Never commit it.
+   - `DEV_AUTH_ENABLED=true`
+   Never commit real values.
 3. **Run:** open this folder in IntelliJ, wait for Maven to download, then press ▶ next to `main` in
    `ApniDukanApplication.java`. On first start, Flyway creates the `files` table (`V1__create_files.sql`).
 4. **Tests:** `mvn test` (or right-click `src/test/java` → Run tests). They don't need the database or R2.
