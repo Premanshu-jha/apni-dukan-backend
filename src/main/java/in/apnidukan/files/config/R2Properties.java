@@ -11,5 +11,6 @@ public record R2Properties(
         @NotBlank String endpoint,
         @NotBlank String bucket,
         @NotBlank String accessKey,
-        @NotBlank String secretKey) {
+        @NotBlank String secretKey,
+        @NotBlank String region) {
 }

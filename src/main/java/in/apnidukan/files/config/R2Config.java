@@ -15,7 +15,7 @@ import java.net.URI;
 
 /**
  * The AWS S3 library, pointed at Cloudflare R2 instead of Amazon.
- * The only R2-specific parts: endpointOverride (your R2 address) and region "auto".
+ * The only R2-specific parts: endpointOverride (your R2 address) and region "auto" (app.r2.region).
  */
 @Configuration
 public class R2Config {
@@ -29,7 +29,7 @@ public class R2Config {
     public S3Client s3Client(R2Properties props, StaticCredentialsProvider r2Credentials) {
         return S3Client.builder()
                 .endpointOverride(URI.create(props.endpoint()))
-                .region(Region.of("auto"))
+                .region(Region.of(props.region()))
                 .credentialsProvider(r2Credentials)
                 .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
                 // Newer AWS SDKs add extra checksums by default; R2 only needs them when required.
@@ -42,7 +42,7 @@ public class R2Config {
     public S3Presigner s3Presigner(R2Properties props, StaticCredentialsProvider r2Credentials) {
         return S3Presigner.builder()
                 .endpointOverride(URI.create(props.endpoint()))
-                .region(Region.of("auto"))
+                .region(Region.of(props.region()))
                 .credentialsProvider(r2Credentials)
                 .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
                 .build();
