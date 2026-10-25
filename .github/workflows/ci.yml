@@ -16,7 +16,7 @@ jobs:
   build:
     runs-on: ubuntu-latest     # GitHub lends a fresh Linux machine for each run
     steps:
-      - uses: actions/checkout@v5          # 1. download this repository's code
+      - uses: actions/checkout@v7          # 1. download this repository's code
         with:
           fetch-depth: 0                   #    (with full history, so the secret scan can check every commit)
 
