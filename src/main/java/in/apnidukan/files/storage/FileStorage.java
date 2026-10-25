@@ -9,8 +9,11 @@ import java.time.Duration;
  */
 public interface FileStorage {
 
-    /** Saves the bytes under the given key. The stream is read once, never fully held in memory. */
-    void put(String key, InputStream content, long sizeBytes, String contentType);
+    /**
+     * Saves the bytes under the given key. The stream is read once, never fully held in memory.
+     * @param sha256Hex the file's SHA-256 (64 hex characters); storage recomputes it and rejects the upload if it differs
+     */
+    void put(String key, InputStream content, long sizeBytes, String contentType, String sha256Hex);
 
     /**
      * A temporary link that opens the file directly from storage.

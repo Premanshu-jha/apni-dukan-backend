@@ -12,6 +12,8 @@ import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignReques
 
 import java.io.InputStream;
 import java.time.Duration;
+import java.util.Base64;
+import java.util.HexFormat;
 
 @Component
 public class R2FileStorage implements FileStorage {
@@ -27,12 +29,15 @@ public class R2FileStorage implements FileStorage {
     }
 
     @Override
-    public void put(String key, InputStream content, long sizeBytes, String contentType) {
+    public void put(String key, InputStream content, long sizeBytes, String contentType, String sha256Hex) {
         PutObjectRequest request = PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(key)
                 .contentType(contentType)
                 .contentLength(sizeBytes)
+                // End-to-end check: R2 recomputes the SHA-256 of what arrived and refuses the upload if it doesn't match.
+                // The S3 header wants the raw 32-byte hash in Base64, so convert from our hex form.
+                .checksumSHA256(Base64.getEncoder().encodeToString(HexFormat.of().parseHex(sha256Hex)))
                 .build();
         s3.putObject(request, RequestBody.fromInputStream(content, sizeBytes));
     }
