@@ -30,7 +30,14 @@ jobs:
       - name: Build and run tests          # 4. compile everything and run all tests
         run: mvn -B verify 2>&1 | tee build.log; exit ${PIPESTATUS[0]}   # same as "mvn verify" on your laptop
 
-      - name: Show why it failed           # 5. only if step 4 failed: put the key error lines on the GitHub page
+      - name: Test summary                 # 5. list how many tests ran, failed or were skipped
+        if: always()
+        run: |
+          for f in target/surefire-reports/*.txt; do
+            echo "::notice title=$(basename "$f" .txt)::$(grep -m1 'Tests run' "$f")"
+          done
+
+      - name: Show why it failed           # 6. only if step 4 failed: put the key error lines on the GitHub page
         if: failure()
         run: |
           grep -E "\[ERROR\]|Caused by|Exception|expected|but was" build.log | head -60 | sed 's/%/%25/g' > errors.txt || true
