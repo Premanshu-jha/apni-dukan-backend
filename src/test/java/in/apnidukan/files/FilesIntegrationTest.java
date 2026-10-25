@@ -174,6 +174,21 @@ class FilesIntegrationTest {
         assertThat(wrongMethod.body().get("code")).isEqualTo("METHOD_NOT_ALLOWED");
     }
 
+    @Test
+    void tooLargeFileGetsAClear413() {
+        Reply reply = upload(SHOP_A, new byte[11 * 1024 * 1024], "huge.jpg", "BILL");
+        assertThat(reply.status()).isEqualTo(413);
+        assertThat(reply.body().get("code")).isEqualTo("FILE_TOO_LARGE");
+    }
+
+    @Test
+    void unknownPurposeSaysWhichValuesAreAllowed() {
+        Reply reply = upload(SHOP_A, fakeJpeg(), "bill.jpg", "INVOICE");
+        assertThat(reply.status()).isEqualTo(400);
+        assertThat((String) reply.body().get("message")).contains("INVOICE").contains("purpose");
+        assertThat(reply.body().get("details").toString()).contains("SHOP_PHOTO", "BILL", "RECEIPT");
+    }
+
     // ---------- helpers ----------
 
     private Reply upload(String shop, byte[] bytes, String filename, String purpose) {
