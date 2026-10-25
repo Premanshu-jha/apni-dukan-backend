@@ -8,6 +8,10 @@ on:                            # WHEN to run:
     branches: [main]           #   when something lands on main
   pull_request:                #   and on every pull request
 
+permissions:                   # what this workflow's GitHub token may do: read only, nothing else
+  contents: read
+  pull-requests: read
+
 jobs:
   build:
     runs-on: ubuntu-latest     # GitHub lends a fresh Linux machine for each run
