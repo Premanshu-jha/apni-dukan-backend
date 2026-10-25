@@ -1,0 +1,49 @@
+# Automatic checks that GitHub runs on every push and pull request.
+# You never run or edit this file yourself; it just shows a green tick or red cross on GitHub.
+
+name: CI                       # the name shown on GitHub's "Actions" tab
+
+on:                            # WHEN to run:
+  push:
+    branches: [main]           #   when something lands on main
+  pull_request:                #   and on every pull request
+
+jobs:
+  build:
+    runs-on: ubuntu-latest     # GitHub lends a fresh Linux machine for each run
+    steps:
+      - uses: actions/checkout@v5          # 1. download this repository's code
+        with:
+          fetch-depth: 0                   #    (with full history, so the secret scan can check every commit)
+
+      - name: Check for committed secrets  # 2. fail if a password or API key was committed by mistake
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-java@v5        # 3. install Java 21
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven                     #    and reuse downloaded libraries between runs (faster)
+
+      - name: Build and run tests          # 4. compile everything and run all tests
+        run: mvn -B verify 2>&1 | tee build.log; exit ${PIPESTATUS[0]}   # same as "mvn verify" on your laptop
+
+      - name: Test summary                 # 5. list how many tests ran, failed or were skipped
+        if: always()
+        run: |
+          for f in target/surefire-reports/*.txt; do
+            echo "::notice title=$(basename "$f" .txt)::$(grep -m1 'Tests run' "$f")"
+          done
+
+      - name: Show why it failed           # 6. only if step 4 failed: put the key error lines on the GitHub page
+        if: failure()
+        run: |
+          grep -E "\[ERROR\]|Caused by|Exception|expected|but was" build.log | head -60 | sed 's/%/%25/g' > errors.txt || true
+          echo "::error title=Build or test failure::$(sed ':a;N;$!ba;s/\n/%0A/g' errors.txt)"
+          for f in target/surefire-reports/*.txt; do
+            if grep -qE "FAILURE|ERROR" "$f"; then
+              echo "::error title=$(basename "$f")::$(head -40 "$f" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+            fi
+          done

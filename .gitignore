@@ -1,0 +1,14 @@
+# Build output
+target/
+
+# Real secrets: never commit
+.env
+*.env.local
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
