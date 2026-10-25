@@ -32,8 +32,7 @@ public class R2Config {
                 .region(Region.of("auto"))
                 .credentialsProvider(r2Credentials)
                 .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
-                // Newer AWS SDKs add a CRC32 "trailer" checksum to every upload by default; R2's docs don't list that
-                // format, and it used to make every upload fail. We send our own SHA-256 instead (see R2FileStorage.put).
+                // Newer AWS SDKs add extra checksums by default; R2 only needs them when required.
                 .requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED)
                 .responseChecksumValidation(ResponseChecksumValidation.WHEN_REQUIRED)
                 .build();

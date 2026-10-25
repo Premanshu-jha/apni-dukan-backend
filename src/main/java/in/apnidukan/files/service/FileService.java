@@ -88,7 +88,7 @@ public class FileService {
 
         // Pass 2: stream the bytes to R2.
         try (InputStream in = upload.getInputStream()) {
-            storage.put(key, in, size, type.contentType(), inspection.sha256());
+            storage.put(key, in, size, type.contentType());
         } catch (IOException e) {
             throw new UncheckedIOException("Could not read the uploaded file", e);
         }

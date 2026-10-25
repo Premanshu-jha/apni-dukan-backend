@@ -41,7 +41,7 @@ flowchart TD
     D -- no --> E2["400 UNSUPPORTED_FILE_TYPE"]
     D -- yes --> F{"Same shop + purpose + SHA-256<br/>already in files table?"}
     F -- yes --> G["200, duplicate: true<br/>returns the earlier file, nothing stored"]
-    F -- no --> H["Pass 2: stream bytes to R2 with their SHA-256<br/>R2 rejects them if the fingerprint does not match<br/>key: shops/{shopId}/{folder}/{uuid}.{ext}"]
+    F -- no --> H["Pass 2: stream bytes to R2<br/>key: shops/{shopId}/{folder}/{uuid}.{ext}"]
     H --> I["Insert row in files table"]
     I -- saved --> J["201 with fileId"]
     I -- "same file saved at the same moment<br/>(unique index)" --> K["Delete our copy from R2<br/>200, duplicate: true"]

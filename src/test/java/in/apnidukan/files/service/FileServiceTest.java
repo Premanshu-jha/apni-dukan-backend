@@ -69,9 +69,7 @@ class FileServiceTest {
         FileUploadResult result = service.upload(upload, FilePurpose.BILL);
 
         ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
-        ArgumentCaptor<String> sha = ArgumentCaptor.forClass(String.class);
-        verify(storage).put(key.capture(), any(InputStream.class), eq((long) JPEG.length), eq("image/jpeg"), sha.capture());
-        assertThat(sha.getValue()).isEqualTo(result.file().getSha256());
+        verify(storage).put(key.capture(), any(InputStream.class), eq((long) JPEG.length), eq("image/jpeg"));
         assertThat(key.getValue()).startsWith("shops/" + SHOP + "/bills/").endsWith(".jpg");
         assertThat(result.duplicate()).isFalse();
         assertThat(result.file().getShopId()).isEqualTo(SHOP);
@@ -92,7 +90,7 @@ class FileServiceTest {
 
         assertThat(result.duplicate()).isTrue();
         assertThat(result.file()).isSameAs(earlier);
-        verify(storage, never()).put(anyString(), any(), anyLong(), anyString(), anyString());
+        verify(storage, never()).put(anyString(), any(), anyLong(), anyString());
     }
 
     @Test
@@ -103,7 +101,7 @@ class FileServiceTest {
                 .isInstanceOf(ApiException.class)
                 .extracting(e -> ((ApiException) e).getCode())
                 .isEqualTo("UNSUPPORTED_FILE_TYPE");
-        verify(storage, never()).put(anyString(), any(), anyLong(), anyString(), anyString());
+        verify(storage, never()).put(anyString(), any(), anyLong(), anyString());
     }
 
     @Test
