@@ -24,6 +24,10 @@ public class DevHeaderCurrentUserProvider implements CurrentUserProvider {
 
     public DevHeaderCurrentUserProvider(@org.springframework.beans.factory.annotation.Value("${app.dev-auth.enabled:false}") boolean enabled) {
         this.enabled = enabled;
+        if (enabled) {
+            org.slf4j.LoggerFactory.getLogger(DevHeaderCurrentUserProvider.class).warn(
+                    "DEV_AUTH_ENABLED=true: anyone can act as any shop with X-Dev-Shop-Id headers. Never use this in production.");
+        }
     }
 
     @Override

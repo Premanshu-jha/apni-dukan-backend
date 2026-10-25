@@ -1,0 +1,17 @@
+# Dependabot: GitHub opens a pull request when a newer version of a library or GitHub Action is out.
+# Each one runs the full CI (build + all tests), so you see a green tick before merging an upgrade.
+version: 2
+updates:
+  - package-ecosystem: maven          # libraries in pom.xml (Spring Boot, AWS SDK, ...)
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      aws-sdk:                        # all AWS SDK updates together in one PR
+        patterns: ["software.amazon.awssdk*"]
+
+  - package-ecosystem: github-actions # actions used in .github/workflows
+    directory: "/"
+    schedule:
+      interval: monthly

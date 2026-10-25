@@ -10,7 +10,10 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
 
+import org.springframework.http.ContentDisposition;
+
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 @Component
@@ -41,7 +44,12 @@ public class R2FileStorage implements FileStorage {
     public String signedLink(String key, Duration validFor, String downloadName) {
         GetObjectRequest.Builder get = GetObjectRequest.builder().bucket(bucket).key(key);
         if (downloadName != null) {
-            get.responseContentDisposition("attachment; filename=\"" + downloadName.replace("\"", "") + "\"");
+            // Spring builds the header safely: quotes are escaped and non-English names (e.g. Hindi) are
+            // encoded as filename*=UTF-8''..., which browsers understand.
+            get.responseContentDisposition(ContentDisposition.attachment()
+                    .filename(downloadName, StandardCharsets.UTF_8)
+                    .build()
+                    .toString());
         }
         GetObjectPresignRequest presign = GetObjectPresignRequest.builder()
                 .signatureDuration(validFor)
