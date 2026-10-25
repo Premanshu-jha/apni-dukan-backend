@@ -133,8 +133,10 @@ public class FileService {
             throw new ApiException(HttpStatus.CONFLICT, "FILE_IN_USE",
                     "This file is attached to a record and can't be deleted");
         }
-        repository.delete(file);
-        repository.flush();
+        // Conditional delete: if two delete requests race, only one removes the row; the other gets 404.
+        if (repository.deleteByIdAndShopId(file.getId(), user.shopId()) == 0) {
+            throw ApiException.notFound("File");
+        }
         storage.delete(file.getStorageKey());
     }
 

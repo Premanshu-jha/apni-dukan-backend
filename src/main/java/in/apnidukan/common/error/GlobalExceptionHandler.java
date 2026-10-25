@@ -48,8 +48,18 @@ public class GlobalExceptionHandler {
                 .body(ErrorResponse.of("FILE_TOO_LARGE", "Files can be at most 10 MB"));
     }
 
+    /**
+     * Spring's own web errors (unknown URL, wrong HTTP method, wrong content type, ...) carry their proper status.
+     * Keep it (404, 405, 415...) instead of turning them into 500.
+     */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception e) {
+        if (e instanceof org.springframework.web.ErrorResponse web) {
+            HttpStatus status = HttpStatus.resolve(web.getStatusCode().value());
+            String code = status != null ? status.name() : "HTTP_" + web.getStatusCode().value();
+            String message = web.getBody().getDetail() != null ? web.getBody().getDetail() : code;
+            return ResponseEntity.status(web.getStatusCode()).body(ErrorResponse.of(code, message));
+        }
         log.error("Unexpected error", e);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(ErrorResponse.of("INTERNAL_ERROR", "Something went wrong. Please try again."));

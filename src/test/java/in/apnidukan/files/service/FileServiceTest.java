@@ -146,13 +146,27 @@ class FileServiceTest {
         StoredFile file = billPhoto();
         when(repository.findByIdAndShopId(file.getId(), SHOP)).thenReturn(Optional.of(file));
         when(usageChecker.isInUse(file)).thenReturn(false);
+        when(repository.deleteByIdAndShopId(file.getId(), SHOP)).thenReturn(1);
 
         service.delete(file.getId());
 
         InOrder order = inOrder(repository, storage);
-        order.verify(repository).delete(file);
-        order.verify(repository).flush();
+        order.verify(repository).deleteByIdAndShopId(file.getId(), SHOP);
         order.verify(storage).delete(file.getStorageKey());
+    }
+
+    @Test
+    void secondOfTwoSimultaneousDeletesGetsNotFoundAndLeavesStorageAlone() {
+        StoredFile file = billPhoto();
+        when(repository.findByIdAndShopId(file.getId(), SHOP)).thenReturn(Optional.of(file));
+        when(usageChecker.isInUse(file)).thenReturn(false);
+        when(repository.deleteByIdAndShopId(file.getId(), SHOP)).thenReturn(0);   // the other request won
+
+        assertThatThrownBy(() -> service.delete(file.getId()))
+                .isInstanceOf(ApiException.class)
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo("NOT_FOUND");
+        verify(storage, never()).delete(anyString());
     }
 
     @Test
@@ -165,7 +179,7 @@ class FileServiceTest {
                 .isInstanceOf(ApiException.class)
                 .extracting(e -> ((ApiException) e).getCode())
                 .isEqualTo("FILE_IN_USE");
-        verify(repository, never()).delete(any(StoredFile.class));
+        verify(repository, never()).deleteByIdAndShopId(any(), any());
         verify(storage, never()).delete(anyString());
     }
 

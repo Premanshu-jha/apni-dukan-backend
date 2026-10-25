@@ -140,6 +140,40 @@ class FilesIntegrationTest {
         assertThat(reply.body().get("code")).isEqualTo("NOT_SIGNED_IN");
     }
 
+    @Test
+    void deletingTheSameFileTwiceGivesNotFoundTheSecondTime() {
+        String id = (String) upload(SHOP_A, fakeJpeg(), "bill.jpg", "BILL").body().get("id");
+        assertThat(delete(SHOP_A, "/files/" + id).status()).isEqualTo(204);
+        assertThat(delete(SHOP_A, "/files/" + id).status()).isEqualTo(404);
+    }
+
+    @Test
+    void downloadLinkKeepsAHindiFileName() throws Exception {
+        String name = "\u092C\u093F\u0932 \"KD\".jpg";   // "बिल "KD".jpg": Hindi letters and quotes
+        String id = (String) upload(SHOP_A, fakeJpeg(), name, "BILL").body().get("id");
+        Reply link = get(SHOP_A, "/files/" + id + "/link?download=true");
+        HttpResponse<byte[]> download = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(URI.create((String) link.body().get("url"))).GET().build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(download.statusCode()).isEqualTo(200);
+        assertThat(download.headers().firstValue("Content-Disposition").orElse(""))
+                .startsWith("attachment")
+                .contains("filename*=UTF-8''");
+    }
+
+    @Test
+    void unknownAddressAndWrongMethodKeepTheirProperStatus() {
+        Reply unknown = get(SHOP_A, "/does-not-exist");
+        assertThat(unknown.status()).isEqualTo(404);
+        assertThat(unknown.body().get("code")).isEqualTo("NOT_FOUND");
+
+        Reply wrongMethod = http.put().uri("/files/" + UUID.randomUUID() + "/link")
+                .header("X-Dev-Shop-Id", SHOP_A).header("X-Dev-User-Id", USER)
+                .exchange((req, res) -> new Reply(res.getStatusCode(), res.bodyTo(Map.class)));
+        assertThat(wrongMethod.status()).isEqualTo(405);
+        assertThat(wrongMethod.body().get("code")).isEqualTo("METHOD_NOT_ALLOWED");
+    }
+
     // ---------- helpers ----------
 
     private Reply upload(String shop, byte[] bytes, String filename, String purpose) {
