@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Starts the whole app against a real Postgres and a real S3-compatible store (MinIO) in Docker:
+ * Starts the whole app against a real Postgres and a real S3-compatible store (S3Mock) in Docker:
  * Flyway runs V1, Hibernate validates the entity against the table, and the files API is called over HTTP.
  * Skipped automatically on a machine without Docker; always runs on GitHub Actions.
  */

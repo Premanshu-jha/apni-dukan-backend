@@ -13,7 +13,7 @@ import java.net.URI;
 import java.time.Duration;
 
 /**
- * Throwaway Postgres and MinIO (an S3-compatible store standing in for Cloudflare R2), started once
+ * Throwaway Postgres and S3Mock (an S3-compatible store standing in for Cloudflare R2), started once
  * per test run in Docker and removed afterwards. Credentials here are made up; nothing real is used.
  */
 public final class TestContainers {
@@ -61,13 +61,10 @@ public final class TestContainers {
 
     public static synchronized GenericContainer<?> minio() {
         if (minio == null) {
-            minio = new GenericContainer<>("minio/minio:latest")
-                    .withEnv("MINIO_ROOT_USER", S3_ACCESS_KEY)
-                    .withEnv("MINIO_ROOT_PASSWORD", S3_SECRET_KEY)
-                    .withCommand("server", "/data")
-                    .withExposedPorts(9000)
-                    .waitingFor(Wait.forHttp("/minio/health/live").forPort(9000)
-                            .withStartupTimeout(Duration.ofMinutes(2)));
+            // Adobe S3Mock: open-source S3-compatible test server (MinIO no longer publishes a Docker image).
+            minio = new GenericContainer<>("adobe/s3mock:latest")
+                    .withExposedPorts(9090)
+                    .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(2)));
             minio.start();
             try (S3Client s3 = s3Client()) {
                 s3.createBucket(b -> b.bucket(BUCKET));
@@ -78,14 +75,14 @@ public final class TestContainers {
 
     public static String s3Endpoint() {
         GenericContainer<?> m = minio();
-        return "http://" + m.getHost() + ":" + m.getMappedPort(9000);
+        return "http://" + m.getHost() + ":" + m.getMappedPort(9090);
     }
 
     /** A plain S3 client for the test itself, to look inside the bucket. */
     public static S3Client s3Client() {
         GenericContainer<?> m = minio;
         return S3Client.builder()
-                .endpointOverride(URI.create("http://" + m.getHost() + ":" + m.getMappedPort(9000)))
+                .endpointOverride(URI.create("http://" + m.getHost() + ":" + m.getMappedPort(9090)))
                 .region(Region.of(S3_REGION))
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create(S3_ACCESS_KEY, S3_SECRET_KEY)))
