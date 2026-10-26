@@ -38,6 +38,12 @@ public class RateLimiter {
         return incrementWithExpiry(redis, "rl:" + key, window);
     }
 
+    /** Seconds until this counter's window ends (for Retry-After); 1 if unknown. */
+    public long secondsLeft(String key) {
+        Long ttl = redis.getExpire("rl:" + key);
+        return ttl == null || ttl < 1 ? 1 : ttl;
+    }
+
     /** The count so far, without adding a hit. */
     public long current(String key) {
         String value = redis.opsForValue().get("rl:" + key);

@@ -23,7 +23,8 @@ public final class AuthRequests {
     public record Logout(@NotBlank @Size(max = 100) String refreshToken) {
     }
 
-    public record SendEmailCode(@NotBlank @Size(max = 254) String email) {
+    /** @param phoneCode only when replacing an already verified email: the code from /email/change-phone-code */
+    public record SendEmailCode(@NotBlank @Size(max = 254) String email, @Size(max = 10) String phoneCode) {
     }
 
     public record VerifyEmail(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 10) String code) {

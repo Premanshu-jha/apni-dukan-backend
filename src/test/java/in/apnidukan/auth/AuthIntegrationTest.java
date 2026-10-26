@@ -10,7 +10,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.env.Environment;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -30,6 +29,7 @@ import java.util.concurrent.Future;
 import static in.apnidukan.support.CapturingSenders.LAST_EMAIL;
 import static in.apnidukan.support.CapturingSenders.LAST_SMS;
 import static in.apnidukan.support.CapturingSenders.codeSentTo;
+import static in.apnidukan.support.CapturingSenders.messageTo;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -132,9 +132,11 @@ class AuthIntegrationTest {
         for (String key : redis.keys("*")) {
             assertThat(redis.getExpire(key)).as(key).isPositive();
         }
-        assertThat(redis.keys("*")).contains(
-                "rl:otp-send:LOGIN:" + PHONE, "rl:otp-send-day:LOGIN:" + PHONE, "rl:otp-fail:LOGIN:" + PHONE,
+        assertThat(redis.keys("*")).contains("rl:otp-send-all:LOGIN:" + PHONE, "rl:otp-fail-all:LOGIN:" + PHONE,
                 "rl:sms-day", "otp:LOGIN:" + PHONE, "otp:LOGIN:" + PHONE + ":tries");
+        assertThat(redis.keys("rl:otp-send:LOGIN:" + PHONE + ":*")).hasSize(1);
+        assertThat(redis.keys("rl:otp-send-day:LOGIN:" + PHONE + ":*")).hasSize(1);
+        assertThat(redis.keys("rl:otp-fail:LOGIN:" + PHONE + ":*")).hasSize(1);
         assertThat(redis.keys("rl:ip-send:*")).hasSize(1);
         assertThat(redis.keys("rl:ip-verify:*")).hasSize(1);
     }
@@ -147,6 +149,8 @@ class AuthIntegrationTest {
         Reply fourth = post("/auth/otp/send", Map.of("phone", PHONE), null);
         assertThat(fourth.status()).isEqualTo(429);
         assertThat(fourth.body().get("code")).isEqualTo("TOO_MANY_CODES");
+        // The app is told how long to wait (up to 10 minutes)
+        assertThat(Integer.parseInt(fourth.retryAfter())).isBetween(1, 600);
     }
 
     @Test
@@ -167,7 +171,13 @@ class AuthIntegrationTest {
         String refresh2 = (String) rotated.body().get("refreshToken");
         assertThat(refresh2).isNotEqualTo(refresh1);
 
-        // The old one comes back (e.g. copied by someone): refused, and the new one stops working too
+        // Coming back right away is treated as the app retrying (reply lost on a weak network): no alarm
+        Reply retry = post("/auth/refresh", Map.of("refreshToken", refresh1), null);
+        assertThat(retry.body().get("code")).isEqualTo("INVALID_REFRESH_TOKEN");
+        assertThat(get("/auth/me", (String) rotated.body().get("accessToken")).status()).isEqualTo(200);
+
+        // Coming back minutes later means it was copied: refused, and the new one stops working too
+        jdbc.update("UPDATE refresh_tokens SET revoked_at = revoked_at - interval '2 minutes' WHERE revoke_reason = 'ROTATED'");
         Reply reused = post("/auth/refresh", Map.of("refreshToken", refresh1), null);
         assertThat(reused.status()).isEqualTo(401);
         assertThat(reused.body().get("code")).isEqualTo("REFRESH_TOKEN_REUSED");
@@ -284,7 +294,12 @@ class AuthIntegrationTest {
         assertThat(get("/auth/me", oldAccess).body().get("code")).isEqualTo("SIGNED_OUT");
         assertThat(get("/auth/me", (String) done.body().get("accessToken")).status()).isEqualTo(200);
         // The real owner is told on the old phone and by email
-        assertThat(LAST_SMS.get(PHONE)).contains("account moved to a new number ending 0002");
+        assertThat(messageTo(LAST_SMS, PHONE)).contains("account moved to a new number ending 0002");
+        long until = System.currentTimeMillis() + 3000;
+        while (!LAST_EMAIL.getOrDefault("shop@gmail.com", "").contains("ending 0002")
+                && System.currentTimeMillis() < until) {
+            Thread.yield();
+        }
         assertThat(LAST_EMAIL.get("shop@gmail.com")).contains("ending 0002");
     }
 
@@ -301,6 +316,7 @@ class AuthIntegrationTest {
         assertThat(fake.status()).isEqualTo(202);
         // Both phones get an SMS, so the SMS doesn't give it away; only the real owner's inbox gets a code
         assertThat(LAST_SMS).containsKeys("9700000003", "9700000004");
+        messageTo(LAST_EMAIL, "shop@gmail.com"); // sent in the background, so both replies take the same time
         assertThat(LAST_EMAIL).containsOnlyKeys("shop@gmail.com");
 
         // Guessing the email code gives the same answer for both
@@ -368,6 +384,23 @@ class AuthIntegrationTest {
     }
 
     @Test
+    void aStrangerGuessingFromTheirNetworkCannotLockTheOwnerOut() {
+        String stranger = "203.0.113.50";
+        for (int round = 1; round <= 2; round++) {
+            postFrom(stranger, "/auth/otp/send", Map.of("phone", PHONE));
+            String real = codeSentTo(LAST_SMS, PHONE);
+            String wrong = real.equals("000000") ? "111111" : "000000";
+            for (int i = 1; i <= 5; i++) {
+                postFrom(stranger, "/auth/otp/verify", Map.of("phone", PHONE, "code", wrong));
+            }
+        }
+        assertThat(postFrom(stranger, "/auth/otp/send", Map.of("phone", PHONE)).body().get("code"))
+                .isEqualTo("LOCKED_FOR_TODAY");
+        // The owner, on their own network, still signs in normally
+        assertThat(signIn(PHONE).status()).isEqualTo(200);
+    }
+
+    @Test
     void oneNetworkCannotSprayCodesToManyNumbers() {
         for (int i = 0; i < 10; i++) {
             assertThat(post("/auth/otp/send", Map.of("phone", "90000000" + String.format("%02d", i)), null).status())
@@ -378,11 +411,7 @@ class AuthIntegrationTest {
         assertThat(eleventh.body().get("code")).isEqualTo("TOO_MANY_REQUESTS");
 
         // Another caller (IP passed on by the proxy) is not affected
-        Reply other = http.post().uri("/auth/otp/send")
-                .header("X-Forwarded-For", "203.0.113.9")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("phone", "9000000099"))
-                .exchange((rq, res) -> new Reply(res.getStatusCode(), readBody(res)));
+        Reply other = postFrom("203.0.113.9", "/auth/otp/send", Map.of("phone", "9000000099"));
         assertThat(other.status()).isEqualTo(202);
     }
 
@@ -403,12 +432,86 @@ class AuthIntegrationTest {
     }
 
     @Test
+    void hugeBodiesWithoutALengthAreStoppedWhileReading() throws Exception {
+        byte[] big = ("{\"phone\":\"" + "9".repeat(70_000) + "\"}").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        HttpRequest chunked = HttpRequest.newBuilder(URI.create(base + "/api/v1/auth/otp/send"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new java.io.ByteArrayInputStream(big)))
+                .build();
+        HttpResponse<String> r = HttpClient.newHttpClient().send(chunked, HttpResponse.BodyHandlers.ofString());
+        assertThat(r.statusCode()).isEqualTo(413);
+        assertThat(r.body()).contains("REQUEST_TOO_LARGE");
+    }
+
+    @Test
+    void onlyTheFileUploadMayBeALargeMultipartRequest() throws Exception {
+        String boundary = "ApniDukan";
+        String body = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\n"
+                + "9".repeat(70_000) + "\r\n--" + boundary + "--\r\n";
+        HttpRequest multipart = HttpRequest.newBuilder(URI.create(base + "/api/v1/auth/otp/send"))
+                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        HttpResponse<String> r = HttpClient.newHttpClient().send(multipart, HttpResponse.BodyHandlers.ofString());
+        assertThat(r.statusCode()).isEqualTo(413);
+    }
+
+    @Test
+    void anExpiredRefreshTokenTriedTwiceDoesNotSignOutEverywhere() {
+        Map<?, ?> other = signIn(PHONE).body();
+        Map<?, ?> idle = signIn(PHONE).body();
+        jdbc.update("UPDATE refresh_tokens SET expires_at = now() - interval '1 day' WHERE token_hash = ?",
+                in.apnidukan.auth.service.Hashing.sha256Hex((String) idle.get("refreshToken")));
+
+        for (int i = 0; i < 2; i++) {
+            Reply r = post("/auth/refresh", Map.of("refreshToken", idle.get("refreshToken")), null);
+            assertThat(r.status()).isEqualTo(401);
+            assertThat(r.body().get("code")).isIn("REFRESH_TOKEN_EXPIRED", "INVALID_REFRESH_TOKEN");
+        }
+        // The other device is untouched
+        assertThat(get("/auth/me", (String) other.get("accessToken")).status()).isEqualTo(200);
+        assertThat(post("/auth/refresh", Map.of("refreshToken", other.get("refreshToken")), null).status())
+                .isEqualTo(200);
+    }
+
+    @Test
+    void changingAVerifiedEmailNeedsACodeFromTheOwnPhoneAndTellsTheOldAddress() {
+        Reply signedIn = signIn(PHONE);
+        String access = (String) signedIn.body().get("accessToken");
+        verifyEmail(signedIn, "owner@gmail.com");
+
+        // Someone holding only the token can't swap in their own email
+        Reply blocked = post("/auth/email/send-code", Map.of("email", "attacker@gmail.com"), access);
+        assertThat(blocked.status()).isEqualTo(403);
+        assertThat(blocked.body().get("code")).isEqualTo("PHONE_CODE_REQUIRED");
+        assertThat(LAST_EMAIL).doesNotContainKey("attacker@gmail.com");
+
+        // The owner, with their phone, can
+        assertThat(post("/auth/email/change-phone-code", Map.of(), access).status()).isEqualTo(202);
+        String phoneCode = codeSentTo(LAST_SMS, PHONE);
+        assertThat(post("/auth/email/send-code", Map.of("email", "new.owner@gmail.com", "phoneCode", phoneCode), access)
+                .status()).isEqualTo(202);
+        Reply changed = post("/auth/email/verify",
+                Map.of("email", "new.owner@gmail.com", "code", codeSentTo(LAST_EMAIL, "new.owner@gmail.com")), access);
+        assertThat(changed.status()).isEqualTo(200);
+        assertThat(changed.body().get("email")).isEqualTo("new.owner@gmail.com");
+
+        // ...and the old address hears about it
+        long until = System.currentTimeMillis() + 3000;
+        while (!LAST_EMAIL.getOrDefault("owner@gmail.com", "").contains("was changed")
+                && System.currentTimeMillis() < until) {
+            Thread.yield();
+        }
+        assertThat(LAST_EMAIL.get("owner@gmail.com")).contains("was changed to n***@gmail.com");
+    }
+
+    @Test
     void tokenSignedWithAnotherSecretIsRefused() {
         var other = new in.apnidukan.common.security.JwtService(
                 new in.apnidukan.common.security.JwtProperties("some-other-secret-0123456789-abcdefghijkl", 15, 30),
                 java.time.Clock.systemUTC());
         String forged = other.issue(new in.apnidukan.common.security.AuthPrincipal(
-                java.util.UUID.randomUUID(), null, null, true)).token();
+                java.util.UUID.randomUUID(), null, null, true), 0).token();
         Reply r = get("/admin/shops", forged);
         assertThat(r.status()).isEqualTo(401);
         assertThat(r.body().get("code")).isEqualTo("INVALID_TOKEN");
@@ -455,13 +558,13 @@ class AuthIntegrationTest {
                 .headers(h -> bearer(h, token))
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(body)
-                .exchange((rq, res) -> new Reply(res.getStatusCode(), readBody(res)));
+                .exchange((rq, res) -> reply(res));
     }
 
     private Reply get(String path, String token) {
         return http.get().uri(path)
                 .headers(h -> bearer(h, token))
-                .exchange((rq, res) -> new Reply(res.getStatusCode(), readBody(res)));
+                .exchange((rq, res) -> reply(res));
     }
 
     private static void bearer(org.springframework.http.HttpHeaders headers, String token) {
@@ -479,9 +582,21 @@ class AuthIntegrationTest {
         return res.bodyTo(Map.class);
     }
 
-    private record Reply(int status, Map<?, ?> body) {
-        Reply(HttpStatusCode code, Map<?, ?> body) {
-            this(code.value(), body == null ? Map.of() : body);
-        }
+    private Reply postFrom(String ip, String path, Object body) {
+        return http.post().uri(path)
+                .header("X-Forwarded-For", ip)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body)
+                .exchange((rq, res) -> reply(res));
+    }
+
+    private static Reply reply(org.springframework.web.client.RestClient.RequestHeadersSpec.ConvertibleClientHttpResponse res)
+            throws java.io.IOException {
+        Map<?, ?> body = readBody(res);
+        return new Reply(res.getStatusCode().value(), body == null ? Map.of() : body,
+                res.getHeaders().getFirst("Retry-After"));
+    }
+
+    private record Reply(int status, Map<?, ?> body, String retryAfter) {
     }
 }

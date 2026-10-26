@@ -4,6 +4,8 @@ package in.apnidukan.auth.domain;
 public enum RevokeReason {
     /** Swapped for a new one by /auth/refresh. If it ever comes back, it was copied. */
     ROTATED,
+    /** Used after its 30 days: just "sign in again", never a sign of copying. */
+    EXPIRED,
     /** This device signed out. */
     SIGNED_OUT,
     /** Every session ended (account recovery, or a copied token was detected). */

@@ -21,7 +21,7 @@ class JwtServiceTest {
     @Test
     void tokenCarriesUserShopRoleAndAdminFlag() {
         AuthPrincipal who = new AuthPrincipal(UUID.randomUUID(), UUID.randomUUID(), "OWNER", true);
-        JwtService.IssuedToken issued = jwt.issue(who);
+        JwtService.IssuedToken issued = jwt.issue(who, 0);
 
         assertThat(jwt.parse(issued.token())).isEqualTo(who);
         assertThat(issued.expiresAt()).isEqualTo(NOW.plus(Duration.ofMinutes(15)));
@@ -30,19 +30,19 @@ class JwtServiceTest {
     @Test
     void tokenWithoutAShopHasNullShop() {
         AuthPrincipal who = new AuthPrincipal(UUID.randomUUID(), null, null, false);
-        assertThat(jwt.parse(jwt.issue(who).token())).isEqualTo(who);
+        assertThat(jwt.parse(jwt.issue(who, 0).token())).isEqualTo(who);
     }
 
     @Test
     void expiredTokenIsRecognisedAsExpired() {
-        String token = jwt.issue(new AuthPrincipal(UUID.randomUUID(), null, null, false)).token();
+        String token = jwt.issue(new AuthPrincipal(UUID.randomUUID(), null, null, false), 0).token();
         JwtService later = service(SECRET, NOW.plus(Duration.ofMinutes(16)));
         assertThatThrownBy(() -> later.parse(token)).isInstanceOf(JwtService.TokenExpiredException.class);
     }
 
     @Test
     void changedTokenIsInvalid() {
-        String token = jwt.issue(new AuthPrincipal(UUID.randomUUID(), null, null, false)).token();
+        String token = jwt.issue(new AuthPrincipal(UUID.randomUUID(), null, null, false), 0).token();
         String tampered = token.substring(0, token.length() - 2) + (token.endsWith("A") ? "BB" : "AA");
         assertThatThrownBy(() -> jwt.parse(tampered)).isInstanceOf(JwtService.InvalidTokenException.class);
     }
@@ -50,7 +50,7 @@ class JwtServiceTest {
     @Test
     void tokenSignedWithAnotherSecretIsInvalid() {
         String token = service("another-secret-that-is-also-long-enough-123456", NOW)
-                .issue(new AuthPrincipal(UUID.randomUUID(), null, null, false)).token();
+                .issue(new AuthPrincipal(UUID.randomUUID(), null, null, false), 0).token();
         assertThatThrownBy(() -> jwt.parse(token)).isInstanceOf(JwtService.InvalidTokenException.class);
     }
 

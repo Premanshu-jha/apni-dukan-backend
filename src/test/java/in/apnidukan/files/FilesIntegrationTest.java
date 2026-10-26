@@ -138,7 +138,7 @@ class FilesIntegrationTest {
 
     @Test
     void signedInWithoutAShopCannotUploadYet() {
-        String noShop = jwt.issue(new AuthPrincipal(UUID.fromString(USER), null, null, false)).token();
+        String noShop = jwt.issue(new AuthPrincipal(UUID.fromString(USER), null, null, false), 0).token();
         MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
         form.add("purpose", "BILL");
         form.add("file", new ByteArrayResource(fakeJpeg()) {
@@ -238,7 +238,7 @@ class FilesIntegrationTest {
 
     /** A real access token for a person acting for this shop (the shop's id is made up until shops exist). */
     private String tokenFor(String shop) {
-        return jwt.issue(new AuthPrincipal(UUID.fromString(USER), UUID.fromString(shop), "OWNER", false)).token();
+        return jwt.issue(new AuthPrincipal(UUID.fromString(USER), UUID.fromString(shop), "OWNER", false), 0).token();
     }
 
     private static byte[] fakeJpeg() {

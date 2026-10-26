@@ -7,7 +7,9 @@ public enum OtpPurpose {
     LOGIN(Duration.ofMinutes(5)),
     EMAIL_VERIFY(Duration.ofMinutes(10)),
     RECOVER_EMAIL(Duration.ofMinutes(10)),
-    RECOVER_PHONE(Duration.ofMinutes(10));
+    RECOVER_PHONE(Duration.ofMinutes(10)),
+    /** Code to the person's own phone, needed to replace an already verified email. */
+    CHANGE_EMAIL(Duration.ofMinutes(10));
 
     private final Duration validFor;
 

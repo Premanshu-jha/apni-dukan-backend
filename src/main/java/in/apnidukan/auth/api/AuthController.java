@@ -64,10 +64,20 @@ public class AuthController {
         return UserResponse.from(auth.me(currentUser.get().userId()));
     }
 
-    /** Signed in: send a 6-digit code to the email to prove it's yours. */
+    /** Signed in, replacing an already verified email: first a code to your own phone. 202. */
+    @PostMapping("/email/change-phone-code")
+    public ResponseEntity<Void> sendEmailChangePhoneCode(HttpServletRequest request) {
+        auth.sendEmailChangePhoneCode(currentUser.get().userId(), request.getRemoteAddr());
+        return ResponseEntity.accepted().build();
+    }
+
+    /**
+     * Signed in: send a 6-digit code to the email to prove it's yours. Replacing an already verified email also
+     * needs phoneCode (from /email/change-phone-code), otherwise 403 PHONE_CODE_REQUIRED.
+     */
     @PostMapping("/email/send-code")
     public ResponseEntity<Void> sendEmailCode(@Valid @RequestBody SendEmailCode body, HttpServletRequest request) {
-        auth.sendEmailCode(currentUser.get().userId(), body.email(), request.getRemoteAddr());
+        auth.sendEmailCode(currentUser.get().userId(), body.email(), body.phoneCode(), request.getRemoteAddr());
         return ResponseEntity.accepted().build();
     }
 

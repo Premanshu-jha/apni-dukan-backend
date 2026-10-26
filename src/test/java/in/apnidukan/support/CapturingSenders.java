@@ -42,11 +42,26 @@ public class CapturingSenders {
         return (to, subject, body) -> LAST_EMAIL.put(to, body);
     }
 
-    public static String codeSentTo(Map<String, String> box, String recipient) {
-        String message = box.get(recipient);
-        if (message == null) {
-            throw new AssertionError("Nothing was sent to " + recipient);
+    /** The last message to this recipient; waits up to 3 s, because some messages are sent in the background. */
+    public static String messageTo(Map<String, String> box, String recipient) {
+        long until = System.nanoTime() + 3_000_000_000L;
+        while (System.nanoTime() < until) {
+            String message = box.get(recipient);
+            if (message != null) {
+                return message;
+            }
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
         }
+        throw new AssertionError("Nothing was sent to " + recipient);
+    }
+
+    public static String codeSentTo(Map<String, String> box, String recipient) {
+        String message = messageTo(box, recipient);
         Matcher m = CODE.matcher(message);
         if (!m.find()) {
             throw new AssertionError("No 6-digit code in: " + message);

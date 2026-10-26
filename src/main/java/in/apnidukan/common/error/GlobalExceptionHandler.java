@@ -25,8 +25,11 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<ErrorResponse> handleApi(ApiException e) {
-        return ResponseEntity.status(e.getStatus())
-                .body(new ErrorResponse(e.getCode(), e.getMessage(), e.getDetails()));
+        var reply = ResponseEntity.status(e.getStatus());
+        if (e.getRetryAfterSeconds() != null) {
+            reply.header("Retry-After", Long.toString(e.getRetryAfterSeconds()));
+        }
+        return reply.body(new ErrorResponse(e.getCode(), e.getMessage(), e.getDetails()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

@@ -23,7 +23,7 @@ CREATE TABLE refresh_tokens (
     expires_at   TIMESTAMPTZ  NOT NULL,
     revoked_at   TIMESTAMPTZ,
     -- Why it stopped working. Only a ROTATED token coming back means it was copied.
-    revoke_reason VARCHAR(30)  CHECK (revoke_reason IN ('ROTATED', 'SIGNED_OUT', 'SIGNED_OUT_EVERYWHERE', 'REUSE_DETECTED')),
+    revoke_reason VARCHAR(30)  CHECK (revoke_reason IN ('ROTATED', 'EXPIRED', 'SIGNED_OUT', 'SIGNED_OUT_EVERYWHERE', 'REUSE_DETECTED')),
     CHECK ((revoked_at IS NULL) = (revoke_reason IS NULL))
 );
 

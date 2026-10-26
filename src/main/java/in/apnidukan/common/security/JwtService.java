@@ -32,10 +32,6 @@ public class JwtService {
         this.clock = clock;
     }
 
-    public IssuedToken issue(AuthPrincipal who) {
-        return issue(who, 0);
-    }
-
     /** @param generation the person's session generation (see {@link SessionRevocations}) */
     public IssuedToken issue(AuthPrincipal who, long generation) {
         Instant now = Instant.now(clock);

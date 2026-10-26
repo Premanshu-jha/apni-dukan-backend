@@ -16,7 +16,8 @@ import java.io.IOException;
 
 /**
  * JSON bodies are small (a phone number, a code, an order). Anything over 64 KB is refused before it is read, so
- * nobody can tie up the server's memory with a huge body. File uploads (multipart) have their own 10 MB limit.
+ * nobody can tie up the server's memory with a huge body. Only the file upload (POST /api/v1/files) may be larger;
+ * it has its own 10 MB limit.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -28,7 +29,9 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         String type = request.getContentType();
-        if (type != null && type.toLowerCase().startsWith("multipart/")) {
+        // Only the file upload may send a big multipart body (it has its own 10 MB limit)
+        if (type != null && type.toLowerCase(java.util.Locale.ROOT).startsWith("multipart/")
+                && "POST".equals(request.getMethod()) && "/api/v1/files".equals(request.getRequestURI())) {
             chain.doFilter(request, response);
             return;
         }
