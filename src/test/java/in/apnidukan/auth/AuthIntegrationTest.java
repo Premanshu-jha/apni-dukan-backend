@@ -124,6 +124,22 @@ class AuthIntegrationTest {
     }
 
     @Test
+    void everyCounterInRedisAlwaysHasATimer() {
+        post("/auth/otp/send", Map.of("phone", PHONE), null);
+        post("/auth/otp/verify", Map.of("phone", PHONE, "code", "000000".equals(codeSentTo(LAST_SMS, PHONE))
+                ? "111111" : "000000"), null);
+        // Counters that never expired would block that phone or network forever
+        for (String key : redis.keys("*")) {
+            assertThat(redis.getExpire(key)).as(key).isPositive();
+        }
+        assertThat(redis.keys("*")).contains(
+                "rl:otp-send:LOGIN:" + PHONE, "rl:otp-send-day:LOGIN:" + PHONE, "rl:otp-fail:LOGIN:" + PHONE,
+                "rl:sms-day", "otp:LOGIN:" + PHONE, "otp:LOGIN:" + PHONE + ":tries");
+        assertThat(redis.keys("rl:ip-send:*")).hasSize(1);
+        assertThat(redis.keys("rl:ip-verify:*")).hasSize(1);
+    }
+
+    @Test
     void onlyThreeCodesPerTenMinutes() {
         for (int i = 0; i < 3; i++) {
             assertThat(post("/auth/otp/send", Map.of("phone", PHONE), null).status()).isEqualTo(202);

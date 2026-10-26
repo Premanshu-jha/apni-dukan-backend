@@ -49,7 +49,7 @@ public class OtpService {
 
     /** Creates a new 6-digit code for this target and returns it so the caller can send it. */
     public String issue(OtpPurpose purpose, String target) {
-        String id = purpose + ":" + target;
+        String id = purpose.name() + ":" + target;
         if (limits.current("otp-fail:" + id) >= MAX_WRONG_PER_DAY) {
             throw lockedForTheDay();
         }
@@ -73,7 +73,7 @@ public class OtpService {
      * left; the 5th wrong attempt destroys the code (TOO_MANY_ATTEMPTS) and a new one must be requested.
      */
     public void verify(OtpPurpose purpose, String target, String code) {
-        String id = purpose + ":" + target;
+        String id = purpose.name() + ":" + target;
         String codeKey = codeKey(purpose, target);
         if (limits.current("otp-fail:" + id) >= MAX_WRONG_PER_DAY) {
             redis.delete(codeKey);
@@ -85,11 +85,7 @@ public class OtpService {
         }
         // Count the attempt first: of many guesses arriving together, only the first 5 are ever compared.
         String triesKey = codeKey + ":tries";
-        Long attempt = redis.opsForValue().increment(triesKey);
-        long attemptNo = attempt == null ? Long.MAX_VALUE : attempt;
-        if (attemptNo == 1) {
-            redis.expire(triesKey, purpose.validFor());
-        }
+        long attemptNo = RateLimiter.incrementWithExpiry(redis, triesKey, purpose.validFor());
         if (attemptNo > MAX_TRIES_PER_CODE) {
             redis.delete(codeKey);
             throw tooManyAttempts();
@@ -126,7 +122,7 @@ public class OtpService {
     }
 
     private static String codeKey(OtpPurpose purpose, String target) {
-        return "otp:" + purpose + ":" + target;
+        return "otp:" + purpose.name() + ":" + target;
     }
 
     private String hash(String target, String code) {
