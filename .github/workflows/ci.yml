@@ -8,6 +8,9 @@ on:                            # WHEN to run:
     branches: [main]           #   when something lands on main
   pull_request:                #   and on every pull request
 
+# Actions are pinned to exact commits (the version is in the comment), so nobody can swap the code behind a tag.
+# Dependabot still proposes updates for them.
+
 permissions:                   # what this workflow's GitHub token may do: read only, nothing else
   contents: read
   pull-requests: read
@@ -16,16 +19,16 @@ jobs:
   build:
     runs-on: ubuntu-latest     # GitHub lends a fresh Linux machine for each run
     steps:
-      - uses: actions/checkout@v7          # 1. download this repository's code
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 · 1. download this repository's code
         with:
           fetch-depth: 0                   #    (with full history, so the secret scan can check every commit)
 
       - name: Check for committed secrets  # 2. fail if a password or API key was committed by mistake
-        uses: gitleaks/gitleaks-action@v3
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/setup-java@v6        # 3. install Java 21
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad  # v6.1.0 · 3. install Java 21
         with:
           distribution: temurin
           java-version: '21'
@@ -71,7 +74,7 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Scan for security problems
         run: |
           semgrep scan --metrics=off --error --json --output semgrep.json \

@@ -25,9 +25,9 @@
 
         <!-- Automatic code checks (run by "mvn verify" and on every pull request) -->
         <jacoco.version>0.8.13</jacoco.version>
-        <!-- Build fails if tests cover less than this share of the code's lines / branches -->
-        <coverage.lines.minimum>0.50</coverage.lines.minimum>
-        <coverage.branches.minimum>0.40</coverage.branches.minimum>
+        <!-- Build fails if tests cover less than this share of the code's lines / branches (today: ~89% / ~73%) -->
+        <coverage.lines.minimum>0.85</coverage.lines.minimum>
+        <coverage.branches.minimum>0.70</coverage.branches.minimum>
         <spotbugs-plugin.version>4.9.3.0</spotbugs-plugin.version>
         <findsecbugs.version>1.13.0</findsecbugs.version>
         <errorprone.version>2.36.0</errorprone.version>
