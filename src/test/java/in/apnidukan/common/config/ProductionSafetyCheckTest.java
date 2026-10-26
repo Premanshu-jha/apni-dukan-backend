@@ -11,7 +11,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ProductionSafetyCheckTest {
 
-    private final SmsSender realSms = (phone, message) -> { };
+    private final SmsSender realSms = new SmsSender() {
+        @Override
+        public void sendOtp(String phone, String code) { }
+
+        @Override
+        public void sendNotice(String phone, String text) { }
+    };
     private final EmailSender realEmail = (to, subject, body) -> { };
 
     @Test

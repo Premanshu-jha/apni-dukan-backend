@@ -78,7 +78,7 @@ public class AuthService {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitSends(ip);
         String code = otp.issue(OtpPurpose.LOGIN, phone);
-        sendSms(phone, "Your Apni Dukan code is " + code + ". It works for 5 minutes. Don't share it with anyone.");
+        sendSms(phone, () -> sms.sendOtp(phone, code));
     }
 
     /** Correct code: signs in, creating the account the first time this phone is used. */
@@ -194,7 +194,7 @@ public class AuthService {
                     "Your recovery code is " + emailCode + ".\n\nIt works for 10 minutes. "
                             + "If you didn't ask for this, ignore this email; your account stays as it is.");
         }
-        sendSms(newPhone, "Your Apni Dukan recovery code is " + phoneCode + ". Don't share it with anyone.");
+        sendSms(newPhone, () -> sms.sendOtp(newPhone, phoneCode));
     }
 
     /**
@@ -227,8 +227,8 @@ public class AuthService {
         String ending = newPhone.substring(6);
         if (!oldPhone.equals(newPhone)) {
             try {
-                sendSms(oldPhone, "Your Apni Dukan account was moved to a new number ending " + ending
-                        + ". If this wasn't you, contact Apni Dukan support immediately.");
+                sendSms(oldPhone, () -> sms.sendNotice(oldPhone, "Your Apni Dukan account was moved to a new number "
+                        + "ending " + ending + ". If this wasn't you, contact Apni Dukan support immediately."));
             } catch (ApiException e) {
                 // A paused SMS must not undo the recovery; the email below still goes out.
                 log.warn("Could not tell the old phone of user {} about the recovery: {}", user.getId(), e.getCode());
@@ -273,14 +273,14 @@ public class AuthService {
     }
 
     /** Every SMS goes through here: a hard daily cap protects the SMS bill even if all other limits are dodged. */
-    private void sendSms(String phone, String text) {
+    private void sendSms(String phone, Runnable send) {
         if (!limits.tryHit("sms-day", smsDailyLimit, Duration.ofHours(24))) {
             log.error("Daily SMS limit ({}) reached: SMS paused. Check for abuse before raising SMS_DAILY_LIMIT.",
                     smsDailyLimit);
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SMS_PAUSED",
                     "We can't send codes right now. Please try again later.");
         }
-        sms.send(phone, text);
+        send.run();
     }
 
     private static ApiException tooManyRequests() {

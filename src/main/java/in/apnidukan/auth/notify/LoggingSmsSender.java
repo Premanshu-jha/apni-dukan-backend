@@ -6,17 +6,22 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
- * DEVELOPMENT: prints the SMS (with the OTP) in the console instead of sending it.
- * Active while app.sms.provider=log (SMS_PROVIDER), the default until MSG91 DLT registration is done.
+ * Only if you choose it (SMS_PROVIDER=log), e.g. when out of MSG91 credit: prints the code in the console instead
+ * of sending it. Refused on the real server (see ProductionSafetyCheck).
  */
 @Component
-@ConditionalOnProperty(name = "app.sms.provider", havingValue = "log", matchIfMissing = true)
+@ConditionalOnProperty(name = "app.sms.provider", havingValue = "log")
 public class LoggingSmsSender implements SmsSender {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingSmsSender.class);
 
     @Override
-    public void send(String phone, String message) {
-        log.warn("[DEV SMS, not sent] to {}: {}", phone, message);
+    public void sendOtp(String phone, String code) {
+        log.warn("[DEV SMS, not sent] code for {}: {}", phone, code);
+    }
+
+    @Override
+    public void sendNotice(String phone, String text) {
+        log.warn("[DEV SMS, not sent] to {}: {}", phone, text);
     }
 }

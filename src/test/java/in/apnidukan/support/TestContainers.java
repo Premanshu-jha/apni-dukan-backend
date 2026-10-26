@@ -100,6 +100,7 @@ public final class TestContainers {
 
     /** Points the app at the test containers, using the same names application.properties reads. */
     public static void register(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        registry.add("app.sms.provider", () -> "log"); // tests capture SMS (CapturingSenders), nothing is sent
         registry.add("DB_URL", TestContainers::jdbcUrl);
         registry.add("DB_USER", () -> DB_USER);
         registry.add("DB_PASSWORD", () -> DB_PASSWORD);

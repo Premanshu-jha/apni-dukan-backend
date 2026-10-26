@@ -174,8 +174,11 @@ coming back counts as copied; an old device retrying a signed-out token just get
      (`rediss` with two s = TLS; use `redis://` only if your database has TLS off).
    - `JWT_SECRET`: a long random value, at least 32 characters
      (for example the output of `openssl rand -base64 48`). Changing it signs everyone out.
-   - Optional: `SMS_PROVIDER` (default `log`: the OTP is printed in the IntelliJ console instead of sent),
-     `MAIL_ENABLED=true` with `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`
+   - `MSG91_AUTH_KEY` and `MSG91_OTP_TEMPLATE_ID`: the same values as in the OMR project. OTPs are sent as
+     real SMS through MSG91 with that template until Apni Dukan has its own DLT registration.
+     Optional: `MSG91_NOTICE_TEMPLATE_ID` for notices like "your account moved" (skipped without it),
+     `SMS_PROVIDER=log` to print codes in the console instead (e.g. out of MSG91 credit).
+   - Optional: `MAIL_ENABLED=true` with `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`
      to send real emails (default: printed in the console), `CORS_ALLOWED_ORIGINS`
      (default `http://localhost:5173`, the shop app's dev server; separate several with commas).
    - On the real server only: `APP_PRODUCTION=true`. The app then refuses to start if codes would be printed in
@@ -188,14 +191,14 @@ coming back counts as copied; an old device retrying a signed-out token just get
 
 ## Try it
 
-**Sign in** (the code appears in the IntelliJ console while `SMS_PROVIDER=log`)
+**Sign in** (the code arrives by SMS through MSG91)
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/auth/otp/send \
   -H "Content-Type: application/json" -d '{"phone":"9876543210"}'
 
 curl -X POST http://localhost:8080/api/v1/auth/otp/verify \
-  -H "Content-Type: application/json" -d '{"phone":"9876543210","code":"<code from console>"}'
+  -H "Content-Type: application/json" -d '{"phone":"9876543210","code":"<code from SMS>"}'
 ```
 
 Copy `accessToken` from the reply and send it on every other call:

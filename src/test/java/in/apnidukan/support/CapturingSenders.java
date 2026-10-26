@@ -23,7 +23,17 @@ public class CapturingSenders {
     @Bean
     @Primary
     SmsSender capturingSms() {
-        return (phone, message) -> LAST_SMS.put(phone, message);
+        return new SmsSender() {
+            @Override
+            public void sendOtp(String phone, String code) {
+                LAST_SMS.put(phone, "code " + code);
+            }
+
+            @Override
+            public void sendNotice(String phone, String text) {
+                LAST_SMS.put(phone, text);
+            }
+        };
     }
 
     @Bean
