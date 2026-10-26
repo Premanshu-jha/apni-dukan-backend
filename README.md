@@ -180,8 +180,9 @@ coming back counts as copied; an old device retrying a signed-out token just get
      "your account was moved to a new number ending ##ENDING##" (sent to the old phone after account recovery).
      Off by default until that DLT template exists; required on the real server.
      `SMS_PROVIDER=log` prints SMS in the console instead (only if you choose it, e.g. out of MSG91 credit).
-   - Optional: `MAIL_ENABLED=true` with `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`
-     to send real emails (default: printed in the console), `CORS_ALLOWED_ORIGINS`
+   - `MAIL_USERNAME` (your Gmail address) and `MAIL_PASSWORD` (its 16-letter app password), the same as in
+     Vidyavriti. Email codes are sent through Gmail SMTP. `MAIL_ENABLED=false` prints them in the console instead.
+   - Optional: `CORS_ALLOWED_ORIGINS`
      (default `http://localhost:5173`, the shop app's dev server; separate several with commas).
    - On the real server only: `APP_PRODUCTION=true`. The app then refuses to start if codes would be printed in
      the log or CORS allows localhost. Optional `SMS_DAILY_LIMIT` (default 500).

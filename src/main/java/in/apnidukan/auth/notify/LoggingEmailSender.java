@@ -5,9 +5,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-/** DEVELOPMENT: prints the email (with its code) in the console. Active while app.mail.enabled=false. */
+/** Only if you choose it (MAIL_ENABLED=false): prints the email (with its code) in the console. Refused in production. */
 @Component
-@ConditionalOnProperty(name = "app.mail.enabled", havingValue = "false", matchIfMissing = true)
+@ConditionalOnProperty(name = "app.mail.enabled", havingValue = "false")
 public class LoggingEmailSender implements EmailSender {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingEmailSender.class);

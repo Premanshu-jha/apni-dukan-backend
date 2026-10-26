@@ -190,9 +190,14 @@ public class AuthService {
         String emailCode = otp.issue(OtpPurpose.RECOVER_EMAIL, address);
         String phoneCode = otp.issue(OtpPurpose.RECOVER_PHONE, newPhone);
         if (exists) {
-            email.send(address, "Recover your Apni Dukan account",
-                    "Your recovery code is " + emailCode + ".\n\nIt works for 10 minutes. "
-                            + "If you didn't ask for this, ignore this email; your account stays as it is.");
+            try {
+                email.send(address, "Recover your Apni Dukan account",
+                        "Your recovery code is " + emailCode + ".\n\nIt works for 10 minutes. "
+                                + "If you didn't ask for this, ignore this email; your account stays as it is.");
+            } catch (ApiException e) {
+                // Answer exactly as for an unknown email, so a mail failure can't reveal that the account exists
+                log.warn("Recovery email could not be sent: {}", e.getCode());
+            }
         }
         sendSms(newPhone, () -> sms.sendOtp(newPhone, phoneCode));
     }
@@ -234,9 +239,14 @@ public class AuthService {
                 log.warn("Could not tell the old phone of user {} about the recovery: {}", user.getId(), e.getCode());
             }
         }
-        email.send(address, "Your Apni Dukan account moved to a new phone",
-                "Your account now uses the phone number ending " + ending + ". Every other device was signed out."
-                        + "\n\nIf this wasn't you, contact Apni Dukan support immediately.");
+        try {
+            email.send(address, "Your Apni Dukan account moved to a new phone",
+                    "Your account now uses the phone number ending " + ending + ". Every other device was signed out."
+                            + "\n\nIf this wasn't you, contact Apni Dukan support immediately.");
+        } catch (ApiException e) {
+            // The recovery itself is complete; a failed notice must not undo it
+            log.warn("Could not email user {} about the recovery: {}", user.getId(), e.getCode());
+        }
         return issueTokens(user, device, false);
     }
 

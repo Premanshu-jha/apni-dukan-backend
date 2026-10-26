@@ -1,21 +1,23 @@
 package in.apnidukan.auth.notify;
 
+import in.apnidukan.common.error.ApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.HttpStatus;
 import org.springframework.mail.MailException;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
 /**
- * Sends real email over SMTP (Gmail while developing, a sending service later), like Vidyavriti's EmailService.
- * Runs in the background (@Async) so the request doesn't wait for the mail server.
+ * Sends real email over SMTP, the same setup as Vidyavriti (Gmail: smtp.gmail.com:587 with an app password).
+ * Sends while the request waits, so if Gmail refuses, the app is told to try again instead of waiting for a code
+ * that never comes. Never logs the email body (it contains the code).
  */
 @Component
-@ConditionalOnProperty(name = "app.mail.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "app.mail.enabled", havingValue = "true", matchIfMissing = true)
 public class SmtpEmailSender implements EmailSender {
 
     private static final Logger log = LoggerFactory.getLogger(SmtpEmailSender.class);
@@ -23,12 +25,19 @@ public class SmtpEmailSender implements EmailSender {
     private final JavaMailSender mailSender;
     private final String from;
 
-    public SmtpEmailSender(JavaMailSender mailSender, @Value("${app.mail.from}") String from) {
+    public SmtpEmailSender(JavaMailSender mailSender,
+                           @Value("${spring.mail.username:}") String username,
+                           @Value("${spring.mail.password:}") String password,
+                           @Value("${app.mail.from:}") String from) {
+        if (username.isBlank() || password.isBlank()) {
+            throw new IllegalStateException("Email: set MAIL_USERNAME and MAIL_PASSWORD (the Gmail app password, "
+                    + "as in Vidyavriti), or MAIL_ENABLED=false to print emails in the console.");
+        }
         this.mailSender = mailSender;
-        this.from = from;
+        // Gmail only sends "from" the signed-in account, so that is the default sender
+        this.from = from.isBlank() ? username : from;
     }
 
-    @Async
     @Override
     public void send(String to, String subject, String body) {
         SimpleMailMessage message = new SimpleMailMessage();
@@ -39,7 +48,9 @@ public class SmtpEmailSender implements EmailSender {
         try {
             mailSender.send(message);
         } catch (MailException e) {
-            log.error("Could not send email to {}", to, e);
+            log.error("Could not send email ({}): {}", subject, e.getClass().getSimpleName());
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "EMAIL_FAILED",
+                    "We couldn't send the email. Please try again in a minute.");
         }
     }
 }
