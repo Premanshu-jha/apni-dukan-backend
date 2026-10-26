@@ -54,7 +54,9 @@ class AuthIntegrationTest {
     @BeforeEach
     void setUp() {
         base = "http://localhost:" + environment.getProperty("local.server.port");
-        http = RestClient.builder().baseUrl(base + "/api/v1").build();
+        http = RestClient.builder()
+                // JDK client: the Apache client pulled in by Testcontainers silently retries 429 replies
+                .requestFactory(new org.springframework.http.client.JdkClientHttpRequestFactory()).baseUrl(base + "/api/v1").build();
         jdbc.update("DELETE FROM refresh_tokens");
         jdbc.update("DELETE FROM users");
         redis.execute((org.springframework.data.redis.core.RedisCallback<Object>) connection -> {

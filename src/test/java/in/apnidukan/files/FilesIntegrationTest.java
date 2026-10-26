@@ -59,6 +59,8 @@ class FilesIntegrationTest {
     @BeforeEach
     void setUp() {
         http = RestClient.builder()
+                // JDK client: the Apache client pulled in by Testcontainers silently retries 429 replies
+                .requestFactory(new org.springframework.http.client.JdkClientHttpRequestFactory())
                 .baseUrl("http://localhost:" + environment.getProperty("local.server.port") + "/api/v1")
                 .build();
         jdbc.update("DELETE FROM files");
