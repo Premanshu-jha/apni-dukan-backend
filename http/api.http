@@ -44,6 +44,10 @@ Content-Type: application/json
 
 { "email": "{{email}}" }
 
+### 5b. Replacing an already verified email: first a code to your own phone (then add "phoneCode" in request 5)
+POST {{baseUrl}}/auth/email/change-phone-code
+Authorization: Bearer {{accessToken}}
+
 ### 6. Verify the email with the code from your inbox
 POST {{baseUrl}}/auth/email/verify
 Authorization: Bearer {{accessToken}}
