@@ -21,7 +21,7 @@ public class LoggingSmsSender implements SmsSender {
     }
 
     @Override
-    public void sendNotice(String phone, String text) {
-        log.warn("[DEV SMS, not sent] to {}: {}", phone, text);
+    public void sendAccountMoved(String phone, String newPhoneEnding) {
+        log.warn("[DEV SMS, not sent] to {}: account moved to a new number ending {}", phone, newPhoneEnding);
     }
 }

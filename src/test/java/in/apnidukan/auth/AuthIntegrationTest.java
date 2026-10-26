@@ -268,7 +268,7 @@ class AuthIntegrationTest {
         assertThat(get("/auth/me", oldAccess).body().get("code")).isEqualTo("SIGNED_OUT");
         assertThat(get("/auth/me", (String) done.body().get("accessToken")).status()).isEqualTo(200);
         // The real owner is told on the old phone and by email
-        assertThat(LAST_SMS.get(PHONE)).contains("moved to a new number ending 0002");
+        assertThat(LAST_SMS.get(PHONE)).contains("account moved to a new number ending 0002");
         assertThat(LAST_EMAIL.get("shop@gmail.com")).contains("ending 0002");
     }
 

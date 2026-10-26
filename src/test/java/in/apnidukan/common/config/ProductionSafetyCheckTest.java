@@ -16,7 +16,7 @@ class ProductionSafetyCheckTest {
         public void sendOtp(String phone, String code) { }
 
         @Override
-        public void sendNotice(String phone, String text) { }
+        public void sendAccountMoved(String phone, String newPhoneEnding) { }
     };
     private final EmailSender realEmail = (to, subject, body) -> { };
 

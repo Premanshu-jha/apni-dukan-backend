@@ -227,10 +227,10 @@ public class AuthService {
         String ending = newPhone.substring(6);
         if (!oldPhone.equals(newPhone)) {
             try {
-                sendSms(oldPhone, () -> sms.sendNotice(oldPhone, "Your Apni Dukan account was moved to a new number "
-                        + "ending " + ending + ". If this wasn't you, contact Apni Dukan support immediately."));
+                sendSms(oldPhone, () -> sms.sendAccountMoved(oldPhone, ending));
             } catch (ApiException e) {
-                // A paused SMS must not undo the recovery; the email below still goes out.
+                // The owner has already proved the email and the new phone: a failed notice SMS (MSG91 down,
+                // daily cap) must not undo the recovery. It is logged, and the email below still goes out.
                 log.warn("Could not tell the old phone of user {} about the recovery: {}", user.getId(), e.getCode());
             }
         }

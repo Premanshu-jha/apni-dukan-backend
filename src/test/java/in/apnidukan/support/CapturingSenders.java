@@ -30,8 +30,8 @@ public class CapturingSenders {
             }
 
             @Override
-            public void sendNotice(String phone, String text) {
-                LAST_SMS.put(phone, text);
+            public void sendAccountMoved(String phone, String newPhoneEnding) {
+                LAST_SMS.put(phone, "account moved to a new number ending " + newPhoneEnding);
             }
         };
     }
