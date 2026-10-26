@@ -13,6 +13,7 @@ public class ApiException extends RuntimeException {
     private final HttpStatus status;
     private final String code;
     private final Map<String, Object> details;
+    private Long retryAfterSeconds;
 
     public ApiException(HttpStatus status, String code, String message) {
         this(status, code, message, Map.of());
@@ -28,6 +29,13 @@ public class ApiException extends RuntimeException {
     public HttpStatus getStatus() { return status; }
     public String getCode() { return code; }
     public Map<String, Object> getDetails() { return details; }
+    public Long getRetryAfterSeconds() { return retryAfterSeconds; }
+
+    /** Tells the app how long to wait before trying again (sent as the Retry-After header). */
+    public ApiException retryAfter(long seconds) {
+        this.retryAfterSeconds = Math.max(1, seconds);
+        return this;
+    }
 
     public static ApiException notFound(String what) {
         return new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", what + " not found");

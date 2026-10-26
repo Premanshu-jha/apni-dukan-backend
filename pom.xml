@@ -21,6 +21,7 @@
         <java.version>21</java.version>
         <!-- AWS SDK v2, used to talk to Cloudflare R2 (S3-compatible). Update to the newest 2.x when IntelliJ suggests it. -->
         <aws-sdk.version>2.57.2</aws-sdk.version>
+        <jjwt.version>0.13.0</jjwt.version>
     </properties>
 
     <dependencyManagement>
@@ -63,6 +64,41 @@
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
+        </dependency>
+
+        <!-- Sign-in: Spring Security + JWT (jjwt, as in ScoreLens) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- OTP and email codes, rate limits: Redis Cloud -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- Email codes (JavaMailSender, as in Vidyavriti) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
         </dependency>
 
         <!-- File storage: Cloudflare R2 through the S3 API -->

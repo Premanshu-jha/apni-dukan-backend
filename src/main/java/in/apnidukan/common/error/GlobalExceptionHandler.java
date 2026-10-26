@@ -25,8 +25,11 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<ErrorResponse> handleApi(ApiException e) {
-        return ResponseEntity.status(e.getStatus())
-                .body(new ErrorResponse(e.getCode(), e.getMessage(), e.getDetails()));
+        var reply = ResponseEntity.status(e.getStatus());
+        if (e.getRetryAfterSeconds() != null) {
+            reply.header("Retry-After", Long.toString(e.getRetryAfterSeconds()));
+        }
+        return reply.body(new ErrorResponse(e.getCode(), e.getMessage(), e.getDetails()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -65,6 +68,12 @@ public class GlobalExceptionHandler {
     /** The request body isn't valid JSON (or has a value of the wrong type). */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ErrorResponse> handleUnreadable(HttpMessageNotReadableException e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof in.apnidukan.common.web.RequestSizeLimitFilter.RequestTooLargeException) {
+                return ResponseEntity.status(413)
+                        .body(ErrorResponse.of("REQUEST_TOO_LARGE", "This request is too large"));
+            }
+        }
         return ResponseEntity.badRequest()
                 .body(ErrorResponse.of("BAD_REQUEST", "The request body is not valid JSON"));
     }
