@@ -23,7 +23,7 @@ class Msg91SmsSenderTest {
     private final MockRestServiceServer msg91 = MockRestServiceServer.bindTo(builder).build();
 
     private Msg91SmsSender sender() {
-        return new Msg91SmsSender(builder, "https://control.msg91.com", "test-key", "otp-template", "moved-template");
+        return new Msg91SmsSender(builder, "https://control.msg91.com", "test-key", "otp-template", "moved-template", true);
     }
 
     @Test
@@ -77,9 +77,16 @@ class Msg91SmsSenderTest {
 
     @Test
     void missingSettingsStopTheAppWithAClearMessage() {
-        assertThatThrownBy(() -> new Msg91SmsSender(builder, "https://control.msg91.com", "", "", ""))
+        assertThatThrownBy(() -> new Msg91SmsSender(builder, "https://control.msg91.com", "", "", "", false))
                 .hasMessageContaining("MSG91_AUTH_KEY");
-        assertThatThrownBy(() -> new Msg91SmsSender(builder, "https://control.msg91.com", "key", "otp", ""))
+        assertThatThrownBy(() -> new Msg91SmsSender(builder, "https://control.msg91.com", "key", "otp", "", true))
                 .hasMessageContaining("MSG91_ACCOUNT_MOVED_TEMPLATE_ID");
+    }
+
+    @Test
+    void accountMovedSmsSwitchedOffSendsNothingAndNeedsNoTemplate() {
+        new Msg91SmsSender(builder, "https://control.msg91.com", "key", "otp", "", false)
+                .sendAccountMoved("9848012345", "0002");
+        msg91.verify(); // no request was made
     }
 }

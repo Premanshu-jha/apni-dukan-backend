@@ -24,7 +24,8 @@ import java.util.Map;
  * - OTP (MSG91_OTP_TEMPLATE_ID): variable OTP, as in OMR
  * - account moved (MSG91_ACCOUNT_MOVED_TEMPLATE_ID): variable ENDING, e.g.
  *   "Your Apni Dukan account was moved to a new number ending ##ENDING##. Not you? Contact support."
- * Both are required: the app doesn't start without them.
+ * The OTP template is required. The account-moved SMS is switched off until its template exists
+ * (SMS_ACCOUNT_MOVED_ENABLED=true turns it on, and then its template ID is required too).
  * Never logs the code or the auth key.
  */
 @Component
@@ -37,22 +38,29 @@ public class Msg91SmsSender implements SmsSender {
     private final String authKey;
     private final String otpTemplateId;
     private final String accountMovedTemplateId;
+    private final boolean accountMovedEnabled;
 
     @Autowired
     public Msg91SmsSender(@Value("${app.sms.msg91.base-url:https://control.msg91.com}") String baseUrl,
                           @Value("${app.sms.msg91.auth-key:}") String authKey,
                           @Value("${app.sms.msg91.otp-template-id:}") String otpTemplateId,
-                          @Value("${app.sms.msg91.account-moved-template-id:}") String accountMovedTemplateId) {
-        this(RestClient.builder().requestFactory(timeouts()), baseUrl, authKey, otpTemplateId, accountMovedTemplateId);
+                          @Value("${app.sms.msg91.account-moved-template-id:}") String accountMovedTemplateId,
+                          @Value("${app.sms.account-moved.enabled:false}") boolean accountMovedEnabled) {
+        this(RestClient.builder().requestFactory(timeouts()), baseUrl, authKey, otpTemplateId, accountMovedTemplateId,
+                accountMovedEnabled);
     }
 
     /** For tests: a builder bound to a fake MSG91. */
     Msg91SmsSender(RestClient.Builder builder, String baseUrl, String authKey, String otpTemplateId,
-                   String accountMovedTemplateId) {
-        if (authKey.isBlank() || otpTemplateId.isBlank() || accountMovedTemplateId.isBlank()) {
-            throw new IllegalStateException("SMS: set MSG91_AUTH_KEY, MSG91_OTP_TEMPLATE_ID and "
-                    + "MSG91_ACCOUNT_MOVED_TEMPLATE_ID (MSG91 → Templates), or SMS_PROVIDER=log to print SMS in the console.");
+                   String accountMovedTemplateId, boolean accountMovedEnabled) {
+        if (authKey.isBlank() || otpTemplateId.isBlank()) {
+            throw new IllegalStateException("SMS: set MSG91_AUTH_KEY and MSG91_OTP_TEMPLATE_ID "
+                    + "(MSG91 → Templates), or SMS_PROVIDER=log to print SMS in the console.");
         }
+        if (accountMovedEnabled && accountMovedTemplateId.isBlank()) {
+            throw new IllegalStateException("SMS: SMS_ACCOUNT_MOVED_ENABLED=true needs MSG91_ACCOUNT_MOVED_TEMPLATE_ID.");
+        }
+        this.accountMovedEnabled = accountMovedEnabled;
         this.http = builder.baseUrl(baseUrl).build();
         this.authKey = authKey;
         this.otpTemplateId = otpTemplateId;
@@ -73,6 +81,10 @@ public class Msg91SmsSender implements SmsSender {
 
     @Override
     public void sendAccountMoved(String phone, String newPhoneEnding) {
+        if (!accountMovedEnabled) {
+            log.info("Account-moved SMS is switched off (SMS_ACCOUNT_MOVED_ENABLED); only the email notice was sent");
+            return;
+        }
         send(accountMovedTemplateId, Map.of("mobiles", "91" + phone, "ENDING", newPhoneEnding));
     }
 

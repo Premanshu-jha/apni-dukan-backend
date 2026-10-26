@@ -15,11 +15,13 @@ import org.springframework.stereotype.Component;
 public class ProductionSafetyCheck {
 
     public ProductionSafetyCheck(@Value("${app.production:false}") boolean production, SmsSender sms,
-                                 EmailSender email, @Value("${app.cors.allowed-origins}") String corsOrigins) {
-        check(production, sms, email, corsOrigins);
+                                 EmailSender email, @Value("${app.cors.allowed-origins}") String corsOrigins,
+                                 @Value("${app.sms.account-moved.enabled:false}") boolean accountMovedSms) {
+        check(production, sms, email, corsOrigins, accountMovedSms);
     }
 
-    static void check(boolean production, SmsSender sms, EmailSender email, String corsOrigins) {
+    static void check(boolean production, SmsSender sms, EmailSender email, String corsOrigins,
+                      boolean accountMovedSms) {
         if (!production) {
             return;
         }
@@ -30,6 +32,10 @@ public class ProductionSafetyCheck {
         if (email instanceof LoggingEmailSender) {
             throw new IllegalStateException("APP_PRODUCTION=true but MAIL_ENABLED=false: email codes would be "
                     + "printed in the log. Configure SMTP.");
+        }
+        if (!accountMovedSms) {
+            throw new IllegalStateException("APP_PRODUCTION=true but SMS_ACCOUNT_MOVED_ENABLED=false: the old phone "
+                    + "must be told when an account is moved. Add the DLT template and turn it on.");
         }
         if (corsOrigins.contains("localhost") || corsOrigins.contains("127.0.0.1") || corsOrigins.contains("*")) {
             throw new IllegalStateException("APP_PRODUCTION=true but CORS_ALLOWED_ORIGINS allows " + corsOrigins

@@ -23,32 +23,38 @@ class ProductionSafetyCheckTest {
     @Test
     void developmentAllowsConsoleCodesAndLocalhost() {
         assertThatCode(() -> ProductionSafetyCheck.check(false, new LoggingSmsSender(), new LoggingEmailSender(),
-                "http://localhost:5173")).doesNotThrowAnyException();
+                "http://localhost:5173", true)).doesNotThrowAnyException();
     }
 
     @Test
     void productionRefusesOtpsInTheLog() {
         assertThatThrownBy(() -> ProductionSafetyCheck.check(true, new LoggingSmsSender(), realEmail,
-                "https://shop.example.in")).hasMessageContaining("SMS_PROVIDER=log");
+                "https://shop.example.in", true)).hasMessageContaining("SMS_PROVIDER=log");
     }
 
     @Test
     void productionRefusesEmailCodesInTheLog() {
         assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms, new LoggingEmailSender(),
-                "https://shop.example.in")).hasMessageContaining("MAIL_ENABLED=false");
+                "https://shop.example.in", true)).hasMessageContaining("MAIL_ENABLED=false");
     }
 
     @Test
     void productionRefusesLocalhostOrAnyOriginInCors() {
-        assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "http://localhost:5173"))
+        assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "http://localhost:5173", true))
                 .hasMessageContaining("CORS_ALLOWED_ORIGINS");
-        assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "*"))
+        assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "*", true))
                 .hasMessageContaining("CORS_ALLOWED_ORIGINS");
     }
 
     @Test
+    void productionRefusesWithTheAccountMovedSmsOff() {
+        assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "https://shop.example.in", false))
+                .hasMessageContaining("SMS_ACCOUNT_MOVED_ENABLED");
+    }
+
+    @Test
     void productionWithRealSettingsStarts() {
-        assertThatCode(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "https://shop.example.in"))
+        assertThatCode(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "https://shop.example.in", true))
                 .doesNotThrowAnyException();
     }
 }

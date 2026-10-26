@@ -176,8 +176,9 @@ coming back counts as copied; an old device retrying a signed-out token just get
      (for example the output of `openssl rand -base64 48`). Changing it signs everyone out.
    - `MSG91_AUTH_KEY` and `MSG91_OTP_TEMPLATE_ID`: the same values as in the OMR project. OTPs are sent as
      real SMS through MSG91 with that template until Apni Dukan has its own DLT registration.
-     `MSG91_ACCOUNT_MOVED_TEMPLATE_ID`: the template for "your account was moved to a new number ending
-     ##ENDING##" (sent to the old phone after account recovery). All three are required.
+     Later: `SMS_ACCOUNT_MOVED_ENABLED=true` with `MSG91_ACCOUNT_MOVED_TEMPLATE_ID`, the template for
+     "your account was moved to a new number ending ##ENDING##" (sent to the old phone after account recovery).
+     Off by default until that DLT template exists; required on the real server.
      `SMS_PROVIDER=log` prints SMS in the console instead (only if you choose it, e.g. out of MSG91 credit).
    - Optional: `MAIL_ENABLED=true` with `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`
      to send real emails (default: printed in the console), `CORS_ALLOWED_ORIGINS`
