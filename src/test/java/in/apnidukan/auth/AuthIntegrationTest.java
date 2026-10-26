@@ -101,13 +101,20 @@ class AuthIntegrationTest {
         post("/auth/otp/send", Map.of("phone", PHONE), null);
         String real = codeSentTo(LAST_SMS, PHONE);
         String wrong = real.equals("000000") ? "111111" : "000000";
-        for (int i = 1; i <= 5; i++) {
+        for (int i = 1; i <= 4; i++) {
             Reply r = post("/auth/otp/verify", Map.of("phone", PHONE, "code", wrong), null);
+            assertThat(r.status()).as(r.body().toString()).isEqualTo(400);
             assertThat(r.body().get("code")).isEqualTo("WRONG_CODE");
+            assertThat(((Map<?, ?>) r.body().get("details")).get("attemptsLeft")).isEqualTo(5 - i);
         }
-        Reply sixth = post("/auth/otp/verify", Map.of("phone", PHONE, "code", real), null);
-        assertThat(sixth.status()).isEqualTo(429);
-        assertThat(sixth.body().get("code")).isEqualTo("TOO_MANY_ATTEMPTS");
+        Reply fifth = post("/auth/otp/verify", Map.of("phone", PHONE, "code", wrong), null);
+        assertThat(fifth.status()).as(fifth.body().toString()).isEqualTo(429);
+        assertThat(fifth.body().get("code")).isEqualTo("TOO_MANY_ATTEMPTS");
+
+        // Even the real code no longer works: a new one has to be requested
+        Reply afterwards = post("/auth/otp/verify", Map.of("phone", PHONE, "code", real), null);
+        assertThat(afterwards.status()).as(afterwards.body().toString()).isEqualTo(400);
+        assertThat(afterwards.body().get("code")).isEqualTo("CODE_EXPIRED");
     }
 
     @Test

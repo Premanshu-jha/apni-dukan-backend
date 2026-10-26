@@ -16,7 +16,7 @@ import java.util.Map;
  *
  * <pre>
  * otp:{purpose}:{target}        keyed hash of the code      expires with the code (5-10 min)
- * otp:{purpose}:{target}:tries  wrong guesses so far        max 5, then the code is destroyed
+ * otp:{purpose}:{target}:tries  wrong guesses so far        the 5th wrong guess destroys the code
  * otp-rate:{purpose}:{target}   codes sent in this window   max 3 per 10 minutes
  * </pre>
  * Redis INCR is atomic, so counting stays correct even when two requests arrive at the same moment.
@@ -55,7 +55,10 @@ public class OtpService {
         return code;
     }
 
-    /** Checks a code. A correct code works exactly once; 5 wrong guesses destroy it. */
+    /**
+     * Checks a code. A correct code works exactly once. Wrong guesses 1-4 answer WRONG_CODE with the attempts left;
+     * the 5th wrong guess destroys the code (TOO_MANY_ATTEMPTS) and a new one must be requested.
+     */
     public void verify(OtpPurpose purpose, String target, String code) {
         String codeKey = codeKey(purpose, target);
         String triesKey = codeKey + ":tries";
@@ -63,25 +66,26 @@ public class OtpService {
         if (stored == null) {
             throw ApiException.badRequest("CODE_EXPIRED", "This code has expired. Ask for a new one.");
         }
-        Long tries = redis.opsForValue().increment(triesKey);
-        if (tries != null && tries == 1) {
+        if (code != null && Hashing.sameHash(stored, hash(target, code.trim()))) {
+            // Single use: only the request that actually deletes the key wins, even if two arrive together.
+            if (!Boolean.TRUE.equals(redis.delete(codeKey))) {
+                throw ApiException.badRequest("CODE_EXPIRED", "This code has expired. Ask for a new one.");
+            }
+            redis.delete(triesKey);
+            return;
+        }
+        Long wrong = redis.opsForValue().increment(triesKey);
+        long wrongSoFar = wrong == null ? MAX_WRONG_TRIES : wrong;
+        if (wrongSoFar == 1) {
             redis.expire(triesKey, purpose.validFor());
         }
-        if (tries != null && tries > MAX_WRONG_TRIES) {
+        if (wrongSoFar >= MAX_WRONG_TRIES) {
             redis.delete(codeKey);
             throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_ATTEMPTS",
                     "Too many wrong codes. Ask for a new one.");
         }
-        if (code == null || !Hashing.sameHash(stored, hash(target, code.trim()))) {
-            long left = MAX_WRONG_TRIES - (tries == null ? 0 : tries);
-            throw new ApiException(HttpStatus.BAD_REQUEST, "WRONG_CODE", "That code is not correct",
-                    Map.of("attemptsLeft", Math.max(0, left)));
-        }
-        // Single use: only the request that actually deletes the key wins, even if two arrive together.
-        if (!Boolean.TRUE.equals(redis.delete(codeKey))) {
-            throw ApiException.badRequest("CODE_EXPIRED", "This code has expired. Ask for a new one.");
-        }
-        redis.delete(triesKey);
+        throw new ApiException(HttpStatus.BAD_REQUEST, "WRONG_CODE", "That code is not correct",
+                Map.of("attemptsLeft", MAX_WRONG_TRIES - wrongSoFar));
     }
 
     private static String codeKey(OtpPurpose purpose, String target) {
