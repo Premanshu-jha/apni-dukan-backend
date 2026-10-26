@@ -132,6 +132,21 @@ flowchart TD
 
 `POST /auth/logout` ends one session. Admin pages (`/api/v1/admin/**`) need an admin account.
 
+### Limits (against guessing and SMS abuse)
+
+| What | Limit |
+| --- | --- |
+| Tries per code | 5 (the 5th wrong one destroys the code). Every try is counted before checking, so parallel guesses don't get extra tries |
+| Codes per phone or email | 3 per 10 minutes, 10 per day |
+| Wrong codes per phone or email | 10 per day, then `429 LOCKED_FOR_TODAY` |
+| Per network (IP) | 10 code requests and 30 code checks per hour |
+| All SMS together | `SMS_DAILY_LIMIT` per day (default 500), then `503 SMS_PAUSED` |
+| JSON request body | 64 KB |
+
+"Signed out everywhere" (recovery, or a copied refresh token) takes effect at once: every access token carries a
+session number, and older numbers are refused on their next call. Only a refresh token that was already swapped
+coming back counts as copied; an old device retrying a signed-out token just gets "sign in again".
+
 ### Endpoints (`/api/v1/auth`)
 
 | Call | What it does |
@@ -163,6 +178,8 @@ flowchart TD
      `MAIL_ENABLED=true` with `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`
      to send real emails (default: printed in the console), `CORS_ALLOWED_ORIGINS`
      (default `http://localhost:5173`, the shop app's dev server; separate several with commas).
+   - On the real server only: `APP_PRODUCTION=true`. The app then refuses to start if codes would be printed in
+     the log or CORS allows localhost. Optional `SMS_DAILY_LIMIT` (default 500).
    Never commit real values.
 3. **Run:** open this folder in IntelliJ, wait for Maven to download, then press ▶ next to `main` in
    `ApniDukanApplication.java`. On first start, Flyway creates the tables (`V1__create_files.sql`, `V2__create_users_and_refresh_tokens.sql`).
