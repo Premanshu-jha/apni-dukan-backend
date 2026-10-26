@@ -31,8 +31,8 @@ jobs:
           java-version: '21'
           cache: maven                     #    and reuse downloaded libraries between runs (faster)
 
-      - name: Build and run tests          # 4. compile everything and run all tests
-        run: mvn -B verify 2>&1 | tee build.log; exit ${PIPESTATUS[0]}   # same as "mvn verify" on your laptop
+      - name: Build, test and check code   # 4. compile (with Error Prone), run all tests, then coverage, SpotBugs
+        run: mvn -B verify -Perrorprone 2>&1 | tee build.log; exit ${PIPESTATUS[0]}
 
       - name: Test summary                 # 5. list how many tests ran, failed or were skipped
         if: always()
@@ -41,7 +41,20 @@ jobs:
             echo "::notice title=$(basename "$f" .txt)::$(grep -m1 'Tests run' "$f")"
           done
 
-      - name: Show why it failed           # 6. only if step 4 failed: put the key error lines on the GitHub page
+      - name: Coverage summary             # 6. how much of the code the tests actually run
+        if: always()
+        run: |
+          f=target/site/jacoco/jacoco.csv
+          [ -f "$f" ] || exit 0
+          awk -F, 'NR>1 { lm+=$8; lc+=$9; bm+=$6; bc+=$7; split($2,p,"."); m=p[3]; mlm[m]+=$8; mlc[m]+=$9 }
+            END {
+              printf "::notice title=Coverage::lines %.1f%%, branches %.1f%%\n", 100*lc/(lc+lm), 100*bc/(bc+bm)
+              print "## Test coverage" >> ENVIRON["GITHUB_STEP_SUMMARY"]
+              printf "Lines **%.1f%%** · branches **%.1f%%**\n\n| Module | Lines |\n| --- | --- |\n", 100*lc/(lc+lm), 100*bc/(bc+bm) >> ENVIRON["GITHUB_STEP_SUMMARY"]
+              for (m in mlc) printf "| %s | %.1f%% |\n", m, 100*mlc[m]/(mlc[m]+mlm[m]) >> ENVIRON["GITHUB_STEP_SUMMARY"]
+            }' "$f"
+
+      - name: Show why it failed           # 7. only if step 4 failed: put the key error lines on the GitHub page
         if: failure()
         run: |
           grep -E "\[ERROR\]|Caused by|Exception|expected|but was" build.log | head -60 | sed 's/%/%25/g' > errors.txt || true
@@ -51,3 +64,24 @@ jobs:
               echo "::error title=$(basename "$f")::$(head -40 "$f" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
             fi
           done
+
+  # Security scan of the source code (free Semgrep rules: Java, secrets, OWASP Top 10). Separate job, runs in parallel.
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v7
+      - name: Scan for security problems
+        run: |
+          semgrep scan --metrics=off --error --json --output semgrep.json \
+            --config p/java --config p/secrets --config p/owasp-top-ten --exclude src/test && rc=0 || rc=$?
+          # Put each finding on the pull request page, next to the line it is about
+          python3 - <<'PY'
+          import json
+          for r in json.load(open("semgrep.json")).get("results", []):
+              rule = r["check_id"].split(".")[-1]
+              msg = r["extra"]["message"].replace("\n", " ")[:400]
+              print("::error file=%s,line=%s,title=Semgrep %s::%s" % (r["path"], r["start"]["line"], rule, msg))
+          PY
+          exit $rc

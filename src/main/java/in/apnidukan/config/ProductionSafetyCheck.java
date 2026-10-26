@@ -1,4 +1,4 @@
-package in.apnidukan.common.config;
+package in.apnidukan.config;
 
 import in.apnidukan.auth.notify.EmailSender;
 import in.apnidukan.auth.notify.LoggingEmailSender;
@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
+ * App-level startup check (it looks at several modules, so it lives outside common).
  * On the real server (APP_PRODUCTION=true) the app refuses to start with development-only settings:
  * codes printed in the log (anyone reading logs could sign in as anyone) or the shop app's localhost address in CORS.
  */

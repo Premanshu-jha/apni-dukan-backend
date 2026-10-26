@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Findings we have looked at and decided are not problems here. Each entry says why.
+  Anything not listed fails the build.
+-->
+<FindBugsFilter>
+    <!-- Spring beans, JPA entities and records hand out/keep references to objects on purpose
+         (injected collaborators, collections). Not a bug in a Spring app. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- We turn off CSRF on purpose: there are no cookies or server sessions, every call carries a bearer token
+         (see SecurityConfig). CSRF only matters for cookie-based sign-in. -->
+    <Match>
+        <Bug pattern="SPRING_CSRF_PROTECTION_DISABLED"/>
+        <Class name="in.apnidukan.common.security.SecurityConfig"/>
+    </Match>
+    <!-- Constructors that refuse to start with missing settings (fail fast) are intended. -->
+    <Match>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
+</FindBugsFilter>
