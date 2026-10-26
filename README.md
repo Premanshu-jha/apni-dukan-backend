@@ -137,14 +137,20 @@ flowchart TD
 | What | Limit |
 | --- | --- |
 | Tries per code | 5 (the 5th wrong one destroys the code). Every try is counted before checking, so parallel guesses don't get extra tries |
-| Codes per phone or email | 3 per 10 minutes, 10 per day |
-| Wrong codes per phone or email | 10 per day, then `429 LOCKED_FOR_TODAY` |
-| Per network (IP) | 10 code requests and 30 code checks per hour |
+| Codes per phone or email, per network | 3 per 10 minutes, 10 per day (20 per day from all networks together) |
+| Wrong codes per phone or email, per network | 10 per day (50 from all networks together), then `429 LOCKED_FOR_TODAY` |
+| Per network (IP; IPv6 counted per /64) | 10 code requests and 30 code checks per hour |
+| Email codes per account | 10 per day |
 | All SMS together | `SMS_DAILY_LIMIT` per day (default 500), then `503 SMS_PAUSED` |
-| JSON request body | 64 KB |
+| JSON request body | 64 KB (only `POST /api/v1/files` may be larger, up to 10 MB) |
+
+Limits count per phone **and** network, so a stranger guessing your number from their own network locks only
+themselves. Every 429 carries a `Retry-After` header (seconds to wait).
 
 "Signed out everywhere" (recovery, or a copied refresh token) takes effect at once: every access token carries a
-session number, and older numbers are refused on their next call. Only a refresh token that was already swapped
+session number, and older numbers are refused on their next call. A swapped refresh token coming back within
+60 seconds counts as the app retrying (a reply lost on a weak network); later than that it counts as copied.
+Only a refresh token that was already swapped
 coming back counts as copied; an old device retrying a signed-out token just gets "sign in again".
 
 ### Endpoints (`/api/v1/auth`)
@@ -156,7 +162,8 @@ coming back counts as copied; an old device retrying a signed-out token just get
 | `POST /refresh` `{refreshToken}` | New token pair |
 | `POST /logout` `{refreshToken}` | Ends this session, 204 |
 | `GET /me` | The signed-in person |
-| `POST /email/send-code` `{email}` | Sends a 6-digit code to the email (10 min) |
+| `POST /email/send-code` `{email, phoneCode?}` | Sends a 6-digit code to the email (10 min). Replacing an already verified email also needs `phoneCode` |
+| `POST /email/change-phone-code` | Sends a code to your own phone, needed to replace a verified email. The old email is told after the change |
 | `POST /email/verify` `{email, code}` | Marks the email verified |
 | `POST /recover/start` | Lost phone: code to the verified email. New email: code to the phone |
 | `POST /recover/complete` | Moves the account to the new phone or email and ends every old session |
@@ -227,6 +234,16 @@ curl -X DELETE "http://localhost:8080/api/v1/files/<id>" -H "Authorization: Bear
 
 `purpose` is one of `SHOP_PHOTO`, `BILL`, `RECEIPT`. Accepted types: JPEG, PNG, WEBP, PDF (checked from the
 file's bytes, not its name), up to 10 MB. Another shop's file returns `404`.
+
+## Before going live (checklist)
+
+- **Real caller IPs:** behind Cloudflare + Railway, set the trusted proxy ranges
+  (`server.tomcat.remoteip.trusted-proxies`) or read `CF-Connecting-IP`, and check one request's logged IP
+  against your phone's. Otherwise all users may share one IP and hit the per-network limits together.
+- **Redis Cloud:** set the eviction policy to `noeviction`, so limits and session numbers are never dropped
+  under memory pressure.
+- **Captcha** (Cloudflare Turnstile) on the sign-in screen, plus an alert well before `SMS_DAILY_LIMIT`.
+- `APP_PRODUCTION=true`, own DLT templates, `SMS_ACCOUNT_MOVED_ENABLED=true`, a mail provider with `MAIL_FROM`.
 
 ## Errors
 
