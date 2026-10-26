@@ -1,5 +1,7 @@
 package in.apnidukan.files;
 
+import in.apnidukan.common.security.AuthPrincipal;
+import in.apnidukan.common.security.JwtService;
 import in.apnidukan.support.TestContainers;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,20 +47,12 @@ class FilesIntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        // The same names application.properties expects as environment variables.
-        registry.add("DB_URL", TestContainers::jdbcUrl);
-        registry.add("DB_USER", () -> TestContainers.DB_USER);
-        registry.add("DB_PASSWORD", () -> TestContainers.DB_PASSWORD);
-        registry.add("R2_ENDPOINT", TestContainers::s3Endpoint);
-        registry.add("R2_BUCKET", () -> TestContainers.BUCKET);
-        registry.add("R2_ACCESS_KEY", () -> TestContainers.S3_ACCESS_KEY);
-        registry.add("R2_SECRET_KEY", () -> TestContainers.S3_SECRET_KEY);
-        registry.add("R2_REGION", () -> TestContainers.S3_REGION);
-        registry.add("DEV_AUTH_ENABLED", () -> "true");
+        TestContainers.register(registry);
     }
 
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
+    @Autowired JwtService jwt;
 
     RestClient http;
 
@@ -133,11 +127,31 @@ class FilesIntegrationTest {
     }
 
     @Test
-    void callsWithoutTheShopHeaderAreRefused() {
+    void callsWithoutASignInTokenAreRefused() {
         Reply reply = http.get().uri("/files/" + UUID.randomUUID() + "/link")
                 .exchange((req, res) -> new Reply(res.getStatusCode(), res.bodyTo(Map.class)));
         assertThat(reply.status()).isEqualTo(401);
         assertThat(reply.body().get("code")).isEqualTo("NOT_SIGNED_IN");
+    }
+
+    @Test
+    void signedInWithoutAShopCannotUploadYet() {
+        String noShop = jwt.issue(new AuthPrincipal(UUID.fromString(USER), null, null, false)).token();
+        MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
+        form.add("purpose", "BILL");
+        form.add("file", new ByteArrayResource(fakeJpeg()) {
+            @Override
+            public String getFilename() {
+                return "bill.jpg";
+            }
+        });
+        Reply reply = http.post().uri("/files")
+                .header("Authorization", "Bearer " + noShop)
+                .contentType(MediaType.MULTIPART_FORM_DATA)
+                .body(form)
+                .exchange((req, res) -> new Reply(res.getStatusCode(), res.bodyTo(Map.class)));
+        assertThat(reply.status()).isEqualTo(403);
+        assertThat(reply.body().get("code")).isEqualTo("SHOP_REQUIRED");
     }
 
     @Test
@@ -168,7 +182,7 @@ class FilesIntegrationTest {
         assertThat(unknown.body().get("code")).isEqualTo("NOT_FOUND");
 
         Reply wrongMethod = http.put().uri("/files/" + UUID.randomUUID() + "/link")
-                .header("X-Dev-Shop-Id", SHOP_A).header("X-Dev-User-Id", USER)
+                .header("Authorization", "Bearer " + tokenFor(SHOP_A))
                 .exchange((req, res) -> new Reply(res.getStatusCode(), res.bodyTo(Map.class)));
         assertThat(wrongMethod.status()).isEqualTo(405);
         assertThat(wrongMethod.body().get("code")).isEqualTo("METHOD_NOT_ALLOWED");
@@ -201,7 +215,7 @@ class FilesIntegrationTest {
             }
         });
         return http.post().uri("/files")
-                .header("X-Dev-Shop-Id", shop).header("X-Dev-User-Id", USER)
+                .header("Authorization", "Bearer " + tokenFor(shop))
                 .contentType(MediaType.MULTIPART_FORM_DATA)
                 .body(form)
                 .exchange((req, res) -> new Reply(res.getStatusCode(), res.bodyTo(Map.class)));
@@ -209,15 +223,20 @@ class FilesIntegrationTest {
 
     private Reply get(String shop, String path) {
         return http.get().uri(path)
-                .header("X-Dev-Shop-Id", shop).header("X-Dev-User-Id", USER)
+                .header("Authorization", "Bearer " + tokenFor(shop))
                 .exchange((req, res) -> new Reply(res.getStatusCode(), res.bodyTo(Map.class)));
     }
 
     private Reply delete(String shop, String path) {
         return http.delete().uri(path)
-                .header("X-Dev-Shop-Id", shop).header("X-Dev-User-Id", USER)
+                .header("Authorization", "Bearer " + tokenFor(shop))
                 .exchange((req, res) -> new Reply(res.getStatusCode(),
                         res.getStatusCode().value() == 204 ? Map.of() : res.bodyTo(Map.class)));
+    }
+
+    /** A real access token for a person acting for this shop (the shop's id is made up until shops exist). */
+    private String tokenFor(String shop) {
+        return jwt.issue(new AuthPrincipal(UUID.fromString(USER), UUID.fromString(shop), "OWNER", false)).token();
     }
 
     private static byte[] fakeJpeg() {

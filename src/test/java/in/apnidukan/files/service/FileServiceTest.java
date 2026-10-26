@@ -56,7 +56,7 @@ class FileServiceTest {
     void setUp() {
         service = new FileService(repository, storage, currentUser, Clock.fixed(NOW, ZoneOffset.UTC), 5,
                 List.of(usageChecker));
-        when(currentUser.get()).thenReturn(new CurrentUser(USER, SHOP));
+        when(currentUser.requireShop()).thenReturn(new CurrentUser(USER, SHOP));
     }
 
     @Test

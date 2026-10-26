@@ -61,7 +61,7 @@ public class FileService {
     }
 
     public FileUploadResult upload(MultipartFile upload, FilePurpose purpose) {
-        CurrentUser user = currentUser.get();
+        CurrentUser user = currentUser.requireShop();
 
         if (upload == null || upload.isEmpty()) {
             throw ApiException.badRequest("EMPTY_FILE", "The file is empty");
@@ -111,7 +111,7 @@ public class FileService {
 
     /** A link that opens the file straight from R2 for a few minutes. Only the file's own shop can get one. */
     public FileLink link(UUID fileId, boolean download) {
-        CurrentUser user = currentUser.get();
+        CurrentUser user = currentUser.requireShop();
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
         String downloadName = download ? downloadName(file) : null;
@@ -126,7 +126,7 @@ public class FileService {
      */
     @Transactional
     public void delete(UUID fileId) {
-        CurrentUser user = currentUser.get();
+        CurrentUser user = currentUser.requireShop();
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
         if (usageCheckers.stream().anyMatch(checker -> checker.isInUse(file))) {

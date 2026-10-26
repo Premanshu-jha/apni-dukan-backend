@@ -26,8 +26,12 @@ public final class TestContainers {
     public static final String S3_REGION = "us-east-1";
     public static final String BUCKET = "apnidukan-files";
 
+    /** Made-up signing secret for tests only (at least 32 characters). */
+    public static final String JWT_SECRET = "test-only-secret-0123456789-abcdefghijklmnopqrstuvwxyz";
+
     private static GenericContainer<?> postgres;
     private static GenericContainer<?> minio;
+    private static GenericContainer<?> redis;
 
     private TestContainers() {
     }
@@ -76,6 +80,36 @@ public final class TestContainers {
     public static String s3Endpoint() {
         GenericContainer<?> m = minio();
         return "http://" + m.getHost() + ":" + m.getMappedPort(9090);
+    }
+
+    public static synchronized GenericContainer<?> redis() {
+        if (redis == null) {
+            redis = new GenericContainer<>("redis:7-alpine")
+                    .withExposedPorts(6379)
+                    .waitingFor(Wait.forLogMessage(".*Ready to accept connections.*\\s", 1)
+                            .withStartupTimeout(Duration.ofMinutes(2)));
+            redis.start();
+        }
+        return redis;
+    }
+
+    public static String redisUrl() {
+        GenericContainer<?> r = redis();
+        return "redis://" + r.getHost() + ":" + r.getMappedPort(6379);
+    }
+
+    /** Points the app at the test containers, using the same names application.properties reads. */
+    public static void register(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        registry.add("DB_URL", TestContainers::jdbcUrl);
+        registry.add("DB_USER", () -> DB_USER);
+        registry.add("DB_PASSWORD", () -> DB_PASSWORD);
+        registry.add("R2_ENDPOINT", TestContainers::s3Endpoint);
+        registry.add("R2_BUCKET", () -> BUCKET);
+        registry.add("R2_ACCESS_KEY", () -> S3_ACCESS_KEY);
+        registry.add("R2_SECRET_KEY", () -> S3_SECRET_KEY);
+        registry.add("R2_REGION", () -> S3_REGION);
+        registry.add("REDIS_URL", TestContainers::redisUrl);
+        registry.add("JWT_SECRET", () -> JWT_SECRET);
     }
 
     /** A plain S3 client for the test itself, to look inside the bucket. */
