@@ -1,6 +1,7 @@
 package in.apnidukan.auth.service;
 
 import in.apnidukan.auth.domain.RefreshToken;
+import in.apnidukan.auth.domain.RevokeReason;
 import in.apnidukan.auth.domain.User;
 import in.apnidukan.auth.notify.EmailSender;
 import in.apnidukan.auth.notify.SmsSender;
@@ -99,14 +100,26 @@ public class AuthService {
 
     /**
      * Swaps a refresh token for a new pair (rotation). Each refresh token works once.
-     * If an already-used token comes back, it was probably copied: every session of that person is ended.
+     * If an already-swapped token comes back, it was probably copied: every session of that person is ended,
+     * once per copied token (so whoever holds it can't keep signing the owner out).
+     * A token ended by sign-out or recovery just gets "sign in again": the old device may well still try it.
      */
     @Transactional(noRollbackFor = ApiException.class)
     public AuthTokens refresh(String refreshToken, String device) {
         Instant now = Instant.now(clock);
         RefreshToken stored = refreshTokens.findByTokenHash(Hashing.sha256Hex(nullToEmpty(refreshToken)))
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
-        if (stored.getRevokedAt() != null || refreshTokens.revokeIfActive(stored.getId(), now) == 0) {
+        boolean copied = stored.getRevokedAt() != null
+                ? stored.getRevokeReason() == RevokeReason.ROTATED
+                // Revoked between our read and now: a parallel refresh with the same token just rotated it
+                : refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.ROTATED) == 0;
+        if (stored.getRevokedAt() != null && !copied) {
+            throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");
+        }
+        if (copied) {
+            if (refreshTokens.markReuseDetected(stored.getId()) == 0) {
+                throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");
+            }
             refreshTokens.revokeAllForUser(stored.getUserId(), now);
             revocations.revokeAll(stored.getUserId());
             log.warn("Refresh token reused for user {}: all sessions ended", stored.getUserId());
@@ -124,7 +137,7 @@ public class AuthService {
     @Transactional
     public void logout(String refreshToken) {
         refreshTokens.findByTokenHash(Hashing.sha256Hex(nullToEmpty(refreshToken)))
-                .ifPresent(t -> refreshTokens.revokeIfActive(t.getId(), Instant.now(clock)));
+                .ifPresent(t -> refreshTokens.revokeIfActive(t.getId(), Instant.now(clock), RevokeReason.SIGNED_OUT));
     }
 
     // ---------------- email verification ----------------

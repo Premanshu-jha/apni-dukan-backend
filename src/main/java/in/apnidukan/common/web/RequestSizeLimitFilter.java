@@ -44,6 +44,13 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
         chain.doFilter(new LimitedRequest(request), response);
     }
 
+    /** Thrown while reading a body that turns out to be too large; answered as 413 by GlobalExceptionHandler. */
+    public static final class RequestTooLargeException extends IOException {
+        RequestTooLargeException() {
+            super("Request body over " + MAX_JSON_BYTES + " bytes");
+        }
+    }
+
     private static final class LimitedRequest extends HttpServletRequestWrapper {
 
         private ServletInputStream limited;
@@ -91,7 +98,7 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
         private void count(int n) throws IOException {
             read += n;
             if (read > MAX_JSON_BYTES) {
-                throw new IOException("Request body over " + MAX_JSON_BYTES + " bytes");
+                throw new RequestTooLargeException();
             }
         }
 

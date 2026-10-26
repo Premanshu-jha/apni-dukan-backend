@@ -2,6 +2,8 @@ package in.apnidukan.auth.domain;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
@@ -34,6 +36,10 @@ public class RefreshToken {
     @Column(name = "revoked_at")
     private Instant revokedAt;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "revoke_reason", length = 30)
+    private RevokeReason revokeReason;
+
     protected RefreshToken() {
         // for JPA
     }
@@ -54,4 +60,5 @@ public class RefreshToken {
     public Instant getCreatedAt() { return createdAt; }
     public Instant getExpiresAt() { return expiresAt; }
     public Instant getRevokedAt() { return revokedAt; }
+    public RevokeReason getRevokeReason() { return revokeReason; }
 }

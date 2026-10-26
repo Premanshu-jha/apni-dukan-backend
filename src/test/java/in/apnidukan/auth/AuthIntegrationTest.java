@@ -164,7 +164,29 @@ class AuthIntegrationTest {
         assertThat(get("/auth/me", (String) rotated.body().get("accessToken")).status()).isEqualTo(401);
 
         // Signing in again works normally
-        assertThat(get("/auth/me", (String) signIn(PHONE).body().get("accessToken")).status()).isEqualTo(200);
+        Map<?, ?> fresh = signIn(PHONE).body();
+        assertThat(get("/auth/me", (String) fresh.get("accessToken")).status()).isEqualTo(200);
+
+        // Whoever holds the copied token can't keep signing the owner out: it works as an alarm only once
+        Reply again = post("/auth/refresh", Map.of("refreshToken", refresh1), null);
+        assertThat(again.body().get("code")).isEqualTo("INVALID_REFRESH_TOKEN");
+        assertThat(get("/auth/me", (String) fresh.get("accessToken")).status()).isEqualTo(200);
+        assertThat(post("/auth/refresh", Map.of("refreshToken", fresh.get("refreshToken")), null).status())
+                .isEqualTo(200);
+    }
+
+    @Test
+    void anOldDeviceTryingItsSignedOutTokenDoesNotSignOutTheOthers() {
+        Map<?, ?> phoneA = signIn(PHONE).body();
+        Map<?, ?> phoneB = signIn(PHONE).body();
+        post("/auth/logout", Map.of("refreshToken", phoneA.get("refreshToken")), null);
+
+        Reply r = post("/auth/refresh", Map.of("refreshToken", phoneA.get("refreshToken")), null);
+        assertThat(r.status()).isEqualTo(401);
+        assertThat(r.body().get("code")).isEqualTo("INVALID_REFRESH_TOKEN");
+        assertThat(get("/auth/me", (String) phoneB.get("accessToken")).status()).isEqualTo(200);
+        assertThat(post("/auth/refresh", Map.of("refreshToken", phoneB.get("refreshToken")), null).status())
+                .isEqualTo(200);
     }
 
     @Test
@@ -238,7 +260,10 @@ class AuthIntegrationTest {
                 "phoneCode", codeSentTo(LAST_SMS, newPhone)), null);
         assertThat(done.status()).isEqualTo(200);
         assertThat(((Map<?, ?>) done.body().get("user")).get("phone")).isEqualTo(newPhone);
-        assertThat(post("/auth/refresh", Map.of("refreshToken", oldRefresh), null).status()).isEqualTo(401);
+        // The lost phone trying its old token gets "sign in again" and does not end the new session
+        Reply oldTry = post("/auth/refresh", Map.of("refreshToken", oldRefresh), null);
+        assertThat(oldTry.status()).isEqualTo(401);
+        assertThat(oldTry.body().get("code")).isEqualTo("INVALID_REFRESH_TOKEN");
         // Old sessions end at once; the new one works
         assertThat(get("/auth/me", oldAccess).body().get("code")).isEqualTo("SIGNED_OUT");
         assertThat(get("/auth/me", (String) done.body().get("accessToken")).status()).isEqualTo(200);

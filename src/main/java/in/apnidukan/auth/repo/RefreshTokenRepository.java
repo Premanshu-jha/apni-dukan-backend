@@ -1,6 +1,7 @@
 package in.apnidukan.auth.repo;
 
 import in.apnidukan.auth.domain.RefreshToken;
+import in.apnidukan.auth.domain.RevokeReason;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -15,11 +16,20 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
 
     /** Revokes one token only if it is still active. Returns 1 if this call revoked it, 0 if it already was. */
     @Modifying
-    @Query("UPDATE RefreshToken t SET t.revokedAt = :now WHERE t.id = :id AND t.revokedAt IS NULL")
-    int revokeIfActive(UUID id, Instant now);
+    @Query("UPDATE RefreshToken t SET t.revokedAt = :now, t.revokeReason = :reason "
+            + "WHERE t.id = :id AND t.revokedAt IS NULL")
+    int revokeIfActive(UUID id, Instant now, RevokeReason reason);
+
+    /** A rotated token came back: marks it so that it can trigger "signed out everywhere" only this once. */
+    @Modifying
+    @Query("UPDATE RefreshToken t SET t.revokeReason = in.apnidukan.auth.domain.RevokeReason.REUSE_DETECTED "
+            + "WHERE t.id = :id AND t.revokeReason = in.apnidukan.auth.domain.RevokeReason.ROTATED")
+    int markReuseDetected(UUID id);
 
     /** Signs a person out of every device. */
     @Modifying
-    @Query("UPDATE RefreshToken t SET t.revokedAt = :now WHERE t.userId = :userId AND t.revokedAt IS NULL")
+    @Query("UPDATE RefreshToken t SET t.revokedAt = :now, "
+            + "t.revokeReason = in.apnidukan.auth.domain.RevokeReason.SIGNED_OUT_EVERYWHERE "
+            + "WHERE t.userId = :userId AND t.revokedAt IS NULL")
     int revokeAllForUser(UUID userId, Instant now);
 }
