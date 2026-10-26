@@ -21,7 +21,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static in.apnidukan.support.CapturingSenders.LAST_EMAIL;
 import static in.apnidukan.support.CapturingSenders.LAST_SMS;
@@ -140,6 +144,7 @@ class AuthIntegrationTest {
     void refreshRotatesAndAReusedRefreshTokenSignsOutEverywhere() {
         Map<?, ?> first = signIn(PHONE).body();
         String refresh1 = (String) first.get("refreshToken");
+        String access1 = (String) first.get("accessToken");
 
         Reply rotated = post("/auth/refresh", Map.of("refreshToken", refresh1), null);
         assertThat(rotated.status()).isEqualTo(200);
@@ -151,6 +156,15 @@ class AuthIntegrationTest {
         assertThat(reused.status()).isEqualTo(401);
         assertThat(reused.body().get("code")).isEqualTo("REFRESH_TOKEN_REUSED");
         assertThat(post("/auth/refresh", Map.of("refreshToken", refresh2), null).status()).isEqualTo(401);
+
+        // ...and the access tokens already handed out stop at once, not after 15 minutes
+        Reply me = get("/auth/me", access1);
+        assertThat(me.status()).isEqualTo(401);
+        assertThat(me.body().get("code")).isEqualTo("SIGNED_OUT");
+        assertThat(get("/auth/me", (String) rotated.body().get("accessToken")).status()).isEqualTo(401);
+
+        // Signing in again works normally
+        assertThat(get("/auth/me", (String) signIn(PHONE).body().get("accessToken")).status()).isEqualTo(200);
     }
 
     @Test
@@ -196,7 +210,11 @@ class AuthIntegrationTest {
     void emailAlreadyVerifiedByAnotherAccountIsRefused() {
         verifyEmail(signIn(PHONE), "shop@gmail.com");
         String other = (String) signIn("9000000001").body().get("accessToken");
-        Reply r = post("/auth/email/send-code", Map.of("email", "shop@gmail.com"), other);
+        // Sending answers like for any email (otherwise anyone could test which emails have accounts)...
+        assertThat(post("/auth/email/send-code", Map.of("email", "shop@gmail.com"), other).status()).isEqualTo(202);
+        // ...the clash shows only to someone who has the code from that inbox
+        Reply r = post("/auth/email/verify",
+                Map.of("email", "shop@gmail.com", "code", codeSentTo(LAST_EMAIL, "shop@gmail.com")), other);
         assertThat(r.status()).isEqualTo(409);
         assertThat(r.body().get("code")).isEqualTo("EMAIL_IN_USE");
     }
@@ -205,7 +223,10 @@ class AuthIntegrationTest {
     void recoveryMovesTheAccountToANewPhoneAndSignsOutOldSessions() {
         Reply first = signIn(PHONE);
         String oldRefresh = (String) first.body().get("refreshToken");
+        String oldAccess = (String) first.body().get("accessToken");
         verifyEmail(first, "shop@gmail.com");
+        LAST_SMS.clear();
+        LAST_EMAIL.clear();
 
         String newPhone = "9700000002";
         assertThat(post("/auth/recover/start", Map.of("email", "shop@gmail.com", "newPhone", newPhone), null)
@@ -218,13 +239,138 @@ class AuthIntegrationTest {
         assertThat(done.status()).isEqualTo(200);
         assertThat(((Map<?, ?>) done.body().get("user")).get("phone")).isEqualTo(newPhone);
         assertThat(post("/auth/refresh", Map.of("refreshToken", oldRefresh), null).status()).isEqualTo(401);
+        // Old sessions end at once; the new one works
+        assertThat(get("/auth/me", oldAccess).body().get("code")).isEqualTo("SIGNED_OUT");
+        assertThat(get("/auth/me", (String) done.body().get("accessToken")).status()).isEqualTo(200);
+        // The real owner is told on the old phone and by email
+        assertThat(LAST_SMS.get(PHONE)).contains("moved to a new number ending 0002");
+        assertThat(LAST_EMAIL.get("shop@gmail.com")).contains("ending 0002");
     }
 
     @Test
-    void recoveryStartDoesNotRevealWhetherAnEmailExists() {
-        Reply r = post("/auth/recover/start", Map.of("email", "nobody@gmail.com", "newPhone", "9700000003"), null);
-        assertThat(r.status()).isEqualTo(202);
-        assertThat(LAST_EMAIL).isEmpty();
+    void recoveryDoesNotRevealWhetherAnEmailHasAnAccount() {
+        verifyEmail(signIn(PHONE), "shop@gmail.com");
+        LAST_SMS.clear();
+        LAST_EMAIL.clear();
+
+        // Someone tries a real email and a made-up one, using their own phone each time
+        Reply real = post("/auth/recover/start", Map.of("email", "shop@gmail.com", "newPhone", "9700000003"), null);
+        Reply fake = post("/auth/recover/start", Map.of("email", "nobody@gmail.com", "newPhone", "9700000004"), null);
+        assertThat(real.status()).isEqualTo(202);
+        assertThat(fake.status()).isEqualTo(202);
+        // Both phones get an SMS, so the SMS doesn't give it away; only the real owner's inbox gets a code
+        assertThat(LAST_SMS).containsKeys("9700000003", "9700000004");
+        assertThat(LAST_EMAIL).containsOnlyKeys("shop@gmail.com");
+
+        // Guessing the email code gives the same answer for both
+        Reply realGuess = post("/auth/recover/complete", Map.of("email", "shop@gmail.com", "emailCode", "123456",
+                "newPhone", "9700000003", "phoneCode", codeSentTo(LAST_SMS, "9700000003")), null);
+        Reply fakeGuess = post("/auth/recover/complete", Map.of("email", "nobody@gmail.com", "emailCode", "123456",
+                "newPhone", "9700000004", "phoneCode", codeSentTo(LAST_SMS, "9700000004")), null);
+        assertThat(realGuess.status()).isEqualTo(fakeGuess.status()).isEqualTo(400);
+        assertThat(realGuess.body().get("code")).isEqualTo(fakeGuess.body().get("code")).isEqualTo("WRONG_CODE");
+
+        // And the same limits apply to both
+        for (int i = 0; i < 2; i++) {
+            post("/auth/recover/start", Map.of("email", "shop@gmail.com", "newPhone", "9700000003"), null);
+            post("/auth/recover/start", Map.of("email", "nobody@gmail.com", "newPhone", "9700000004"), null);
+        }
+        assertThat(post("/auth/recover/start", Map.of("email", "shop@gmail.com", "newPhone", "9700000005"), null)
+                .body().get("code")).isEqualTo("TOO_MANY_CODES");
+        assertThat(post("/auth/recover/start", Map.of("email", "nobody@gmail.com", "newPhone", "9700000006"), null)
+                .body().get("code")).isEqualTo("TOO_MANY_CODES");
+    }
+
+    @Test
+    void guessesSentAllAtOnceCannotSlipPastTheFiveTryLimit() throws Exception {
+        post("/auth/otp/send", Map.of("phone", PHONE), null);
+        String real = codeSentTo(LAST_SMS, PHONE);
+        String wrong = real.equals("000000") ? "111111" : "000000";
+
+        ExecutorService pool = Executors.newFixedThreadPool(25);
+        try {
+            List<Future<Reply>> replies = new java.util.ArrayList<>();
+            for (int i = 0; i < 25; i++) {
+                replies.add(pool.submit(() -> post("/auth/otp/verify", Map.of("phone", PHONE, "code", wrong), null)));
+            }
+            int wrongCodeAnswers = 0;
+            for (Future<Reply> f : replies) {
+                Reply r = f.get();
+                assertThat(r.status()).as(r.body().toString()).isIn(400, 429);
+                if ("WRONG_CODE".equals(r.body().get("code"))) {
+                    wrongCodeAnswers++;
+                }
+            }
+            // Only the first 5 attempts were ever compared: 4 "wrong", then the code was destroyed
+            assertThat(wrongCodeAnswers).isEqualTo(4);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(post("/auth/otp/verify", Map.of("phone", PHONE, "code", real), null).body().get("code"))
+                .isEqualTo("CODE_EXPIRED");
+    }
+
+    @Test
+    void tenWrongCodesInADayLockThePhoneUntilTomorrow() {
+        String wrong;
+        for (int round = 1; round <= 2; round++) {
+            post("/auth/otp/send", Map.of("phone", PHONE), null);
+            String real = codeSentTo(LAST_SMS, PHONE);
+            wrong = real.equals("000000") ? "111111" : "000000";
+            for (int i = 1; i <= 5; i++) {
+                post("/auth/otp/verify", Map.of("phone", PHONE, "code", wrong), null);
+            }
+        }
+        Reply send = post("/auth/otp/send", Map.of("phone", PHONE), null);
+        assertThat(send.status()).isEqualTo(429);
+        assertThat(send.body().get("code")).isEqualTo("LOCKED_FOR_TODAY");
+    }
+
+    @Test
+    void oneNetworkCannotSprayCodesToManyNumbers() {
+        for (int i = 0; i < 10; i++) {
+            assertThat(post("/auth/otp/send", Map.of("phone", "90000000" + String.format("%02d", i)), null).status())
+                    .isEqualTo(202);
+        }
+        Reply eleventh = post("/auth/otp/send", Map.of("phone", "9000000099"), null);
+        assertThat(eleventh.status()).isEqualTo(429);
+        assertThat(eleventh.body().get("code")).isEqualTo("TOO_MANY_REQUESTS");
+
+        // Another caller (IP passed on by the proxy) is not affected
+        Reply other = http.post().uri("/auth/otp/send")
+                .header("X-Forwarded-For", "203.0.113.9")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("phone", "9000000099"))
+                .exchange((rq, res) -> new Reply(res.getStatusCode(), readBody(res)));
+        assertThat(other.status()).isEqualTo(202);
+    }
+
+    @Test
+    void dailySmsCapPausesSendingToProtectTheBill() {
+        redis.opsForValue().set("rl:sms-day", "500");
+        Reply r = post("/auth/otp/send", Map.of("phone", PHONE), null);
+        assertThat(r.status()).isEqualTo(503);
+        assertThat(r.body().get("code")).isEqualTo("SMS_PAUSED");
+        assertThat(LAST_SMS).isEmpty();
+    }
+
+    @Test
+    void hugeRequestBodiesAreRefusedBeforeBeingRead() {
+        Reply r = post("/auth/otp/send", Map.of("phone", "9".repeat(70_000)), null);
+        assertThat(r.status()).isEqualTo(413);
+        assertThat(r.body().get("code")).isEqualTo("REQUEST_TOO_LARGE");
+    }
+
+    @Test
+    void tokenSignedWithAnotherSecretIsRefused() {
+        var other = new in.apnidukan.common.security.JwtService(
+                new in.apnidukan.common.security.JwtProperties("some-other-secret-0123456789-abcdefghijkl", 15, 30),
+                java.time.Clock.systemUTC());
+        String forged = other.issue(new in.apnidukan.common.security.AuthPrincipal(
+                java.util.UUID.randomUUID(), null, null, true)).token();
+        Reply r = get("/admin/shops", forged);
+        assertThat(r.status()).isEqualTo(401);
+        assertThat(r.body().get("code")).isEqualTo("INVALID_TOKEN");
     }
 
     @Test

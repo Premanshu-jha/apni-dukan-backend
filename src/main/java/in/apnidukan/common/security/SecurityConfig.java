@@ -31,7 +31,8 @@ import java.util.List;
 public class SecurityConfig {
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtService jwt) throws Exception {
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtService jwt,
+                                                   SessionRevocations revocations) throws Exception {
         http
                 .csrf(csrf -> csrf.disable())
                 .cors(Customizer.withDefaults())
@@ -56,6 +57,8 @@ public class SecurityConfig {
                             Object reason = request.getAttribute(JwtAuthFilter.AUTH_ERROR);
                             if ("TOKEN_EXPIRED".equals(reason)) {
                                 writeError(response, 401, "TOKEN_EXPIRED", "Your session has expired. Refresh it.");
+                            } else if ("SIGNED_OUT".equals(reason)) {
+                                writeError(response, 401, "SIGNED_OUT", "You were signed out. Sign in again.");
                             } else if ("INVALID_TOKEN".equals(reason)) {
                                 writeError(response, 401, "INVALID_TOKEN", "Sign in again.");
                             } else {
@@ -64,7 +67,7 @@ public class SecurityConfig {
                         })
                         .accessDeniedHandler((request, response, ex) ->
                                 writeError(response, 403, "FORBIDDEN", "You are not allowed to do this.")))
-                .addFilterBefore(new JwtAuthFilter(jwt), UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(new JwtAuthFilter(jwt, revocations), UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }
 

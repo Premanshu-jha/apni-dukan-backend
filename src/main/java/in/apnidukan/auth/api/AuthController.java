@@ -12,6 +12,7 @@ import in.apnidukan.auth.api.AuthResponses.TokenResponse;
 import in.apnidukan.auth.api.AuthResponses.UserResponse;
 import in.apnidukan.auth.service.AuthService;
 import in.apnidukan.common.context.CurrentUserProvider;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -34,15 +35,16 @@ public class AuthController {
 
     /** Step 1 of sign-in: sends a 6-digit OTP to the phone. 202; 429 after 3 codes in 10 minutes. */
     @PostMapping("/otp/send")
-    public ResponseEntity<Void> sendOtp(@Valid @RequestBody SendOtp body) {
-        auth.sendLoginOtp(body.phone());
+    public ResponseEntity<Void> sendOtp(@Valid @RequestBody SendOtp body, HttpServletRequest request) {
+        auth.sendLoginOtp(body.phone(), request.getRemoteAddr());
         return ResponseEntity.accepted().build();
     }
 
     /** Step 2: correct OTP → tokens. Creates the account on first use (newUser: true). */
     @PostMapping("/otp/verify")
-    public TokenResponse verifyOtp(@Valid @RequestBody VerifyOtp body) {
-        return TokenResponse.from(auth.verifyLoginOtp(body.phone(), body.code(), body.device()));
+    public TokenResponse verifyOtp(@Valid @RequestBody VerifyOtp body, HttpServletRequest request) {
+        return TokenResponse.from(auth.verifyLoginOtp(body.phone(), body.code(), body.device(),
+                request.getRemoteAddr()));
     }
 
     /** Swap the refresh token for a fresh pair (call when the access token expires, every 15 minutes). */
@@ -64,27 +66,28 @@ public class AuthController {
 
     /** Signed in: send a 6-digit code to the email to prove it's yours. */
     @PostMapping("/email/send-code")
-    public ResponseEntity<Void> sendEmailCode(@Valid @RequestBody SendEmailCode body) {
-        auth.sendEmailCode(currentUser.get().userId(), body.email());
+    public ResponseEntity<Void> sendEmailCode(@Valid @RequestBody SendEmailCode body, HttpServletRequest request) {
+        auth.sendEmailCode(currentUser.get().userId(), body.email(), request.getRemoteAddr());
         return ResponseEntity.accepted().build();
     }
 
     @PostMapping("/email/verify")
-    public UserResponse verifyEmail(@Valid @RequestBody VerifyEmail body) {
-        return UserResponse.from(auth.verifyEmail(currentUser.get().userId(), body.email(), body.code()));
+    public UserResponse verifyEmail(@Valid @RequestBody VerifyEmail body, HttpServletRequest request) {
+        return UserResponse.from(auth.verifyEmail(currentUser.get().userId(), body.email(), body.code(),
+                request.getRemoteAddr()));
     }
 
-    /** Lost your phone number: codes go to your verified email and to the new phone. Always 202. */
+    /** Lost your phone number: codes go to your verified email and to the new phone. Always 202, account or not. */
     @PostMapping("/recover/start")
-    public ResponseEntity<Void> startRecovery(@Valid @RequestBody StartRecovery body) {
-        auth.startRecovery(body.email(), body.newPhone());
+    public ResponseEntity<Void> startRecovery(@Valid @RequestBody StartRecovery body, HttpServletRequest request) {
+        auth.startRecovery(body.email(), body.newPhone(), request.getRemoteAddr());
         return ResponseEntity.accepted().build();
     }
 
     /** Both codes correct → your account now uses the new phone; all old sessions are signed out. */
     @PostMapping("/recover/complete")
-    public TokenResponse completeRecovery(@Valid @RequestBody CompleteRecovery body) {
+    public TokenResponse completeRecovery(@Valid @RequestBody CompleteRecovery body, HttpServletRequest request) {
         return TokenResponse.from(auth.completeRecovery(body.email(), body.emailCode(), body.newPhone(),
-                body.phoneCode(), body.device()));
+                body.phoneCode(), body.device(), request.getRemoteAddr()));
     }
 }

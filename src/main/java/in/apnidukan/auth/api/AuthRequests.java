@@ -9,30 +9,31 @@ public final class AuthRequests {
     private AuthRequests() {
     }
 
-    public record SendOtp(@NotBlank String phone) {
+    public record SendOtp(@NotBlank @Size(max = 20) String phone) {
     }
 
     /** @param device optional label shown later in "signed-in devices", e.g. "Redmi Note 12" */
-    public record VerifyOtp(@NotBlank String phone, @NotBlank @Size(max = 10) String code, String device) {
+    public record VerifyOtp(@NotBlank @Size(max = 20) String phone, @NotBlank @Size(max = 10) String code,
+                            @Size(max = 200) String device) {
     }
 
-    public record Refresh(@NotBlank String refreshToken, String device) {
+    public record Refresh(@NotBlank @Size(max = 100) String refreshToken, @Size(max = 200) String device) {
     }
 
-    public record Logout(@NotBlank String refreshToken) {
+    public record Logout(@NotBlank @Size(max = 100) String refreshToken) {
     }
 
-    public record SendEmailCode(@NotBlank String email) {
+    public record SendEmailCode(@NotBlank @Size(max = 254) String email) {
     }
 
-    public record VerifyEmail(@NotBlank String email, @NotBlank @Size(max = 10) String code) {
+    public record VerifyEmail(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 10) String code) {
     }
 
-    public record StartRecovery(@NotBlank String email, @NotBlank String newPhone) {
+    public record StartRecovery(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 20) String newPhone) {
     }
 
-    public record CompleteRecovery(@NotBlank String email, @NotBlank @Size(max = 10) String emailCode,
-                                   @NotBlank String newPhone, @NotBlank @Size(max = 10) String phoneCode,
-                                   String device) {
+    public record CompleteRecovery(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 10) String emailCode,
+                                   @NotBlank @Size(max = 20) String newPhone,
+                                   @NotBlank @Size(max = 10) String phoneCode, @Size(max = 200) String device) {
     }
 }

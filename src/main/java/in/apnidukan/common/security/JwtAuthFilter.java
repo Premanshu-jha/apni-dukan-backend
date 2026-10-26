@@ -22,9 +22,11 @@ public class JwtAuthFilter extends OncePerRequestFilter {
     static final String AUTH_ERROR = "auth.error";
 
     private final JwtService jwt;
+    private final SessionRevocations revocations;
 
-    public JwtAuthFilter(JwtService jwt) {
+    public JwtAuthFilter(JwtService jwt, SessionRevocations revocations) {
         this.jwt = jwt;
+        this.revocations = revocations;
     }
 
     @Override
@@ -33,7 +35,13 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         String header = request.getHeader("Authorization");
         if (header != null && header.startsWith("Bearer ")) {
             try {
-                AuthPrincipal who = jwt.parse(header.substring(7).trim());
+                JwtService.ParsedToken parsed = jwt.parseToken(header.substring(7).trim());
+                AuthPrincipal who = parsed.who();
+                if (revocations.isRevoked(who.userId(), parsed.generation())) {
+                    request.setAttribute(AUTH_ERROR, "SIGNED_OUT");
+                    chain.doFilter(request, response);
+                    return;
+                }
                 var authorities = who.admin()
                         ? List.of(new SimpleGrantedAuthority("ROLE_ADMIN"))
                         : List.<SimpleGrantedAuthority>of();

@@ -10,6 +10,11 @@ import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.security.AuthPrincipal;
 import in.apnidukan.common.security.JwtProperties;
 import in.apnidukan.common.security.JwtService;
+import in.apnidukan.common.security.RateLimiter;
+import in.apnidukan.common.security.SessionRevocations;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -29,6 +34,13 @@ import java.util.UUID;
 @Service
 public class AuthService {
 
+    private static final Logger log = LoggerFactory.getLogger(AuthService.class);
+
+    /** Per caller IP: codes requested (SMS or email) and codes tried, per hour. Stops one machine spraying numbers. */
+    static final int IP_SENDS_PER_HOUR = 10;
+    static final int IP_VERIFIES_PER_HOUR = 30;
+    static final Duration HOUR = Duration.ofHours(1);
+
     private final UserRepository users;
     private final RefreshTokenRepository refreshTokens;
     private final OtpService otp;
@@ -37,10 +49,18 @@ public class AuthService {
     private final JwtService jwt;
     private final Clock clock;
     private final Duration refreshValidity;
+    private final RateLimiter limits;
+    private final SessionRevocations revocations;
+    private final int smsDailyLimit;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
-                       SmsSender sms, EmailSender email, JwtService jwt, JwtProperties props, Clock clock) {
+                       SmsSender sms, EmailSender email, JwtService jwt, JwtProperties props, Clock clock,
+                       RateLimiter limits, SessionRevocations revocations,
+                       @Value("${app.sms.daily-limit:500}") int smsDailyLimit) {
+        this.limits = limits;
+        this.revocations = revocations;
+        this.smsDailyLimit = smsDailyLimit;
         this.users = users;
         this.refreshTokens = refreshTokens;
         this.otp = otp;
@@ -53,16 +73,18 @@ public class AuthService {
 
     // ---------------- phone OTP sign-in ----------------
 
-    public void sendLoginOtp(String phoneInput) {
+    public void sendLoginOtp(String phoneInput, String ip) {
         String phone = PhoneNumbers.normalize(phoneInput);
+        limitSends(ip);
         String code = otp.issue(OtpPurpose.LOGIN, phone);
-        sms.send(phone, "Your Apni Dukan code is " + code + ". It works for 5 minutes. Don't share it with anyone.");
+        sendSms(phone, "Your Apni Dukan code is " + code + ". It works for 5 minutes. Don't share it with anyone.");
     }
 
     /** Correct code: signs in, creating the account the first time this phone is used. */
     @Transactional
-    public AuthTokens verifyLoginOtp(String phoneInput, String code, String device) {
+    public AuthTokens verifyLoginOtp(String phoneInput, String code, String device, String ip) {
         String phone = PhoneNumbers.normalize(phoneInput);
+        limitVerifies(ip);
         otp.verify(OtpPurpose.LOGIN, phone, code);
         boolean created = false;
         User user = users.findByPhone(phone).orElse(null);
@@ -86,6 +108,8 @@ public class AuthService {
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
         if (stored.getRevokedAt() != null || refreshTokens.revokeIfActive(stored.getId(), now) == 0) {
             refreshTokens.revokeAllForUser(stored.getUserId(), now);
+            revocations.revokeAll(stored.getUserId());
+            log.warn("Refresh token reused for user {}: all sessions ended", stored.getUserId());
             throw unauthorized("REFRESH_TOKEN_REUSED", "For your safety you were signed out everywhere. Sign in again.");
         }
         if (!stored.getExpiresAt().isAfter(now)) {
@@ -105,14 +129,13 @@ public class AuthService {
 
     // ---------------- email verification ----------------
 
-    public void sendEmailCode(UUID userId, String emailInput) {
+    /**
+     * Sends the code even if another account already uses this email: refusing here would let anyone find out which
+     * emails have accounts. The clash is reported at verify, to someone who has proved they own the inbox.
+     */
+    public void sendEmailCode(UUID userId, String emailInput, String ip) {
         String address = Emails.normalize(emailInput);
-        users.findByVerifiedEmail(address)
-                .filter(other -> !other.getId().equals(userId))
-                .ifPresent(other -> {
-                    throw new ApiException(HttpStatus.CONFLICT, "EMAIL_IN_USE",
-                            "This email is already used by another account");
-                });
+        limitSends(ip);
         String code = otp.issue(OtpPurpose.EMAIL_VERIFY, userId + ":" + address);
         email.send(address, "Your Apni Dukan verification code",
                 "Your Apni Dukan verification code is " + code + ".\n\nIt works for 10 minutes. "
@@ -120,10 +143,17 @@ public class AuthService {
     }
 
     @Transactional
-    public User verifyEmail(UUID userId, String emailInput, String code) {
+    public User verifyEmail(UUID userId, String emailInput, String code, String ip) {
         String address = Emails.normalize(emailInput);
+        limitVerifies(ip);
         otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code);
         User user = users.findById(userId).orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+        users.findByVerifiedEmail(address)
+                .filter(other -> !other.getId().equals(userId))
+                .ifPresent(other -> {
+                    throw new ApiException(HttpStatus.CONFLICT, "EMAIL_IN_USE",
+                            "This email is already used by another account");
+                });
         user.verifyEmail(address, Instant.now(clock));
         try {
             return users.saveAndFlush(user);
@@ -136,42 +166,64 @@ public class AuthService {
 
     /**
      * Step 1: sends a code to the verified email and an OTP to the new phone.
-     * Answers the same way whether or not the email exists, so it can't be used to find out who has an account.
+     * Behaves exactly the same whether or not the email has an account (same limits, the SMS is always sent),
+     * so it can't be used to find out who has an account.
      */
-    public void startRecovery(String emailInput, String newPhoneInput) {
+    public void startRecovery(String emailInput, String newPhoneInput, String ip) {
         String address = Emails.normalize(emailInput);
         String newPhone = PhoneNumbers.normalize(newPhoneInput);
-        if (users.findByVerifiedEmail(address).isEmpty()) {
-            return;
-        }
+        limitSends(ip);
+        boolean exists = users.findByVerifiedEmail(address).isPresent();
         String emailCode = otp.issue(OtpPurpose.RECOVER_EMAIL, address);
         String phoneCode = otp.issue(OtpPurpose.RECOVER_PHONE, newPhone);
-        email.send(address, "Recover your Apni Dukan account",
-                "Your recovery code is " + emailCode + ".\n\nIt works for 10 minutes. "
-                        + "If you didn't ask for this, ignore this email; your account stays as it is.");
-        sms.send(newPhone, "Your Apni Dukan recovery code is " + phoneCode + ". Don't share it with anyone.");
+        if (exists) {
+            email.send(address, "Recover your Apni Dukan account",
+                    "Your recovery code is " + emailCode + ".\n\nIt works for 10 minutes. "
+                            + "If you didn't ask for this, ignore this email; your account stays as it is.");
+        }
+        sendSms(newPhone, "Your Apni Dukan recovery code is " + phoneCode + ". Don't share it with anyone.");
     }
 
-    /** Step 2: both codes correct → the account moves to the new phone and every old session is ended. */
+    /**
+     * Step 2: both codes correct → the account moves to the new phone, every old session ends at once, and the
+     * old phone and the email are told (so a real owner notices if someone else did this).
+     */
     @Transactional
     public AuthTokens completeRecovery(String emailInput, String emailCode, String newPhoneInput, String phoneCode,
-                                       String device) {
+                                       String device, String ip) {
         String address = Emails.normalize(emailInput);
         String newPhone = PhoneNumbers.normalize(newPhoneInput);
-        User user = users.findByVerifiedEmail(address)
-                .orElseThrow(() -> ApiException.badRequest("RECOVERY_FAILED", "These details don't match an account"));
+        limitVerifies(ip);
+        // Codes first: without them, the answer never depends on whether the account exists.
         otp.verify(OtpPurpose.RECOVER_EMAIL, address, emailCode);
         otp.verify(OtpPurpose.RECOVER_PHONE, newPhone, phoneCode);
+        User user = users.findByVerifiedEmail(address)
+                .orElseThrow(() -> ApiException.badRequest("RECOVERY_FAILED", "These details don't match an account"));
         users.findByPhone(newPhone)
                 .filter(other -> !other.getId().equals(user.getId()))
                 .ifPresent(other -> {
                     throw new ApiException(HttpStatus.CONFLICT, "PHONE_IN_USE",
                             "This phone number already has its own account");
                 });
+        String oldPhone = user.getPhone();
         Instant now = Instant.now(clock);
         user.changePhone(newPhone, now);
         users.saveAndFlush(user);
         refreshTokens.revokeAllForUser(user.getId(), now);
+        revocations.revokeAll(user.getId());
+        String ending = newPhone.substring(6);
+        if (!oldPhone.equals(newPhone)) {
+            try {
+                sendSms(oldPhone, "Your Apni Dukan account was moved to a new number ending " + ending
+                        + ". If this wasn't you, contact Apni Dukan support immediately.");
+            } catch (ApiException e) {
+                // A paused SMS must not undo the recovery; the email below still goes out.
+                log.warn("Could not tell the old phone of user {} about the recovery: {}", user.getId(), e.getCode());
+            }
+        }
+        email.send(address, "Your Apni Dukan account moved to a new phone",
+                "Your account now uses the phone number ending " + ending + ". Every other device was signed out."
+                        + "\n\nIf this wasn't you, contact Apni Dukan support immediately.");
         return issueTokens(user, device, false);
     }
 
@@ -184,7 +236,8 @@ public class AuthService {
     private AuthTokens issueTokens(User user, String device, boolean newUser) {
         Instant now = Instant.now(clock);
         // The shop and role are added to the token once shops exist (next PR).
-        JwtService.IssuedToken access = jwt.issue(new AuthPrincipal(user.getId(), null, null, user.isAdmin()));
+        JwtService.IssuedToken access = jwt.issue(new AuthPrincipal(user.getId(), null, null, user.isAdmin()),
+                revocations.currentGeneration(user.getId()));
         byte[] raw = new byte[32];
         random.nextBytes(raw);
         String refresh = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
@@ -192,6 +245,34 @@ public class AuthService {
         refreshTokens.save(new RefreshToken(UUID.randomUUID(), user.getId(), Hashing.sha256Hex(refresh),
                 trimDevice(device), now, refreshExpires));
         return new AuthTokens(access.token(), access.expiresAt(), refresh, refreshExpires, user, newUser);
+    }
+
+    private void limitSends(String ip) {
+        if (!limits.tryHit("ip-send:" + ip, IP_SENDS_PER_HOUR, HOUR)) {
+            throw tooManyRequests();
+        }
+    }
+
+    private void limitVerifies(String ip) {
+        if (!limits.tryHit("ip-verify:" + ip, IP_VERIFIES_PER_HOUR, HOUR)) {
+            throw tooManyRequests();
+        }
+    }
+
+    /** Every SMS goes through here: a hard daily cap protects the SMS bill even if all other limits are dodged. */
+    private void sendSms(String phone, String text) {
+        if (!limits.tryHit("sms-day", smsDailyLimit, Duration.ofHours(24))) {
+            log.error("Daily SMS limit ({}) reached: SMS paused. Check for abuse before raising SMS_DAILY_LIMIT.",
+                    smsDailyLimit);
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SMS_PAUSED",
+                    "We can't send codes right now. Please try again later.");
+        }
+        sms.send(phone, text);
+    }
+
+    private static ApiException tooManyRequests() {
+        return new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS",
+                "Too many requests from this network. Try again in an hour.");
     }
 
     private static ApiException unauthorized(String code, String message) {

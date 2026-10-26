@@ -33,13 +33,19 @@ public class JwtService {
     }
 
     public IssuedToken issue(AuthPrincipal who) {
+        return issue(who, 0);
+    }
+
+    /** @param generation the person's session generation (see {@link SessionRevocations}) */
+    public IssuedToken issue(AuthPrincipal who, long generation) {
         Instant now = Instant.now(clock);
         Instant expires = now.plus(accessValidity);
         var builder = Jwts.builder()
                 .subject(who.userId().toString())
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(expires))
-                .claim("adm", who.admin());
+                .claim("adm", who.admin())
+                .claim("gen", generation);
         if (who.shopId() != null) {
             builder.claim("shop", who.shopId().toString()).claim("role", who.shopRole());
         }
@@ -48,6 +54,11 @@ public class JwtService {
 
     /** @throws TokenExpiredException if it was valid but is too old; @throws InvalidTokenException otherwise */
     public AuthPrincipal parse(String token) {
+        return parseToken(token).who();
+    }
+
+    /** Like {@link #parse} but also returns the session generation the token was issued in. */
+    public ParsedToken parseToken(String token) {
         try {
             Claims claims = Jwts.parser()
                     .verifyWith(key)
@@ -57,16 +68,27 @@ public class JwtService {
                     .getPayload();
             String shop = claims.get("shop", String.class);
             Boolean admin = claims.get("adm", Boolean.class);
-            return new AuthPrincipal(
+            Number generation = claims.get("gen", Number.class);
+            if (claims.getSubject() == null || generation == null) {
+                throw new InvalidTokenException();
+            }
+            AuthPrincipal who = new AuthPrincipal(
                     UUID.fromString(claims.getSubject()),
                     shop == null ? null : UUID.fromString(shop),
                     claims.get("role", String.class),
                     Boolean.TRUE.equals(admin));
+            return new ParsedToken(who, generation.longValue());
         } catch (ExpiredJwtException e) {
             throw new TokenExpiredException();
-        } catch (JwtException | IllegalArgumentException e) {
+        } catch (InvalidTokenException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            // Bad signature, wrong format, odd claim types: never a 500, always "sign in again"
             throw new InvalidTokenException();
         }
+    }
+
+    public record ParsedToken(AuthPrincipal who, long generation) {
     }
 
     public record IssuedToken(String token, Instant expiresAt) {
