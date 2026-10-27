@@ -7,6 +7,8 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    cooldown:                         # wait 7 days after a release before proposing it (a bad or
+      default-days: 7                 # hijacked release is usually pulled within days)
     groups:
       aws-sdk:                        # all AWS SDK updates together in one PR
         patterns: ["software.amazon.awssdk*"]
@@ -15,3 +17,12 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: pip            # the Semgrep version used by CI (.github/semgrep/requirements.txt)
+    directory: "/.github/semgrep"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7

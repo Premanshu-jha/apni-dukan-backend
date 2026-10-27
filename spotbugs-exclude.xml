@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Findings we have looked at and decided are not problems here. Each entry says why, and is kept as narrow as possible.
+  SpotBugs reports Medium and High findings (threshold=Medium); any of those not listed here fails the build.
+-->
+<FindBugsFilter>
+    <!-- Storing objects passed to a constructor is how Spring dependency injection works (a service keeps the
+         repositories and clients it is given). Not a leak. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- Returning an internal object from a getter is fine for entities (JPA), API records (serialised to JSON) and
+         configuration/properties holders. Elsewhere (services, utilities) it stays reported. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+        <Or>
+            <Package name="~in\.apnidukan\..*\.domain"/>
+            <Package name="~in\.apnidukan\..*\.api"/>
+            <Class name="~.*(Config|Properties)"/>
+        </Or>
+    </Match>
+    <!-- We turn off CSRF on purpose: there are no cookies or server sessions, every call carries a bearer token
+         (see SecurityConfig). CSRF only matters for cookie-based sign-in. -->
+    <Match>
+        <Bug pattern="SPRING_CSRF_PROTECTION_DISABLED"/>
+        <Class name="in.apnidukan.common.security.SecurityConfig"/>
+    </Match>
+    <!-- These constructors refuse to start the app when a required setting is missing or too weak (fail fast, on
+         purpose): no SMS/mail settings, production misconfiguration, or a JWT_SECRET too short to sign safely. -->
+    <Match>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+        <Or>
+            <Class name="in.apnidukan.auth.notify.Msg91SmsSender"/>
+            <Class name="in.apnidukan.auth.notify.SmtpEmailSender"/>
+            <Class name="in.apnidukan.config.ProductionSafetyCheck"/>
+            <Class name="in.apnidukan.common.security.JwtService"/>
+        </Or>
+    </Match>
+</FindBugsFilter>

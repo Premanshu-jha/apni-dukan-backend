@@ -1,4 +1,4 @@
-package in.apnidukan.common.config;
+package in.apnidukan.config;
 
 import in.apnidukan.auth.notify.EmailSender;
 import in.apnidukan.auth.notify.LoggingEmailSender;

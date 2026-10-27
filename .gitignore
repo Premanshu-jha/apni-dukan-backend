@@ -12,3 +12,6 @@ target/
 
 # OS
 .DS_Store
+
+# Your own phone/email for http/api.http
+http/http-client.private.env.json

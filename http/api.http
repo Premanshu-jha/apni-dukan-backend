@@ -1,0 +1,90 @@
+### Apni Dukan API: click ▶ next to a request (environment "local"). See http/README.md.
+# Your phone, email and the codes you receive (otp, emailCode) go in http-client.private.env.json, which Git ignores,
+# so nothing personal is ever committed from this file. The file id is saved automatically by request 7.
+
+### 1. Send OTP (SMS through MSG91)
+POST {{baseUrl}}/auth/otp/send
+Content-Type: application/json
+
+{ "phone": "{{phone}}" }
+
+### 2. Verify OTP → signs in (creates the account the first time). Saves the tokens.
+POST {{baseUrl}}/auth/otp/verify
+Content-Type: application/json
+
+{ "phone": "{{phone}}", "code": "{{otp}}", "device": "IntelliJ" }
+
+> {%
+    client.test("Signed in", () => client.assert(response.status === 200, "Status " + response.status));
+    client.global.set("accessToken", response.body.accessToken);
+    client.global.set("refreshToken", response.body.refreshToken);
+%}
+
+### 3. Who am I
+GET {{baseUrl}}/auth/me
+Authorization: Bearer {{accessToken}}
+
+### 4. Refresh: new pair, the old refresh token is used up. Saves the new tokens.
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
+
+> {%
+    client.global.set("accessToken", response.body.accessToken);
+    client.global.set("refreshToken", response.body.refreshToken);
+%}
+
+### 5. Send an email code (Gmail)
+POST {{baseUrl}}/auth/email/send-code
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "email": "{{email}}" }
+
+### 5b. Replacing an already verified email: first a code to your own phone (then add "phoneCode" in request 5)
+POST {{baseUrl}}/auth/email/change-phone-code
+Authorization: Bearer {{accessToken}}
+
+### 6. Verify the email with the code from your inbox
+POST {{baseUrl}}/auth/email/verify
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "email": "{{email}}", "code": "{{emailCode}}" }
+
+### 7. Upload a bill photo (needs a shop: answers 403 SHOP_REQUIRED until shop registration exists)
+POST {{baseUrl}}/files
+Authorization: Bearer {{accessToken}}
+Content-Type: multipart/form-data; boundary=ApniDukan
+
+--ApniDukan
+Content-Disposition: form-data; name="purpose"
+
+BILL
+--ApniDukan
+Content-Disposition: form-data; name="file"; filename="bill.jpg"
+Content-Type: image/jpeg
+
+< ./sample-bill.jpg
+--ApniDukan--
+
+> {%
+    if (response.status === 200 || response.status === 201) {
+        client.global.set("fileId", response.body.id);
+    }
+%}
+
+### 8. Link to view a file for 5 minutes (add ?download=true to save it instead)
+GET {{baseUrl}}/files/{{fileId}}/link
+Authorization: Bearer {{accessToken}}
+
+### 9. Delete a file (Neon + R2)
+DELETE {{baseUrl}}/files/{{fileId}}
+Authorization: Bearer {{accessToken}}
+
+### 10. Sign out this device
+POST {{baseUrl}}/auth/logout
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
