@@ -2,6 +2,8 @@ package in.apnidukan.common.error;
 
 import org.springframework.http.HttpStatus;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -23,12 +25,13 @@ public class ApiException extends RuntimeException {
         super(message);
         this.status = status;
         this.code = code;
-        this.details = details;
+        // Own copy, so nobody can change an exception's details after it was thrown
+        this.details = details == null ? Map.of() : new LinkedHashMap<>(details);
     }
 
     public HttpStatus getStatus() { return status; }
     public String getCode() { return code; }
-    public Map<String, Object> getDetails() { return details; }
+    public Map<String, Object> getDetails() { return Collections.unmodifiableMap(details); }
     public Long getRetryAfterSeconds() { return retryAfterSeconds; }
 
     /** Tells the app how long to wait before trying again (sent as the Retry-After header). */

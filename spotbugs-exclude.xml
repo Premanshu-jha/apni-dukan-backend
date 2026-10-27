@@ -25,13 +25,15 @@
         <Bug pattern="SPRING_CSRF_PROTECTION_DISABLED"/>
         <Class name="in.apnidukan.common.security.SecurityConfig"/>
     </Match>
-    <!-- These constructors refuse to start the app when a required setting is missing (fail fast, on purpose). -->
+    <!-- These constructors refuse to start the app when a required setting is missing or too weak (fail fast, on
+         purpose): no SMS/mail settings, production misconfiguration, or a JWT_SECRET too short to sign safely. -->
     <Match>
         <Bug pattern="CT_CONSTRUCTOR_THROW"/>
         <Or>
             <Class name="in.apnidukan.auth.notify.Msg91SmsSender"/>
             <Class name="in.apnidukan.auth.notify.SmtpEmailSender"/>
             <Class name="in.apnidukan.config.ProductionSafetyCheck"/>
+            <Class name="in.apnidukan.common.security.JwtService"/>
         </Or>
     </Match>
 </FindBugsFilter>
