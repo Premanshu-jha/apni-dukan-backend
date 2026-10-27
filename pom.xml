@@ -32,7 +32,7 @@
         <coverage.branches.minimum>0.68</coverage.branches.minimum>
         <spotbugs-plugin.version>4.9.3.0</spotbugs-plugin.version>
         <findsecbugs.version>1.13.0</findsecbugs.version>
-        <errorprone.version>2.36.0</errorprone.version>
+        <errorprone.version>2.50.0</errorprone.version>
         <archunit.version>1.5.1</archunit.version>
     </properties>
 
