@@ -9,9 +9,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.RestController;
 
+import static com.tngtech.archunit.base.DescribedPredicate.alwaysTrue;
+import static com.tngtech.archunit.base.DescribedPredicate.not;
+import static com.tngtech.archunit.core.domain.JavaClass.Predicates.resideInAPackage;
+import static com.tngtech.archunit.core.domain.JavaClass.Predicates.resideInAnyPackage;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noFields;
+import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noMethods;
 import static com.tngtech.archunit.library.GeneralCodingRules.NO_CLASSES_SHOULD_ACCESS_STANDARD_STREAMS;
 import static com.tngtech.archunit.library.GeneralCodingRules.NO_CLASSES_SHOULD_THROW_GENERIC_EXCEPTIONS;
 import static com.tngtech.archunit.library.GeneralCodingRules.NO_CLASSES_SHOULD_USE_JAVA_UTIL_LOGGING;
@@ -19,22 +24,26 @@ import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.sli
 
 /**
  * House rules for how the code is organised, checked on every build. If a change breaks one, the test says
- * which class and which rule. Modules: auth, files (and later shops, orders, ...); common is shared by all.
+ * which class and which rule. Every package directly under in.apnidukan is a module (auth, files, and later shops,
+ * orders, ...) and is covered automatically; common is shared by all; config is app-level wiring.
  */
 @AnalyzeClasses(packages = "in.apnidukan", importOptions = ImportOption.DoNotIncludeTests.class)
 class ArchitectureTest {
 
-    /** common is the foundation: it must not know about any feature module. */
+    /** common is the foundation: it must not know about any module, present or future. */
     @ArchTest
     static final ArchRule commonDependsOnNoModule = noClasses()
             .that().resideInAPackage("in.apnidukan.common..")
-            .should().dependOnClassesThat().resideInAnyPackage("in.apnidukan.auth..", "in.apnidukan.files..");
+            .should().dependOnClassesThat(resideInAPackage("in.apnidukan..")
+                    .and(not(resideInAPackage("in.apnidukan.common.."))));
 
-    /** Feature modules don't reach into each other; shared things go through common. */
+    /** Modules don't reach into each other; shared things go through common. Covers new modules automatically. */
     @ArchTest
     static final ArchRule modulesAreIndependent = slices()
-            .matching("in.apnidukan.(auth|files)..").namingSlices("$1")
-            .should().notDependOnEachOther();
+            .matching("in.apnidukan.(*)..").namingSlices("$1")
+            .should().notDependOnEachOther()
+            .ignoreDependency(alwaysTrue(), resideInAnyPackage("in.apnidukan.common.."))
+            .ignoreDependency(resideInAnyPackage("in.apnidukan.config.."), alwaysTrue());
 
     /** Controllers only talk to services, never straight to the database. */
     @ArchTest
@@ -57,14 +66,21 @@ class ArchitectureTest {
     /** Only security and sign-in may create or read sign-in tokens. */
     @ArchTest
     static final ArchRule tokensOnlyInSecurityAndSignIn = classes()
-            .that().haveSimpleName("JwtService")
+            .that().haveNameMatching("in\\.apnidukan\\.common\\.security\\.JwtService(\\$.*)?")
             .should().onlyBeAccessed().byAnyPackage("in.apnidukan.common.security..", "in.apnidukan.auth.service..");
 
     /** Dependencies come through constructors (easy to test, can't be forgotten), not field injection. */
     @ArchTest
     static final ArchRule noFieldInjection = noFields()
             .should().beAnnotatedWith(Autowired.class)
-            .orShould().beAnnotatedWith(Value.class);
+            .orShould().beAnnotatedWith(Value.class)
+            .orShould().beAnnotatedWith("jakarta.inject.Inject")
+            .orShould().beAnnotatedWith("jakarta.annotation.Resource");
+
+    @ArchTest
+    static final ArchRule noSetterInjection = noMethods()
+            .should().beAnnotatedWith(Autowired.class)
+            .orShould().beAnnotatedWith("jakarta.inject.Inject");
 
     /** Logging goes through the logger (SLF4J), never System.out, so nothing sensitive lands in stray output. */
     @ArchTest

@@ -19,3 +19,10 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
+
+  - package-ecosystem: pip            # the Semgrep version used by CI (.github/semgrep/requirements.txt)
+    directory: "/.github/semgrep"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7

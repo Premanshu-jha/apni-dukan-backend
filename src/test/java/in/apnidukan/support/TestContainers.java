@@ -36,7 +36,14 @@ public final class TestContainers {
     private TestContainers() {
     }
 
+    /**
+     * Integration tests run only when Docker is available. On your laptop without Docker they are skipped.
+     * On CI they always run: there, missing Docker must fail loudly, not quietly skip half the tests.
+     */
     public static boolean dockerAvailable() {
+        if (System.getenv("CI") != null) {
+            return true;
+        }
         try {
             return DockerClientFactory.instance().isDockerAvailable();
         } catch (Throwable e) {

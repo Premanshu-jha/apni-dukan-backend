@@ -196,8 +196,11 @@ coming back counts as copied; an old device retrying a signed-out token just get
    Never commit real values.
 3. **Run:** open this folder in IntelliJ, wait for Maven to download, then press ▶ next to `main` in
    `ApniDukanApplication.java`. On first start, Flyway creates the tables (`V1__create_files.sql`, `V2__create_users_and_refresh_tokens.sql`).
-4. **Tests:** `mvn test` (or right-click `src/test/java` → Run tests). They start their own Postgres, Redis and S3 stand-in in Docker (Testcontainers),
-   so Docker must be running; they never touch Neon, Redis Cloud or R2.
+4. **Tests:** `mvn test` (or right-click `src/test/java` → Run tests). They start their own Postgres, Redis and S3
+   stand-in in Docker (Testcontainers), so Docker must be running; they never touch Neon, Redis Cloud or R2.
+   Without Docker the integration tests are skipped on your laptop (on CI they always run).
+   `mvn verify` also runs the code checks (coverage gate, SpotBugs). It needs Docker, because without the integration
+   tests the coverage gate fails; use `mvn verify -Djacoco.skip=true` if Docker isn't running.
 
 ## Try it
 

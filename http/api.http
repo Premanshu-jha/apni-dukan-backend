@@ -1,8 +1,6 @@
 ### Apni Dukan API: click ▶ next to a request (environment "local"). See http/README.md.
-# Your phone and email come from http-client.private.env.json. Paste codes from SMS/email here:
-@otp = 000000
-@emailCode = 000000
-@fileId = paste-a-file-id-here
+# Your phone, email and the codes you receive (otp, emailCode) go in http-client.private.env.json, which Git ignores,
+# so nothing personal is ever committed from this file. The file id is saved automatically by request 7.
 
 ### 1. Send OTP (SMS through MSG91)
 POST {{baseUrl}}/auth/otp/send
@@ -70,6 +68,12 @@ Content-Type: image/jpeg
 
 < ./sample-bill.jpg
 --ApniDukan--
+
+> {%
+    if (response.status === 200 || response.status === 201) {
+        client.global.set("fileId", response.body.id);
+    }
+%}
 
 ### 8. Link to view a file for 5 minutes (add ?download=true to save it instead)
 GET {{baseUrl}}/files/{{fileId}}/link

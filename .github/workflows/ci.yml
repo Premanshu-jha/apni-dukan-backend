@@ -22,6 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1 · 1. download this repository's code
         with:
           fetch-depth: 0                   #    (with full history, so the secret scan can check every commit)
+          persist-credentials: false       #    don't leave the GitHub token on disk for the build to read
 
       - name: Check for committed secrets  # 2. fail if a password or API key was committed by mistake
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
@@ -49,12 +50,14 @@ jobs:
         run: |
           f=target/site/jacoco/jacoco.csv
           [ -f "$f" ] || exit 0
-          awk -F, 'NR>1 { lm+=$8; lc+=$9; bm+=$6; bc+=$7; split($2,p,"."); m=p[3]; mlm[m]+=$8; mlc[m]+=$9 }
+          # jacoco.csv columns: GROUP,PACKAGE,CLASS,INSTRUCTION_MISSED,INSTRUCTION_COVERED,BRANCH_MISSED,BRANCH_COVERED,LINE_MISSED,LINE_COVERED,...
+          awk -F, 'function pct(c, m) { return (c + m) == 0 ? 100 : 100 * c / (c + m) }
+            NR>1 { lm+=$8; lc+=$9; bm+=$6; bc+=$7; split($2,p,"."); m=(p[3]=="" ? "(root)" : p[3]); mlm[m]+=$8; mlc[m]+=$9 }
             END {
-              printf "::notice title=Coverage::lines %.1f%%, branches %.1f%%\n", 100*lc/(lc+lm), 100*bc/(bc+bm)
+              printf "::notice title=Coverage::lines %.1f%%, branches %.1f%%\n", pct(lc,lm), pct(bc,bm)
               print "## Test coverage" >> ENVIRON["GITHUB_STEP_SUMMARY"]
-              printf "Lines **%.1f%%** · branches **%.1f%%**\n\n| Module | Lines |\n| --- | --- |\n", 100*lc/(lc+lm), 100*bc/(bc+bm) >> ENVIRON["GITHUB_STEP_SUMMARY"]
-              for (m in mlc) printf "| %s | %.1f%% |\n", m, 100*mlc[m]/(mlc[m]+mlm[m]) >> ENVIRON["GITHUB_STEP_SUMMARY"]
+              printf "Lines **%.1f%%** · branches **%.1f%%**\n\n| Module | Lines |\n| --- | --- |\n", pct(lc,lm), pct(bc,bm) >> ENVIRON["GITHUB_STEP_SUMMARY"]
+              for (m in mlc) printf "| %s | %.1f%% |\n", m, pct(mlc[m],mlm[m]) >> ENVIRON["GITHUB_STEP_SUMMARY"]
             }' "$f"
 
       - name: Show why it failed           # 7. only if step 4 failed: put the key error lines on the GitHub page
@@ -69,22 +72,46 @@ jobs:
           done
 
   # Security scan of the source code (free Semgrep rules: Java, secrets, OWASP Top 10). Separate job, runs in parallel.
+  # Semgrep is installed from PyPI at the exact version in .github/semgrep/requirements.txt (Dependabot proposes
+  # updates), instead of an unpinned Docker image that anyone controlling the tag could swap.
   semgrep:
     runs-on: ubuntu-latest
-    container:
-      image: semgrep/semgrep
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install Semgrep
+        run: pip install --disable-pip-version-check -r .github/semgrep/requirements.txt
       - name: Scan for security problems
         run: |
           semgrep scan --metrics=off --error --json --output semgrep.json \
             --config p/java --config p/secrets --config p/owasp-top-ten --exclude src/test && rc=0 || rc=$?
-          # Put each finding on the pull request page, next to the line it is about
-          python3 - <<'PY'
-          import json
-          for r in json.load(open("semgrep.json")).get("results", []):
+          # Put each finding next to its line on the pull request page, and show scan errors (files Semgrep
+          # couldn't read are not scanned, so they must not pass silently)
+          py=0
+          python3 - <<'PY' || py=$?
+          import json, sys
+
+          def esc(value, prop=False):
+              value = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              return value.replace(":", "%3A").replace(",", "%2C") if prop else value
+
+          try:
+              report = json.load(open("semgrep.json"))
+          except (OSError, ValueError) as e:
+              print("::error title=Semgrep::Semgrep produced no report (%s); see the log above" % esc(e))
+              sys.exit(0)
+          for r in report.get("results", []):
               rule = r["check_id"].split(".")[-1]
-              msg = r["extra"]["message"].replace("\n", " ")[:400]
-              print("::error file=%s,line=%s,title=Semgrep %s::%s" % (r["path"], r["start"]["line"], rule, msg))
+              print("::error file=%s,line=%s,title=%s::%s" % (esc(r["path"], True), r["start"]["line"],
+                    esc("Semgrep " + rule, True), esc(r["extra"]["message"][:400])))
+          errors = report.get("errors", [])
+          for e in errors:
+              print("::error title=Semgrep scan error::%s" % esc(e.get("message", e)[:400] if isinstance(e.get("message"), str) else e))
+          sys.exit(1 if errors else 0)
           PY
-          exit $rc
+          if [ $rc -ne 0 ]; then exit $rc; fi
+          exit $py
