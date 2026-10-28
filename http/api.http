@@ -53,7 +53,44 @@ Content-Type: application/json
 
 { "email": "{{email}}", "code": "{{emailCode}}" }
 
-### 7. Upload a bill photo (needs a shop: answers 403 SHOP_REQUIRED until shop registration exists)
+### 6b. Register your shop (step 1). Then run request 4 (Refresh) so your token carries the shop.
+POST {{baseUrl}}/shops
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "Sharma Kirana Store",
+  "ownerName": "Ramesh Sharma",
+  "addressLine": "Shop 4, Lake View Apartments",
+  "area": "Kondapur",
+  "city": "Hyderabad",
+  "pincode": "500084",
+  "latitude": 17.465123,
+  "longitude": 78.364456
+}
+
+### 6c. My shop (details, status, your role, version)
+GET {{baseUrl}}/shops/me
+Authorization: Bearer {{accessToken}}
+
+> {%
+    client.global.set("shopVersion", response.body.version);
+%}
+
+### 6d. Edit My shop (owner only): send the version from 6c and only what changes
+PATCH {{baseUrl}}/shops/me
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{shopVersion}}, "name": "Sharma General Store" }
+
+> {%
+    if (response.status === 200) {
+        client.global.set("shopVersion", response.body.version);
+    }
+%}
+
+### 7. Upload a bill photo (needs a shop: register in 6b and refresh first, otherwise 403 SHOP_REQUIRED)
 POST {{baseUrl}}/files
 Authorization: Bearer {{accessToken}}
 Content-Type: multipart/form-data; boundary=ApniDukan

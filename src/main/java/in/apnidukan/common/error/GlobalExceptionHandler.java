@@ -73,6 +73,12 @@ public class GlobalExceptionHandler {
                 return ResponseEntity.status(413)
                         .body(ErrorResponse.of("REQUEST_TOO_LARGE", "This request is too large"));
             }
+            if (t instanceof tools.jackson.databind.exc.UnrecognizedPropertyException unknown) {
+                String field = String.valueOf(unknown.getPropertyName());
+                field = field.length() > 50 ? field.substring(0, 50) + "..." : field;
+                return ResponseEntity.badRequest().body(new ErrorResponse("UNKNOWN_FIELD",
+                        "'" + field + "' is not a field of this request", Map.of("field", field)));
+            }
         }
         return ResponseEntity.badRequest()
                 .body(ErrorResponse.of("BAD_REQUEST", "The request body is not valid JSON"));

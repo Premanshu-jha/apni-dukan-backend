@@ -17,6 +17,6 @@ public class JwtCurrentUserProvider implements CurrentUserProvider {
         if (auth == null || !(auth.getPrincipal() instanceof AuthPrincipal who)) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "NOT_SIGNED_IN", "Sign in first.");
         }
-        return new CurrentUser(who.userId(), who.shopId());
+        return new CurrentUser(who.userId(), who.shopId(), who.shopRole());
     }
 }

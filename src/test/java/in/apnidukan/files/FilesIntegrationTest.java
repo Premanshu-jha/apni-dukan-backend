@@ -3,6 +3,7 @@ package in.apnidukan.files;
 import in.apnidukan.common.security.AuthPrincipal;
 import in.apnidukan.common.security.JwtService;
 import in.apnidukan.support.TestContainers;
+import in.apnidukan.support.TestData;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
@@ -44,6 +45,7 @@ class FilesIntegrationTest {
     private static final String SHOP_A = "11111111-1111-1111-1111-111111111111";
     private static final String SHOP_B = "33333333-3333-3333-3333-333333333333";
     private static final String USER = "22222222-2222-2222-2222-222222222222";
+    private static final String OTHER_OWNER = "44444444-4444-4444-4444-444444444444";
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
@@ -63,7 +65,12 @@ class FilesIntegrationTest {
                 .requestFactory(new org.springframework.http.client.JdkClientHttpRequestFactory())
                 .baseUrl("http://localhost:" + environment.getProperty("local.server.port") + "/api/v1")
                 .build();
-        jdbc.update("DELETE FROM files");
+        // Files must belong to real shops and real people (foreign keys since V3)
+        TestData.clean(jdbc);
+        TestData.user(jdbc, UUID.fromString(USER), "9000000101");
+        TestData.user(jdbc, UUID.fromString(OTHER_OWNER), "9000000102");
+        TestData.shop(jdbc, UUID.fromString(SHOP_A), UUID.fromString(USER));
+        TestData.shop(jdbc, UUID.fromString(SHOP_B), UUID.fromString(OTHER_OWNER));
     }
 
     @Test

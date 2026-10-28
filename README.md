@@ -11,6 +11,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `common` | Error format, security (JWT check, CORS), current user/shop, clock |
 | `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery |
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
+| `shops` | Shop registration step 1 (details, GPS pin, GSTIN/Udyam), My shop, owner/helper roles, history of every change |
 
 ## How file handling works
 
@@ -168,6 +169,40 @@ coming back counts as copied; an old device retrying a signed-out token just get
 | `POST /recover/start` | Lost phone: code to the verified email. New email: code to the phone |
 | `POST /recover/complete` | Moves the account to the new phone or email and ends every old session |
 
+## How shops work
+
+A person registers one shop (for now) and becomes its **OWNER**; helpers will be added by the owner later.
+Every shop gets a plain number as its code (1001, 1002, ...), given out by the database.
+
+```mermaid
+sequenceDiagram
+    participant P as Phone
+    participant B as Backend
+    participant D as Neon
+    P->>B: POST /shops {name, owner, address, pincode, lat/lng, GSTIN?, Udyam?}
+    B->>D: shop (DRAFT, next code) + membership (OWNER)
+    B-->>P: 201 shop
+    P->>B: POST /auth/refresh
+    B-->>P: new access token carrying shop + role
+    P->>B: PATCH /shops/me {version, changed fields}
+    alt version matches
+        B->>D: save; Envers adds this new version to shops_aud, with who changed it
+        B-->>P: 200 shop (version + 1)
+    else someone saved in between
+        B-->>P: 409 SHOP_CHANGED (reload and retry)
+    end
+```
+
+| Call | What it does |
+| --- | --- |
+| `POST /api/v1/shops` | Registers your shop as `DRAFT`, you as owner. 409 `ALREADY_HAS_SHOP` if you have one. Then refresh your token |
+| `GET /api/v1/shops/me` | Your shop, its status and your role (`myRole`). 404 `NO_SHOP` if none |
+| `PATCH /api/v1/shops/me` | Owner only (403 `OWNER_ONLY`). Send `version` and only the fields to change; `""` removes GSTIN/Udyam |
+
+Rules: the GPS pin is required and must be inside India; pincode is 6 digits; GSTIN and Udyam are optional, checked,
+and stored in capitals; text is trimmed. Unknown fields are refused with 400 `UNKNOWN_FIELD`, so nobody can send
+`"status": "APPROVED"` for their own shop. Status moves DRAFT → PENDING_VISIT → APPROVED in the next PR.
+
 ## Run it on your laptop
 
 1. **Install:** JDK 21 (IntelliJ can download it). IntelliJ's bundled Maven is enough.
@@ -220,8 +255,8 @@ Copy `accessToken` from the reply and send it on every other call:
 curl http://localhost:8080/api/v1/auth/me -H "Authorization: Bearer <accessToken>"
 ```
 
-**Files** need a shop. Until shop registration is built (next module), a signed-in person without a shop
-gets `403 SHOP_REQUIRED`; the integration tests cover the file calls meanwhile.
+**Files** need a shop: register one (`POST /api/v1/shops`, see "How shops work"), then refresh your token.
+Without a shop, file calls answer `403 SHOP_REQUIRED`.
 
 ```bash
 # Upload a bill photo: 201 with the file id; the same file again returns 200 and "duplicate": true
@@ -255,5 +290,7 @@ Sign-in errors use the same shape: `401 NOT_SIGNED_IN`, `401 TOKEN_EXPIRED`, `40
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (`V3__...`, `V4__...`).
+Only through new Flyway files in `src/main/resources/db/migration` (`V4__...`, `V5__...`).
+A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
+create tables, because Hibernate only validates).
 Never edit a migration that has already run. Hibernate is set to `validate`.
