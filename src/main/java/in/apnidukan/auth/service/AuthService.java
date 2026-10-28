@@ -8,6 +8,7 @@ import in.apnidukan.auth.notify.SmsSender;
 import in.apnidukan.auth.repo.RefreshTokenRepository;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.async.BackgroundTasks;
+import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.security.AuthPrincipal;
 import in.apnidukan.common.security.ClientIp;
@@ -69,14 +70,16 @@ public class AuthService {
     private final SessionRevocations revocations;
     private final BackgroundTasks background;
     private final TransactionTemplate tx;
+    private final ShopMemberships memberships;
     private final int smsDailyLimit;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
                        SmsSender sms, EmailSender email, JwtService jwt, JwtProperties props, Clock clock,
                        RateLimiter limits, SessionRevocations revocations, BackgroundTasks background,
-                       PlatformTransactionManager transactions,
+                       PlatformTransactionManager transactions, ShopMemberships memberships,
                        @Value("${app.sms.daily-limit:500}") int smsDailyLimit) {
+        this.memberships = memberships;
         this.users = users;
         this.refreshTokens = refreshTokens;
         this.otp = otp;
@@ -318,8 +321,11 @@ public class AuthService {
 
     private AuthTokens issueTokens(User user, String device, boolean newUser) {
         Instant now = Instant.now(clock);
-        // The shop and role are added to the token once shops exist (next PR).
-        JwtService.IssuedToken access = jwt.issue(new AuthPrincipal(user.getId(), null, null, user.isAdmin()),
+        // The shop the person works in, and their role there, go into the token (looked up fresh every time)
+        ShopMemberships.Membership membership = memberships.find(user.getId()).orElse(null);
+        JwtService.IssuedToken access = jwt.issue(new AuthPrincipal(user.getId(),
+                        membership == null ? null : membership.shopId(),
+                        membership == null ? null : membership.role(), user.isAdmin()),
                 revocations.currentGeneration(user.getId()));
         byte[] raw = new byte[32];
         random.nextBytes(raw);
