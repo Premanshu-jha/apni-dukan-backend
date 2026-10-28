@@ -38,12 +38,17 @@ jobs:
       - name: Build, test and check code   # 4. compile (with Error Prone), run all tests, then coverage, SpotBugs
         run: mvn -B verify -Perrorprone 2>&1 | tee build.log; exit ${PIPESTATUS[0]}
 
-      - name: Test summary                 # 5. list how many tests ran, failed or were skipped
+      - name: Test summary                 # 5. how many tests ran, failed or were skipped (one line per test class)
         if: always()
         run: |
-          for f in target/surefire-reports/*.txt; do
-            echo "::notice title=$(basename "$f" .txt)::$(grep -m1 'Tests run' "$f")"
-          done
+          ls target/surefire-reports/*.txt >/dev/null 2>&1 || exit 0
+          # One combined notice (GitHub shows at most 10 notices per step) and a full table in the run summary
+          total=$(grep -h -m1 -o 'Tests run: [0-9]*' target/surefire-reports/*.txt | awk '{s+=$3} END {print s}')
+          echo "::notice title=Tests::$total tests in $(ls target/surefire-reports/*.txt | wc -l) classes"
+          { echo "## Tests"; echo "| Class | Result |"; echo "| --- | --- |"
+            for f in target/surefire-reports/*.txt; do
+              echo "| $(basename "$f" .txt | sed 's/^in\.apnidukan\.//') | $(grep -m1 'Tests run' "$f" | sed 's/, Time elapsed.*//') |"
+            done; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Coverage summary             # 6. how much of the code the tests actually run
         if: always()
