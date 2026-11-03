@@ -69,6 +69,15 @@ public class SalonDayController {
         return day.upcoming(me());
     }
 
+    /**
+     * Undo a No-show pressed by mistake (owner or helper, within 24 hours): the strike goes; the appointment waits
+     * again if its time isn't over and the barber is free, otherwise it is closed. 409 WRONG_STATUS / BARBER_BUSY.
+     */
+    @PostMapping("/appointments/{id}/undo-no-show")
+    public AppointmentView undoNoShow(@PathVariable UUID id) {
+        return day.undoNoShow(me(), id);
+    }
+
     /** Walk-in suggestions per barber for these services: free now, or his earliest start today. */
     @GetMapping("/walk-ins/options")
     public List<WalkInOption> walkInOptions(@RequestParam List<UUID> services) {

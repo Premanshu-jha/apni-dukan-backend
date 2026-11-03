@@ -1051,6 +1051,94 @@ class SalonBookingIntegrationTest {
         assertThat(his.stream().map(x -> field(x, "id"))).containsExactly(heldWalkIn.toString(), tomorrow.toString());
     }
 
+    @Test
+    void aNoShowPressedByMistakeIsUndoneTheStrikeGoesAndItCanStart() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju, to 12:45
+        CLOCK.set(at("12:20"));
+        assertThat(post("/salon/appointments/" + b + "/no-show", Map.of(), owner).status()).isEqualTo(200);
+        assertThat(count("customer_strikes")).isEqualTo(1);
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        assertThat(post("/salon/appointments/" + b + "/undo-no-show", Map.of(), rajuUser).status()).isEqualTo(403);
+
+        Reply undone = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
+        assertThat(undone.status()).as(undone.text()).isEqualTo(200);
+        assertThat(status(b)).isEqualTo("CONFIRMED");
+        assertThat(count("customer_strikes")).isZero();
+        assertThat(count("appointment_events WHERE event = 'NO_SHOW_UNDONE' AND detail = 'waiting again, strike "
+                + "removed'")).isEqualTo(1);
+        assertThat(start(b, Map.of("withoutCode", true), owner).status()).isEqualTo(200);
+        assertThat(post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner).text())
+                .contains("WRONG_STATUS");
+    }
+
+    @Test
+    void aNoShowWhoseTimeWasGivenAwayIsClosedWhenUndone() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju, to 12:45
+        CLOCK.set(at("12:20"));
+        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
+        id(walkIn(owner, List.of(haircut), raju, null, UUID.randomUUID()));   // Raju takes a walk-in now
+        Reply undone = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
+        assertThat(undone.status()).as(undone.text()).isEqualTo(200);
+        assertThat(field(undone.body(), "status")).isEqualTo("CANCELLED_BY_SALON");
+        assertThat(field(undone.body(), "cancelReason")).isEqualTo("No-show undone");
+        assertThat(count("customer_strikes")).isZero();
+        assertThat(jobs(b)).noneMatch(j -> j.startsWith("BOOKING_CANCELLED_BY_SALON"));   // the customer isn't told
+    }
+
+    @Test
+    void aNoShowOnABarberSwitchedOffMeanwhileIsClosedWhenUndone() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju
+        CLOCK.set(at("12:20"));
+        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
+        Reply off = patch("/salon/staff/" + raju, Map.of("version", rajuVersion(), "active", false), owner);
+        assertThat(off.status()).as(off.text()).isEqualTo(200);   // a no-show isn't "upcoming"
+        Reply undone = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
+        assertThat(field(undone.body(), "status")).as(undone.text()).isEqualTo("CANCELLED_BY_SALON");
+        assertThat(count("customer_strikes")).isZero();
+    }
+
+    @Test
+    void aNoShowUndoneWhileTheSalonIsOffTheAppIsClosedNotReopened() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));
+        CLOCK.set(at("12:20"));
+        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
+        jdbc.update("UPDATE shops SET status = 'SUSPENDED' WHERE id = ?", salon);
+        Reply undone = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
+        assertThat(field(undone.body(), "status")).as(undone.text()).isEqualTo("CANCELLED_BY_SALON");
+        assertThat(count("customer_strikes")).isZero();
+    }
+
+    @Test
+    void afterADaySupportTakesBackTheStrikeInsteadOfTheSalon() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("12:20"));
+        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
+        CLOCK.advance(Duration.ofHours(24));
+        assertThat(post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner).text())
+                .contains("WRONG_STATUS").contains("support");
+
+        UUID admin = person("9000000999");
+        jdbc.update("UPDATE users SET admin = TRUE WHERE id = ?", admin);
+        assertThat(post("/admin/salon/strikes/lookup", Map.of("phone", "9000000101"), owner).status()).isEqualTo(403);
+        Reply list = post("/admin/salon/strikes/lookup", Map.of("phone", "9000000101"), admin);
+        assertThat(list.status()).as(list.text()).isEqualTo(200);
+        assertThat(field(list.body(), "blockedUntil")).isNull();
+        List<?> strikes = (List<?>) field(list.body(), "strikes");
+        assertThat(strikes).hasSize(1);
+        assertThat(field(strikes.get(0), "kind")).isEqualTo("NO_SHOW");
+        assertThat(field(strikes.get(0), "salonName")).isEqualTo("Test Shop");
+
+        assertThat(post("/admin/salon/strikes/" + b + "/remove", Map.of("reason", "Barber pressed it by mistake"),
+                admin).status()).isEqualTo(204);
+        assertThat(count("customer_strikes")).isZero();
+        assertThat(count("appointment_events WHERE event = 'STRIKE_REMOVED'")).isEqualTo(1);
+        assertThat(field(post("/admin/salon/strikes/" + b + "/remove", Map.of("reason", "again"), admin).body(),
+                "code")).isEqualTo("STRIKE_NOT_FOUND");
+        assertThat(field(post("/admin/salon/strikes/lookup", Map.of("phone", "9000000555"), admin).body(), "code"))
+                .isEqualTo("CUSTOMER_NOT_FOUND");
+    }
+
     // ---------- helpers ----------
 
     /** The salon-side messages queued: "user TYPE body", without the booking number at the end. */

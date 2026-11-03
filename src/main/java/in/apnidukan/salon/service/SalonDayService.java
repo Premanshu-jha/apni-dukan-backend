@@ -82,6 +82,8 @@ public class SalonDayService {
     public static final Duration LATE_ALLOWANCE = Duration.ofMinutes(15);
     /** Start is allowed from this long before the planned start. */
     static final Duration EARLY_START = Duration.ofMinutes(15);
+    /** No-show can be undone at the salon until this long after the start; after that only support can. */
+    static final Duration UNDO_NO_SHOW_WITHIN = Duration.ofHours(24);
     static final Duration MAX_BREAK = Duration.ofHours(12);
     static final Duration MAX_LEAVE = Duration.ofDays(30);
     static final Duration MAX_PAUSE = Duration.ofDays(30);
@@ -339,6 +341,56 @@ public class SalonDayService {
             notices.closed(a);
         }
         appointments.event(a.id(), now, c.userId(), "NO_SHOW", null);
+        return salonView(c, appointments.find(a.id()).orElseThrow());
+    }
+
+    /**
+     * Undo a No-show pressed by mistake (owner or helper, within 24 hours of the start): the customer's strike is
+     * taken back. If its time isn't over and the barber is still free, it goes back to waiting (press Start);
+     * otherwise (its time is over or taken, or the barber was switched off meanwhile) it is closed as cancelled by
+     * the salon ("No-show undone"), with no message to the customer. It waits again only while the salon takes
+     * online bookings (APPROVED). Locks in the booking order: the customer's lock (their 2-booking limit), the
+     * shop's row in shared mode (a suspension at the same moment waits, then finds the booking), the barber's row
+     * (so switching him off at the same moment can't leave it on an inactive barber), the appointment.
+     */
+    @Transactional
+    public AppointmentView undoNoShow(UUID userId, UUID appointmentId) {
+        Caller c = access.ownerOrHelper(userId);
+        Appointment found = appointments.find(appointmentId).filter(x -> x.shopId().equals(c.shopId()))
+                .orElseThrow(SalonDayService::notFound);
+        if (found.customerId() != null) {
+            appointments.lockCustomer(found.customerId());
+        }
+        boolean salonLive = shops.findForBooking(c.shopId()).map(s -> "APPROVED".equals(s.status())).orElse(false);
+        UUID barber = found.staffId();
+        boolean barberActive = appointments.lockActiveBarber(barber);
+        Appointment a = lockedFor(c, appointmentId);
+        Instant now = now();
+        requireStatus(a, AppointmentStatus.NO_SHOW);
+        if (now.isAfter(a.startsAt().plus(UNDO_NO_SHOW_WITHIN))) {
+            throw wrongStatus("Too late to undo here (more than 24 hours). Apni Dukan support can still remove the "
+                    + "customer's strike.");
+        }
+        boolean timeLeft = barberActive && salonLive && a.staffId().equals(barber) && now.isBefore(a.endsAt())
+                && appointments.holding(List.of(a.staffId()), a.startsAt(), a.endsAt(), a.id()).isEmpty();
+        boolean changed;
+        try {
+            changed = timeLeft
+                    ? appointments.undoNoShow(a.id(), AppointmentStatus.CONFIRMED, null, now)
+                    : appointments.undoNoShow(a.id(), AppointmentStatus.CANCELLED_BY_SALON, "No-show undone", now);
+        } catch (DataIntegrityViolationException e) {
+            if (hasSqlState(e, OVERLAP)) {   // the time was given to someone at this very moment
+                throw new ApiException(HttpStatus.CONFLICT, "BARBER_BUSY",
+                        "The barber's time was just given to someone else. Try Undo again.");
+            }
+            throw e;
+        }
+        if (!changed) {
+            throw wrongStatus("It was changed in the meantime. Reload.");
+        }
+        boolean hadStrike = a.isBooking() && strikes.remove(a.id());
+        appointments.event(a.id(), now, c.userId(), "NO_SHOW_UNDONE", (timeLeft ? "waiting again" : "closed")
+                + (hadStrike ? ", strike removed" : ""));
         return salonView(c, appointments.find(a.id()).orElseThrow());
     }
 

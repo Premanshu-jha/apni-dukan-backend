@@ -14,6 +14,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -46,6 +47,12 @@ public class UserDirectoryService implements UserDirectory {
                 throw new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN", "Please try again.");
             }
         });
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<UUID> findByPhone(String phoneInput) {
+        return users.findByPhone(PhoneNumbers.normalize(phoneInput)).map(User::getId);
     }
 
     @Override
