@@ -337,7 +337,7 @@ public class BookingService {
         }
         Appointment moved = appointments.find(a.id()).orElseThrow();
         appointments.event(a.id(), now, customerId, "RESCHEDULED", a.startsAt() + " -> " + newStart);
-        notices.rescheduled(moved, salon, now);
+        notices.rescheduled(a, moved, salon, now);
         return view(moved, now);
     }
 

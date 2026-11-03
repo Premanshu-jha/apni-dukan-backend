@@ -1,25 +1,41 @@
 package in.apnidukan.salon.service;
 
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
+import in.apnidukan.common.context.ShopMemberships;
+import in.apnidukan.common.context.UserDirectory;
+import in.apnidukan.common.context.UserDirectory.Person;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.common.notify.Notifications.Notice;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.BookedService;
+import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
+import in.apnidukan.salon.repo.SalonStaffRepository;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.time.LocalDate;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * The messages a customer gets about a booking: the Web Push text, and the variables for its SMS template (the
- * SMS goes out only once a template id is set for that type, see SmsTemplates and the README). Queued in the same transaction as the change (see Notifications),
- * so a message exists only if the change was saved.
+ * The messages about a booking: to the customer, and to the salon (the owner, and the barber it is with if he has a
+ * sign-in) when a customer books, cancels or moves online, so nobody at the salon has to keep watching the day
+ * screen. Each is a Web Push, plus an SMS from its template once a template id is set for that type (see
+ * SmsTemplates and the README). Queued in the same transaction as the change (see Notifications), so a message
+ * exists only if the change was saved.
+ *
+ * The salon's messages are about something that already happened, so they have no subject (refId): a later change
+ * to the booking never cancels them; it sends its own.
  */
 @Component
 public class SalonNotices {
@@ -35,9 +51,20 @@ public class SalonNotices {
             .withZone(SalonTime.ZONE);
 
     private final Notifications notifications;
+    private final ShopMemberships memberships;
+    private final SalonStaffRepository staff;
+    private final UserDirectory users;
 
-    public SalonNotices(Notifications notifications) {
+    /**
+     * @param memberships @Lazy: the shops module (which implements it) calls back into the salon module when a shop
+     *                    changes (SalonShopChanges uses these notices), so it is looked up on first use instead
+     */
+    public SalonNotices(Notifications notifications, @Lazy ShopMemberships memberships, SalonStaffRepository staff,
+                        UserDirectory users) {
         this.notifications = notifications;
+        this.memberships = memberships;
+        this.staff = staff;
+        this.users = users;
     }
 
     /** Booking saved: the confirmation now, and the reminder 60 minutes before if it was booked well ahead. */
@@ -49,10 +76,19 @@ public class SalonNotices {
                 url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()),
                         "BOOKING", a.bookingNo())));
         remind(a, salon, now);
+        String who = customerName(a);
+        String barber = barberName(a.staffId());
+        tellSalon(a, List.of(a.staffId()), "SALON_NEW_BOOKING", "New booking, " + TIME.format(a.startsAt()),
+                who + " booked " + names(services) + " with " + barber + ", " + DAY_TIME.format(a.startsAt())
+                        + ". Booking " + a.bookingNo() + ".",
+                salonSms(who, a, barber), now);
     }
 
-    /** Booking moved: cancels its pending messages, tells the customer, and sets a new reminder. */
-    public void rescheduled(Appointment moved, ShopCard salon, Instant now) {
+    /**
+     * Booking moved: cancels its pending messages, tells the customer, sets a new reminder, and tells the salon
+     * (both barbers when it moved from one to another).
+     */
+    public void rescheduled(Appointment before, Appointment moved, ShopCard salon, Instant now) {
         notifications.cancelPending(moved.id());
         notifications.queue(new Notice(moved.customerId(), "BOOKING_RESCHEDULED", moved.id(), now,
                 "Booking moved",
@@ -60,15 +96,35 @@ public class SalonNotices {
                 url(moved), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(moved.startsAt()),
                         "BOOKING", moved.bookingNo())));
         remind(moved, salon, now);
+        String who = customerName(moved);
+        String barber = barberName(moved.staffId());
+        tellSalon(moved, List.of(before.staffId(), moved.staffId()), "SALON_BOOKING_MOVED", "Booking moved",
+                who + " moved booking " + moved.bookingNo() + " from " + DAY_TIME.format(before.startsAt()) + " to "
+                        + DAY_TIME.format(moved.startsAt()) + ", with " + barber + ".",
+                salonSms(who, moved, barber), now);
     }
 
-    /** The customer cancelled. */
+    /** The customer cancelled: they and the salon are told. */
     public void cancelledByCustomer(Appointment a, ShopCard salon, boolean late, Instant now) {
         notifications.cancelPending(a.id());
         notifications.queue(new Notice(a.customerId(), "BOOKING_CANCELLED", a.id(), now, "Booking cancelled",
                 "Your booking at " + salon.name() + " on " + DAY_TIME.format(a.startsAt()) + " is cancelled."
                         + (late ? " It was less than 1 hour before, so it counts as a late cancel." : ""),
                 url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()))));
+        salonToldOfCancel(a, late ? " Less than 1 hour before." : "", now);
+    }
+
+    /**
+     * Tells the salon a booking was cancelled without anyone at the salon doing it (the customer, or their account
+     * being deleted). The time is free again.
+     */
+    public void salonToldOfCancel(Appointment a, String note, Instant now) {
+        String who = customerName(a);
+        String barber = barberName(a.staffId());
+        tellSalon(a, List.of(a.staffId()), "SALON_BOOKING_CANCELLED", "Booking cancelled, " + TIME.format(a.startsAt()),
+                who + " cancelled " + DAY_TIME.format(a.startsAt()) + " with " + barber + ". Booking " + a.bookingNo()
+                        + "." + note + " The time is free again.",
+                salonSms(who, a, barber), now);
     }
 
     /** The salon cancelled, with its reason. */
@@ -93,6 +149,33 @@ public class SalonNotices {
         for (Appointment a : upcoming) {
             notifications.replacePending(reminder(a, salon));   // only channels still waiting are rewritten
         }
+    }
+
+    /** To the salon's owner and the given barbers' sign-ins (each person once). */
+    private void tellSalon(Appointment a, List<UUID> barbers, String type, String title, String body,
+                           Map<String, String> sms, Instant now) {
+        Set<UUID> to = new LinkedHashSet<>();
+        memberships.members(a.shopId()).stream().filter(m -> "OWNER".equals(m.role()))
+                .forEach(m -> to.add(m.userId()));
+        staff.findAllById(barbers).stream().map(SalonStaff::getUserId).filter(Objects::nonNull).forEach(to::add);
+        String day = "/salon/day?date=" + LocalDate.ofInstant(a.startsAt(), SalonTime.ZONE);
+        for (UUID person : to) {
+            notifications.queue(new Notice(person, type, null, now, title, body, day, sms));
+        }
+    }
+
+    private static Map<String, String> salonSms(String who, Appointment a, String barber) {
+        return Map.of("CUSTOMER", who, "WHEN", DAY_TIME.format(a.startsAt()), "BARBER", barber,
+                "BOOKING", a.bookingNo());
+    }
+
+    private String customerName(Appointment a) {
+        Person p = users.find(Set.of(a.customerId())).get(a.customerId());
+        return p == null || p.name() == null ? "A customer" : p.name();
+    }
+
+    private String barberName(UUID staffId) {
+        return staff.findById(staffId).map(SalonStaff::getName).orElse("a barber");
     }
 
     private void remind(Appointment a, ShopCard salon, Instant now) {

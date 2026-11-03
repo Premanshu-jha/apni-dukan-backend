@@ -857,7 +857,8 @@ class SalonBookingIntegrationTest {
         // Someone with no device
         id(book(customer2, at("12:00"), List.of(haircut), UUID.randomUUID()));
 
-        assertThat(sender.runOnce()).isEqualTo(2);   // the two confirmations; the reminders aren't due yet
+        // The two confirmations and the owner's two "new booking" notices; the reminders aren't due yet
+        assertThat(sender.runOnce()).isEqualTo(4);
         assertThat(PUSHED).hasSize(1);
         assertThat(PUSHED.get(0)).contains("\"type\":\"BOOKING_CONFIRMED\"").contains("/bookings/" + b);
         assertThat(jdbc.queryForList("SELECT status FROM notification_jobs WHERE type = 'BOOKING_CONFIRMED' "
@@ -881,7 +882,7 @@ class SalonBookingIntegrationTest {
         post("/me/push-subscriptions", subscription(FCM), customer);
         UUID b = id(book(customer, at("11:15"), List.of(haircut), UUID.randomUUID()));   // confirmation only
         pushResult = PushSender.Result.FAILED;
-        assertThat(sender.runOnce()).isEqualTo(1);
+        assertThat(sender.runOnce()).isEqualTo(2);   // and the owner's notice, who has no device (done)
         assertThat(sender.runOnce()).isZero();   // waiting for its retry: not taken again
         for (int minutes : new int[] {1, 5, 15}) {
             CLOCK.advance(Duration.ofMinutes(minutes));
@@ -899,7 +900,7 @@ class SalonBookingIntegrationTest {
         assertThat(count("notification_jobs WHERE channel = 'SMS'")).isZero();
         post("/salon/appointments/" + b + "/cancel", Map.of("reason", "Power cut today"), owner);
         assertThat(jdbc.queryForList("SELECT channel || ':' || type FROM notification_jobs WHERE status = 'PENDING' "
-                + "ORDER BY channel", String.class)).containsExactly("PUSH:BOOKING_CANCELLED_BY_SALON",
+                + "AND ref_id IS NOT NULL ORDER BY channel", String.class)).containsExactly("PUSH:BOOKING_CANCELLED_BY_SALON",
                 "SMS:BOOKING_CANCELLED_BY_SALON");
         sender.runOnce();
         assertThat(TEXTED).containsExactly("9000000101 tpl-salon-cancel {REASON=Power cut today, SALON=Test Shop, "
@@ -912,12 +913,14 @@ class SalonBookingIntegrationTest {
     void aMessageWhoseLeaseRanOutAndWasTakenByAnotherServerIsNotSentByTheFirst() {
         UUID b = id(book(customer, at("11:15"), List.of(haircut), UUID.randomUUID()));
         Instant t0 = CLOCK.instant();
-        List<NotificationJob> mine = store.claimDue(t0, 10, Duration.ofMinutes(5), 8);
+        List<NotificationJob> mine = store.claimDue(t0, 10, Duration.ofMinutes(5), 8).stream()
+                .filter(j -> j.type().equals("BOOKING_CONFIRMED")).toList();   // not the owner's notice
         assertThat(mine).hasSize(1);
         Instant myLease = t0.plus(Duration.ofMinutes(5));
         // This server stalls; after its lease another server claims the same message
         Instant later = t0.plus(Duration.ofMinutes(6));
-        assertThat(store.claimDue(later, 10, Duration.ofMinutes(5), 8)).hasSize(1);
+        assertThat(store.claimDue(later, 10, Duration.ofMinutes(5), 8))
+                .anyMatch(j -> j.id().equals(mine.get(0).id()));
         assertThat(store.renew(mine.get(0).id(), myLease, later.plus(Duration.ofMinutes(5)))).isFalse();
         store.finish(mine.get(0).id(), in.apnidukan.notifications.domain.JobStatus.SENT, later, myLease);
         assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE ref_id = ?", String.class, b))
@@ -957,7 +960,7 @@ class SalonBookingIntegrationTest {
     @Test
     void aMessageClaimedTooOftenWithoutAnOutcomeIsGivenUp() {
         UUID b = id(book(customer, at("11:15"), List.of(haircut), UUID.randomUUID()));
-        jdbc.update("UPDATE notification_jobs SET attempts = 8 WHERE ref_id = ?", b);
+        jdbc.update("UPDATE notification_jobs SET attempts = 8");   // the owner's notice too
         assertThat(sender.runOnce()).isZero();
         assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE ref_id = ?", String.class, b))
                 .isEqualTo("FAILED");
@@ -1003,7 +1006,59 @@ class SalonBookingIntegrationTest {
         assertThat(hisDay.text()).contains("\"customerName\":\"Customer\"").doesNotContain("9000000101");
     }
 
+    @Test
+    void theSalonIsToldWhenACustomerBooksMovesOrCancels() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        patch("/auth/me", Map.of("name", "Ravi Kumar"), customer);
+        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // only Raju
+        assertThat(salonNotices()).containsExactlyInAnyOrder(
+                owner + " SALON_NEW_BOOKING Ravi Kumar booked Haircut + Beard trim with Raju, Tue 10 Nov, 12:00 PM.",
+                rajuUser + " SALON_NEW_BOOKING Ravi Kumar booked Haircut + Beard trim with Raju, Tue 10 Nov, 12:00 PM.");
+
+        jdbc.update("DELETE FROM notification_jobs WHERE ref_id IS NULL");
+        post("/bookings/" + b + "/reschedule", Map.of("startAt", at("14:00").toString()), customer);
+        assertThat(salonNotices()).hasSize(2).allMatch(n -> n.contains("SALON_BOOKING_MOVED Ravi Kumar moved booking")
+                && n.contains("from Tue 10 Nov, 12:00 PM to Tue 10 Nov, 2:00 PM, with Raju."));
+
+        jdbc.update("DELETE FROM notification_jobs WHERE ref_id IS NULL");
+        post("/bookings/" + b + "/cancel", Map.of(), customer);
+        assertThat(salonNotices()).hasSize(2).allMatch(n -> n.contains("SALON_BOOKING_CANCELLED Ravi Kumar cancelled "
+                + "Tue 10 Nov, 2:00 PM with Raju."));
+        // A later change never cancels what the salon was already told
+        assertThat(count("notification_jobs WHERE ref_id IS NULL AND status = 'CANCELLED'")).isZero();
+    }
+
+    @Test
+    void theUpcomingListShowsWhatsComingAcrossDaysSoonestFirst() {
+        UUID tomorrow = id(book(customer, at("12:00").plus(Duration.ofDays(1)), List.of(haircut, beard),
+                UUID.randomUUID()));   // Raju
+        UUID today = id(book(customer2, at("13:00"), List.of(facial), UUID.randomUUID()));   // Sunil
+        UUID heldWalkIn = id(walkIn(owner, List.of(haircut), raju, at("15:00"), UUID.randomUUID()));
+        post("/salon/staff/" + raju + "/blocks", block("BREAK", "16:00", "16:30"), owner);   // not listed
+        id(walkIn(owner, List.of(haircut), sunil, null, UUID.randomUUID()));   // in service now: not listed
+
+        List<?> all = (List<?>) get("/salon/upcoming", owner).body();
+        assertThat(all.stream().map(x -> field(x, "id"))).containsExactly(today.toString(), heldWalkIn.toString(),
+                tomorrow.toString());
+        // Still listed while the customer may arrive late, gone once marked
+        CLOCK.set(at("13:10"));
+        assertThat(get("/salon/upcoming", owner).text()).contains(today.toString());
+
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        List<?> his = (List<?>) get("/salon/upcoming", rajuUser).body();
+        assertThat(his.stream().map(x -> field(x, "id"))).containsExactly(heldWalkIn.toString(), tomorrow.toString());
+    }
+
     // ---------- helpers ----------
+
+    /** The salon-side messages queued: "user TYPE body", without the booking number at the end. */
+    private List<String> salonNotices() {
+        return jdbc.queryForList("SELECT user_id || ' ' || type || ' ' || body FROM notification_jobs "
+                + "WHERE ref_id IS NULL AND channel = 'PUSH'", String.class).stream()
+                .map(s -> s.replaceAll(" Booking [A-Z0-9]+\\..*$", "")).toList();
+    }
 
     private UUID person(String phone) {
         UUID id = UUID.randomUUID();

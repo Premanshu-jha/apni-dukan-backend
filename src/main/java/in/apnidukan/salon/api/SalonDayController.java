@@ -60,6 +60,15 @@ public class SalonDayController {
         return day.day(me(), date);
     }
 
+    /**
+     * Upcoming bookings and walk-ins across the coming days, soonest first (up to 200): the owner's "what's coming"
+     * list. A barber without walk-in access sees only his own.
+     */
+    @GetMapping("/upcoming")
+    public List<AppointmentView> upcoming() {
+        return day.upcoming(me());
+    }
+
     /** Walk-in suggestions per barber for these services: free now, or his earliest start today. */
     @GetMapping("/walk-ins/options")
     public List<WalkInOption> walkInOptions(@RequestParam List<UUID> services) {

@@ -87,6 +87,9 @@ public class SalonDayService {
     static final Duration MAX_PAUSE = Duration.ofDays(30);
     static final Duration MAX_CONFLICT_RANGE = Duration.ofDays(31);
     static final int CLOSURE_DAYS_AHEAD = 365;
+    /** The upcoming list covers the longest booking window a salon can set (30 days), at most this many rows. */
+    static final Duration UPCOMING_AHEAD = Duration.ofDays(31);
+    static final int UPCOMING_LIMIT = 200;
     /** SQL state of an exclusion-rule violation (the no-overlap rule). */
     static final String OVERLAP = "23P01";
 
@@ -256,6 +259,19 @@ public class SalonDayService {
         appointments.insertServices(a.id(), chosen);
         appointments.event(a.id(), now, c.userId(), startNow ? "WALK_IN_STARTED" : "WALK_IN_HELD", null);
         return salonView(c, a);
+    }
+
+    /**
+     * Everything still to come, soonest first, across days: online bookings and walk-ins held for later that are
+     * CONFIRMED and not over yet (so a customer running late is still on it). Owner and helpers see the whole
+     * salon; a barber sees his own unless he has walk-in access.
+     */
+    @Transactional(readOnly = true)
+    public List<AppointmentView> upcoming(UUID userId) {
+        Caller c = access.caller(userId);
+        Instant now = now();
+        return views(c, appointments.upcomingInSalon(c.shopId(), c.seesAll() ? null : c.staffId(), now,
+                now.plus(UPCOMING_AHEAD), UPCOMING_LIMIT));
     }
 
     // ---------- start, no-show, reassign, cancel ----------

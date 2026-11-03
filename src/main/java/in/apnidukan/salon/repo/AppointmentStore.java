@@ -41,6 +41,13 @@ public class AppointmentStore {
     /** Upcoming: still open (CONFIRMED or IN_SERVICE) and not over yet. Past: everything else. */
     private static final String UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
             + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ? ORDER BY starts_at, id LIMIT ?";
+    /** The salon's bookings and walk-ins still to come or still able to start (CONFIRMED, not over yet). */
+    private static final String SALON_UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
+            + "AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ? "
+            + "ORDER BY starts_at, id LIMIT ?";
+    private static final String BARBER_UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
+            + "AND staff_id = ? AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ? "
+            + "ORDER BY starts_at, id LIMIT ?";
     private static final String PAST_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
             + "AND NOT (status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ?) ORDER BY starts_at DESC, id LIMIT ?";
 
@@ -227,6 +234,16 @@ public class AppointmentStore {
         Integer n = jdbc.queryForObject("SELECT count(*) FROM appointments WHERE staff_id = ? "
                 + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ?", Integer.class, staffId, at(now));
         return n == null ? 0 : n;
+    }
+
+    /**
+     * What's coming up in the salon, soonest first: CONFIRMED bookings and walk-ins not over yet that start before
+     * {@code until}; only this barber's when staffId is set.
+     */
+    public List<Appointment> upcomingInSalon(UUID shopId, UUID staffId, Instant now, Instant until, int limit) {
+        return staffId == null
+                ? jdbc.query(SALON_UPCOMING_SQL, ROW, shopId, at(now), at(until), limit)
+                : jdbc.query(BARBER_UPCOMING_SQL, ROW, shopId, staffId, at(now), at(until), limit);
     }
 
     /** The salon's online bookings still to come (CONFIRMED, start in the future). */
