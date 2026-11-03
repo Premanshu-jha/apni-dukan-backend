@@ -2,7 +2,10 @@ package in.apnidukan.common.error;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -109,6 +112,20 @@ public class GlobalExceptionHandler {
         log.warn("Database lock conflict, answered 409 TRY_AGAIN: {}", e.getClass().getSimpleName());
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(ErrorResponse.of("TRY_AGAIN", "Someone else changed the same thing at the same moment. Try again."));
+    }
+
+    /**
+     * Redis or the database didn't answer in time (down, or a network blip). Nothing was done; the app waits a few
+     * seconds and tries again. Sign-in codes and start codes need Redis, so they stop while it is down; everything
+     * else keeps working (see SessionRevocations).
+     */
+    @ExceptionHandler({DataAccessResourceFailureException.class, QueryTimeoutException.class,
+            CannotCreateTransactionException.class})
+    public ResponseEntity<ErrorResponse> handleUnavailable(Exception e) {
+        // CannotCreateTransactionException: no database connection to be had at the start of a transaction
+        log.error("A data store didn't answer, answered 503 SERVICE_BUSY: {}", e.getClass().getSimpleName());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).header("Retry-After", "5")
+                .body(ErrorResponse.of("SERVICE_BUSY", "We're having a short problem. Try again in a few seconds."));
     }
 
     /**
