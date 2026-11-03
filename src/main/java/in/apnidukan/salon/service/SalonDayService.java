@@ -156,7 +156,8 @@ public class SalonDayService {
                 Availability.working(weeks.getOrDefault(b.getId(), List.of()).stream().map(StaffShift::shift)
                         .toList(), day).stream().map(i -> hours(i, day)).toList(),
                 all.stream().filter(a -> a.staffId().equals(b.getId()))
-                        .map(a -> view(a, services.getOrDefault(a.id(), List.of()), customers, now))
+                        .map(a -> view(a, services.getOrDefault(a.id(), List.of()), customers, now,
+                                c.ownerOrHelper()))
                         .toList()))
                 .toList();
         return new DayView(day, columns);
@@ -216,7 +217,7 @@ public class SalonDayService {
                     || !hadServices.equals(new ArrayList<>(new java.util.LinkedHashSet<>(in.serviceIds())))) {
                 throw keyReused();   // the same key for a different walk-in: nothing was added
             }
-            return salonView(e);
+            return salonView(c, e);
         }
         Instant now = now();
         List<BookedService> chosen = calendar.chosenServices(c.shopId(), in.serviceIds());
@@ -254,7 +255,7 @@ public class SalonDayService {
         }
         appointments.insertServices(a.id(), chosen);
         appointments.event(a.id(), now, c.userId(), startNow ? "WALK_IN_STARTED" : "WALK_IN_HELD", null);
-        return salonView(a);
+        return salonView(c, a);
     }
 
     // ---------- start, no-show, reassign, cancel ----------
@@ -294,7 +295,7 @@ public class SalonDayService {
         }
         appointments.event(a.id(), now, c.userId(), "STARTED", Boolean.FALSE.equals(withCode) ? "without code" : null);
         notices.closed(a);
-        return salonView(appointments.find(a.id()).orElseThrow());
+        return salonView(c, appointments.find(a.id()).orElseThrow());
     }
 
     /**
@@ -322,7 +323,7 @@ public class SalonDayService {
             notices.closed(a);
         }
         appointments.event(a.id(), now, c.userId(), "NO_SHOW", null);
-        return salonView(appointments.find(a.id()).orElseThrow());
+        return salonView(c, appointments.find(a.id()).orElseThrow());
     }
 
     /** Gives a CONFIRMED appointment to another barber who does its services, same time. Owner or helper. */
@@ -332,7 +333,7 @@ public class SalonDayService {
         Appointment a = lockedFor(c, appointmentId);
         requireStatus(a, AppointmentStatus.CONFIRMED);
         if (a.staffId().equals(in.staffId())) {
-            return salonView(a);
+            return salonView(c, a);
         }
         SalonStaff target = activeBarber(c, in.staffId());
         List<UUID> serviceIds = ids(appointments.services(List.of(a.id())).getOrDefault(a.id(), List.of()));
@@ -348,7 +349,7 @@ public class SalonDayService {
         }
         moveOrBusy(a, target, a.startsAt(), a.endsAt(), now);
         appointments.event(a.id(), now, c.userId(), "REASSIGNED", a.staffId() + " -> " + target.getId());
-        return salonView(appointments.find(a.id()).orElseThrow());
+        return salonView(c, appointments.find(a.id()).orElseThrow());
     }
 
     /** The salon cancels a CONFIRMED booking or walk-in, with a reason sent to the customer. No strike. */
@@ -366,7 +367,7 @@ public class SalonDayService {
             notices.cancelledBySalon(a, salonCard(c.shopId()), reason, now);
         }
         appointments.event(a.id(), now, c.userId(), "CANCELLED_BY_SALON", reason);
-        return salonView(appointments.find(a.id()).orElseThrow());
+        return salonView(c, appointments.find(a.id()).orElseThrow());
     }
 
     // ---------- breaks and leave ----------
@@ -380,7 +381,7 @@ public class SalonDayService {
             throw noStaff();   // another barber's day: as if he didn't exist
         }
         Interval range = range(from, to, MAX_CONFLICT_RANGE);
-        return views(appointments.holding(List.of(barber.getId()), range.start(), range.end(), null));
+        return views(c, appointments.holding(List.of(barber.getId()), range.start(), range.end(), null));
     }
 
     /**
@@ -411,7 +412,7 @@ public class SalonDayService {
             throw blockConflicts(appointments.holding(List.of(barber.getId()), time.start(), time.end(), null));
         }
         appointments.event(block.id(), now, c.userId(), "BLOCK_ADDED", in.type().name());
-        return salonView(block);
+        return salonView(c, block);
     }
 
     /** Removes a break (owner, helper, the barber himself) or leave (owner): his time is free again. */
@@ -640,27 +641,34 @@ public class SalonDayService {
     }
 
     /** One appointment as salon screens show it (never with the start code). */
-    AppointmentView salonView(Appointment a) {
-        return views(List.of(a)).get(0);
+    AppointmentView salonView(Caller c, Appointment a) {
+        return views(c, List.of(a)).get(0);
     }
 
-    private List<AppointmentView> views(List<Appointment> list) {
+    private List<AppointmentView> views(Caller c, List<Appointment> list) {
         Map<UUID, List<BookedService>> services = appointments.services(list.stream().map(Appointment::id).toList());
         Set<UUID> customerIds = new HashSet<>();
         list.stream().map(Appointment::customerId).filter(java.util.Objects::nonNull).forEach(customerIds::add);
         Map<UUID, Person> customers = users.find(customerIds);
         Instant now = now();
-        return list.stream().map(a -> view(a, services.getOrDefault(a.id(), List.of()), customers, now)).toList();
+        return list.stream().map(a -> view(a, services.getOrDefault(a.id(), List.of()), customers, now,
+                c.ownerOrHelper())).toList();
     }
 
+    /**
+     * @param showPhone the customer's phone, so the salon can call someone running late: owner and helpers only,
+     *                  never barbers
+     */
     private static AppointmentView view(Appointment a, List<BookedService> services, Map<UUID, Person> customers,
-                                        Instant now) {
+                                        Instant now, boolean showPhone) {
         String name = null;
+        String phone = null;
         if (a.customerId() != null) {
             Person p = customers.get(a.customerId());
             name = p == null || p.name() == null ? "Customer" : p.name();
+            phone = showPhone && p != null ? p.phone() : null;
         }
-        return AppointmentView.of(a, services, name, now, a.startsAt().plus(LATE_ALLOWANCE));
+        return AppointmentView.of(a, services, name, phone, now, a.startsAt().plus(LATE_ALLOWANCE));
     }
 
     private ShopCard salonCard(UUID shopId) {

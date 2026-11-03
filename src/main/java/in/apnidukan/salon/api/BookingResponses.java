@@ -101,6 +101,8 @@ public final class BookingResponses {
     /**
      * An appointment on the salon's screens. Never carries the customer's start code.
      * @param customerName the customer's name (or "Customer" if they haven't set one); bookings only
+     * @param customerPhone the customer's phone, to call someone running late; bookings only, and only for the
+     *                      owner and helpers (null for barbers)
      * @param notStarted   true if it is CONFIRMED and its start has passed: the screen shows "not started" so staff
      *                     press Start or No-show
      * @param noShowFrom   bookings and walk-ins: No-show is allowed from this moment
@@ -108,16 +110,16 @@ public final class BookingResponses {
     public record AppointmentView(UUID id, AppointmentKind kind, BlockType blockType, UUID staffId,
                                   AppointmentStatus status, Instant startsAt, Instant endsAt, Instant startedAt,
                                   Boolean startedWithCode, List<ServiceLine> services, String bookingNo,
-                                  String customerName, String bookingFor, String guestName, String cancelReason,
-                                  UUID closureId, boolean notStarted, Instant noShowFrom) {
+                                  String customerName, String customerPhone, String bookingFor, String guestName,
+                                  String cancelReason, UUID closureId, boolean notStarted, Instant noShowFrom) {
 
         public static AppointmentView of(Appointment a, List<BookedService> services, String customerName,
-                                         Instant now, Instant noShowFrom) {
+                                         String customerPhone, Instant now, Instant noShowFrom) {
             boolean notStarted = a.status() == AppointmentStatus.CONFIRMED && !now.isBefore(a.startsAt());
             return new AppointmentView(a.id(), a.kind(), a.blockType(), a.staffId(), a.status(), a.startsAt(),
                     a.endsAt(), a.startedAt(), a.startedWithCode(), ServiceLine.from(services), a.bookingNo(),
-                    customerName, a.bookingFor(), a.guestName(), a.cancelReason(), a.closureId(), notStarted,
-                    a.kind() == AppointmentKind.BLOCK ? null : noShowFrom);
+                    customerName, customerPhone, a.bookingFor(), a.guestName(), a.cancelReason(), a.closureId(),
+                    notStarted, a.kind() == AppointmentKind.BLOCK ? null : noShowFrom);
         }
     }
 

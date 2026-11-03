@@ -992,6 +992,17 @@ class SalonBookingIntegrationTest {
         assertThat(get("/salon/day", owner).text()).contains("\"customerName\":\"Ravi Kumar\"");
     }
 
+    @Test
+    void theOwnerSeesTheCustomersPhoneToCallButABarberNeverDoes() {
+        book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID());   // only Raju does both
+        assertThat(get("/salon/day", owner).text()).contains("\"customerPhone\":\"9000000101\"");
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", true), owner);
+        Reply hisDay = get("/salon/day", rajuUser);
+        assertThat(hisDay.text()).contains("\"customerName\":\"Customer\"").doesNotContain("9000000101");
+    }
+
     // ---------- helpers ----------
 
     private UUID person(String phone) {
