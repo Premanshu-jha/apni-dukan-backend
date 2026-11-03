@@ -37,4 +37,8 @@ public final class AuthRequests {
                                    @NotBlank @Size(max = 20) String newPhone,
                                    @NotBlank @Size(max = 10) String phoneCode, @Size(max = 200) String device) {
     }
+
+    /** Your name as salons and shops see it, e.g. "Ravi". 2 to 60 characters after cleaning. */
+    public record UpdateMe(@NotBlank @Size(min = 2, max = 60) String name) {
+    }
 }
