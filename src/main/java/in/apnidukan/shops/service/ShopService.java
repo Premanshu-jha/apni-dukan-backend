@@ -24,6 +24,8 @@ import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -136,8 +138,50 @@ public class ShopService implements ShopMemberships {
 
     @Override
     @Transactional(readOnly = true)
+    public List<Member> members(UUID shopId) {
+        return members.findByShopIdOrderByCreatedAtAscIdAsc(shopId).stream()
+                .sorted(Comparator.comparing((ShopMember m) -> m.getRole() != ShopRole.OWNER))   // owner first
+                .map(m -> new Member(m.getUserId(), m.getRole().name()))
+                .toList();
+    }
+
+    @Override
+    @Transactional
+    public void addMember(UUID shopId, UUID userId, String role) {
+        ShopRole r = ShopRole.valueOf(role);
+        if (r == ShopRole.OWNER) {
+            throw new IllegalArgumentException("A shop has exactly one owner; it can't be added as a member");
+        }
+        if (members.existsByUserId(userId)) {
+            throw alreadyInAShop();
+        }
+        try {
+            members.saveAndFlush(new ShopMember(shopId, userId, r, now()));
+        } catch (DataIntegrityViolationException e) {
+            if (violated(e, ONE_SHOP_PER_PERSON)) {   // added to two shops at the same moment
+                throw alreadyInAShop();
+            }
+            throw e;
+        }
+    }
+
+    @Override
+    @Transactional
+    public void removeMember(UUID shopId, UUID userId) {
+        members.findByShopIdAndUserId(shopId, userId).ifPresent(m -> {
+            if (m.getRole() == ShopRole.OWNER) {
+                throw new IllegalStateException("The owner can't be removed from the shop");
+            }
+            members.delete(m);
+            members.flush();
+        });
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public Optional<Membership> find(UUID userId) {
-        return members.findByUserId(userId).map(m -> new Membership(m.getShopId(), m.getRole().name()));
+        return members.findByUserId(userId).map(m -> new Membership(m.getShopId(), m.getRole().name(),
+                shops.findById(m.getShopId()).orElseThrow().getType().name()));
     }
 
     /** Cut to microseconds, what the database stores, so the response right after saving matches a later GET. */
@@ -217,6 +261,11 @@ public class ShopService implements ShopMemberships {
     private static ApiException invalid(String field, String problem) {
         return new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                 Map.of(field, problem));
+    }
+
+    private static ApiException alreadyInAShop() {
+        return new ApiException(HttpStatus.CONFLICT, "ALREADY_IN_A_SHOP",
+                "This person already works in a shop. One person can work in one shop only.");
     }
 
     private static ApiException alreadyHasShop() {
