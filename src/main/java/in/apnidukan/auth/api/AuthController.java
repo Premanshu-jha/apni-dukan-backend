@@ -1,5 +1,7 @@
 package in.apnidukan.auth.api;
 
+import in.apnidukan.common.web.ClientAddress;
+
 import in.apnidukan.auth.api.AuthRequests.CompleteRecovery;
 import in.apnidukan.auth.api.AuthRequests.Logout;
 import in.apnidukan.auth.api.AuthRequests.Refresh;
@@ -29,16 +31,21 @@ public class AuthController {
 
     private final AuthService auth;
     private final CurrentUserProvider currentUser;
+    private final ClientAddress client;
 
-    public AuthController(AuthService auth, CurrentUserProvider currentUser) {
+    public AuthController(AuthService auth, CurrentUserProvider currentUser, ClientAddress client) {
         this.auth = auth;
         this.currentUser = currentUser;
+        this.client = client;
     }
 
-    /** Step 1 of sign-in: sends a 6-digit OTP to the phone. 202; 429 after 3 codes in 10 minutes. */
+    /**
+     * Step 1 of sign-in: sends a 6-digit OTP to the phone. 202; 429 after 3 codes in 10 minutes; 400
+     * CAPTCHA_REQUIRED / CAPTCHA_FAILED without a genuine robot-check token (once Turnstile is switched on).
+     */
     @PostMapping("/otp/send")
     public ResponseEntity<Void> sendOtp(@Valid @RequestBody SendOtp body, HttpServletRequest request) {
-        auth.sendLoginOtp(body.phone(), request.getRemoteAddr());
+        auth.sendLoginOtp(body.phone(), client.of(request), body.captchaToken());
         return ResponseEntity.accepted().build();
     }
 
@@ -46,7 +53,7 @@ public class AuthController {
     @PostMapping("/otp/verify")
     public TokenResponse verifyOtp(@Valid @RequestBody VerifyOtp body, HttpServletRequest request) {
         return TokenResponse.from(auth.verifyLoginOtp(body.phone(), body.code(), body.device(),
-                request.getRemoteAddr()));
+                client.of(request)));
     }
 
     /** Swap the refresh token for a fresh pair (call when the access token expires, every 15 minutes). */
@@ -75,7 +82,7 @@ public class AuthController {
     /** Signed in, replacing an already verified email: first a code to your own phone. 202. */
     @PostMapping("/email/change-phone-code")
     public ResponseEntity<Void> sendEmailChangePhoneCode(HttpServletRequest request) {
-        auth.sendEmailChangePhoneCode(currentUser.get().userId(), request.getRemoteAddr());
+        auth.sendEmailChangePhoneCode(currentUser.get().userId(), client.of(request));
         return ResponseEntity.accepted().build();
     }
 
@@ -85,20 +92,20 @@ public class AuthController {
      */
     @PostMapping("/email/send-code")
     public ResponseEntity<Void> sendEmailCode(@Valid @RequestBody SendEmailCode body, HttpServletRequest request) {
-        auth.sendEmailCode(currentUser.get().userId(), body.email(), body.phoneCode(), request.getRemoteAddr());
+        auth.sendEmailCode(currentUser.get().userId(), body.email(), body.phoneCode(), client.of(request));
         return ResponseEntity.accepted().build();
     }
 
     @PostMapping("/email/verify")
     public UserResponse verifyEmail(@Valid @RequestBody VerifyEmail body, HttpServletRequest request) {
         return UserResponse.from(auth.verifyEmail(currentUser.get().userId(), body.email(), body.code(),
-                request.getRemoteAddr()));
+                client.of(request)));
     }
 
     /** Lost your phone number: codes go to your verified email and to the new phone. Always 202, account or not. */
     @PostMapping("/recover/start")
     public ResponseEntity<Void> startRecovery(@Valid @RequestBody StartRecovery body, HttpServletRequest request) {
-        auth.startRecovery(body.email(), body.newPhone(), request.getRemoteAddr());
+        auth.startRecovery(body.email(), body.newPhone(), client.of(request), body.captchaToken());
         return ResponseEntity.accepted().build();
     }
 
@@ -106,6 +113,6 @@ public class AuthController {
     @PostMapping("/recover/complete")
     public TokenResponse completeRecovery(@Valid @RequestBody CompleteRecovery body, HttpServletRequest request) {
         return TokenResponse.from(auth.completeRecovery(body.email(), body.emailCode(), body.newPhone(),
-                body.phoneCode(), body.device(), request.getRemoteAddr()));
+                body.phoneCode(), body.device(), client.of(request)));
     }
 }

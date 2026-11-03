@@ -415,6 +415,17 @@ class AuthIntegrationTest {
     }
 
     @Test
+    void madeUpForwardedForEntriesDontDodgeTheNetworkLimit() {
+        // The caller writes anything on the left; the proxy's own entry (the last one) is what counts
+        for (int i = 0; i < 10; i++) {
+            assertThat(postFrom("10.0.0." + i + ", 198.51.100.7", "/auth/otp/send",
+                    Map.of("phone", "90000001" + String.format("%02d", i))).status()).isEqualTo(202);
+        }
+        Reply eleventh = postFrom("10.9.9.9, 198.51.100.7", "/auth/otp/send", Map.of("phone", "9000000199"));
+        assertThat(eleventh.status()).isEqualTo(429);
+    }
+
+    @Test
     void dailySmsCapPausesSendingToProtectTheBill() {
         redis.opsForValue().set("rl:sms-day", "500");
         Reply r = post("/auth/otp/send", Map.of("phone", PHONE), null);

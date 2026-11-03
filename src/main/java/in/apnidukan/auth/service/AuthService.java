@@ -75,15 +75,17 @@ public class AuthService {
     private final BackgroundTasks background;
     private final TransactionTemplate tx;
     private final ShopMemberships memberships;
+    private final HumanCheck humans;
     private final int smsDailyLimit;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
                        SmsSender sms, EmailSender email, JwtService jwt, JwtProperties props, Clock clock,
                        RateLimiter limits, SessionRevocations revocations, BackgroundTasks background,
-                       PlatformTransactionManager transactions, ShopMemberships memberships,
+                       PlatformTransactionManager transactions, ShopMemberships memberships, HumanCheck humans,
                        @Value("${app.sms.daily-limit:500}") int smsDailyLimit) {
         this.memberships = memberships;
+        this.humans = humans;
         this.users = users;
         this.refreshTokens = refreshTokens;
         this.otp = otp;
@@ -101,9 +103,10 @@ public class AuthService {
 
     // ---------------- phone OTP sign-in ----------------
 
-    public void sendLoginOtp(String phoneInput, String ip) {
+    public void sendLoginOtp(String phoneInput, String ip, String captchaToken) {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitSends(ip);
+        humans.require(captchaToken, ip);
         String code = otp.issue(OtpPurpose.LOGIN, phone, ip);
         sendSms(() -> sms.sendOtp(phone, code));
     }
@@ -254,10 +257,11 @@ public class AuthService {
      * Behaves exactly the same whether or not the email has an account: same limits, the SMS is always sent, and
      * the email goes out in the background, so not even the response time differs.
      */
-    public void startRecovery(String emailInput, String newPhoneInput, String ip) {
+    public void startRecovery(String emailInput, String newPhoneInput, String ip, String captchaToken) {
         String address = Emails.normalize(emailInput);
         String newPhone = PhoneNumbers.normalize(newPhoneInput);
         limitSends(ip);
+        humans.require(captchaToken, ip);
         boolean exists = users.findByVerifiedEmail(address).isPresent();
         String emailCode = otp.issue(OtpPurpose.RECOVER_EMAIL, address, ip);
         String phoneCode = otp.issue(OtpPurpose.RECOVER_PHONE, newPhone, ip);
@@ -368,7 +372,13 @@ public class AuthService {
 
     /** Every code SMS goes through here: a hard daily cap protects the SMS bill even if all other limits are dodged. */
     private void sendSms(Runnable send) {
-        if (!limits.tryHit("sms-day", smsDailyLimit, Duration.ofHours(24))) {
+        long sentToday = limits.hit("sms-day", Duration.ofHours(24));
+        if (sentToday == smsDailyLimit * 8L / 10) {
+            // Once, at 80%: time to look before sign-in codes stop for everyone
+            log.error("80% of the daily SMS limit used ({} of {}). Check for abuse now; at {} sign-in codes stop.",
+                    sentToday, smsDailyLimit, smsDailyLimit);
+        }
+        if (sentToday > smsDailyLimit) {
             log.error("Daily SMS limit ({}) reached: SMS paused. Check for abuse before raising SMS_DAILY_LIMIT.",
                     smsDailyLimit);
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SMS_PAUSED",
