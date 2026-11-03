@@ -69,7 +69,24 @@ Content-Type: application/json
   "longitude": 78.364456
 }
 
-### 6c. My shop (details, status, your role, version)
+### 6b-salon. Or register your shop as a salon (instead of 6b). Then run request 4 (Refresh).
+POST {{baseUrl}}/shops
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "Sharma Hair Studio",
+  "ownerName": "Ramesh Sharma",
+  "addressLine": "Shop 4, Lake View Apartments",
+  "area": "Kondapur",
+  "city": "Hyderabad",
+  "pincode": "500084",
+  "latitude": 17.465123,
+  "longitude": 78.364456,
+  "type": "SALON"
+}
+
+### 6c. My shop (details, status, type KIRANA or SALON, your role, version)
 GET {{baseUrl}}/shops/me
 Authorization: Bearer {{accessToken}}
 
@@ -87,6 +104,91 @@ Content-Type: application/json
 > {%
     if (response.status === 200) {
         client.global.set("shopVersion", response.body.version);
+    }
+%}
+
+### 6e. Salon (registered with 6b-salon): add a service (owner only)
+POST {{baseUrl}}/salon/services
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Haircut", "durationMinutes": 30, "pricePaise": 15000, "priceIsFrom": false, "sortOrder": 0 }
+
+> {%
+    if (response.status === 201) {
+        client.global.set("serviceId", response.body.id);
+    }
+%}
+
+### 6f. Salon: the services list
+GET {{baseUrl}}/salon/services
+Authorization: Bearer {{accessToken}}
+
+### 6g. Salon: add a barber
+POST {{baseUrl}}/salon/staff
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Raju" }
+
+> {%
+    if (response.status === 201) {
+        client.global.set("staffId", response.body.id);
+        client.global.set("staffVersion", response.body.version);
+    }
+%}
+
+### 6h. Salon: what this barber does (replaces the list; send his version from 6g or the last reply)
+PUT {{baseUrl}}/salon/staff/{{staffId}}/services
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{staffVersion}}, "serviceIds": ["{{serviceId}}"] }
+
+> {%
+    if (response.status === 200) {
+        client.global.set("staffVersion", response.body.version);
+    }
+%}
+
+### 6i. Salon: his week (replaces it). Monday split shift, Sunday to midnight
+PUT {{baseUrl}}/salon/staff/{{staffId}}/hours
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{staffVersion}}, "hours": [
+    { "weekday": 1, "start": "10:00", "end": "14:00" },
+    { "weekday": 1, "start": "16:00", "end": "21:00" },
+    { "weekday": 7, "start": "12:00", "end": "24:00" }
+] }
+
+> {%
+    if (response.status === 200) {
+        client.global.set("staffVersion", response.body.version);
+    }
+%}
+
+### 6j. Salon: booking settings (defaults until saved: version null)
+GET {{baseUrl}}/salon/settings
+Authorization: Bearer {{accessToken}}
+
+> {%
+    if (response.status === 200) {
+        // written into the JSON as-is, so null must be the text "null"
+        client.global.set("settingsVersion", response.body.version === null ? "null" : response.body.version);
+    }
+%}
+
+### 6k. Salon: save booking settings (send the version from 6j; null on the first save)
+PATCH {{baseUrl}}/salon/settings
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{settingsVersion}}, "minLeadMinutes": 60, "maxDaysAhead": 14 }
+
+> {%
+    if (response.status === 200) {
+        client.global.set("settingsVersion", response.body.version);
     }
 %}
 
@@ -125,3 +227,221 @@ POST {{baseUrl}}/auth/logout
 Content-Type: application/json
 
 { "refreshToken": "{{refreshToken}}" }
+
+### 11. Registration step 2: upload the owner's photo (any JPEG; reuses sample-bill.jpg here)
+POST {{baseUrl}}/files
+Authorization: Bearer {{accessToken}}
+Content-Type: multipart/form-data; boundary=ApniDukan
+
+--ApniDukan
+Content-Disposition: form-data; name="purpose"
+
+OWNER_PHOTO
+--ApniDukan
+Content-Disposition: form-data; name="file"; filename="owner.jpg"
+Content-Type: image/jpeg
+
+< ./sample-bill.jpg
+--ApniDukan--
+
+> {%
+    if (response.status === 200 || response.status === 201) {
+        client.global.set("ownerPhotoId", response.body.id);
+    }
+%}
+
+### 11b. ... and a photo of the shop (purpose SHOP_PHOTO; use a different picture than 11)
+POST {{baseUrl}}/files
+Authorization: Bearer {{accessToken}}
+Content-Type: multipart/form-data; boundary=ApniDukan
+
+--ApniDukan
+Content-Disposition: form-data; name="purpose"
+
+SHOP_PHOTO
+--ApniDukan
+Content-Disposition: form-data; name="file"; filename="shop.jpg"
+Content-Type: image/jpeg
+
+< ./sample-bill.jpg
+--ApniDukan--
+
+> {%
+    if (response.status === 200 || response.status === 201) {
+        client.global.set("shopPhotoId", response.body.id);
+    }
+%}
+
+### 11c. Set both photos on My shop (run 6c first for the version)
+PUT {{baseUrl}}/shops/me/photos
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{shopVersion}}, "ownerPhotoFileId": "{{ownerPhotoId}}", "shopPhotoFileId": "{{shopPhotoId}}" }
+
+> {%
+    if (response.status === 200) {
+        client.global.set("shopVersion", response.body.version);
+    }
+%}
+
+### 11d. Submit for visit (409 PHOTOS_REQUIRED until both photos are set)
+POST {{baseUrl}}/shops/me/submit
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{shopVersion}} }
+
+> {%
+    if (response.status === 200) {
+        client.global.set("shopVersion", response.body.version);
+    }
+%}
+
+### 11e. Field team only (users.admin = true): shops waiting for a visit, with photo links. Saves the first one.
+GET {{baseUrl}}/admin/shops
+Authorization: Bearer {{accessToken}}
+
+> {%
+    if (response.status === 200 && response.body.length > 0) {
+        client.global.set("adminShopId", response.body[0].id);
+        client.global.set("adminShopVersion", response.body[0].version);
+    }
+%}
+
+### 11f. Field team: approve that shop after the visit, with the version you checked (409 SHOP_CHANGED if not)
+POST {{baseUrl}}/admin/shops/{{adminShopId}}/approve
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{adminShopVersion}} }
+
+### 12. Salon: give barber Raju (6g) his own sign-in with his phone
+PUT {{baseUrl}}/salon/staff/{{staffId}}/login
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "phone": "{{barberPhone}}" }
+
+### 12b. Salon: everyone in the salon, and who may add walk-ins
+GET {{baseUrl}}/salon/members
+Authorization: Bearer {{accessToken}}
+
+### 13. Customer: salons near a point (the salon must be approved, 11f)
+GET {{baseUrl}}/salons?lat=17.466&lng=78.365
+Authorization: Bearer {{accessToken}}
+
+> {%
+    if (response.status === 200 && response.body.length > 0) {
+        client.global.set("salonId", response.body[0].id);
+    }
+%}
+
+### 13b. Customer: free times for the haircut (6e) on a date (India date)
+GET {{baseUrl}}/salons/{{salonId}}/availability?services={{serviceId}}&date={{bookingDate}}
+Authorization: Bearer {{accessToken}}
+
+> {%
+    if (response.status === 200 && response.body.starts.length > 0) {
+        client.global.set("startAt", response.body.starts[0].startAt);
+    }
+%}
+
+### 13c. Customer: book the first free time. A new Idempotency-Key per booking; the same one when retrying
+POST {{baseUrl}}/bookings
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+Idempotency-Key: {{$random.uuid}}
+
+{ "salonId": "{{salonId}}", "serviceIds": ["{{serviceId}}"], "startAt": "{{startAt}}" }
+
+> {%
+    if (response.status === 201) {
+        client.global.set("bookingId", response.body.id);
+        client.global.set("startCode", response.body.startCode);
+    }
+%}
+
+### 13d. Customer: my upcoming bookings (with the start code)
+GET {{baseUrl}}/me/bookings
+Authorization: Bearer {{accessToken}}
+
+### 14. Salon: the day screen
+GET {{baseUrl}}/salon/day?date={{bookingDate}}
+Authorization: Bearer {{accessToken}}
+
+### 14b. Salon: walk-in suggestions for the haircut
+GET {{baseUrl}}/salon/walk-ins/options?services={{serviceId}}
+Authorization: Bearer {{accessToken}}
+
+### 14c. Salon: start the booking with the customer's code (from 15 minutes before its time)
+POST {{baseUrl}}/salon/appointments/{{bookingId}}/start
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "code": "{{startCode}}" }
+
+### 14d. Customer: cancel a booking that hasn't started (book another with 13c first; after 14c this one is 409)
+POST {{baseUrl}}/bookings/{{bookingId}}/cancel
+Authorization: Bearer {{accessToken}}
+
+### 14e. Salon: pause online bookings until midnight / resume
+POST {{baseUrl}}/salon/pause
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{}
+
+### 14f. Salon: resume online bookings
+POST {{baseUrl}}/salon/resume
+Authorization: Bearer {{accessToken}}
+
+### 15. Customer: move my booking to another free start (take one from 13b)
+POST {{baseUrl}}/bookings/{{bookingId}}/reschedule
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "startAt": "{{startAt}}" }
+
+### 15b. Customer: set my name (salons see it)
+PATCH {{baseUrl}}/auth/me
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "name": "Ravi" }
+
+### 15c. Customer: allow notifications on this device (the app sends the browser's PushSubscription)
+GET {{baseUrl}}/push/public-key
+Authorization: Bearer {{accessToken}}
+
+### 16. Salon: No-show (from 15 minutes after the start)
+POST {{baseUrl}}/salon/appointments/{{bookingId}}/no-show
+Authorization: Bearer {{accessToken}}
+
+### 16b. Salon: give the booking to another barber at the same time
+POST {{baseUrl}}/salon/appointments/{{bookingId}}/reassign
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "staffId": "{{staffId}}" }
+
+### 16c. Salon: a break for barber Raju (times are exact moments; 08:30Z = 2:00 PM in India)
+POST {{baseUrl}}/salon/staff/{{staffId}}/blocks
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "type": "BREAK", "startAt": "{{bookingDate}}T08:30:00Z", "endAt": "{{bookingDate}}T09:00:00Z" }
+
+### 16d. Salon: close the whole salon for a day (409 BLOCK_CONFLICTS lists bookings in the way)
+POST {{baseUrl}}/salon/closures
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "date": "{{bookingDate}}" }
+
+### 16e. Salon: switch barber Raju off (he left) or on again; send his version from GET /salon/staff
+PATCH {{baseUrl}}/salon/staff/{{staffId}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{staffVersion}}, "active": false }
