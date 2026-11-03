@@ -6,6 +6,7 @@ import in.apnidukan.auth.api.AuthRequests.Refresh;
 import in.apnidukan.auth.api.AuthRequests.SendEmailCode;
 import in.apnidukan.auth.api.AuthRequests.SendOtp;
 import in.apnidukan.auth.api.AuthRequests.StartRecovery;
+import in.apnidukan.auth.api.AuthRequests.UpdateMe;
 import in.apnidukan.auth.api.AuthRequests.VerifyEmail;
 import in.apnidukan.auth.api.AuthRequests.VerifyOtp;
 import in.apnidukan.auth.api.AuthResponses.TokenResponse;
@@ -16,6 +17,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -62,6 +64,12 @@ public class AuthController {
     @GetMapping("/me")
     public UserResponse me() {
         return UserResponse.from(auth.me(currentUser.get().userId()));
+    }
+
+    /** Set your name (2 to 60 characters; spaces and look-alike letters are tidied). Shown to salons you book. */
+    @PatchMapping("/me")
+    public UserResponse updateMe(@Valid @RequestBody UpdateMe body) {
+        return UserResponse.from(auth.rename(currentUser.get().userId(), body.name()));
     }
 
     /** Signed in, replacing an already verified email: first a code to your own phone. 202. */

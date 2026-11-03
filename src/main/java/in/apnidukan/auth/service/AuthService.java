@@ -16,6 +16,8 @@ import in.apnidukan.common.security.JwtProperties;
 import in.apnidukan.common.security.JwtService;
 import in.apnidukan.common.security.RateLimiter;
 import in.apnidukan.common.security.SessionRevocations;
+import in.apnidukan.common.text.TextCleaner;
+import in.apnidukan.common.text.TextCleaner.TextField;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -57,6 +59,8 @@ public class AuthService {
      * every device. Later than this, it means the token was copied.
      */
     static final Duration RETRY_GRACE = Duration.ofSeconds(60);
+    /** A person's name: 2 to 60 characters after cleaning (the column allows 100). */
+    static final TextField NAME = new TextField("name", 2, 60);
 
     private final UserRepository users;
     private final RefreshTokenRepository refreshTokens;
@@ -315,6 +319,18 @@ public class AuthService {
 
     public User me(UUID userId) {
         return users.findById(userId).orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+    }
+
+    /** Sets the person's name, cleaned like shop names (see TextCleaner). */
+    @Transactional
+    public User rename(UUID userId, String name) {
+        User user = me(userId);
+        String cleaned = TextCleaner.clean(NAME, name);
+        if (!cleaned.equals(user.getName())) {
+            user.rename(cleaned, Instant.now(clock));
+            users.saveAndFlush(user);
+        }
+        return user;
     }
 
     // ---------------- helpers ----------------
