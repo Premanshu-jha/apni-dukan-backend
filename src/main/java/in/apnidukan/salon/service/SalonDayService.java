@@ -171,8 +171,8 @@ public class SalonDayService {
     // ---------- walk-ins ----------
 
     /**
-     * For the chosen services, one suggestion per barber who does them all: free now, or his earliest start today
-     * (exact minutes). Free-now barbers first (least booked first), then by earliest start; barbers who can't fit
+     * For the chosen services, one suggestion per barber who does them all: free now, or (for information: a walk-in
+     * always starts now) when he is next free today (exact minutes). Free-now barbers first (least booked first), then by earliest start; barbers who can't fit
      * it in today last.
      */
     @Transactional(readOnly = true)
@@ -204,9 +204,9 @@ public class SalonDayService {
     }
 
     /**
-     * Adds a walk-in with the chosen barber: now (IN_SERVICE at once) or at a later time today (CONFIRMED, holding
-     * his time so online slots skip it). If his time was taken in between: 409 BARBER_BUSY with his next free start.
-     * The same Idempotency-Key again returns the walk-in already added.
+     * Adds a walk-in with the chosen barber, starting now (IN_SERVICE at once; the customer is in the chair, so no
+     * code). Walk-ins are never booked for later. If he isn't free now (taken in between): 409 BARBER_BUSY with his
+     * next free start. The same Idempotency-Key again returns the walk-in already added.
      */
     @Transactional
     public AppointmentView addWalkIn(UUID userId, String idempotencyKey, WalkIn in) {
@@ -231,20 +231,11 @@ public class SalonDayService {
         if (calendar.barbersFor(c.shopId(), ids(chosen)).stream().noneMatch(b -> b.getId().equals(barber.getId()))) {
             throw SalonCalendar.invalid("staffId", "this barber doesn't do all of the chosen services");
         }
-        Instant nowMinute = now.truncatedTo(ChronoUnit.MINUTES);
-        boolean startNow = in.startAt() == null;
-        Instant start = startNow ? nowMinute : in.startAt().truncatedTo(ChronoUnit.MINUTES);
-        if (start.isBefore(nowMinute)) {
-            throw SalonCalendar.invalid("startAt", "is in the past; leave it out to start now");
-        }
-        if (!start.isBefore(Availability.dayStart(today(now).plusDays(1)))) {
-            throw SalonCalendar.invalid("startAt", "must be today");
-        }
+        Instant start = now.truncatedTo(ChronoUnit.MINUTES);
         String guest = in.name() == null || in.name().isBlank() ? null : clean(GUEST_NAME, in.name());
         Appointment a = new Appointment(UUID.randomUUID(), c.shopId(), barber.getId(), AppointmentKind.WALK_IN, null,
-                null, null, null, null, guest, null, start, start.plus(length),
-                startNow ? AppointmentStatus.IN_SERVICE : AppointmentStatus.CONFIRMED, startNow ? now : null, null,
-                null, c.userId(), requestId, now, now);
+                null, null, null, null, guest, null, start, start.plus(length), AppointmentStatus.IN_SERVICE, now,
+                null, null, c.userId(), requestId, now, now);
         if (!appointments.lockActiveBarber(barber.getId())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "STAFF_NOT_FOUND", "No such barber.");
         }
@@ -256,16 +247,16 @@ public class SalonDayService {
             details.put("freeNow", false);
             details.put("freeAt", next.map(s -> (Object) s.start().toString()).orElse("not today"));
             throw new ApiException(HttpStatus.CONFLICT, "BARBER_BUSY",
-                    barber.getName() + " is busy at that time now. Pick another suggestion.", details);
+                    barber.getName() + " isn't free right now. Pick a barber who is free now.", details);
         }
         appointments.insertServices(a.id(), chosen);
-        appointments.event(a.id(), now, c.userId(), startNow ? "WALK_IN_STARTED" : "WALK_IN_HELD", null);
+        appointments.event(a.id(), now, c.userId(), "WALK_IN_STARTED", null);
         return salonView(c, a);
     }
 
     /**
-     * Everything still to come, soonest first, across days: online bookings and walk-ins held for later that are
-     * CONFIRMED and not over yet (so a customer running late is still on it). Owner and helpers see the whole
+     * Everything still to come, soonest first, across days: online bookings that are CONFIRMED and not over yet (so
+     * a customer running late is still on it, until the automatic no-show). Owner and helpers see the whole
      * salon; a barber sees his own unless he has walk-in access.
      */
     @Transactional(readOnly = true)
@@ -318,8 +309,8 @@ public class SalonDayService {
     }
 
     /**
-     * CONFIRMED → NO_SHOW, from 15 minutes after the start. Frees the barber's time at once. An online booking
-     * gives the customer a strike; a walk-in doesn't (there is no account).
+     * CONFIRMED → NO_SHOW, from 15 minutes after the start (the automatic no-show does the same within a minute).
+     * Frees the barber's time at once; the customer gets a strike and the same "missed booking" message.
      */
     @Transactional
     public AppointmentView noShow(UUID userId, UUID appointmentId) {
@@ -339,7 +330,7 @@ public class SalonDayService {
         if (a.isBooking()) {
             // Dated at the booking's start, not when staff pressed the button (it may be pressed late)
             strikes.add(a.customerId(), a.id(), StrikeKind.NO_SHOW, a.startsAt());
-            notices.closed(a);
+            notices.noShow(a, salonCard(c.shopId()), now);
         }
         appointments.event(a.id(), now, c.userId(), "NO_SHOW", null);
         return salonView(c, appointments.find(a.id()).orElseThrow());
@@ -369,7 +360,7 @@ public class SalonDayService {
     }
 
     /**
-     * The automatic no-show (AutoEndJob, every minute): a booking or held walk-in still not started 15 minutes
+     * The automatic no-show (AutoEndJob, every minute): a booking still not started 15 minutes
      * after its start becomes NO_SHOW, which frees the barber's time. Start needs the customer's code (or the
      * owner's "without code"), so a customer being served is always started by then. An online booking gives the
      * customer a strike, dated at its start, and a message saying so. Safe on two servers at once: each row is
@@ -379,9 +370,12 @@ public class SalonDayService {
     @Transactional
     public int markNoShows(Instant now) {
         List<Appointment> missed = appointments.markNoShows(now.minus(LATE_ALLOWANCE), now);
+        Instant recent = now.minus(Duration.ofDays(1));
         for (Appointment a : missed) {
             appointments.event(a.id(), now, null, "NO_SHOW", "automatic");
-            if (a.isBooking()) {
+            // A booking from more than a day ago (left from before the automatic no-show existed, or the job was
+            // stopped for a day) is closed quietly: no strike or message that late
+            if (a.isBooking() && a.startsAt().isAfter(recent)) {
                 strikes.add(a.customerId(), a.id(), StrikeKind.NO_SHOW, a.startsAt());
                 notices.noShow(a, salonCard(a.shopId()), now);
             }

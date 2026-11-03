@@ -16,7 +16,7 @@ import java.time.temporal.ChronoUnit;
  * <ul>
  *   <li>an appointment in service ends by itself at its planned end (there is no Done button). If a service runs
  *       long, the app doesn't know; the next customer may wait;</li>
- *   <li>a booking or held walk-in not started 15 minutes after its start becomes a no-show (see
+ *   <li>a booking not started 15 minutes after its start becomes a no-show (see
  *       SalonDayService.markNoShows).</li>
  * </ul>
  */

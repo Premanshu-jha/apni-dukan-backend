@@ -41,7 +41,7 @@ public class AppointmentStore {
     /** Upcoming: still open (CONFIRMED or IN_SERVICE) and not over yet. Past: everything else. */
     private static final String UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
             + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ? ORDER BY starts_at, id LIMIT ?";
-    /** The salon's bookings and walk-ins still to come or still able to start (CONFIRMED, not over yet). */
+    /** The salon's bookings still to come or still able to start (CONFIRMED, not over yet). */
     private static final String SALON_UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
             + "AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ? "
             + "ORDER BY starts_at, id LIMIT ?";
@@ -101,7 +101,7 @@ public class AppointmentStore {
     }
 
     /**
-     * The automatic no-show: every booking and held walk-in still CONFIRMED whose start was at or before
+     * The automatic no-show: every booking still CONFIRMED whose start was at or before
      * {@code startedBy} becomes NO_SHOW, in one statement; returns the rows it changed (each only once, even with
      * two servers running this).
      */

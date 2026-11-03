@@ -384,8 +384,8 @@ The customer picks services and a time; the backend picks the barber. Another pe
 | Call | Who | What it does |
 | --- | --- | --- |
 | `GET /day?date=` | owner, helper, and anyone with walk-in access: all barbers; other barbers: their own | A column per barber with his hours and appointments (`notStarted` once its time passed). Never the start code |
-| `GET /upcoming` | owner, helper, anyone with walk-in access: the salon; other barbers: their own | Bookings and held walk-ins still to come across the next 31 days, soonest first (up to 200), including ones running late |
-| `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or his earliest start today (exact minutes). Add with `startAt` null = start now (IN_SERVICE) or a later time today (held). 409 `BARBER_BUSY` with his next free time |
+| `GET /upcoming` | owner, helper, anyone with walk-in access: the salon; other barbers: their own | Online bookings still to come across the next 31 days, soonest first (up to 200), including ones running late |
+| `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or when he is next free today (exact minutes, for information). A walk-in always starts now with a barber who is free now (IN_SERVICE at once, no code: the customer is in the chair); there is no booking a walk-in for later. 409 `BARBER_BUSY` with his next free time |
 | `GET /members` · `PUT /members/{userId}/walk-in-access {allowed}` | owner | Who may add walk-ins besides the owner (a helper or barber) |
 | `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before until 15 min after the start (then it is a no-show). A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper) |
 | `POST /appointments/{id}/no-show` | owner, helper; barber: own | From 15 min after the start (the late allowance). Frees the time; a booking gives the customer a strike. Rarely needed: the job below does it within a minute |
@@ -404,7 +404,7 @@ one back (204; the reason goes into the booking's history as `STRIKE_REMOVED`).
 
 **Lifecycle:** CONFIRMED → IN_SERVICE (Start, with the customer's code) → COMPLETED by itself at its planned end (a
 job every minute; there is no Done button, so a long service makes the next customer wait). CONFIRMED →
-CANCELLED_BY_CUSTOMER / CANCELLED_BY_SALON. A booking or held walk-in not started 15 minutes after its start becomes
+CANCELLED_BY_CUSTOMER / CANCELLED_BY_SALON. A booking not started 15 minutes after its start becomes
 NO_SHOW by itself (the same job; a customer being served has always been started with their code by then): an online
 booking gives the customer a strike and a "missed booking" message. BLOCKED → REMOVED. Every change is a
 conditional update ("only if still CONFIRMED") and is logged in `appointment_events` with who did it.

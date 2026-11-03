@@ -415,6 +415,14 @@ Authorization: Bearer {{accessToken}}
 GET {{baseUrl}}/salon/walk-ins/options?services={{serviceId}}
 Authorization: Bearer {{accessToken}}
 
+### 14b2. Salon: add a walk-in with a barber who is free now; it starts at once (no code). A new Idempotency-Key each time
+POST {{baseUrl}}/salon/walk-ins
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+Idempotency-Key: {{$random.uuid}}
+
+{ "serviceIds": ["{{serviceId}}"], "staffId": "{{staffId}}", "name": "Walk-in" }
+
 ### 14c. Salon: start the booking with the customer's code (from 15 minutes before its time)
 POST {{baseUrl}}/salon/appointments/{{bookingId}}/start
 Authorization: Bearer {{accessToken}}

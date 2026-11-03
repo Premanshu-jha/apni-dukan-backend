@@ -293,7 +293,7 @@ class SalonBookingIntegrationTest {
     void reschedulingMovesToAnotherBarberWhenTheFirstIsBusy() {
         UUID mine = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));   // Raju (added first)
         assertThat(staffOf(mine)).isEqualTo(raju);
-        walkIn(owner, List.of(haircut), raju, at("13:00"), UUID.randomUUID());   // Raju held at 13:00
+        book(customer2, at("13:00"), List.of(haircut, beard), UUID.randomUUID());   // Raju busy at 13:00
         Reply moved = post("/bookings/" + mine + "/reschedule", Map.of("startAt", at("13:00").toString()), customer);
         assertThat(moved.status()).as(moved.text()).isEqualTo(200);
         assertThat(staffOf(mine)).isEqualTo(sunil);
@@ -430,13 +430,13 @@ class SalonBookingIntegrationTest {
         assertThat(field(r.body(), "status")).as(r.text()).isEqualTo("NO_SHOW");
         assertThat(count("customer_strikes")).isEqualTo(1);
         // Raju is free again: a walk-in can start right now
-        Reply walkIn = walkIn(owner, List.of(haircut, beard), raju, null, UUID.randomUUID());
+        Reply walkIn = walkIn(owner, List.of(haircut, beard), raju, UUID.randomUUID());
         assertThat(walkIn.status()).as(walkIn.text()).isEqualTo(201);
     }
 
     @Test
     void appointmentsInServiceEndByThemselvesAndUnstartedOnesBecomeNoShowsAfter15Minutes() {
-        UUID walk = id(walkIn(owner, List.of(haircut), raju, null, UUID.randomUUID()));   // 10:00-10:30
+        UUID walk = id(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()));   // 10:00-10:30
         UUID b = id(book(customer, at("11:00"), List.of(haircut), UUID.randomUUID()));   // Raju
         UUID held = id(book(customer2, at("11:00"), List.of(haircut), UUID.randomUUID()));   // Sunil (Raju is taken)
         CLOCK.set(at("10:29"));
@@ -456,16 +456,16 @@ class SalonBookingIntegrationTest {
                 .isEqualTo(2);
         assertThat(jobs(b)).contains("BOOKING_NO_SHOW:PENDING");
         // The barbers are free again at once
-        assertThat(walkIn(owner, List.of(haircut), raju, null, UUID.randomUUID()).status()).isEqualTo(201);
+        assertThat(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()).status()).isEqualTo(201);
     }
 
     @Test
     void walkInRetriesReturnTheSameWalkInAndADifferentOneWithTheSameKeyIsRefused() {
         UUID key = UUID.randomUUID();
-        Reply first = walkIn(owner, List.of(haircut), raju, null, key);
-        Reply again = walkIn(owner, List.of(haircut), raju, null, key);
+        Reply first = walkIn(owner, List.of(haircut), raju, key);
+        Reply again = walkIn(owner, List.of(haircut), raju, key);
         assertThat(field(again.body(), "id")).isEqualTo(field(first.body(), "id"));
-        assertThat(field(walkIn(owner, List.of(haircut), sunil, null, key).body(), "code"))
+        assertThat(field(walkIn(owner, List.of(haircut), sunil, key).body(), "code"))
                 .isEqualTo("IDEMPOTENCY_KEY_REUSED");
         assertThat(count("appointments")).isEqualTo(1);
     }
@@ -476,23 +476,23 @@ class SalonBookingIntegrationTest {
     void onlyTheOwnerAndPeopleHeGaveAccessToCanAddWalkIns() {
         UUID helper = person("9000000002");
         TestData.member(jdbc, salon, helper, "HELPER");
-        Reply refused = walkIn(helper, List.of(haircut), sunil, null, UUID.randomUUID());
+        Reply refused = walkIn(helper, List.of(haircut), sunil, UUID.randomUUID());
         assertThat(refused.status()).isEqualTo(403);
         assertThat(field(refused.body(), "code")).isEqualTo("WALK_INS_NOT_ALLOWED");
 
         Reply granted = put("/salon/members/" + helper + "/walk-in-access", Map.of("allowed", true), owner);
         assertThat(granted.status()).as(granted.text()).isEqualTo(200);
-        assertThat(walkIn(helper, List.of(haircut), sunil, null, UUID.randomUUID()).status()).isEqualTo(201);
+        assertThat(walkIn(helper, List.of(haircut), sunil, UUID.randomUUID()).status()).isEqualTo(201);
         assertThat(put("/salon/members/" + helper + "/walk-in-access", Map.of("allowed", true), helper).status())
                 .isEqualTo(403);   // only the owner gives access
 
         put("/salon/members/" + helper + "/walk-in-access", Map.of("allowed", false), owner);
-        assertThat(walkIn(helper, List.of(haircut), raju, null, UUID.randomUUID()).status()).isEqualTo(403);
+        assertThat(walkIn(helper, List.of(haircut), raju, UUID.randomUUID()).status()).isEqualTo(403);
     }
 
     @Test
-    void walkInSuggestionsAndAHeldWalkInBlocksOnlineSlots() {
-        walkIn(owner, List.of(haircut, beard), raju, null, UUID.randomUUID());   // Raju busy 10:00-10:45
+    void walkInSuggestionsAndWalkInsOnlyStartNow() {
+        walkIn(owner, List.of(haircut, beard), raju, UUID.randomUUID());   // Raju busy 10:00-10:45
         Reply options = get("/salon/walk-ins/options?services=" + haircut, owner);
         List<?> list = (List<?>) options.body();
         assertThat(field(list.get(0), "staffId")).isEqualTo(sunil.toString());   // free now first
@@ -500,18 +500,14 @@ class SalonBookingIntegrationTest {
         assertThat(field(list.get(1), "freeNow")).isEqualTo(false);
         assertThat(field(list.get(1), "time")).isEqualTo("10:45");
 
-        // Hold Raju at 10:45 for a waiting customer: the 11:00 online slot for haircut+beard disappears
-        UUID held = id(walkIn(owner, List.of(haircut, beard), raju, at("10:45"), UUID.randomUUID()));
-        assertThat(status(held)).isEqualTo("CONFIRMED");
-        assertThat(times(haircut + "," + beard)).doesNotContain("10:45", "11:00", "11:15").contains("11:30");
-        // Someone else can't take Raju at 10:50 any more
-        Reply busy = walkIn(owner, List.of(beard), raju, at("10:50"), UUID.randomUUID());
-        assertThat(field(busy.body(), "code")).isEqualTo("BARBER_BUSY");
-        // The waiting customer left: No-show frees the time and gives no strike (no account)
-        CLOCK.set(at("11:00"));
-        assertThat(field(post("/salon/appointments/" + held + "/no-show", Map.of(), owner).body(), "status"))
-                .isEqualTo("NO_SHOW");
-        assertThat(count("customer_strikes")).isZero();
+        // A walk-in always starts now: a time for later is refused, and so is a barber who isn't free now
+        Map<String, Object> later = new HashMap<>(Map.of("serviceIds", List.of(haircut), "staffId", sunil.toString(),
+                "startAt", at("12:00").toString()));
+        assertThat(field(call(HttpMethod.POST, "/salon/walk-ins", later, owner, UUID.randomUUID()).body(), "code"))
+                .isEqualTo("UNKNOWN_FIELD");
+        Reply busy = walkIn(owner, List.of(beard), raju, UUID.randomUUID());
+        assertThat(field(busy.body(), "code")).as(busy.text()).isEqualTo("BARBER_BUSY");
+        assertThat(field(field(busy.body(), "details"), "freeAt")).isEqualTo(at("10:45").toString());
     }
 
     // ---------- barbers with their own sign-in ----------
@@ -542,7 +538,7 @@ class SalonBookingIntegrationTest {
                 .isEqualTo(201);
         assertThat(field(post("/salon/staff/" + raju + "/blocks", block("LEAVE", "17:00", "21:00"), rajuUser)
                 .body(), "code")).isEqualTo("OWNER_ONLY");
-        assertThat(walkIn(rajuUser, List.of(haircut), raju, null, UUID.randomUUID()).status()).isEqualTo(403);
+        assertThat(walkIn(rajuUser, List.of(haircut), raju, UUID.randomUUID()).status()).isEqualTo(403);
 
         // The same phone can't be a barber in a second place
         Reply twice = put("/salon/staff/" + sunil + "/login", Map.of("phone", "9000000201"), owner);
@@ -563,7 +559,7 @@ class SalonBookingIntegrationTest {
         UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
         put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", true), owner);
         assertThat((List<?>) field(get("/salon/day?date=2026-11-10", rajuUser).body(), "barbers")).hasSize(2);
-        assertThat(walkIn(rajuUser, List.of(haircut), sunil, null, UUID.randomUUID()).status()).isEqualTo(201);
+        assertThat(walkIn(rajuUser, List.of(haircut), sunil, UUID.randomUUID()).status()).isEqualTo(201);
         // Other members don't see barbers' sign-in phones
         assertThat(get("/salon/staff", rajuUser).text()).doesNotContain("9000000201");
         assertThat(get("/salon/staff", owner).text()).contains("9000000201");
@@ -677,8 +673,8 @@ class SalonBookingIntegrationTest {
         Reply moved = post("/salon/appointments/" + b + "/reassign", Map.of("staffId", other.toString()), owner);
         assertThat(moved.status()).as(moved.text()).isEqualTo(200);
         assertThat(staffOf(b)).isEqualTo(other);
-        // The first barber now has a walk-in at 12:00: moving it back on top of that is refused
-        walkIn(owner, List.of(haircut), staffOf(b).equals(raju) ? sunil : raju, at("12:00"), UUID.randomUUID());
+        // The first barber now has another booking at 12:00: moving it back on top of that is refused
+        book(customer2, at("12:00"), List.of(haircut), UUID.randomUUID());
         Reply busy = post("/salon/appointments/" + b + "/reassign",
                 Map.of("staffId", (staffOf(b).equals(raju) ? sunil : raju).toString()), owner);
         assertThat(field(busy.body(), "code")).isEqualTo("BARBER_BUSY");
@@ -1042,12 +1038,12 @@ class SalonBookingIntegrationTest {
         UUID tomorrow = id(book(customer, at("12:00").plus(Duration.ofDays(1)), List.of(haircut, beard),
                 UUID.randomUUID()));   // Raju
         UUID today = id(book(customer2, at("13:00"), List.of(facial), UUID.randomUUID()));   // Sunil
-        UUID heldWalkIn = id(walkIn(owner, List.of(haircut), raju, at("15:00"), UUID.randomUUID()));
+        UUID later = id(book(customer2, at("15:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju
         post("/salon/staff/" + raju + "/blocks", block("BREAK", "16:00", "16:30"), owner);   // not listed
-        id(walkIn(owner, List.of(haircut), sunil, null, UUID.randomUUID()));   // in service now: not listed
+        id(walkIn(owner, List.of(haircut), sunil, UUID.randomUUID()));   // in service now: not listed
 
         List<?> all = (List<?>) get("/salon/upcoming", owner).body();
-        assertThat(all.stream().map(x -> field(x, "id"))).containsExactly(today.toString(), heldWalkIn.toString(),
+        assertThat(all.stream().map(x -> field(x, "id"))).containsExactly(today.toString(), later.toString(),
                 tomorrow.toString());
         // Still listed while the customer may arrive late, gone once marked
         CLOCK.set(at("13:10"));
@@ -1056,7 +1052,7 @@ class SalonBookingIntegrationTest {
         put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
         UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
         List<?> his = (List<?>) get("/salon/upcoming", rajuUser).body();
-        assertThat(his.stream().map(x -> field(x, "id"))).containsExactly(heldWalkIn.toString(), tomorrow.toString());
+        assertThat(his.stream().map(x -> field(x, "id"))).containsExactly(later.toString(), tomorrow.toString());
     }
 
     @Test
@@ -1136,7 +1132,7 @@ class SalonBookingIntegrationTest {
         assertThat((List<?>) get("/salons?lat=17.466&lng=78.365", customer).body()).isEmpty();
         assertThat(book(customer, at("13:00"), List.of(haircut), UUID.randomUUID()).status()).isEqualTo(404);
         // The salon still runs its own day (walk-ins)
-        assertThat(walkIn(owner, List.of(haircut), raju, null, UUID.randomUUID()).status()).isEqualTo(201);
+        assertThat(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()).status()).isEqualTo(201);
 
         // Ending the suspension puts it back in the visit list: live only after a new check
         Reply back = post("/admin/shops/" + salon + "/reinstate", Map.of("version", shopVersion()), admin);
@@ -1293,13 +1289,10 @@ class SalonBookingIntegrationTest {
         return call(HttpMethod.POST, "/bookings", body, who, key);
     }
 
-    private Reply walkIn(UUID who, List<UUID> services, UUID staffId, Instant start, UUID key) {
+    private Reply walkIn(UUID who, List<UUID> services, UUID staffId, UUID key) {
         Map<String, Object> body = new HashMap<>();
         body.put("serviceIds", services);
         body.put("staffId", staffId.toString());
-        if (start != null) {
-            body.put("startAt", start.toString());
-        }
         return call(HttpMethod.POST, "/salon/walk-ins", body, who, key);
     }
 

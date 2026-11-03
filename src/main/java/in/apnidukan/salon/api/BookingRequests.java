@@ -37,13 +37,11 @@ public final class BookingRequests {
     }
 
     /**
-     * Add a walk-in. Send an Idempotency-Key header.
-     * @param startAt null = start now; otherwise the later time suggested for that barber today (held for them)
+     * Add a walk-in: it starts now with a barber who is free now. Send an Idempotency-Key header.
      * @param name    optional, the customer's name
      */
     public record WalkIn(@NotEmpty @Size(max = 10) List<@NotNull UUID> serviceIds,
                          @NotNull UUID staffId,
-                         Instant startAt,
                          @Size(max = 60) String name) {
     }
 
