@@ -1,6 +1,7 @@
 package in.apnidukan.salon.service;
 
 import in.apnidukan.common.context.ShopDirectory;
+import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.FileRefs;
@@ -103,13 +104,14 @@ public class BookingService {
     private final StartCodes codes;
     private final SalonNotices notices;
     private final FileRefs files;
+    private final UserDirectory users;
     private final Clock clock;
     private final SecureRandom random = new SecureRandom();
 
     public BookingService(ShopDirectory shops, SalonCalendar calendar, AppointmentStore appointments,
                           StrikeStore strikes, SalonAccessStore salonAccess, SalonServiceItemRepository services,
                           SalonStaffRepository staff, StaffSkillRepository skills, StaffShiftRepository shifts,
-                          StartCodes codes, SalonNotices notices, FileRefs files, Clock clock) {
+                          StartCodes codes, SalonNotices notices, FileRefs files, UserDirectory users, Clock clock) {
         this.shops = shops;
         this.calendar = calendar;
         this.appointments = appointments;
@@ -122,6 +124,7 @@ public class BookingService {
         this.codes = codes;
         this.notices = notices;
         this.files = files;
+        this.users = users;
         this.clock = clock;
     }
 
@@ -207,6 +210,7 @@ public class BookingService {
     public BookingView book(UUID customerId, String idempotencyKey, Book in) {
         UUID requestId = SalonDayService.requestId(idempotencyKey);
         appointments.lockCustomer(customerId);   // this person's bookings run one after the other
+        requireLiveAccount(customerId);
         Optional<Appointment> earlier = appointments.findByRequest(customerId, requestId);
         if (earlier.isPresent()) {
             requireSameBooking(earlier.get(), in);
@@ -290,6 +294,7 @@ public class BookingService {
     @Transactional
     public BookingView reschedule(UUID customerId, UUID bookingId, Instant newStart) {
         appointments.lockCustomer(customerId);
+        requireLiveAccount(customerId);
         // The shop row (FOR SHARE) before the booking's row, the same order as booking and suspending a shop
         UUID shopId = mine(customerId, appointments.find(bookingId)).shopId();
         ShopCard salon = shops.findForBooking(shopId).orElseThrow();   // see ShopDirectory.findForBooking
@@ -344,6 +349,16 @@ public class BookingService {
     }
 
     // ---------- rules ----------
+
+    /**
+     * Checked after taking the customer's lock: an account deleted while this request waited (or used with a
+     * token from before the deletion while Redis is down) can't book or move. 401, like any signed-out call.
+     */
+    private void requireLiveAccount(UUID customerId) {
+        if (!users.isActive(customerId)) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "NOT_SIGNED_IN", "Sign in first.");
+        }
+    }
 
     /**
      * 403 BOOKING_BLOCKED if 3 strikes fall within 60 days of each other and the latest of them was less than

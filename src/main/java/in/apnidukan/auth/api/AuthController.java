@@ -3,6 +3,7 @@ package in.apnidukan.auth.api;
 import in.apnidukan.common.web.ClientAddress;
 
 import in.apnidukan.auth.api.AuthRequests.CompleteRecovery;
+import in.apnidukan.auth.api.AuthRequests.DeleteAccount;
 import in.apnidukan.auth.api.AuthRequests.Logout;
 import in.apnidukan.auth.api.AuthRequests.Refresh;
 import in.apnidukan.auth.api.AuthRequests.SendEmailCode;
@@ -77,6 +78,27 @@ public class AuthController {
     @PatchMapping("/me")
     public UserResponse updateMe(@Valid @RequestBody UpdateMe body) {
         return UserResponse.from(auth.rename(currentUser.get().userId(), body.name()));
+    }
+
+    /**
+     * Deleting your account, step 1: a code to your own phone. 202; 409 SHOP_OWNER if you own a shop (close or
+     * hand it over first).
+     */
+    @PostMapping("/me/delete-code")
+    public ResponseEntity<Void> sendDeleteCode(HttpServletRequest request) {
+        auth.sendDeleteCode(currentUser.get().userId(), client.of(request));
+        return ResponseEntity.accepted().build();
+    }
+
+    /**
+     * Step 2: with the code, the account is deleted and every device signed out. Upcoming bookings are cancelled
+     * (no strike); past ones stay for the shops, without your name. 204. Can't be undone; the same phone can sign
+     * up again later as a new account.
+     */
+    @PostMapping("/me/delete")
+    public ResponseEntity<Void> deleteAccount(@Valid @RequestBody DeleteAccount body, HttpServletRequest request) {
+        auth.deleteAccount(currentUser.get().userId(), body.code(), client.of(request));
+        return ResponseEntity.noContent().build();
     }
 
     /** Signed in, replacing an already verified email: first a code to your own phone. 202. */

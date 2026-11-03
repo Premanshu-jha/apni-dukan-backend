@@ -1192,6 +1192,67 @@ class SalonBookingIntegrationTest {
                 String.class)).contains("name board").contains("submit again");
     }
 
+    @Test
+    void aCustomerWhoDeletesTheirAccountLosesUpcomingBookingsTheSalonIsToldAndRecordsStay() {
+        patch("/auth/me", Map.of("name", "Ravi Kumar"), customer);
+        post("/me/push-subscriptions", subscription(FCM), customer);
+        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju
+        jdbc.update("UPDATE appointments SET booking_for = 'Ravi junior' WHERE id = ?", b);
+        String oldToken = token(customer);
+
+        assertThat(field(post("/auth/me/delete-code", Map.of(), owner).body(), "code")).isEqualTo("SHOP_OWNER");
+        assertThat(post("/auth/me/delete-code", Map.of(), customer).status()).isEqualTo(202);
+        String code = in.apnidukan.support.CapturingSenders.codeSentTo(
+                in.apnidukan.support.CapturingSenders.LAST_SMS, "9000000101");
+        Reply wrong = post("/auth/me/delete", Map.of("code", code.equals("000000") ? "111111" : "000000"), customer);
+        assertThat(wrong.status()).as(wrong.text()).isEqualTo(400);
+        assertThat(count("users WHERE deleted_at IS NOT NULL")).isZero();
+        assertThat(post("/auth/me/delete", Map.of("code", code), customer).status()).isEqualTo(204);
+
+        // Who it was is gone; the row and its history stay
+        assertThat(jdbc.queryForObject("SELECT (phone IS NULL) AND (name IS NULL) AND (deleted_at IS NOT NULL) "
+                + "FROM users WHERE id = ?", Boolean.class, customer)).isTrue();
+        assertThat(status(b)).isEqualTo("CANCELLED_BY_CUSTOMER");
+        assertThat(count("customer_strikes")).isZero();
+        assertThat(count("push_subscriptions")).isZero();
+        assertThat(count("notification_jobs WHERE status = 'PENDING' AND user_id = '" + customer + "'")).isZero();
+        assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE type = 'SALON_BOOKING_CANCELLED' "
+                + "AND user_id = ?", String.class, owner)).startsWith("A customer cancelled")
+                .contains("deleted their account").doesNotContain("Ravi");
+        // Their own messages keep no text, their bookings no "for" name
+        assertThat(count("notification_jobs WHERE user_id = '" + customer + "' AND body <> ''")).isZero();
+        assertThat(jdbc.queryForObject("SELECT booking_for FROM appointments WHERE id = ?", String.class, b)).isNull();
+        // A token from before the deletion can't book, even if the sign-out check let it through (Redis down)
+        assertThat(field(book(customer, at("15:00"), List.of(haircut), UUID.randomUUID()).body(), "code"))
+                .isEqualTo("NOT_SIGNED_IN");
+        String day = get("/salon/day", owner).text();
+        assertThat(day).contains(b.toString()).contains("\"customerName\":\"Customer\"").doesNotContain("9000000101");
+        // Sessions in use stop at once
+        Integer status = http.get().uri("/salon/upcoming").headers(h -> h.setBearerAuth(oldToken))
+                .exchange((rq, res) -> Integer.valueOf(res.getStatusCode().value()));
+        assertThat(status).isEqualTo(401);
+        // The phone is free for a brand-new account
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000101"), owner);
+        assertThat(jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000101'", UUID.class))
+                .isNotEqualTo(customer);
+    }
+
+    @Test
+    void aBarberWhoDeletesHisAccountLeavesTheSalonButHisNameAndHistoryStay() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", true), owner);
+        assertThat(post("/auth/me/delete-code", Map.of(), rajuUser).status()).isEqualTo(202);
+        String code = in.apnidukan.support.CapturingSenders.codeSentTo(
+                in.apnidukan.support.CapturingSenders.LAST_SMS, "9000000201");
+        assertThat(post("/auth/me/delete", Map.of("code", code), rajuUser).status()).isEqualTo(204);
+        assertThat(jdbc.queryForObject("SELECT user_id FROM salon_staff WHERE id = ?", UUID.class, raju)).isNull();
+        assertThat(jdbc.queryForObject("SELECT name FROM salon_staff WHERE id = ?", String.class, raju))
+                .isEqualTo("Raju");
+        assertThat(count("shop_members WHERE user_id = '" + rajuUser + "'")).isZero();
+        assertThat(count("walk_in_access")).isZero();
+    }
+
     // ---------- helpers ----------
 
     private long shopVersion() {

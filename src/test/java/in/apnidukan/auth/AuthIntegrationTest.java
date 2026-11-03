@@ -426,6 +426,27 @@ class AuthIntegrationTest {
     }
 
     @Test
+    void aDeletedAccountCantSignInAgainButItsPhoneStartsANewOne() {
+        Reply first = signIn(PHONE);
+        String access = (String) first.body().get("accessToken");
+        String refresh = (String) first.body().get("refreshToken");
+        jdbc.update("UPDATE refresh_tokens SET device = 'Pixel 8'");
+        assertThat(post("/auth/me/delete-code", Map.of(), access).status()).isEqualTo(202);
+        String code = codeSentTo(LAST_SMS, PHONE);
+        assertThat(post("/auth/me/delete", Map.of("code", code), access).status()).isEqualTo(204);
+        assertThat(get("/auth/me", access).status()).isEqualTo(401);
+        assertThat(post("/auth/refresh", Map.of("refreshToken", refresh), null).status()).isEqualTo(401);
+        Integer labelled = jdbc.queryForObject("SELECT count(*) FROM refresh_tokens WHERE device IS NOT NULL",
+                Integer.class);
+        assertThat(labelled).isZero();   // device names can say whose phone it was
+
+        Reply again = signIn(PHONE);
+        assertThat(again.body().get("newUser")).isEqualTo(true);
+        assertThat(((Map<?, ?>) again.body().get("user")).get("id"))
+                .isNotEqualTo(((Map<?, ?>) first.body().get("user")).get("id"));
+    }
+
+    @Test
     void dailySmsCapPausesSendingToProtectTheBill() {
         redis.opsForValue().set("rl:sms-day", "500");
         Reply r = post("/auth/otp/send", Map.of("phone", PHONE), null);

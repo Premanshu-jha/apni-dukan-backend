@@ -57,4 +57,9 @@ public class SalonAccessStore {
     public void revokeWalkIns(UUID shopId, UUID userId) {
         jdbc.update("DELETE FROM walk_in_access WHERE shop_id = ? AND user_id = ?", shopId, userId);
     }
+
+    /** Takes walk-in access away from this person in every salon (their account was deleted). */
+    public void revokeAllWalkIns(UUID userId) {
+        jdbc.update("DELETE FROM walk_in_access WHERE user_id = ?", userId);
+    }
 }

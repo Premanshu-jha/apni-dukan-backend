@@ -26,6 +26,11 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
             + "WHERE t.id = :id AND t.revokeReason = in.apnidukan.auth.domain.RevokeReason.ROTATED")
     int markReuseDetected(UUID id);
 
+    /** Forgets the device labels of a person's sign-ins (their account was deleted). */
+    @Modifying
+    @Query("UPDATE RefreshToken t SET t.device = NULL WHERE t.userId = :userId")
+    int forgetDevices(UUID userId);
+
     /** Signs a person out of every device. */
     @Modifying
     @Query("UPDATE RefreshToken t SET t.revokedAt = :now, "

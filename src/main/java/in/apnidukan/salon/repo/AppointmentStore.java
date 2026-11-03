@@ -103,6 +103,12 @@ public class AppointmentStore {
                 + "WHERE id = ? AND status = 'NO_SHOW'", to.name(), reason, at(now), id) == 1;
     }
 
+    /** Clears the "for" names this customer typed on their bookings (their account was deleted). */
+    public void forgetBookingFor(UUID customerId) {
+        jdbc.update("UPDATE appointments SET booking_for = NULL WHERE customer_id = ? AND booking_for IS NOT NULL",
+                customerId);
+    }
+
     /** CONFIRMED → NO_SHOW, CANCELLED_BY_CUSTOMER or CANCELLED_BY_SALON; frees the barber's time. */
     public boolean close(UUID id, AppointmentStatus to, String reason, Instant now) {
         return jdbc.update("UPDATE appointments SET status = ?, cancel_reason = ?, updated_at = ? "

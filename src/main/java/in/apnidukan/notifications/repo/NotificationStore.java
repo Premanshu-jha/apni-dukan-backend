@@ -44,6 +44,18 @@ public class NotificationStore {
                 + "WHERE ref_id = ? AND status = 'PENDING'", at(now), refId);
     }
 
+    /** Cancels everything still waiting to go to this person (their account was deleted). */
+    public int cancelPendingForUser(UUID userId, Instant now) {
+        return jdbc.update("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = ? "
+                + "WHERE user_id = ? AND status = 'PENDING'", at(now), userId);
+    }
+
+    /** Empties the text of every message this person got or would have got (their account was deleted). */
+    public int blankForUser(UUID userId) {
+        return jdbc.update("UPDATE notification_jobs SET title = '', body = '', url = NULL, sms_variables = NULL "
+                + "WHERE user_id = ?", userId);
+    }
+
     /**
      * New text for one message type about this subject, on the rows still waiting. Their lease and place in the
      * queue (next_try_at) don't change: a server sending one right now keeps it and records its outcome as usual.

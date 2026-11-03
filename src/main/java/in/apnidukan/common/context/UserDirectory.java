@@ -23,6 +23,15 @@ public interface UserDirectory {
     /** Name (null if not set) and phone of each person found; unknown ids are left out. */
     Map<UUID, Person> find(Collection<UUID> userIds);
 
+    /** False once the person deleted their account (or for an unknown id). */
+    boolean isActive(UUID userId);
+
+    /**
+     * Like isActive, and holds the person's row until the transaction ends, so deleting the account waits for it
+     * (and a deletion in progress is waited for first). Must run inside a transaction.
+     */
+    boolean lockIfActive(UUID userId);
+
     /** True only for the Apni Dukan field team (users.admin). */
     boolean isAdmin(UUID userId);
 

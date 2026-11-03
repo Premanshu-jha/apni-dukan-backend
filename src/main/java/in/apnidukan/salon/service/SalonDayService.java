@@ -364,6 +364,8 @@ public class SalonDayService {
         boolean salonLive = shops.findForBooking(c.shopId()).map(s -> "APPROVED".equals(s.status())).orElse(false);
         UUID barber = found.staffId();
         boolean barberActive = appointments.lockActiveBarber(barber);
+        // A customer who deleted their account since can't be waited for
+        boolean customerLive = found.customerId() == null || users.isActive(found.customerId());
         Appointment a = lockedFor(c, appointmentId);
         Instant now = now();
         requireStatus(a, AppointmentStatus.NO_SHOW);
@@ -371,7 +373,8 @@ public class SalonDayService {
             throw wrongStatus("Too late to undo here (more than 24 hours). Apni Dukan support can still remove the "
                     + "customer's strike.");
         }
-        boolean timeLeft = barberActive && salonLive && a.staffId().equals(barber) && now.isBefore(a.endsAt())
+        boolean timeLeft = barberActive && salonLive && customerLive && a.staffId().equals(barber)
+                && now.isBefore(a.endsAt())
                 && appointments.holding(List.of(a.staffId()), a.startsAt(), a.endsAt(), a.id()).isEmpty();
         boolean changed;
         try {

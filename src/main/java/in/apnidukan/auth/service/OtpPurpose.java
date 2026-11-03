@@ -9,7 +9,9 @@ public enum OtpPurpose {
     RECOVER_EMAIL(Duration.ofMinutes(10)),
     RECOVER_PHONE(Duration.ofMinutes(10)),
     /** Code to the person's own phone, needed to replace an already verified email. */
-    CHANGE_EMAIL(Duration.ofMinutes(10));
+    CHANGE_EMAIL(Duration.ofMinutes(10)),
+    /** Code to the person's own phone, to confirm deleting their account. */
+    DELETE_ACCOUNT(Duration.ofMinutes(10));
 
     private final Duration validFor;
 

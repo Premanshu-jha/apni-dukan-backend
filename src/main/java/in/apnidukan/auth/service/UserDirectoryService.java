@@ -65,6 +65,18 @@ public class UserDirectoryService implements UserDirectory {
 
     @Override
     @Transactional(readOnly = true)
+    public boolean isActive(UUID userId) {
+        return users.findById(userId).filter(u -> !u.isDeleted()).isPresent();
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean lockIfActive(UUID userId) {
+        return users.lockIfActive(userId).orElse(false);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public boolean isAdmin(UUID userId) {
         return users.findById(userId).map(User::isAdmin).orElse(false);
     }

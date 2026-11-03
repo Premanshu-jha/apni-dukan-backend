@@ -119,7 +119,15 @@ public class SalonNotices {
      * being deleted). The time is free again.
      */
     public void salonToldOfCancel(Appointment a, String note, Instant now) {
-        String who = customerName(a);
+        salonToldOfCancel(a, customerName(a), note, now);
+    }
+
+    /** The customer deleted their account: the salon is told the time is free, without the customer's name. */
+    public void salonToldOfDeletedAccount(Appointment a, Instant now) {
+        salonToldOfCancel(a, "A customer", " They deleted their account.", now);
+    }
+
+    private void salonToldOfCancel(Appointment a, String who, String note, Instant now) {
         String barber = barberName(a.staffId());
         tellSalon(a, List.of(a.staffId()), "SALON_BOOKING_CANCELLED", "Booking cancelled, " + TIME.format(a.startsAt()),
                 who + " cancelled " + DAY_TIME.format(a.startsAt()) + " with " + barber + ". Booking " + a.bookingNo()
