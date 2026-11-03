@@ -2,6 +2,7 @@ package in.apnidukan.shops.service;
 
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.common.text.TextCleaner.TextField;
 import in.apnidukan.shops.api.ShopRequests.CreateShop;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
 import in.apnidukan.shops.api.ShopResponse;
@@ -23,11 +24,13 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Locale;
-import java.text.Normalizer;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
+
+import static in.apnidukan.common.error.DatabaseErrors.violated;
+import static in.apnidukan.common.text.TextCleaner.clean;
 
 /**
  * Shop registration (step 1) and My shop. The person always comes from the sign-in token; the shop is looked up
@@ -39,16 +42,11 @@ public class ShopService implements ShopMemberships {
     /** 2-digit state code, PAN (5 letters, 4 digits, 1 letter), entity number, 'Z', check character. */
     private static final Pattern GSTIN = Pattern.compile("[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]");
     private static final String GSTIN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    /** Any kind of space, in any script (Java's \\s alone only knows ASCII spaces). */
-    private static final Pattern SPACES = Pattern.compile("[\\s\\p{Z}]+");
     /** Unique key that allows one shop per person (named in V3). */
     static final String ONE_SHOP_PER_PERSON = "ux_shop_members_user";
     private static final Pattern UDYAM = Pattern.compile("UDYAM-[A-Z]{2}-[0-9]{2}-[0-9]{7}");
 
-    /** A text field's name (for error messages) and its allowed length after cleaning; max is the column size in V3. */
-    record TextField(String name, int minLength, int maxLength) {
-    }
-
+    /** Each text field's allowed length after cleaning; max is the column size in V3. */
     static final TextField NAME = new TextField("name", 2, 100);
     static final TextField OWNER_NAME = new TextField("ownerName", 2, 100);
     static final TextField ADDRESS_LINE = new TextField("addressLine", 5, 200);
@@ -75,8 +73,8 @@ public class ShopService implements ShopMemberships {
             throw alreadyHasShop();
         }
         Instant now = now();
-        ShopDetails details = new ShopDetails(text(NAME, in.name()), text(OWNER_NAME, in.ownerName()),
-                text(ADDRESS_LINE, in.addressLine()), text(AREA, in.area()), text(CITY, in.city()),
+        ShopDetails details = new ShopDetails(clean(NAME, in.name()), clean(OWNER_NAME, in.ownerName()),
+                clean(ADDRESS_LINE, in.addressLine()), clean(AREA, in.area()), clean(CITY, in.city()),
                 in.pincode(), coordinate(in.latitude()), coordinate(in.longitude()),
                 gstin(in.gstin()), udyam(in.udyamNumber()));
         Shop shop = new Shop(shops.nextShopCode(), details, now);
@@ -113,11 +111,11 @@ public class ShopService implements ShopMemberships {
         }
         ShopDetails old = shop.details();
         ShopDetails updated = new ShopDetails(
-                in.name() == null ? old.name() : text(NAME, in.name()),
-                in.ownerName() == null ? old.ownerName() : text(OWNER_NAME, in.ownerName()),
-                in.addressLine() == null ? old.addressLine() : text(ADDRESS_LINE, in.addressLine()),
-                in.area() == null ? old.area() : text(AREA, in.area()),
-                in.city() == null ? old.city() : text(CITY, in.city()),
+                in.name() == null ? old.name() : clean(NAME, in.name()),
+                in.ownerName() == null ? old.ownerName() : clean(OWNER_NAME, in.ownerName()),
+                in.addressLine() == null ? old.addressLine() : clean(ADDRESS_LINE, in.addressLine()),
+                in.area() == null ? old.area() : clean(AREA, in.area()),
+                in.city() == null ? old.city() : clean(CITY, in.city()),
                 in.pincode() == null ? old.pincode() : in.pincode(),
                 in.latitude() == null ? old.latitude() : coordinate(in.latitude()),
                 in.longitude() == null ? old.longitude() : coordinate(in.longitude()),
@@ -149,75 +147,6 @@ public class ShopService implements ShopMemberships {
     private ShopMember membership(UUID userId) {
         return members.findByUserId(userId).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "NO_SHOP",
                 "You haven't registered or joined a shop yet."));
-    }
-
-    /**
-     * Cleans a name or address before saving, or refuses it with a 400.
-     * Example: "  Sharma   Store " becomes "Sharma Store".
-     */
-    static String text(TextField field, String value) {
-        String normal = toNormalLetters(value);
-        refuseHiddenCharacters(field.name(), normal);   // must run before collapseSpaces (see refuseHiddenCharacters)
-        String cleaned = collapseSpaces(normal);
-        requireTwoLettersOrDigits(field.name(), cleaned);
-        requireLength(field, cleaned);
-        return cleaned;
-    }
-
-    /** Look-alike letters become normal ones: full-width "Sharma" from some keyboards becomes plain "Sharma". */
-    private static String toNormalLetters(String value) {
-        return Normalizer.normalize(value, Normalizer.Form.NFKC);
-    }
-
-    /**
-     * Refuses invisible characters, such as the right-to-left override that can make a name display differently
-     * from what was typed. Tab and newline are allowed: they come from pasted addresses and collapseSpaces tidies them.
-     * Runs before collapseSpaces, because that would turn line separators into spaces and hide them from this check.
-     */
-    private static void refuseHiddenCharacters(String field, String value) {
-        boolean found = value.codePoints().anyMatch(ShopService::isHidden);
-        if (found) {
-            throw invalid(field, "contains invisible or special characters");
-        }
-    }
-
-    private static boolean isHidden(int c) {
-        if (c == '\t' || c == '\n' || c == '\r') {
-            return false;
-        }
-        int type = Character.getType(c);
-        return type == Character.CONTROL                 // control codes, e.g. the null character
-                || type == Character.FORMAT              // zero-width space, right-to-left override
-                || type == Character.PRIVATE_USE         // characters with no agreed meaning
-                || type == Character.UNASSIGNED          // not a real character
-                || type == Character.SURROGATE           // half of a broken emoji
-                || type == Character.LINE_SEPARATOR      // Unicode line separator
-                || type == Character.PARAGRAPH_SEPARATOR; // Unicode paragraph separator
-    }
-
-    /** Any run of spaces, tabs or newlines becomes one space, and the ends are trimmed. */
-    private static String collapseSpaces(String value) {
-        return SPACES.matcher(value).replaceAll(" ").strip();
-    }
-
-    /**
-     * Checks the length of the cleaned value, which is what gets saved. @Size in the request only sees what was sent:
-     * collapsing spaces can make it shorter, and toNormalLetters can make it longer (one character can become 3 or
-     * more), which would otherwise reach the database too long and fail with a 500. Counted like Postgres counts.
-     */
-    private static void requireLength(TextField field, String value) {
-        int length = value.codePointCount(0, value.length());
-        if (length < field.minLength() || length > field.maxLength()) {
-            throw invalid(field.name(), "must be " + field.minLength() + " to " + field.maxLength() + " characters");
-        }
-    }
-
-    /** Refuses values like "!!" or "--". Letters in any script count, so Hindi names pass. */
-    private static void requireTwoLettersOrDigits(String field, String value) {
-        long count = value.codePoints().filter(Character::isLetterOrDigit).count();
-        if (count < 2) {
-            throw invalid(field, "must have at least 2 letters or digits");
-        }
     }
 
     /** Stored to 6 decimals (about 10 cm), the column's precision. */
@@ -274,17 +203,6 @@ public class ShopService implements ShopMemberships {
     /** Adds the two "digits" of a number written in base 36, e.g. 70 = 1 x 36 + 34, so it becomes 1 + 34 = 35. */
     private static int addDigitsInBase36(int number) {
         return number / 36 + number % 36;
-    }
-
-    /** Whether the database refused the write because of this named constraint. */
-    private static boolean violated(DataIntegrityViolationException e, String constraint) {
-        for (Throwable t = e; t != null; t = t.getCause()) {
-            if (t instanceof org.hibernate.exception.ConstraintViolationException c
-                    && constraint.equalsIgnoreCase(c.getConstraintName())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static String compact(String value) {

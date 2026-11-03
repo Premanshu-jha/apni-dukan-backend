@@ -2,6 +2,7 @@ package in.apnidukan.common.error;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -97,6 +98,17 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleTooLarge(MaxUploadSizeExceededException e) {
         return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE)
                 .body(ErrorResponse.of("FILE_TOO_LARGE", "Files can be at most 10 MB"));
+    }
+
+    /**
+     * Two requests waited on each other in the database (a deadlock) or a lock couldn't be had: the database undid
+     * one of them. Nothing was saved for this one; trying again works.
+     */
+    @ExceptionHandler(PessimisticLockingFailureException.class)
+    public ResponseEntity<ErrorResponse> handleLockFailure(PessimisticLockingFailureException e) {
+        log.warn("Database lock conflict, answered 409 TRY_AGAIN: {}", e.getClass().getSimpleName());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ErrorResponse.of("TRY_AGAIN", "Someone else changed the same thing at the same moment. Try again."));
     }
 
     /**
