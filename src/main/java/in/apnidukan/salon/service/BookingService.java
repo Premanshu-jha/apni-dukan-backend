@@ -290,10 +290,12 @@ public class BookingService {
     @Transactional
     public BookingView reschedule(UUID customerId, UUID bookingId, Instant newStart) {
         appointments.lockCustomer(customerId);
+        // The shop row (FOR SHARE) before the booking's row, the same order as booking and suspending a shop
+        UUID shopId = mine(customerId, appointments.find(bookingId)).shopId();
+        ShopCard salon = shops.findForBooking(shopId).orElseThrow();   // see ShopDirectory.findForBooking
         Appointment a = lockMine(customerId, bookingId);
         Instant now = now();
         requireChangeable(a, now);
-        ShopCard salon = shops.findForBooking(a.shopId()).orElseThrow();   // see ShopDirectory.findForBooking
         if (!"APPROVED".equals(salon.status()) || paused(salon.id(), now)) {
             throw new ApiException(HttpStatus.CONFLICT, "SALON_NOT_BOOKABLE",
                     "The salon isn't taking online changes right now (paused, or its details are being checked "

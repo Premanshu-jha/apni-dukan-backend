@@ -6,7 +6,9 @@ import in.apnidukan.shops.service.ShopAdminService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -44,7 +46,32 @@ public class ShopAdminController {
         return admin.approve(currentUser.get().userId(), id, body.version());
     }
 
+    /** The visit didn't pass: back to DRAFT with the reason the owner sees. 409 WRONG_STATUS / SHOP_CHANGED. */
+    @PostMapping("/{id}/reject")
+    public AdminShopResponse reject(@PathVariable UUID id, @Valid @RequestBody Decision body) {
+        return admin.reject(currentUser.get().userId(), id, body.version(), body.reason());
+    }
+
+    /**
+     * Take a shop off the app (APPROVED or PENDING_VISIT), with the reason the owner sees. A salon's upcoming online
+     * bookings are cancelled and each customer gets a message.
+     */
+    @PostMapping("/{id}/suspend")
+    public AdminShopResponse suspend(@PathVariable UUID id, @Valid @RequestBody Decision body) {
+        return admin.suspend(currentUser.get().userId(), id, body.version(), body.reason());
+    }
+
+    /** End a suspension: back to PENDING_VISIT, live again after the field team approves it (11f). */
+    @PostMapping("/{id}/reinstate")
+    public AdminShopResponse reinstate(@PathVariable UUID id, @Valid @RequestBody Approve body) {
+        return admin.reinstate(currentUser.get().userId(), id, body.version());
+    }
+
     /** @param version the shop's version in the list the field team checked */
     public record Approve(@NotNull Long version) {
+    }
+
+    /** @param reason what the owner should know, e.g. "The shop photo doesn't show the shop's name board." */
+    public record Decision(@NotNull Long version, @NotBlank @Size(max = 200) String reason) {
     }
 }

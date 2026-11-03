@@ -1139,7 +1139,65 @@ class SalonBookingIntegrationTest {
                 .isEqualTo("CUSTOMER_NOT_FOUND");
     }
 
+    @Test
+    void aSuspendedSalonDisappearsItsUpcomingBookingsAreCancelledAndItCanComeBack() {
+        UUID admin = person("9000000999");
+        jdbc.update("UPDATE users SET admin = TRUE WHERE id = ?", admin);
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        assertThat(field(post("/admin/shops/" + salon + "/reject", Map.of("version", shopVersion(), "reason",
+                "Photo is blurry"), admin).body(), "code")).isEqualTo("WRONG_STATUS");   // only before approval
+        assertThat(post("/admin/shops/" + salon + "/suspend", Map.of("version", shopVersion() - 1, "reason",
+                "Closed for months"), admin).text()).contains("SHOP_CHANGED");
+
+        Reply suspended = post("/admin/shops/" + salon + "/suspend", Map.of("version", shopVersion(), "reason",
+                "Customers report it closed for months."), admin);
+        assertThat(suspended.status()).as(suspended.text()).isEqualTo(200);
+        assertThat(field(suspended.body(), "status")).isEqualTo("SUSPENDED");
+        assertThat(status(b)).isEqualTo("CANCELLED_BY_SALON");
+        String toCustomer = jdbc.queryForObject("SELECT body FROM notification_jobs WHERE ref_id = ? "
+                + "AND type = 'BOOKING_CANCELLED_BY_SALON' AND channel = 'PUSH'", String.class, b);
+        assertThat(toCustomer).contains("isn't taking online bookings").doesNotContain("months");
+        assertThat(field(get("/shops/me", owner).body(), "statusReason"))
+                .isEqualTo("Customers report it closed for months.");
+        assertThat(count("notification_jobs WHERE type = 'SHOP_SUSPENDED' AND user_id = '" + owner + "'"))
+                .isEqualTo(1);
+        assertThat((List<?>) get("/salons?lat=17.466&lng=78.365", customer).body()).isEmpty();
+        assertThat(book(customer, at("13:00"), List.of(haircut), UUID.randomUUID()).status()).isEqualTo(404);
+        // The salon still runs its own day (walk-ins)
+        assertThat(walkIn(owner, List.of(haircut), raju, null, UUID.randomUUID()).status()).isEqualTo(201);
+
+        // Ending the suspension puts it back in the visit list: live only after a new check
+        Reply back = post("/admin/shops/" + salon + "/reinstate", Map.of("version", shopVersion()), admin);
+        assertThat(field(back.body(), "status")).as(back.text()).isEqualTo("PENDING_VISIT");
+        assertThat(field(back.body(), "statusReason")).isNull();
+        assertThat((List<?>) get("/salons?lat=17.466&lng=78.365", customer).body()).isEmpty();
+        assertThat(approve(salon, admin).status()).isEqualTo(200);
+        assertThat((List<?>) get("/salons?lat=17.466&lng=78.365", customer).body()).hasSize(1);
+        assertThat(status(b)).isEqualTo("CANCELLED_BY_SALON");   // cancelled bookings stay cancelled
+    }
+
+    @Test
+    void aShopWhoseVisitDidntPassGoesBackToDraftWithTheReason() {
+        UUID admin = person("9000000999");
+        jdbc.update("UPDATE users SET admin = TRUE WHERE id = ?", admin);
+        jdbc.update("UPDATE shops SET status = 'PENDING_VISIT' WHERE id = ?", salon);
+        assertThat(post("/admin/shops/" + salon + "/reject", Map.of("version", shopVersion(), "reason", "x"), admin)
+                .status()).isEqualTo(400);
+        Reply sentBack = post("/admin/shops/" + salon + "/reject", Map.of("version", shopVersion(), "reason",
+                "The shop photo doesn't show the name board."), admin);
+        assertThat(field(sentBack.body(), "status")).as(sentBack.text()).isEqualTo("DRAFT");
+        Reply mine = get("/shops/me", owner);
+        assertThat(field(mine.body(), "statusReason")).isEqualTo("The shop photo doesn't show the name board.");
+        assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE type = 'SHOP_NOT_APPROVED'",
+                String.class)).contains("name board").contains("submit again");
+    }
+
     // ---------- helpers ----------
+
+    private long shopVersion() {
+        Long v = jdbc.queryForObject("SELECT version FROM shops WHERE id = ?", Long.class, salon);
+        return v == null ? 0 : v;
+    }
 
     /** The salon-side messages queued: "user TYPE body", without the booking number at the end. */
     private List<String> salonNotices() {
