@@ -54,6 +54,11 @@ public class User {
         this.updatedAt = now;
     }
 
+    public void rename(String name, Instant now) {
+        this.name = name;
+        this.updatedAt = now;
+    }
+
     public void changePhone(String phone, Instant now) {
         this.phone = phone;
         this.updatedAt = now;

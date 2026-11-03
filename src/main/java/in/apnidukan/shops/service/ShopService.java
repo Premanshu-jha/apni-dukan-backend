@@ -10,6 +10,7 @@ import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopDetails;
 import in.apnidukan.shops.domain.ShopMember;
 import in.apnidukan.shops.domain.ShopRole;
+import in.apnidukan.shops.domain.ShopType;
 import in.apnidukan.shops.repo.ShopMemberRepository;
 import in.apnidukan.shops.repo.ShopRepository;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -77,7 +78,7 @@ public class ShopService implements ShopMemberships {
                 clean(ADDRESS_LINE, in.addressLine()), clean(AREA, in.area()), clean(CITY, in.city()),
                 in.pincode(), coordinate(in.latitude()), coordinate(in.longitude()),
                 gstin(in.gstin()), udyam(in.udyamNumber()));
-        Shop shop = new Shop(shops.nextShopCode(), details, now);
+        Shop shop = new Shop(shops.nextShopCode(), ShopType.KIRANA, details, now);
         try {
             shops.saveAndFlush(shop);   // new entity (id still null) → INSERT; Hibernate fills shop.getId()
             members.saveAndFlush(new ShopMember(shop.getId(), userId, ShopRole.OWNER, now));
