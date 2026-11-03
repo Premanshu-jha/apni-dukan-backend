@@ -1,6 +1,7 @@
 package in.apnidukan.auth.notify;
 
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.common.notify.TextMessages;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,7 +31,7 @@ import java.util.Map;
  */
 @Component
 @ConditionalOnProperty(name = "app.sms.provider", havingValue = "msg91", matchIfMissing = true)
-public class Msg91SmsSender implements SmsSender {
+public class Msg91SmsSender implements SmsSender, TextMessages {
 
     private static final Logger log = LoggerFactory.getLogger(Msg91SmsSender.class);
 
@@ -86,6 +87,19 @@ public class Msg91SmsSender implements SmsSender {
             return;
         }
         send(accountMovedTemplateId, Map.of("mobiles", "91" + phone, "ENDING", newPhoneEnding));
+    }
+
+    /** A booking message from its own template; false (retry later) instead of an error if MSG91 refuses. */
+    @Override
+    public boolean send(String phone, String templateId, Map<String, String> variables) {
+        Map<String, String> recipient = new java.util.HashMap<>(variables);
+        recipient.put("mobiles", "91" + phone);
+        try {
+            send(templateId, recipient);
+            return true;
+        } catch (ApiException e) {
+            return false;   // already logged in send()
+        }
     }
 
     private void send(String templateId, Map<String, String> recipient) {
