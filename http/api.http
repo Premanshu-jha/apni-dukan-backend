@@ -459,7 +459,7 @@ Authorization: Bearer {{accessToken}}
 POST {{baseUrl}}/salon/appointments/{{bookingId}}/no-show
 Authorization: Bearer {{accessToken}}
 
-### 16a. Salon: undo a No-show pressed by mistake (owner or helper, within 24 hours): the strike goes
+### 16a. Salon: undo a No-show (owner or helper, within 24 hours): the strike goes, the booking is closed
 POST {{baseUrl}}/salon/appointments/{{bookingId}}/undo-no-show
 Authorization: Bearer {{accessToken}}
 

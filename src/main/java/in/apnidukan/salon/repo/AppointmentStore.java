@@ -94,13 +94,20 @@ public class AppointmentStore {
                 + "updated_at = ? WHERE id = ? AND status = 'CONFIRMED'", at(now), withCode, at(now), id) == 1;
     }
 
-    /**
-     * Undoing a no-show: NO_SHOW → CONFIRMED (holds the barber's time again; the no-overlap rule refuses it if
-     * someone else got that time) or → CANCELLED_BY_SALON with the reason (when its time is over or taken).
-     */
+    /** Undoing a no-show: NO_SHOW → the given status (CANCELLED_BY_SALON) with the reason. */
     public boolean undoNoShow(UUID id, AppointmentStatus to, String reason, Instant now) {
         return jdbc.update("UPDATE appointments SET status = ?, cancel_reason = ?, updated_at = ? "
                 + "WHERE id = ? AND status = 'NO_SHOW'", to.name(), reason, at(now), id) == 1;
+    }
+
+    /**
+     * The automatic no-show: every booking and held walk-in still CONFIRMED whose start was at or before
+     * {@code startedBy} becomes NO_SHOW, in one statement; returns the rows it changed (each only once, even with
+     * two servers running this).
+     */
+    public List<Appointment> markNoShows(Instant startedBy, Instant now) {
+        return jdbc.query("UPDATE appointments SET status = 'NO_SHOW', updated_at = ? WHERE status = 'CONFIRMED' "
+                + "AND kind <> 'BLOCK' AND starts_at <= ? RETURNING " + COLUMNS, ROW, at(now), at(startedBy));
     }
 
     /** Clears the "for" names this customer typed on their bookings (their account was deleted). */

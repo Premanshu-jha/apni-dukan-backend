@@ -387,9 +387,9 @@ The customer picks services and a time; the backend picks the barber. Another pe
 | `GET /upcoming` | owner, helper, anyone with walk-in access: the salon; other barbers: their own | Bookings and held walk-ins still to come across the next 31 days, soonest first (up to 200), including ones running late |
 | `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or his earliest start today (exact minutes). Add with `startAt` null = start now (IN_SERVICE) or a later time today (held). 409 `BARBER_BUSY` with his next free time |
 | `GET /members` · `PUT /members/{userId}/walk-in-access {allowed}` | owner | Who may add walk-ins besides the owner (a helper or barber) |
-| `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before. A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper) |
-| `POST /appointments/{id}/no-show` | owner, helper; barber: own | From 15 min after the start (the late allowance). Frees the time; a booking gives the customer a strike |
-| `POST /appointments/{id}/undo-no-show` | owner, helper | Pressed by mistake, within 24 h of the start: the strike goes. It waits again (press Start) if its time isn't over and the barber is still free; otherwise it is closed as cancelled by the salon ("No-show undone"), with no message to the customer. Later, only support can remove the strike |
+| `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before until 15 min after the start (then it is a no-show). A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper) |
+| `POST /appointments/{id}/no-show` | owner, helper; barber: own | From 15 min after the start (the late allowance). Frees the time; a booking gives the customer a strike. Rarely needed: the job below does it within a minute |
+| `POST /appointments/{id}/undo-no-show` | owner, helper | Within 24 h of the start: the strike goes and the booking is closed as cancelled by the salon ("No-show undone"), with no message to the customer. Later, only support can remove the strike |
 | `POST /appointments/{id}/reassign {staffId}` · `/cancel {reason}` | owner, helper | Same time, another barber who does its services · salon cancel (customer told, no strike) |
 | `GET /staff/{id}/blocks/conflicts` · `POST /staff/{id}/blocks` · `DELETE .../blocks/{blockId}` | break: owner, helper, the barber; leave: owner | 409 `BLOCK_CONFLICTS` listing what's in the way; nothing saved |
 | `GET /closures` · `POST /closures {date}` · `DELETE /closures/{id}` | read: anyone in the salon; change: owner | A whole day closed for every barber, all or nothing; barbers added or switched on later get it too |
@@ -402,9 +402,11 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 first, with salon and booking number) and `blockedUntil`; `POST /strikes/{appointmentId}/remove {reason}` takes
 one back (204; the reason goes into the booking's history as `STRIKE_REMOVED`).
 
-**Lifecycle:** CONFIRMED → IN_SERVICE (Start) → COMPLETED by itself at its planned end (a job every minute; there is
-no Done button, so a long service makes the next customer wait). CONFIRMED → NO_SHOW / CANCELLED_BY_CUSTOMER /
-CANCELLED_BY_SALON. A booking nobody started stays CONFIRMED for staff to mark. BLOCKED → REMOVED. Every change is a
+**Lifecycle:** CONFIRMED → IN_SERVICE (Start, with the customer's code) → COMPLETED by itself at its planned end (a
+job every minute; there is no Done button, so a long service makes the next customer wait). CONFIRMED →
+CANCELLED_BY_CUSTOMER / CANCELLED_BY_SALON. A booking or held walk-in not started 15 minutes after its start becomes
+NO_SHOW by itself (the same job; a customer being served has always been started with their code by then): an online
+booking gives the customer a strike and a "missed booking" message. BLOCKED → REMOVED. Every change is a
 conditional update ("only if still CONFIRMED") and is logged in `appointment_events` with who did it.
 
 **Rules:** 30 minutes' notice and up to 7 days ahead (the salon's settings); quarter hours only (400
@@ -436,6 +438,7 @@ accepts but its answer times out, or Redis fails right after a send) one SMS can
 | Booking confirmed | `SMS_TEMPLATE_BOOKING_CONFIRMED` | `##SALON##`, `##WHEN##` (Tue 10 Nov, 6:30 PM), `##BOOKING##` |
 | Reminder, 60 min before | `SMS_TEMPLATE_BOOKING_REMINDER` | `##SALON##`, `##TIME##` (6:30 PM), `##AREA##`, `##CODE##`, `##UNTIL##` (6:45 PM) |
 | Rescheduled | `SMS_TEMPLATE_BOOKING_RESCHEDULED` | `##SALON##`, `##WHEN##`, `##BOOKING##` |
+| Missed (became a no-show) | `SMS_TEMPLATE_BOOKING_NO_SHOW` | `##SALON##`, `##WHEN##` |
 | Cancelled by the customer | `SMS_TEMPLATE_BOOKING_CANCELLED` | `##SALON##`, `##WHEN##` |
 | Cancelled by the salon | `SMS_TEMPLATE_BOOKING_CANCELLED_BY_SALON` | `##SALON##`, `##WHEN##`, `##REASON##` |
 | To the salon: new booking | `SMS_TEMPLATE_SALON_NEW_BOOKING` | `##CUSTOMER##`, `##WHEN##`, `##BARBER##`, `##BOOKING##` |

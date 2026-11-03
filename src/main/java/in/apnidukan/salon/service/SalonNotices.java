@@ -144,6 +144,15 @@ public class SalonNotices {
                 url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()), "REASON", reason)));
     }
 
+    /** The booking became a no-show by itself (not started 15 minutes after its start): the customer is told. */
+    public void noShow(Appointment a, ShopCard salon, Instant now) {
+        notifications.cancelPending(a.id());
+        notifications.queue(new Notice(a.customerId(), "BOOKING_NO_SHOW", a.id(), now, "Missed booking",
+                "You didn't come to " + salon.name() + " at " + TIME.format(a.startsAt()) + ". It counts as a "
+                        + "no-show; 3 within 60 days pause online booking for 30 days.",
+                url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()))));
+    }
+
     /** Started, no-show: nothing more to remind about. */
     public void closed(Appointment a) {
         notifications.cancelPending(a.id());

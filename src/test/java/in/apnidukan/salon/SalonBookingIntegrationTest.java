@@ -435,20 +435,28 @@ class SalonBookingIntegrationTest {
     }
 
     @Test
-    void appointmentsInServiceEndByThemselvesButUnstartedBookingsStay() {
+    void appointmentsInServiceEndByThemselvesAndUnstartedOnesBecomeNoShowsAfter15Minutes() {
         UUID walk = id(walkIn(owner, List.of(haircut), raju, null, UUID.randomUUID()));   // 10:00-10:30
-        UUID b = id(book(customer, at("11:00"), List.of(haircut), UUID.randomUUID()));
+        UUID b = id(book(customer, at("11:00"), List.of(haircut), UUID.randomUUID()));   // Raju
+        UUID held = id(book(customer2, at("11:00"), List.of(haircut), UUID.randomUUID()));   // Sunil (Raju is taken)
         CLOCK.set(at("10:29"));
         assertThat(autoEnd.runOnce()).isZero();
-        CLOCK.set(at("11:31"));
-        assertThat(autoEnd.runOnce()).isEqualTo(1);
-        assertThat(autoEnd.runOnce()).isZero();   // running again changes nothing
+        CLOCK.set(at("11:14"));
+        assertThat(autoEnd.runOnce()).isEqualTo(1);   // the walk-in in service is done; the others are still held
         assertThat(status(walk)).isEqualTo("COMPLETED");
-        assertThat(status(b)).isEqualTo("CONFIRMED");
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM appointment_events WHERE event = 'COMPLETED' "
-                + "AND by_user IS NULL", Integer.class)).isEqualTo(1);
-        Reply day = get("/salon/day", owner);
-        assertThat(day.text()).contains("\"notStarted\":true");
+        assertThat(get("/salon/day", owner).text()).contains("\"notStarted\":true");
+        CLOCK.set(at("11:15"));
+        assertThat(start(b, Map.of("withoutCode", true), owner).text()).contains("WRONG_STATUS");   // held until 11:15
+        assertThat(autoEnd.runOnce()).isEqualTo(2);
+        assertThat(autoEnd.runOnce()).isZero();   // running again changes nothing
+        assertThat(status(b)).isEqualTo("NO_SHOW");
+        assertThat(status(held)).isEqualTo("NO_SHOW");
+        assertThat(count("customer_strikes")).isEqualTo(2);
+        assertThat(count("appointment_events WHERE event = 'NO_SHOW' AND detail = 'automatic' AND by_user IS NULL"))
+                .isEqualTo(2);
+        assertThat(jobs(b)).contains("BOOKING_NO_SHOW:PENDING");
+        // The barbers are free again at once
+        assertThat(walkIn(owner, List.of(haircut), raju, null, UUID.randomUUID()).status()).isEqualTo(201);
     }
 
     @Test
@@ -1052,7 +1060,7 @@ class SalonBookingIntegrationTest {
     }
 
     @Test
-    void aNoShowPressedByMistakeIsUndoneTheStrikeGoesAndItCanStart() {
+    void aNoShowIsUndoneByTheOwnerTheStrikeGoesAndTheBookingIsClosed() {
         UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju, to 12:45
         CLOCK.set(at("12:20"));
         assertThat(post("/salon/appointments/" + b + "/no-show", Map.of(), owner).status()).isEqualTo(200);
@@ -1063,50 +1071,14 @@ class SalonBookingIntegrationTest {
 
         Reply undone = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
         assertThat(undone.status()).as(undone.text()).isEqualTo(200);
-        assertThat(status(b)).isEqualTo("CONFIRMED");
-        assertThat(count("customer_strikes")).isZero();
-        assertThat(count("appointment_events WHERE event = 'NO_SHOW_UNDONE' AND detail = 'waiting again, strike "
-                + "removed'")).isEqualTo(1);
-        assertThat(start(b, Map.of("withoutCode", true), owner).status()).isEqualTo(200);
-        assertThat(post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner).text())
-                .contains("WRONG_STATUS");
-    }
-
-    @Test
-    void aNoShowWhoseTimeWasGivenAwayIsClosedWhenUndone() {
-        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju, to 12:45
-        CLOCK.set(at("12:20"));
-        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
-        id(walkIn(owner, List.of(haircut), raju, null, UUID.randomUUID()));   // Raju takes a walk-in now
-        Reply undone = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
-        assertThat(undone.status()).as(undone.text()).isEqualTo(200);
         assertThat(field(undone.body(), "status")).isEqualTo("CANCELLED_BY_SALON");
         assertThat(field(undone.body(), "cancelReason")).isEqualTo("No-show undone");
         assertThat(count("customer_strikes")).isZero();
+        assertThat(count("appointment_events WHERE event = 'NO_SHOW_UNDONE' AND detail = 'strike removed'"))
+                .isEqualTo(1);
         assertThat(jobs(b)).noneMatch(j -> j.startsWith("BOOKING_CANCELLED_BY_SALON"));   // the customer isn't told
-    }
-
-    @Test
-    void aNoShowOnABarberSwitchedOffMeanwhileIsClosedWhenUndone() {
-        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju
-        CLOCK.set(at("12:20"));
-        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
-        Reply off = patch("/salon/staff/" + raju, Map.of("version", rajuVersion(), "active", false), owner);
-        assertThat(off.status()).as(off.text()).isEqualTo(200);   // a no-show isn't "upcoming"
-        Reply undone = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
-        assertThat(field(undone.body(), "status")).as(undone.text()).isEqualTo("CANCELLED_BY_SALON");
-        assertThat(count("customer_strikes")).isZero();
-    }
-
-    @Test
-    void aNoShowUndoneWhileTheSalonIsOffTheAppIsClosedNotReopened() {
-        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));
-        CLOCK.set(at("12:20"));
-        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
-        jdbc.update("UPDATE shops SET status = 'SUSPENDED' WHERE id = ?", salon);
-        Reply undone = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
-        assertThat(field(undone.body(), "status")).as(undone.text()).isEqualTo("CANCELLED_BY_SALON");
-        assertThat(count("customer_strikes")).isZero();
+        assertThat(post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner).text())
+                .contains("WRONG_STATUS");
     }
 
     @Test

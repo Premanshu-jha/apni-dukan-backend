@@ -279,7 +279,7 @@ public class SalonDayService {
     // ---------- start, no-show, reassign, cancel ----------
 
     /**
-     * CONFIRMED → IN_SERVICE, from 15 minutes before the start. An online booking needs the customer's start code,
+     * CONFIRMED → IN_SERVICE, from 15 minutes before the start until 15 minutes after it (then it is a no-show). An online booking needs the customer's start code,
      * or withoutCode (owner or helper only). A barber can start only his own appointments.
      */
     @Transactional
@@ -291,9 +291,10 @@ public class SalonDayService {
         if (now.isBefore(a.startsAt().minus(EARLY_START))) {
             throw wrongStatus("Too early: Start is allowed from 15 minutes before " + clockTime(a.startsAt()) + ".");
         }
-        if (!now.isBefore(a.endsAt())) {
-            throw wrongStatus("Its time is over (it ended at " + clockTime(a.endsAt()) + "). Mark No-show, or add "
-                    + "the customer as a walk-in.");
+        Instant heldUntil = a.startsAt().plus(LATE_ALLOWANCE);
+        if (!now.isBefore(heldUntil)) {
+            throw wrongStatus("It was held until " + clockTime(heldUntil) + " and is a no-show now. Add the customer "
+                    + "as a walk-in.");
         }
         Boolean withCode = null;
         if (a.isBooking()) {
@@ -345,27 +346,13 @@ public class SalonDayService {
     }
 
     /**
-     * Undo a No-show pressed by mistake (owner or helper, within 24 hours of the start): the customer's strike is
-     * taken back. If its time isn't over and the barber is still free, it goes back to waiting (press Start);
-     * otherwise (its time is over or taken, or the barber was switched off meanwhile) it is closed as cancelled by
-     * the salon ("No-show undone"), with no message to the customer. It waits again only while the salon takes
-     * online bookings (APPROVED). Locks in the booking order: the customer's lock (their 2-booking limit), the
-     * shop's row in shared mode (a suspension at the same moment waits, then finds the booking), the barber's row
-     * (so switching him off at the same moment can't leave it on an inactive barber), the appointment.
+     * Undo a No-show (owner or helper, within 24 hours of the start): the customer's strike is taken back and the
+     * booking is closed as cancelled by the salon ("No-show undone"), with no message to the customer. It never
+     * waits again: its 15 minutes to start are over by the time it can be a no-show.
      */
     @Transactional
     public AppointmentView undoNoShow(UUID userId, UUID appointmentId) {
         Caller c = access.ownerOrHelper(userId);
-        Appointment found = appointments.find(appointmentId).filter(x -> x.shopId().equals(c.shopId()))
-                .orElseThrow(SalonDayService::notFound);
-        if (found.customerId() != null) {
-            appointments.lockCustomer(found.customerId());
-        }
-        boolean salonLive = shops.findForBooking(c.shopId()).map(s -> "APPROVED".equals(s.status())).orElse(false);
-        UUID barber = found.staffId();
-        boolean barberActive = appointments.lockActiveBarber(barber);
-        // A customer who deleted their account since can't be waited for
-        boolean customerLive = found.customerId() == null || users.isActive(found.customerId());
         Appointment a = lockedFor(c, appointmentId);
         Instant now = now();
         requireStatus(a, AppointmentStatus.NO_SHOW);
@@ -373,28 +360,33 @@ public class SalonDayService {
             throw wrongStatus("Too late to undo here (more than 24 hours). Apni Dukan support can still remove the "
                     + "customer's strike.");
         }
-        boolean timeLeft = barberActive && salonLive && customerLive && a.staffId().equals(barber)
-                && now.isBefore(a.endsAt())
-                && appointments.holding(List.of(a.staffId()), a.startsAt(), a.endsAt(), a.id()).isEmpty();
-        boolean changed;
-        try {
-            changed = timeLeft
-                    ? appointments.undoNoShow(a.id(), AppointmentStatus.CONFIRMED, null, now)
-                    : appointments.undoNoShow(a.id(), AppointmentStatus.CANCELLED_BY_SALON, "No-show undone", now);
-        } catch (DataIntegrityViolationException e) {
-            if (hasSqlState(e, OVERLAP)) {   // the time was given to someone at this very moment
-                throw new ApiException(HttpStatus.CONFLICT, "BARBER_BUSY",
-                        "The barber's time was just given to someone else. Try Undo again.");
-            }
-            throw e;
-        }
-        if (!changed) {
+        if (!appointments.undoNoShow(a.id(), AppointmentStatus.CANCELLED_BY_SALON, "No-show undone", now)) {
             throw wrongStatus("It was changed in the meantime. Reload.");
         }
         boolean hadStrike = a.isBooking() && strikes.remove(a.id());
-        appointments.event(a.id(), now, c.userId(), "NO_SHOW_UNDONE", (timeLeft ? "waiting again" : "closed")
-                + (hadStrike ? ", strike removed" : ""));
+        appointments.event(a.id(), now, c.userId(), "NO_SHOW_UNDONE", hadStrike ? "strike removed" : null);
         return salonView(c, appointments.find(a.id()).orElseThrow());
+    }
+
+    /**
+     * The automatic no-show (AutoEndJob, every minute): a booking or held walk-in still not started 15 minutes
+     * after its start becomes NO_SHOW, which frees the barber's time. Start needs the customer's code (or the
+     * owner's "without code"), so a customer being served is always started by then. An online booking gives the
+     * customer a strike, dated at its start, and a message saying so. Safe on two servers at once: each row is
+     * changed by one UPDATE only.
+     * @return how many became no-shows
+     */
+    @Transactional
+    public int markNoShows(Instant now) {
+        List<Appointment> missed = appointments.markNoShows(now.minus(LATE_ALLOWANCE), now);
+        for (Appointment a : missed) {
+            appointments.event(a.id(), now, null, "NO_SHOW", "automatic");
+            if (a.isBooking()) {
+                strikes.add(a.customerId(), a.id(), StrikeKind.NO_SHOW, a.startsAt());
+                notices.noShow(a, salonCard(a.shopId()), now);
+            }
+        }
+        return missed.size();
     }
 
     /** Gives a CONFIRMED appointment to another barber who does its services, same time. Owner or helper. */
