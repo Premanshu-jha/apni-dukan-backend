@@ -14,7 +14,9 @@
 - **7. Upload** saves the new file's id automatically for requests 8 and 9.
 - **Salon, start to end:** 6b-salon, 4 (Refresh), 6e-6k (services, a barber, his week), 11-11d (photos, Submit for
   visit), then the field team approves with 11e-11f (`users.admin = true` on their account; 11e saves the shop's id
-  and version for 11f). After that 13-13d book as a customer, 14-14f work the day as the salon, and 15-16e try moves, no-shows, breaks,
-  closed days and switching a barber off. `bookingDate` is an India
+  and version for 11f; 11g sends a shop back instead, 11h-11j suspend and reinstate a live one). After that 13-13d
+  book as a customer, 14-14f work the day as the salon (14a: what's coming up), and 15-16e try moves, no-shows (16a
+  undoes one), breaks, closed days and switching a barber off. 17-17b are support's strike pages, 18-18b delete the
+  signed-in account (use a test phone). `bookingDate` is an India
   date within the salon's booking window.
 

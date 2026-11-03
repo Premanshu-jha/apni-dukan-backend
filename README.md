@@ -142,9 +142,10 @@ flowchart TD
 | Tries per code | 5 (the 5th wrong one destroys the code). Every try is counted before checking, so parallel guesses don't get extra tries |
 | Codes per phone or email, per network | 3 per 10 minutes, 10 per day (20 per day from all networks together) |
 | Wrong codes per phone or email, per network | 10 per day (50 from all networks together), then `429 LOCKED_FOR_TODAY` |
-| Per network (IP; IPv6 counted per /64) | 10 code requests and 30 code checks per hour |
+| Per network (IP; IPv6 counted per /64) | 10 code requests and 30 code checks per hour. The IP is the caller's real one, from the header set in `CLIENT_IP_HEADER` (see the checklist) |
+| Robot check | Sign-in and recovery codes need a Cloudflare Turnstile token (`captchaToken`) once `TURNSTILE_SECRET_KEY` is set (400 `CAPTCHA_REQUIRED` / `CAPTCHA_FAILED`). If Cloudflare doesn't answer, the code is sent anyway; the limits still hold |
 | Email codes per account | 10 per day |
-| All SMS together | `SMS_DAILY_LIMIT` per day (default 500), then `503 SMS_PAUSED` |
+| All SMS together | `SMS_DAILY_LIMIT` per day (default 500), then `503 SMS_PAUSED`. At 80% an error is logged, so an alert can fire before codes stop |
 | JSON request body | 64 KB (only `POST /api/v1/files` may be larger, up to 10 MB) |
 
 Limits count per phone **and** network, so a stranger guessing your number from their own network locks only
@@ -160,16 +161,30 @@ coming back counts as copied; an old device retrying a signed-out token just get
 
 | Call | What it does |
 | --- | --- |
-| `POST /otp/send` `{phone}` | Sends a code. `+91` and a leading `0` are fine. 429 after 3 codes in 10 minutes |
+| `POST /otp/send` `{phone, captchaToken}` | Sends a code. `+91` and a leading `0` are fine. 429 after 3 codes in 10 minutes |
 | `POST /otp/verify` `{phone, code}` | Signs in (creates the account the first time) |
 | `POST /refresh` `{refreshToken}` | New token pair |
 | `POST /logout` `{refreshToken}` | Ends this session, 204 |
-| `GET /me` | The signed-in person |
+| `GET /me` · `PATCH /me {name}` | The signed-in person · set your name (salons see it on bookings) |
+| `POST /me/delete-code` · `POST /me/delete {code}` | Delete your account: a code to your own phone, then 204. 409 `SHOP_OWNER` for a shop owner (close or hand over the shop first). See below |
 | `POST /email/send-code` `{email, phoneCode?}` | Sends a 6-digit code to the email (10 min). Replacing an already verified email also needs `phoneCode` |
 | `POST /email/change-phone-code` | Sends a code to your own phone, needed to replace a verified email. The old email is told after the change |
 | `POST /email/verify` `{email, code}` | Marks the email verified |
-| `POST /recover/start` | Lost phone: code to the verified email. New email: code to the phone |
-| `POST /recover/complete` | Moves the account to the new phone or email and ends every old session |
+| `POST /recover/start` `{email, newPhone, captchaToken}` | Lost phone: a code to the verified email and one to the new phone |
+| `POST /recover/complete` | Both codes right: moves the account to the new phone and ends every old session |
+
+### Deleting an account
+
+One account works across every part of the app (kirana, salon, ...), so deleting it never deletes rows other
+records point at. Instead, in one transaction: each module closes what is still open for the person
+(`AccountDeletionListener`: upcoming salon bookings are cancelled with no strike and the salon is told "a customer
+deleted their account", a barber's sign-in is unlinked, walk-in access goes, the "for" names on their bookings are
+cleared, waiting messages are cancelled and the text of all their messages emptied, devices forgotten), a helper or
+barber leaves their shop, every device is signed out and its device label cleared, and the `users` row loses its
+phone, name and email (`deleted_at` is set). Past bookings, strikes and shop records stay, showing no name. A
+booking or move waiting behind the deletion, or a token from before it, is refused (401). Messages to a salon about earlier
+bookings (sent, or still waiting to go out) keep the name the salon saw then. The same phone can later sign up as a new
+account. A module added later (kirana orders) plugs in its own `AccountDeletionListener` to cancel its open items.
 
 ## How shops work
 
@@ -204,6 +219,11 @@ sequenceDiagram
 | `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos are set |
 | `GET /api/v1/admin/shops?status=` | Field team (`users.admin`) only, else 403. Shops in a status (default `PENDING_VISIT`) with links to both photos |
 | `POST /api/v1/admin/shops/{id}/approve` | Field team. `{version}` from the list they checked: PENDING_VISIT → APPROVED after the visit. 409 `SHOP_CHANGED` if the owner changed something since (reload, check, approve), 409 `WRONG_STATUS` from another status. Customers can find it from now on |
+| `POST /api/v1/admin/shops/{id}/reject` | Field team. `{version, reason}`: the visit didn't pass but can be fixed, PENDING_VISIT → DRAFT. The owner sees `statusReason`, fixes it and submits again. Bookings already made stay (suspend to cancel them) |
+| `POST /api/v1/admin/shops/{id}/suspend` | Field team. `{version, reason}`: APPROVED or PENDING_VISIT (e.g. found shut at its visit) → SUSPENDED, off the app. A salon's upcoming online bookings are cancelled and each customer is told ("isn't taking online bookings for now"; the field team's reason goes only to the owner). The salon can still run its own day (walk-ins) |
+| `POST /api/v1/admin/shops/{id}/reinstate` | Field team. `{version}`: SUSPENDED → PENDING_VISIT, back in the visit list; live again only once approved after a new check (so nothing changed while suspended goes live unchecked). Cancelled bookings stay cancelled |
+
+The owner gets a message for each field-team decision (approved, sent back, suspended, reinstated).
 
 Rules: the GPS pin is required and must be inside India; pincode is 6 digits; GSTIN and Udyam are optional, checked,
 and stored in capitals; text is trimmed. Unknown fields are refused with 400 `UNKNOWN_FIELD`, so nobody can send
@@ -364,14 +384,23 @@ The customer picks services and a time; the backend picks the barber. Another pe
 | Call | Who | What it does |
 | --- | --- | --- |
 | `GET /day?date=` | owner, helper, and anyone with walk-in access: all barbers; other barbers: their own | A column per barber with his hours and appointments (`notStarted` once its time passed). Never the start code |
+| `GET /upcoming` | owner, helper, anyone with walk-in access: the salon; other barbers: their own | Bookings and held walk-ins still to come across the next 31 days, soonest first (up to 200), including ones running late |
 | `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or his earliest start today (exact minutes). Add with `startAt` null = start now (IN_SERVICE) or a later time today (held). 409 `BARBER_BUSY` with his next free time |
 | `GET /members` · `PUT /members/{userId}/walk-in-access {allowed}` | owner | Who may add walk-ins besides the owner (a helper or barber) |
 | `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before. A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper) |
 | `POST /appointments/{id}/no-show` | owner, helper; barber: own | From 15 min after the start (the late allowance). Frees the time; a booking gives the customer a strike |
+| `POST /appointments/{id}/undo-no-show` | owner, helper | Pressed by mistake, within 24 h of the start: the strike goes. It waits again (press Start) if its time isn't over and the barber is still free; otherwise it is closed as cancelled by the salon ("No-show undone"), with no message to the customer. Later, only support can remove the strike |
 | `POST /appointments/{id}/reassign {staffId}` · `/cancel {reason}` | owner, helper | Same time, another barber who does its services · salon cancel (customer told, no strike) |
 | `GET /staff/{id}/blocks/conflicts` · `POST /staff/{id}/blocks` · `DELETE .../blocks/{blockId}` | break: owner, helper, the barber; leave: owner | 409 `BLOCK_CONFLICTS` listing what's in the way; nothing saved |
 | `GET /closures` · `POST /closures {date}` · `DELETE /closures/{id}` | read: anyone in the salon; change: owner | A whole day closed for every barber, all or nothing; barbers added or switched on later get it too |
 | `GET /pause` · `POST /pause {until?}` · `POST /resume` | read: anyone in the salon; change: owner, helper | Stop new online bookings (default: until midnight) |
+
+On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
+`customerPhone`, to call someone who is running late.
+
+**Support (`/api/v1/admin/salon`, `users.admin` only):** `POST /strikes/lookup {phone}` lists a customer's strikes (latest
+first, with salon and booking number) and `blockedUntil`; `POST /strikes/{appointmentId}/remove {reason}` takes
+one back (204; the reason goes into the booking's history as `STRIKE_REMOVED`).
 
 **Lifecycle:** CONFIRMED → IN_SERVICE (Start) → COMPLETED by itself at its planned end (a job every minute; there is
 no Done button, so a long service makes the next customer wait). CONFIRMED → NO_SHOW / CANCELLED_BY_CUSTOMER /
@@ -388,7 +417,9 @@ so tapping twice can't pass these limits.
 due as Web Push to each of the person's devices (`POST /me/push-subscriptions`, the key from
 `GET /push/public-key`), retrying after 1, 5 and 15 minutes. Confirmation now; reminder 60 minutes before (only for
 bookings made more than 75 minutes ahead) with the address, map link, start code and "held until"; rescheduled;
-cancelled. Moving or cancelling a booking cancels its pending messages. The server only sends to the browsers' real
+cancelled. Moving or cancelling a booking cancels its pending messages. The salon is told too: when a customer
+books, moves or cancels online (or deletes their account), the owner and the barber it's with (if he has a sign-in)
+get a message; these are never cancelled by a later change, which sends its own. The server only sends to the browsers' real
 push services (Google, Mozilla, Apple, Microsoft), so a device address can't point it anywhere else.
 
 **SMS (optional, per message type, no code change):** create the template on DLT and in MSG91 with the variables
@@ -407,18 +438,25 @@ accepts but its answer times out, or Redis fails right after a send) one SMS can
 | Rescheduled | `SMS_TEMPLATE_BOOKING_RESCHEDULED` | `##SALON##`, `##WHEN##`, `##BOOKING##` |
 | Cancelled by the customer | `SMS_TEMPLATE_BOOKING_CANCELLED` | `##SALON##`, `##WHEN##` |
 | Cancelled by the salon | `SMS_TEMPLATE_BOOKING_CANCELLED_BY_SALON` | `##SALON##`, `##WHEN##`, `##REASON##` |
+| To the salon: new booking | `SMS_TEMPLATE_SALON_NEW_BOOKING` | `##CUSTOMER##`, `##WHEN##`, `##BARBER##`, `##BOOKING##` |
+| To the salon: moved | `SMS_TEMPLATE_SALON_BOOKING_MOVED` | `##CUSTOMER##`, `##WHEN##` (the new time), `##BARBER##`, `##BOOKING##` |
+| To the salon: cancelled | `SMS_TEMPLATE_SALON_BOOKING_CANCELLED` | `##CUSTOMER##`, `##WHEN##`, `##BARBER##`, `##BOOKING##` |
 
 Example DLT text for the reminder: "Reminder: {#var#} at {#var#} today, {#var#}. Show code {#var#} at the counter.
 Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sign-in OTP.
 
 ## Before going live (checklist)
 
-- **Real caller IPs:** behind Cloudflare + Railway, set the trusted proxy ranges
-  (`server.tomcat.remoteip.trusted-proxies`) or read `CF-Connecting-IP`, and check one request's logged IP
-  against your phone's. Otherwise all users may share one IP and hit the per-network limits together.
+- **Real caller IPs:** set `CLIENT_IP_HEADER` on Railway: `X-Forwarded-For` (the backend takes its last entry,
+  the one Railway adds), or `CF-Connecting-IP` if Cloudflare's proxy (orange cloud) sits in front; then also make
+  the Railway address reachable only through Cloudflare, or anyone calling it directly can send a made-up
+  `CF-Connecting-IP`. Then check one request's IP against your phone's. The real server refuses to start without it.
+- **Robot check:** create a Cloudflare Turnstile widget for the app's domain; the app shows it on the sign-in and
+  recovery screens and sends its token as `captchaToken`; set `TURNSTILE_SECRET_KEY` on Railway (required by the
+  real server). Point an alert at the log line "80% of the daily SMS limit used".
 - **Redis Cloud:** set the eviction policy to `noeviction`, so limits and session numbers are never dropped
-  under memory pressure.
-- **Captcha** (Cloudflare Turnstile) on the sign-in screen, plus an alert well before `SMS_DAILY_LIMIT`.
+  under memory pressure. If Redis stops answering, signed-in calls keep working; sign-in codes and start codes
+  answer 503 `SERVICE_BUSY` until it is back (`Retry-After: 5`).
 - `APP_PRODUCTION=true`, own DLT templates, `SMS_ACCOUNT_MOVED_ENABLED=true`, a mail provider with `MAIL_FROM`.
 - **Web Push keys:** run `npx web-push generate-vapid-keys` once and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (and
   `VAPID_SUBJECT`, e.g. `mailto:` your support address) on Railway. The real server refuses to start without them.
@@ -429,11 +467,12 @@ Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sig
 Every error looks like `{"code": "UNSUPPORTED_FILE_TYPE", "message": "...", "details": {}}`.
 Sign-in errors use the same shape: `401 NOT_SIGNED_IN`, `401 TOKEN_EXPIRED`, `401 INVALID_TOKEN`, `403 FORBIDDEN`.
 `409 TRY_AGAIN` means two requests changed the same thing at the same moment and the database undid this one:
-nothing was saved, and sending it again works.
+nothing was saved, and sending it again works. `503 SERVICE_BUSY` (with `Retry-After`) means Redis or the database
+didn't answer in time; nothing was done, try again in a few seconds.
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (`V5__...`, `V6__...`).
+Only through new Flyway files in `src/main/resources/db/migration` (`V7__...`, `V8__...`).
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
 Never edit a migration that has already run. Hibernate is set to `validate`.

@@ -2,7 +2,8 @@
 # Your phone, email and the codes you receive (otp, emailCode) go in http-client.private.env.json, which Git ignores,
 # so nothing personal is ever committed from this file. The file id is saved automatically by request 7.
 
-### 1. Send OTP (SMS through MSG91)
+### 1. Send OTP (SMS through MSG91). Once TURNSTILE_SECRET_KEY is set (the real server), add "captchaToken" from the
+### app's Turnstile widget; on your laptop it isn't needed.
 POST {{baseUrl}}/auth/otp/send
 Content-Type: application/json
 
@@ -316,6 +317,42 @@ Content-Type: application/json
 
 { "version": {{adminShopVersion}} }
 
+### 11g. Field team: or send it back after the visit (PENDING_VISIT → DRAFT); the owner sees the reason in 6c
+POST {{baseUrl}}/admin/shops/{{adminShopId}}/reject
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{adminShopVersion}}, "reason": "The shop photo doesn't show the shop's name board." }
+
+### 11h. Field team: live shops. Saves the first one.
+GET {{baseUrl}}/admin/shops?status=APPROVED
+Authorization: Bearer {{accessToken}}
+
+> {%
+    if (response.status === 200 && response.body.length > 0) {
+        client.global.set("adminShopId", response.body[0].id);
+        client.global.set("adminShopVersion", response.body[0].version);
+    }
+%}
+
+### 11i. Field team: suspend it (off the app; a salon's upcoming online bookings are cancelled, customers told)
+POST {{baseUrl}}/admin/shops/{{adminShopId}}/suspend
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{adminShopVersion}}, "reason": "Customers report the shop closed for weeks." }
+
+> {%
+    client.global.set("adminShopVersion", response.body.version);
+%}
+
+### 11j. Field team: end the suspension (back to PENDING_VISIT; approve with 11e-11f after checking again)
+POST {{baseUrl}}/admin/shops/{{adminShopId}}/reinstate
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{adminShopVersion}} }
+
 ### 12. Salon: give barber Raju (6g) his own sign-in with his phone
 PUT {{baseUrl}}/salon/staff/{{staffId}}/login
 Authorization: Bearer {{accessToken}}
@@ -370,6 +407,10 @@ Authorization: Bearer {{accessToken}}
 GET {{baseUrl}}/salon/day?date={{bookingDate}}
 Authorization: Bearer {{accessToken}}
 
+### 14a. Salon: everything coming up across the next days, soonest first (owner and helpers see customer phones)
+GET {{baseUrl}}/salon/upcoming
+Authorization: Bearer {{accessToken}}
+
 ### 14b. Salon: walk-in suggestions for the haircut
 GET {{baseUrl}}/salon/walk-ins/options?services={{serviceId}}
 Authorization: Bearer {{accessToken}}
@@ -418,6 +459,10 @@ Authorization: Bearer {{accessToken}}
 POST {{baseUrl}}/salon/appointments/{{bookingId}}/no-show
 Authorization: Bearer {{accessToken}}
 
+### 16a. Salon: undo a No-show pressed by mistake (owner or helper, within 24 hours): the strike goes
+POST {{baseUrl}}/salon/appointments/{{bookingId}}/undo-no-show
+Authorization: Bearer {{accessToken}}
+
 ### 16b. Salon: give the booking to another barber at the same time
 POST {{baseUrl}}/salon/appointments/{{bookingId}}/reassign
 Authorization: Bearer {{accessToken}}
@@ -445,3 +490,28 @@ Authorization: Bearer {{accessToken}}
 Content-Type: application/json
 
 { "version": {{staffVersion}}, "active": false }
+
+### 17. Support only (users.admin = true): a customer's strikes and whether booking is blocked, by phone
+POST {{baseUrl}}/admin/salon/strikes/lookup
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "phone": "{{phone}}" }
+
+### 17b. Support: take back the strike of a booking, with the reason (kept in the booking's history)
+POST {{baseUrl}}/admin/salon/strikes/{{bookingId}}/remove
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "reason": "Customer was in the chair; the barber pressed No-show by mistake." }
+
+### 18. Delete my account, step 1: a code to my own phone (409 SHOP_OWNER for a shop owner). Put it in "otp".
+POST {{baseUrl}}/auth/me/delete-code
+Authorization: Bearer {{accessToken}}
+
+### 18b. Step 2: deletes the account for good (204) and signs out every device. Use a test phone, not yours!
+POST {{baseUrl}}/auth/me/delete
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "code": "{{otp}}" }
