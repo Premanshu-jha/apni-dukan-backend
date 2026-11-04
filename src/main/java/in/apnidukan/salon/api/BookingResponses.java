@@ -88,7 +88,7 @@ public final class BookingResponses {
     public record BookingView(UUID id, String bookingNo, UUID salonId, String salonName, String salonAddress,
                               String mapLink, List<ServiceLine> services, long totalPricePaise, boolean priceIsFrom,
                               Instant startsAt, Instant endsAt, Instant heldUntil, AppointmentStatus status,
-                              String startCode, String bookingFor, String cancelReason, boolean canChange,
+                              String startCode, String cancelReason, boolean canChange,
                               boolean canMove, Instant createdAt) {
     }
 
@@ -110,7 +110,7 @@ public final class BookingResponses {
     public record AppointmentView(UUID id, AppointmentKind kind, BlockType blockType, UUID staffId,
                                   AppointmentStatus status, Instant startsAt, Instant endsAt, Instant startedAt,
                                   Boolean startedWithCode, List<ServiceLine> services, String bookingNo,
-                                  String customerName, String customerPhone, String bookingFor, String guestName,
+                                  String customerName, String customerPhone, String guestName,
                                   String cancelReason, UUID closureId, boolean notStarted, Instant noShowFrom) {
 
         public static AppointmentView of(Appointment a, List<BookedService> services, String customerName,
@@ -118,7 +118,7 @@ public final class BookingResponses {
             boolean notStarted = a.status() == AppointmentStatus.CONFIRMED && !now.isBefore(a.startsAt());
             return new AppointmentView(a.id(), a.kind(), a.blockType(), a.staffId(), a.status(), a.startsAt(),
                     a.endsAt(), a.startedAt(), a.startedWithCode(), ServiceLine.from(services), a.bookingNo(),
-                    customerName, customerPhone, a.bookingFor(), a.guestName(), a.cancelReason(), a.closureId(),
+                    customerName, customerPhone, a.guestName(), a.cancelReason(), a.closureId(),
                     notStarted, a.kind() == AppointmentKind.BLOCK ? null : noShowFrom);
         }
     }

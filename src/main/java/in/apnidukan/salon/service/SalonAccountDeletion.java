@@ -21,8 +21,7 @@ import java.util.UUID;
  *   <li>as a customer: every booking still waiting (CONFIRMED) is cancelled, with no strike, and the salon is
  *       told the time is free;</li>
  *   <li>as a barber with a sign-in: the sign-in is unlinked (his name, hours and history stay for the salon);</li>
- *   <li>any walk-in access goes;</li>
- *   <li>the "for" names they typed on their bookings are cleared.</li>
+ *   <li>any walk-in access goes.</li>
  * </ul>
  * Past bookings and strikes stay as they are.
  */
@@ -62,7 +61,6 @@ class SalonAccountDeletion implements AccountDeletionListener {
                 notices.salonToldOfDeletedAccount(a, now);
             }
         }
-        appointments.forgetBookingFor(userId);   // the free-text "for" names they typed
         staff.findByUserId(userId).ifPresent(barber -> {
             memberships.removeMember(barber.getShopId(), userId);
             barber.unlinkLogin(now);

@@ -23,13 +23,11 @@ public final class BookingRequests {
 
     /**
      * Book online. Send an Idempotency-Key header (a new UUID per booking attempt; the same one when retrying).
-     * @param startAt    one of the starts from the availability call
-     * @param bookingFor optional: the name of the person it's for, if not you
+     * @param startAt one of the starts from the availability call
      */
     public record Book(@NotNull UUID salonId,
                        @NotEmpty @Size(max = 10) List<@NotNull UUID> serviceIds,
-                       @NotNull Instant startAt,
-                       @Size(max = 60) String bookingFor) {
+                       @NotNull Instant startAt) {
     }
 
     /** Move my booking to another start (from the availability call). */

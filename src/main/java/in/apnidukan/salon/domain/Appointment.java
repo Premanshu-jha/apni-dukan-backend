@@ -10,7 +10,6 @@ import java.util.UUID;
  *
  * @param customerId    bookings only: who booked
  * @param bookingNo     bookings only, e.g. SB7K3Q9X, shown to the customer and the salon
- * @param bookingFor    optional name of the person the booking is for
  * @param guestName     walk-ins only, optional
  * @param startCode     bookings only: the 4 digits the customer shows at the salon; never sent to salon screens
  * @param startedWithCode null until started; false when staff used "Start without code"
@@ -18,7 +17,7 @@ import java.util.UUID;
  * @param createdBy     who made it (the customer, or the salon person who added the walk-in or block)
  */
 public record Appointment(UUID id, UUID shopId, UUID staffId, AppointmentKind kind, BlockType blockType,
-                          UUID closureId, UUID customerId, String bookingNo, String bookingFor, String guestName,
+                          UUID closureId, UUID customerId, String bookingNo, String guestName,
                           String startCode, Instant startsAt, Instant endsAt, AppointmentStatus status,
                           Instant startedAt, Boolean startedWithCode, String cancelReason, UUID createdBy,
                           UUID clientRequestId, Instant createdAt, Instant updatedAt) {

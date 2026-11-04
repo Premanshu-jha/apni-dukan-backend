@@ -234,7 +234,7 @@ public class SalonDayService {
         Instant start = now.truncatedTo(ChronoUnit.MINUTES);
         String guest = in.name() == null || in.name().isBlank() ? null : clean(GUEST_NAME, in.name());
         Appointment a = new Appointment(UUID.randomUUID(), c.shopId(), barber.getId(), AppointmentKind.WALK_IN, null,
-                null, null, null, null, guest, null, start, start.plus(length), AppointmentStatus.IN_SERVICE, now,
+                null, null, null, guest, null, start, start.plus(length), AppointmentStatus.IN_SERVICE, now,
                 null, null, c.userId(), requestId, now, now);
         if (!appointments.lockActiveBarber(barber.getId())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "STAFF_NOT_FOUND", "No such barber.");
@@ -668,7 +668,7 @@ public class SalonDayService {
 
     private Appointment block(Caller c, UUID staffId, BlockType type, UUID closureId, Interval time, Instant now) {
         return new Appointment(UUID.randomUUID(), c.shopId(), staffId, AppointmentKind.BLOCK, type, closureId,
-                null, null, null, null, null, time.start(), time.end(), AppointmentStatus.BLOCKED, null, null, null,
+                null, null, null, null, time.start(), time.end(), AppointmentStatus.BLOCKED, null, null, null,
                 c.userId(), null, now, now);
     }
 

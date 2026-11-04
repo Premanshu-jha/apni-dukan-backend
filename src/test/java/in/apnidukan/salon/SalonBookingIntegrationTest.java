@@ -1165,7 +1165,6 @@ class SalonBookingIntegrationTest {
         patch("/auth/me", Map.of("name", "Ravi Kumar"), customer);
         post("/me/push-subscriptions", subscription(FCM), customer);
         UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju
-        jdbc.update("UPDATE appointments SET booking_for = 'Ravi junior' WHERE id = ?", b);
         String oldToken = token(customer);
 
         assertThat(field(post("/auth/me/delete-code", Map.of(), owner).body(), "code")).isEqualTo("SHOP_OWNER");
@@ -1187,9 +1186,8 @@ class SalonBookingIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE type = 'SALON_BOOKING_CANCELLED' "
                 + "AND user_id = ?", String.class, owner)).startsWith("A customer cancelled")
                 .contains("deleted their account").doesNotContain("Ravi");
-        // Their own messages keep no text, their bookings no "for" name
+        // Their own messages keep no text
         assertThat(count("notification_jobs WHERE user_id = '" + customer + "' AND body <> ''")).isZero();
-        assertThat(jdbc.queryForObject("SELECT booking_for FROM appointments WHERE id = ?", String.class, b)).isNull();
         // A token from before the deletion can't book, even if the sign-out check let it through (Redis down)
         assertThat(field(book(customer, at("15:00"), List.of(haircut), UUID.randomUUID()).body(), "code"))
                 .isEqualTo("NOT_SIGNED_IN");

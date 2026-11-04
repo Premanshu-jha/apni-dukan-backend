@@ -5,7 +5,6 @@ import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.FileRefs;
-import in.apnidukan.common.text.TextCleaner.TextField;
 import in.apnidukan.salon.api.BookingRequests.Book;
 import in.apnidukan.salon.api.BookingResponses.BookingView;
 import in.apnidukan.salon.api.BookingResponses.CancelResult;
@@ -62,7 +61,6 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static in.apnidukan.common.error.DatabaseErrors.hasSqlState;
-import static in.apnidukan.common.text.TextCleaner.clean;
 
 /**
  * The customer side: salons near me, a salon's services and free times, booking, my bookings, cancel and
@@ -88,7 +86,6 @@ public class BookingService {
     static final Duration STRIKE_WINDOW = Duration.ofDays(60);
     static final Duration BLOCK_FOR = Duration.ofDays(30);
     static final int MY_BOOKINGS_LIMIT = 50;
-    static final TextField BOOKING_FOR = new TextField("bookingFor", 2, 60);
     /** Booking numbers: no 0/O, 1/I/L, so they can be read out over the phone. */
     private static final String BOOKING_NO_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
@@ -233,14 +230,12 @@ public class BookingService {
         Interval slot = Interval.of(start, length);
         LocalDate date = LocalDate.ofInstant(start, SalonTime.ZONE);
         List<BarberDay> days = calendar.days(barbers, date, null);
-        String bookingFor = in.bookingFor() == null || in.bookingFor().isBlank() ? null
-                : clean(BOOKING_FOR, in.bookingFor());
         for (UUID barberId : Availability.barbersFor(days, slot)) {
             if (!appointments.lockActiveBarber(barberId)) {
                 continue;   // switched off a moment ago
             }
             Appointment a = new Appointment(UUID.randomUUID(), salon.id(), barberId, AppointmentKind.BOOKING, null,
-                    null, customerId, bookingNo(), bookingFor, null, codes.newCode(), slot.start(), slot.end(),
+                    null, customerId, bookingNo(), null, codes.newCode(), slot.start(), slot.end(),
                     AppointmentStatus.CONFIRMED, null, null, null, customerId, requestId, now, now);
             if (appointments.insertIfFree(a)) {
                 appointments.insertServices(a.id(), chosen);
@@ -520,7 +515,7 @@ public class BookingService {
                     ServiceLine.from(lines), lines.stream().mapToLong(BookedService::pricePaise).sum(),
                     lines.stream().anyMatch(BookedService::priceIsFrom), a.startsAt(), a.endsAt(),
                     a.startsAt().plus(SalonDayService.LATE_ALLOWANCE), a.status(),
-                    a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null, a.bookingFor(),
+                    a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null,
                     a.cancelReason(), changeable, movable, a.createdAt());
         }).toList();
     }

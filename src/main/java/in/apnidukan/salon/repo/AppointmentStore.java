@@ -32,7 +32,7 @@ import java.util.stream.Collectors;
 public class AppointmentStore {
 
     private static final String COLUMNS = "id, shop_id, staff_id, kind, block_type, closure_id, customer_id, "
-            + "booking_no, booking_for, guest_name, start_code, starts_at, ends_at, status, started_at, "
+            + "booking_no, guest_name, start_code, starts_at, ends_at, status, started_at, "
             + "started_with_code, cancel_reason, created_by, client_request_id, created_at, updated_at";
     private static final String HOLDING = "status IN ('CONFIRMED', 'IN_SERVICE', 'BLOCKED')";
     // Whole statements as constants: no SQL is ever built from values (they always go in as ? parameters)
@@ -69,11 +69,11 @@ public class AppointmentStore {
      */
     public boolean insertIfFree(Appointment a) {
         List<UUID> saved = jdbc.query("INSERT INTO appointments (" + COLUMNS + ") VALUES "
-                        + "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        + "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                         + "ON CONFLICT ON CONSTRAINT ex_appointments_no_overlap DO NOTHING RETURNING id",
                 (rs, i) -> rs.getObject(1, UUID.class),
                 a.id(), a.shopId(), a.staffId(), a.kind().name(), a.blockType() == null ? null : a.blockType().name(),
-                a.closureId(), a.customerId(), a.bookingNo(), a.bookingFor(), a.guestName(), a.startCode(),
+                a.closureId(), a.customerId(), a.bookingNo(), a.guestName(), a.startCode(),
                 at(a.startsAt()), at(a.endsAt()), a.status().name(), at(a.startedAt()), a.startedWithCode(),
                 a.cancelReason(), a.createdBy(), a.clientRequestId(), at(a.createdAt()), at(a.updatedAt()));
         return !saved.isEmpty();
@@ -108,12 +108,6 @@ public class AppointmentStore {
     public List<Appointment> markNoShows(Instant startedBy, Instant now) {
         return jdbc.query("UPDATE appointments SET status = 'NO_SHOW', updated_at = ? WHERE status = 'CONFIRMED' "
                 + "AND kind <> 'BLOCK' AND starts_at <= ? RETURNING " + COLUMNS, ROW, at(now), at(startedBy));
-    }
-
-    /** Clears the "for" names this customer typed on their bookings (their account was deleted). */
-    public void forgetBookingFor(UUID customerId) {
-        jdbc.update("UPDATE appointments SET booking_for = NULL WHERE customer_id = ? AND booking_for IS NOT NULL",
-                customerId);
     }
 
     /** CONFIRMED → NO_SHOW, CANCELLED_BY_CUSTOMER or CANCELLED_BY_SALON; frees the barber's time. */
@@ -317,7 +311,7 @@ public class AppointmentStore {
         return new Appointment(rs.getObject("id", UUID.class), rs.getObject("shop_id", UUID.class),
                 rs.getObject("staff_id", UUID.class), AppointmentKind.valueOf(rs.getString("kind")),
                 blockType == null ? null : BlockType.valueOf(blockType), rs.getObject("closure_id", UUID.class),
-                rs.getObject("customer_id", UUID.class), rs.getString("booking_no"), rs.getString("booking_for"),
+                rs.getObject("customer_id", UUID.class), rs.getString("booking_no"),
                 rs.getString("guest_name"), rs.getString("start_code"), instant(rs, "starts_at"),
                 instant(rs, "ends_at"), AppointmentStatus.valueOf(rs.getString("status")),
                 instant(rs, "started_at"), withCode == null ? null : (Boolean) withCode,

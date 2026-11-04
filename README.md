@@ -187,8 +187,8 @@ them. A barber linked by the owner needs nothing: his account is the owner's doi
 One account works across every part of the app (kirana, salon, ...), so deleting it never deletes rows other
 records point at. Instead, in one transaction: each module closes what is still open for the person
 (`AccountDeletionListener`: upcoming salon bookings are cancelled with no strike and the salon is told "a customer
-deleted their account", a barber's sign-in is unlinked, walk-in access goes, the "for" names on their bookings are
-cleared, waiting messages are cancelled and the text of all their messages emptied, devices forgotten), a helper or
+deleted their account", a barber's sign-in is unlinked, walk-in access goes,
+waiting messages are cancelled and the text of all their messages emptied, devices forgotten), a helper or
 barber leaves their shop, every device is signed out and its device label cleared, and the `users` row loses its
 phone, name and email (`deleted_at` is set). Past bookings, strikes and shop records stay, showing no name. A
 booking or move waiting behind the deletion, or a token from before it, is refused (401). Messages to a salon about earlier

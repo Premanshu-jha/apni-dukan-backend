@@ -332,7 +332,7 @@ public class SalonSetupService {
                 appointments.event(old.id(), now, by, "BLOCK_REMOVED", "the salon is closed that day");
             }
             Appointment block = new Appointment(UUID.randomUUID(), salon.shopId(), barber.getId(),
-                    AppointmentKind.BLOCK, BlockType.CLOSED, closureId, null, null, null, null, null,
+                    AppointmentKind.BLOCK, BlockType.CLOSED, closureId, null, null, null, null,
                     first.startsAt(), first.endsAt(), AppointmentStatus.BLOCKED, null, null, null, by, null, now, now);
             if (!appointments.insertIfFree(block)) {
                 throw SalonDayService.blockConflicts(appointments.holding(List.of(barber.getId()), first.startsAt(),
