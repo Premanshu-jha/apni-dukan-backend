@@ -9,6 +9,7 @@ import in.apnidukan.auth.repo.RefreshTokenRepository;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.async.BackgroundTasks;
 import in.apnidukan.common.context.AccountDeletionListener;
+import in.apnidukan.common.context.SignOutEverywhereListener;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.security.AuthPrincipal;
@@ -82,6 +83,7 @@ public class AuthService {
     private final ShopMemberships memberships;
     private final HumanCheck humans;
     private final List<AccountDeletionListener> deletionListeners;
+    private final List<SignOutEverywhereListener> signOutListeners;
     private final int smsDailyLimit;
     private final SecureRandom random = new SecureRandom();
 
@@ -90,8 +92,10 @@ public class AuthService {
                        RateLimiter limits, SessionRevocations revocations, BackgroundTasks background,
                        PlatformTransactionManager transactions, ShopMemberships memberships, HumanCheck humans,
                        List<AccountDeletionListener> deletionListeners,
+                       List<SignOutEverywhereListener> signOutListeners,
                        @Value("${app.sms.daily-limit:500}") int smsDailyLimit) {
         this.memberships = memberships;
+        this.signOutListeners = signOutListeners;
         this.humans = humans;
         this.deletionListeners = deletionListeners;
         this.users = users;
@@ -115,6 +119,7 @@ public class AuthService {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitSends(ip);
         humans.require(captchaToken, ip);
+        requireSmsNotPaused();   // before a new code replaces the one they already have
         String code = otp.issue(OtpPurpose.LOGIN, phone, ip);
         sendSms(() -> sms.sendOtp(phone, code));
     }
@@ -192,10 +197,18 @@ public class AuthService {
     public void logoutEverywhere(UUID userId) {
         me(userId);
         refreshTokens.revokeAllForUser(userId, Instant.now(clock));
+        signOutListeners.forEach(l -> l.signedOutEverywhere(userId));   // a lost phone stops getting messages too
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                revocations.revokeAll(userId);   // access tokens in use stop at once too
+                try {
+                    revocations.revokeAll(userId);   // access tokens in use stop at once too
+                } catch (DataAccessException redisDown) {
+                    // Done in the database (no refresh works, no device gets messages); tokens in use expire
+                    // within 15 minutes. An error here would wrongly tell the person nothing happened.
+                    log.warn("Signed out everywhere for {}, but Redis didn't take it ({})", userId,
+                            redisDown.getClass().getSimpleName());
+                }
             }
         });
     }
@@ -209,6 +222,7 @@ public class AuthService {
     public void sendEmailChangePhoneCode(UUID userId, String ip) {
         User user = me(userId);
         limitSends(ip);
+        requireSmsNotPaused();   // before a new code replaces the one they already have
         String code = otp.issue(OtpPurpose.CHANGE_EMAIL, user.getPhone(), ip);
         sendSms(() -> sms.sendOtp(user.getPhone(), code));
     }
@@ -222,6 +236,10 @@ public class AuthService {
         String address = Emails.normalize(emailInput);
         User user = me(userId);
         limitSends(ip);
+        // The daily email limit is checked before the phone code is used up (a refused send keeps the code)
+        if (limits.current("email-send-user:" + userId) >= EMAIL_SENDS_PER_ACCOUNT_PER_DAY) {
+            throw tooManyEmailCodes(userId);
+        }
         if (user.isEmailVerified() && !address.equals(user.getEmail())) {
             if (phoneCode == null || phoneCode.isBlank()) {
                 throw new ApiException(HttpStatus.FORBIDDEN, "PHONE_CODE_REQUIRED",
@@ -230,9 +248,7 @@ public class AuthService {
             otp.verify(OtpPurpose.CHANGE_EMAIL, user.getPhone(), phoneCode, ip);
         }
         if (!limits.tryHit("email-send-user:" + userId, EMAIL_SENDS_PER_ACCOUNT_PER_DAY, Duration.ofHours(24))) {
-            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_CODES",
-                    "Too many email codes today. Try again tomorrow.")
-                    .retryAfter(limits.secondsLeft("email-send-user:" + userId));
+            throw tooManyEmailCodes(userId);
         }
         String code = otp.issue(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, ip);
         email.send(address, "Your Apni Dukan verification code",
@@ -285,6 +301,7 @@ public class AuthService {
         limitSends(ip);
         humans.require(captchaToken, ip);
         boolean exists = users.findByVerifiedEmail(address).isPresent();
+        requireSmsNotPaused();   // before a new code replaces the one they already have
         String emailCode = otp.issue(OtpPurpose.RECOVER_EMAIL, address, ip);
         String phoneCode = otp.issue(OtpPurpose.RECOVER_PHONE, newPhone, ip);
         if (exists) {
@@ -305,8 +322,11 @@ public class AuthService {
         String newPhone = PhoneNumbers.normalize(newPhoneInput);
         limitVerifies(ip);
         // Codes first: without them, the answer never depends on whether the account exists.
-        otp.verify(OtpPurpose.RECOVER_EMAIL, address, emailCode, ip);
-        otp.verify(OtpPurpose.RECOVER_PHONE, newPhone, phoneCode, ip);
+        // Both are checked before either is used up: a typo in one keeps the other for the next try
+        otp.check(OtpPurpose.RECOVER_EMAIL, address, emailCode, ip);
+        otp.check(OtpPurpose.RECOVER_PHONE, newPhone, phoneCode, ip);
+        otp.consume(OtpPurpose.RECOVER_EMAIL, address);
+        otp.consume(OtpPurpose.RECOVER_PHONE, newPhone);
         String[] oldPhone = new String[1];
         AuthTokens tokens = tx.execute(status -> {
             UUID userId = users.findIdByVerifiedEmail(address)
@@ -328,6 +348,7 @@ public class AuthService {
                 throw phoneInUse();
             }
             refreshTokens.revokeAllForUser(userId, now);
+            signOutListeners.forEach(l -> l.signedOutEverywhere(userId));   // the old phone stops getting messages
             revocations.revokeAll(userId);
             return issueTokens(user, device, false);
         });
@@ -358,7 +379,10 @@ public class AuthService {
     public void sendDeleteCode(UUID userId, String ip) {
         User user = me(userId);
         requireNotOwner(userId);
+        Instant at = Instant.now(clock);
+        deletionListeners.forEach(l -> l.checkCanDelete(userId, at));   // e.g. a booking about to start
         limitSends(ip);
+        requireSmsNotPaused();   // before a new code replaces the one they already have
         String code = otp.issue(OtpPurpose.DELETE_ACCOUNT, user.getPhone(), ip);
         sendSms(() -> sms.sendOtp(user.getPhone(), code));
     }
@@ -378,6 +402,9 @@ public class AuthService {
     public void deleteAccount(UUID userId, String code, String ip) {
         User me = me(userId);
         limitVerifies(ip);
+        // Refused before the code is used up, so it still works once the booking is over (checked again below)
+        Instant at = Instant.now(clock);
+        deletionListeners.forEach(l -> l.checkCanDelete(userId, at));
         otp.verify(OtpPurpose.DELETE_ACCOUNT, me.getPhone(), code, ip);
         tx.executeWithoutResult(status -> {
             requireNotOwner(userId);
@@ -402,6 +429,12 @@ public class AuthService {
             log.warn("Account {} deleted, but Redis didn't take the sign-out ({})", userId,
                     redisDown.getClass().getSimpleName());
         }
+    }
+
+    private ApiException tooManyEmailCodes(UUID userId) {
+        return new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_CODES",
+                "Too many email codes today. Try again tomorrow.")
+                .retryAfter(limits.secondsLeft("email-send-user:" + userId));
     }
 
     private void requireNotOwner(UUID userId) {
@@ -434,7 +467,7 @@ public class AuthService {
         JwtService.IssuedToken access = jwt.issue(new AuthPrincipal(user.getId(),
                         membership == null ? null : membership.shopId(),
                         membership == null ? null : membership.role(), user.isAdmin()),
-                revocations.currentGeneration(user.getId()));
+                revocations.generationForNewToken(user.getId()));
         byte[] raw = new byte[32];
         random.nextBytes(raw);
         String refresh = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
@@ -459,6 +492,18 @@ public class AuthService {
     }
 
     /** Every code SMS goes through here: a hard daily cap protects the SMS bill even if all other limits are dodged. */
+    /** SMS_PAUSED before anything is issued: a refused send must not break a code the person already has. */
+    private void requireSmsNotPaused() {
+        if (limits.current("sms-day") >= smsDailyLimit) {
+            throw smsPaused();
+        }
+    }
+
+    private ApiException smsPaused() {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SMS_PAUSED",
+                "We can't send codes right now. Please try again later.").retryAfter(limits.secondsLeft("sms-day"));
+    }
+
     private void sendSms(Runnable send) {
         long sentToday = limits.hit("sms-day", Duration.ofHours(24));
         if (sentToday == smsDailyLimit * 8L / 10) {
@@ -469,8 +514,7 @@ public class AuthService {
         if (sentToday > smsDailyLimit) {
             log.error("Daily SMS limit ({}) reached: SMS paused. Check for abuse before raising SMS_DAILY_LIMIT.",
                     smsDailyLimit);
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SMS_PAUSED",
-                    "We can't send codes right now. Please try again later.").retryAfter(limits.secondsLeft("sms-day"));
+            throw smsPaused();
         }
         send.run();
     }
