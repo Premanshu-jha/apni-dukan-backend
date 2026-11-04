@@ -6,6 +6,8 @@ import in.apnidukan.common.context.ShopDirectory.ShopCard;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.repo.AppointmentStore;
+import in.apnidukan.salon.repo.SalonAccessStore;
+import in.apnidukan.salon.repo.SalonStaffRepository;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,7 +20,9 @@ import java.util.UUID;
  * What the salon does when its shop changes:
  * <ul>
  *   <li>moved (new address or map pin): pending booking reminders are rewritten with the new place;</li>
- *   <li>suspended by Apni Dukan: upcoming online bookings are cancelled and each customer is told.</li>
+ *   <li>suspended by Apni Dukan: upcoming online bookings are cancelled and each customer is told;</li>
+ *   <li>someone left or was removed: their walk-in access goes, and a barber's sign-in is unlinked (his name,
+ *       hours and bookings stay with the salon).</li>
  * </ul>
  */
 @Component
@@ -30,13 +34,28 @@ class SalonShopChanges implements ShopChangeListener {
     private final AppointmentStore appointments;
     private final ShopDirectory shops;
     private final SalonNotices notices;
+    private final SalonAccessStore access;
+    private final SalonStaffRepository staff;
     private final Clock clock;
 
-    SalonShopChanges(AppointmentStore appointments, ShopDirectory shops, SalonNotices notices, Clock clock) {
+    SalonShopChanges(AppointmentStore appointments, ShopDirectory shops, SalonNotices notices,
+                     SalonAccessStore access, SalonStaffRepository staff, Clock clock) {
         this.appointments = appointments;
         this.shops = shops;
         this.notices = notices;
+        this.access = access;
+        this.staff = staff;
         this.clock = clock;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void memberRemoved(UUID shopId, UUID userId) {
+        access.revokeWalkIns(shopId, userId);
+        staff.findByUserId(userId).filter(b -> b.getShopId().equals(shopId)).ifPresent(barber -> {
+            barber.unlinkLogin(clock.instant());
+            staff.saveAndFlush(barber);
+        });
     }
 
     /** Runs inside the shop change's transaction: if that rolls back, the old reminders stay. */

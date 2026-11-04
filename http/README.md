@@ -4,7 +4,7 @@
 2. Create `http/http-client.private.env.json`. Git ignores it, so your number and codes stay private:
    ```json
    { "local": { "phone": "98XXXXXXXX", "email": "you@gmail.com", "otp": "", "emailCode": "",
-                "barberPhone": "97XXXXXXXX", "bookingDate": "2026-11-20" } }
+                "barberPhone": "97XXXXXXXX", "helperPhone": "96XXXXXXXX", "bookingDate": "2026-11-20" } }
    ```
 3. Open `api.http`, pick the **local** environment at the top, and click ▶ next to a request.
 

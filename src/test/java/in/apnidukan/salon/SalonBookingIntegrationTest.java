@@ -1235,6 +1235,49 @@ class SalonBookingIntegrationTest {
         assertThat(book(fresh, at("12:00"), List.of(haircut), UUID.randomUUID()).status()).isEqualTo(201);
     }
 
+    @Test
+    void theOwnerAddsAHelperWhoWorksTheSalonAndCanBeRemovedOrLeave() {
+        Reply added = post("/shops/me/helpers", Map.of("phone", "9000000301"), owner);
+        assertThat(added.status()).as(added.text()).isEqualTo(200);
+        UUID helper = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000301'", UUID.class);
+        assertThat(jdbc.queryForObject("SELECT role FROM shop_members WHERE user_id = ?", String.class, helper))
+                .isEqualTo("HELPER");
+        assertThat(field(post("/shops/me/helpers", Map.of("phone", "9000000302"), helper).body(), "code"))
+                .isEqualTo("OWNER_ONLY");
+        assertThat(field(post("/shops/me/helpers", Map.of("phone", "9000000301"), owner).body(), "code"))
+                .isEqualTo("ALREADY_IN_A_SHOP");
+        assertThat(get("/shops/me/members", owner).text()).contains("9000000301").contains("HELPER");
+
+        // A helper works the whole day: starts a booking without the customer's code
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        put("/salon/members/" + helper + "/walk-in-access", Map.of("allowed", true), owner);
+        CLOCK.set(at("11:50"));
+        assertThat(start(b, Map.of("withoutCode", true), helper).status()).isEqualTo(200);
+
+        // Removed: membership and walk-in access go, and his session stops at once
+        String oldToken = token(helper);
+        Reply removed = delete("/shops/me/helpers/" + helper, owner);
+        assertThat(removed.status()).as(removed.text()).isEqualTo(200);
+        assertThat(count("shop_members WHERE user_id = '" + helper + "'")).isZero();
+        assertThat(count("walk_in_access")).isZero();
+        Integer status = http.get().uri("/salon/day").headers(h -> h.setBearerAuth(oldToken))
+                .exchange((rq, res) -> Integer.valueOf(res.getStatusCode().value()));
+        assertThat(status).isEqualTo(401);
+        assertThat(field(delete("/shops/me/helpers/" + helper, owner).body(), "code")).isEqualTo("HELPER_NOT_FOUND");
+    }
+
+    @Test
+    void aBarberAddedWithoutAskingCanLeaveAndHisProfileStays() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        assertThat(field(post("/shops/me/leave", Map.of(), owner).body(), "code")).isEqualTo("OWNER_CANT_LEAVE");
+        assertThat(post("/shops/me/leave", Map.of(), rajuUser).status()).isEqualTo(204);
+        assertThat(count("shop_members WHERE user_id = '" + rajuUser + "'")).isZero();
+        assertThat(jdbc.queryForObject("SELECT user_id FROM salon_staff WHERE id = ?", UUID.class, raju)).isNull();
+        assertThat(jdbc.queryForObject("SELECT name FROM salon_staff WHERE id = ?", String.class, raju))
+                .isEqualTo("Raju");
+    }
+
     // ---------- helpers ----------
 
     private long shopVersion() {

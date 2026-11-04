@@ -19,4 +19,10 @@ public interface ShopChangeListener {
      * in progress has finished and new ones see the status.
      */
     void suspended(UUID shopId);
+
+    /**
+     * A helper or barber left the shop or was removed (their membership is already gone). The salon module takes
+     * away their walk-in access and unlinks a barber's sign-in from his barber profile.
+     */
+    void memberRemoved(UUID shopId, UUID userId);
 }

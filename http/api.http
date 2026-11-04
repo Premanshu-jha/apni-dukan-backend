@@ -360,6 +360,17 @@ Content-Type: application/json
 
 { "phone": "{{barberPhone}}" }
 
+### 12a. Owner: add a helper by phone (they sign in with OTP and find the shop); then list everyone
+POST {{baseUrl}}/shops/me/helpers
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "phone": "{{helperPhone}}" }
+
+### 12a2. Owner: everyone in the shop (name, phone, role)
+GET {{baseUrl}}/shops/me/members
+Authorization: Bearer {{accessToken}}
+
 ### 12b. Salon: everyone in the salon, and who may add walk-ins
 GET {{baseUrl}}/salon/members
 Authorization: Bearer {{accessToken}}
