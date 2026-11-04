@@ -1,7 +1,9 @@
 package in.apnidukan.notifications.repo;
 
 import in.apnidukan.common.notify.Notifications.Notice;
+import in.apnidukan.notifications.domain.Audience;
 import in.apnidukan.notifications.domain.Channel;
+import in.apnidukan.notifications.domain.InboxItem;
 import in.apnidukan.notifications.domain.JobStatus;
 import in.apnidukan.notifications.domain.NotificationJob;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,10 +35,11 @@ public class NotificationStore {
     public void insert(Notice n, Channel channel, Instant now) {
         Instant sendAt = n.sendAt().isBefore(now) ? now : n.sendAt();
         jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, ref_id, title, body, url, "
-                        + "sms_variables, send_at, status, attempts, next_try_at, created_at) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)",
+                        + "sms_variables, send_at, status, attempts, next_try_at, created_at, about_user_id) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)",
                 UUID.randomUUID(), n.userId(), channel.name(), n.type(), n.refId(), n.title(), n.body(), n.url(),
-                channel == Channel.SMS ? encode(n.smsVariables()) : null, at(sendAt), at(sendAt), at(now));
+                channel == Channel.SMS ? encode(n.smsVariables()) : null, at(sendAt), at(sendAt), at(now),
+                n.aboutUserId());
     }
 
     public int cancelPending(UUID refId, Instant now) {
@@ -44,21 +47,85 @@ public class NotificationStore {
                 + "WHERE ref_id = ? AND status = 'PENDING'", at(now), refId);
     }
 
+    // ---------- the in-app list ----------
+
+    /**
+     * What a person's list shows: the PUSH row of each message (every message has exactly one), already due, not
+     * blanked, and not cancelled before it was due (one cancelled after it was due may already have been shown), of the types this app shows (by the first word of the type). The SQL is fixed;
+     * the app's type groups go in as one comma-separated parameter.
+     */
+    private static final String INBOX = " FROM notification_jobs WHERE user_id = ? AND channel = 'PUSH'"
+            + " AND (status <> 'CANCELLED' OR finished_at >= send_at) AND send_at <= ? AND title <> ''"
+            + " AND split_part(type, '_', 1) = ANY (string_to_array(?, ','))";
+
+    private static final String INBOX_COLUMNS = "SELECT id, type, title, body, url, send_at, read_at";
+
+    private static String groups(Audience audience) {
+        return String.join(",", audience.typeGroups());
+    }
+
+    private static InboxItem inboxItem(java.sql.ResultSet rs) throws java.sql.SQLException {
+        return new InboxItem(rs.getObject("id", UUID.class), rs.getString("type"), rs.getString("title"),
+                rs.getString("body"), rs.getString("url"), rs.getObject("send_at", OffsetDateTime.class).toInstant(),
+                rs.getObject("read_at") != null);
+    }
+
+    /**
+     * Newest first, at most limit. With a cursor (the sentAt and id of the last item already shown), the next page:
+     * older than it, ties on the same moment broken by id so nothing is skipped or shown twice.
+     */
+    public List<InboxItem> inbox(UUID userId, Audience audience, Instant now, Instant beforeAt, UUID beforeId,
+                                 int limit) {
+        if (beforeAt == null || beforeId == null) {
+            return jdbc.query(INBOX_COLUMNS + INBOX + " ORDER BY send_at DESC, id DESC LIMIT ?",
+                    (rs, i) -> inboxItem(rs), userId, at(now), groups(audience), limit);
+        }
+        return jdbc.query(INBOX_COLUMNS + INBOX + " AND (send_at, id) < (?, ?) ORDER BY send_at DESC, id DESC LIMIT ?",
+                (rs, i) -> inboxItem(rs), userId, at(now), groups(audience), at(beforeAt), beforeId, limit);
+    }
+
+    public long unreadCount(UUID userId, Audience audience, Instant now) {
+        Long n = jdbc.queryForObject("SELECT count(*)" + INBOX + " AND read_at IS NULL", Long.class,
+                userId, at(now), groups(audience));
+        return n == null ? 0 : n;
+    }
+
+    /** Marks these of the person's messages read (only theirs, only once); returns how many changed. */
+    public int markRead(UUID userId, List<UUID> ids, Instant now) {
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        String joined = String.join(",", ids.stream().map(UUID::toString).toList());
+        return jdbc.update("UPDATE notification_jobs SET read_at = ? WHERE user_id = ? AND channel = 'PUSH' "
+                + "AND read_at IS NULL AND id = ANY (string_to_array(?, ',')::uuid[])", at(now), userId, joined);
+    }
+
+    /** Marks everything in this app's list read, up to now. */
+    public int markAllRead(UUID userId, Audience audience, Instant now) {
+        return jdbc.update("UPDATE notification_jobs SET read_at = ? WHERE id IN (SELECT id" + INBOX
+                + " AND read_at IS NULL)", at(now), userId, at(now), groups(audience));
+    }
+
     /** Deletes messages finished (sent, failed, cancelled, no device) before this moment; returns how many. */
     public int deleteFinishedBefore(Instant before) {
         return jdbc.update("DELETE FROM notification_jobs WHERE status <> 'PENDING' AND finished_at < ?", at(before));
     }
 
-    /** Cancels everything still waiting to go to this person (their account was deleted). */
+    /**
+     * Cancels everything still waiting to go to this person, and to others about them (a salon told "Rahul
+     * booked" whose push is still being retried): their account was deleted, and a blanked message must not go
+     * out empty.
+     */
     public int cancelPendingForUser(UUID userId, Instant now) {
         return jdbc.update("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = ? "
-                + "WHERE user_id = ? AND status = 'PENDING'", at(now), userId);
+                + "WHERE (user_id = ? OR about_user_id = ?) AND status = 'PENDING'", at(now), userId, userId);
     }
 
     /** Empties the text of every message this person got or would have got (their account was deleted). */
     public int blankForUser(UUID userId) {
+        // Their own messages, and the ones others got about them (a salon told "Rahul booked")
         return jdbc.update("UPDATE notification_jobs SET title = '', body = '', url = NULL, sms_variables = NULL "
-                + "WHERE user_id = ?", userId);
+                + "WHERE user_id = ? OR about_user_id = ?", userId, userId);
     }
 
     /**
@@ -66,7 +133,8 @@ public class NotificationStore {
      * queue (next_try_at) don't change: a server sending one right now keeps it and records its outcome as usual.
      */
     public int rewritePending(Notice n) {
-        return jdbc.update("UPDATE notification_jobs SET title = ?, body = ?, url = ?, "
+        // A new text is a new message: unread again in the app list
+        return jdbc.update("UPDATE notification_jobs SET title = ?, body = ?, url = ?, read_at = NULL, "
                         + "sms_variables = CASE WHEN channel = 'SMS' THEN ? ELSE NULL END "
                         + "WHERE ref_id = ? AND type = ? AND status = 'PENDING'",
                 n.title(), n.body(), n.url(), encode(n.smsVariables()), n.refId(), n.type());
