@@ -1325,6 +1325,24 @@ class SalonBookingIntegrationTest {
         assertThat(count("notification_jobs WHERE status = 'PENDING'")).isEqualTo(before - 1);
     }
 
+    @Test
+    void theOwnersHistoryCountsTheDayAndWhatWasDone() {
+        id(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()));   // 10:00-10:30, ₹150
+        UUID missed = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("12:15"));
+        autoEnd.runOnce();   // the walk-in completes, the booking becomes a no-show
+        Reply h = get("/salon/history?from=2026-11-10&to=2026-11-10", owner);
+        assertThat(h.status()).as(h.text()).isEqualTo(200);
+        assertThat(field(h.body(), "counts")).isEqualTo(Map.of("COMPLETED", 1, "NO_SHOW", 1));
+        assertThat(((Number) field(h.body(), "completedPaise")).longValue()).isEqualTo(15000);
+        List<?> list = (List<?>) field(h.body(), "appointments");
+        assertThat(field(list.get(0), "id")).isEqualTo(missed.toString());   // latest first
+        assertThat(get("/salon/history?from=2026-10-01&to=2026-11-10", owner).status()).isEqualTo(400);
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        assertThat(get("/salon/history?from=2026-11-10&to=2026-11-10", rajuUser).status()).isEqualTo(403);
+    }
+
     // ---------- helpers ----------
 
     private long shopVersion() {

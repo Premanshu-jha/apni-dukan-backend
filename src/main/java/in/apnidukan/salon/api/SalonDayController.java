@@ -10,6 +10,7 @@ import in.apnidukan.salon.api.BookingRequests.Start;
 import in.apnidukan.salon.api.BookingRequests.WalkIn;
 import in.apnidukan.salon.api.BookingRequests.WalkInAccess;
 import in.apnidukan.salon.api.BookingResponses.AppointmentView;
+import in.apnidukan.salon.api.BookingResponses.HistoryView;
 import in.apnidukan.salon.api.BookingResponses.ClosureView;
 import in.apnidukan.salon.api.BookingResponses.DayView;
 import in.apnidukan.salon.api.BookingResponses.MemberView;
@@ -64,6 +65,16 @@ public class SalonDayController {
      * Upcoming bookings and walk-ins across the coming days, soonest first (up to 200): the owner's "what's coming"
      * list. A barber without walk-in access sees only his own.
      */
+    /**
+     * The owner's history: bookings and walk-ins on the India dates from..to (at most 31 days), latest first, with
+     * a count per status and the completed amount at list price. Owner or helper.
+     */
+    @GetMapping("/history")
+    public HistoryView history(@RequestParam @DateTimeFormat(iso = ISO.DATE) LocalDate from,
+                               @RequestParam @DateTimeFormat(iso = ISO.DATE) LocalDate to) {
+        return day.history(me(), from, to);
+    }
+
     @GetMapping("/upcoming")
     public List<AppointmentView> upcoming() {
         return day.upcoming(me());

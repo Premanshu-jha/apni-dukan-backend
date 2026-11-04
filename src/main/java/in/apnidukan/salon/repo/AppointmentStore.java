@@ -220,6 +220,13 @@ public class AppointmentStore {
         }, ROW);
     }
 
+    /** Bookings and walk-ins starting in [from, to), latest first, at most limit (the owner's history). */
+    public List<Appointment> history(UUID shopId, Instant from, Instant to, int limit) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND kind <> 'BLOCK' "
+                + "AND starts_at >= ? AND starts_at < ? ORDER BY starts_at DESC, id LIMIT ?", ROW, shopId, at(from),
+                at(to), limit);
+    }
+
     /** Everything in the salon overlapping [from, to) except removed blocks, for the day screen. */
     public List<Appointment> forDay(UUID shopId, Instant from, Instant to) {
         return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND status <> 'REMOVED' "

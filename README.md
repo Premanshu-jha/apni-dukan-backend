@@ -399,6 +399,7 @@ The customer picks services and a time; the backend picks the barber. Another pe
 | --- | --- | --- |
 | `GET /day?date=` | owner, helper, and anyone with walk-in access: all barbers; other barbers: their own | A column per barber with his hours and appointments (`notStarted` once its time passed). Never the start code |
 | `GET /upcoming` | owner, helper, anyone with walk-in access: the salon; other barbers: their own | Online bookings still to come across the next 31 days, soonest first (up to 200), including ones running late |
+| `GET /history?from=&to=` | owner, helper | India dates, at most 31 days: bookings and walk-ins latest first (up to 500), how many ended in each status, and what the completed ones were worth at list price |
 | `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or when he is next free today (exact minutes, for information). A walk-in always starts now with a barber who is free now (IN_SERVICE at once, no code: the customer is in the chair); there is no booking a walk-in for later. 409 `BARBER_BUSY` with his next free time |
 | `GET /members` · `PUT /members/{userId}/walk-in-access {allowed}` | owner | Who may add walk-ins besides the owner (a helper or barber) |
 | `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before until 15 min after the start (then it is a no-show). A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper) |

@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /** What the booking, walk-in and daily-work endpoints return. Times are exact moments (ISO-8601, UTC). */
@@ -125,6 +126,16 @@ public final class BookingResponses {
     }
 
     /** The day screen: one column per barber. */
+    /**
+     * The owner's look back over a range of days.
+     * @param counts            how many appointments ended in each status (COMPLETED, NO_SHOW, ...)
+     * @param completedPaise    the list prices of everything COMPLETED ("from" prices count at their base)
+     * @param appointments      bookings and walk-ins in the range, latest first (at most 500; truncated says so)
+     */
+    public record HistoryView(LocalDate from, LocalDate to, Map<String, Long> counts, long completedPaise,
+                              List<AppointmentView> appointments, boolean truncated) {
+    }
+
     public record DayView(LocalDate date, List<BarberColumn> barbers) {
     }
 

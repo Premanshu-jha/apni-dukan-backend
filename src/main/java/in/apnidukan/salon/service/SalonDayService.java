@@ -18,6 +18,7 @@ import in.apnidukan.salon.api.BookingResponses.AppointmentView;
 import in.apnidukan.salon.api.BookingResponses.BarberColumn;
 import in.apnidukan.salon.api.BookingResponses.ClosureView;
 import in.apnidukan.salon.api.BookingResponses.DayView;
+import in.apnidukan.salon.api.BookingResponses.HistoryView;
 import in.apnidukan.salon.api.BookingResponses.HoursBlock;
 import in.apnidukan.salon.api.BookingResponses.MemberView;
 import in.apnidukan.salon.api.BookingResponses.PauseView;
@@ -92,6 +93,8 @@ public class SalonDayService {
     /** The upcoming list covers the longest booking window a salon can set (30 days), at most this many rows. */
     static final Duration UPCOMING_AHEAD = Duration.ofDays(31);
     static final int UPCOMING_LIMIT = 200;
+    static final int HISTORY_MAX_DAYS = 31;
+    static final int HISTORY_LIMIT = 500;
     /** SQL state of an exclusion-rule violation (the no-overlap rule). */
     static final String OVERLAP = "23P01";
 
@@ -265,6 +268,31 @@ public class SalonDayService {
         Instant now = now();
         return views(c, appointments.upcomingInSalon(c.shopId(), c.seesAll() ? null : c.staffId(), now,
                 now.plus(UPCOMING_AHEAD), UPCOMING_LIMIT));
+    }
+
+    /**
+     * The owner's history: bookings and walk-ins on the India dates from..to (at most 31 days), latest first, with
+     * how many ended in each status and what the completed ones were worth at list price. Owner or helper.
+     */
+    @Transactional(readOnly = true)
+    public HistoryView history(UUID userId, LocalDate from, LocalDate to) {
+        Caller c = access.ownerOrHelper(userId);
+        if (to.isBefore(from)) {
+            throw SalonCalendar.invalid("to", "must be on or after from");
+        }
+        if (from.plusDays(HISTORY_MAX_DAYS).isBefore(to.plusDays(1))) {
+            throw SalonCalendar.invalid("to", "is too far from from (at most " + HISTORY_MAX_DAYS + " days)");
+        }
+        List<Appointment> list = appointments.history(c.shopId(), Availability.dayStart(from),
+                Availability.dayStart(to.plusDays(1)), HISTORY_LIMIT + 1);
+        boolean truncated = list.size() > HISTORY_LIMIT;
+        List<Appointment> shown = truncated ? list.subList(0, HISTORY_LIMIT) : list;
+        Map<String, Long> counts = new java.util.TreeMap<>();
+        shown.forEach(a -> counts.merge(a.status().name(), 1L, Long::sum));
+        Map<UUID, List<BookedService>> services = appointments.services(
+                shown.stream().filter(a -> a.status() == AppointmentStatus.COMPLETED).map(Appointment::id).toList());
+        long completed = services.values().stream().flatMap(List::stream).mapToLong(BookedService::pricePaise).sum();
+        return new HistoryView(from, to, counts, completed, views(c, shown), truncated);
     }
 
     // ---------- start, no-show, reassign, cancel ----------
