@@ -297,6 +297,11 @@ public class BookingService {
         Appointment a = lockMine(customerId, bookingId);
         Instant now = now();
         requireChangeable(a, now);
+        if (Duration.between(now, a.startsAt()).compareTo(LATE_CANCEL) < 0) {
+            // Otherwise moving first, then cancelling more than an hour ahead, would dodge the late-cancel strike
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_LATE_TO_MOVE",
+                    "Less than 1 hour to go: this booking can't be moved any more. You can still cancel it.");
+        }
         if (!"APPROVED".equals(salon.status()) || paused(salon.id(), now)) {
             throw new ApiException(HttpStatus.CONFLICT, "SALON_NOT_BOOKABLE",
                     "The salon isn't taking online changes right now (paused, or its details are being checked "
@@ -509,7 +514,8 @@ public class BookingService {
             ShopCard s = salons.get(a.shopId());
             List<BookedService> lines = booked.getOrDefault(a.id(), List.of());
             boolean changeable = a.status() == AppointmentStatus.CONFIRMED && now.isBefore(a.startsAt());
-            boolean movable = changeable && "APPROVED".equals(s.status()) && !paused(s.id(), now);
+            boolean movable = changeable && "APPROVED".equals(s.status()) && !paused(s.id(), now)
+                    && Duration.between(now, a.startsAt()).compareTo(LATE_CANCEL) >= 0;
             return new BookingView(a.id(), a.bookingNo(), s.id(), s.name(),
                     s.addressLine() + ", " + s.area() + ", " + s.city() + " " + s.pincode(), SalonNotices.mapLink(s),
                     ServiceLine.from(lines), lines.stream().mapToLong(BookedService::pricePaise).sum(),

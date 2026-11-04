@@ -22,7 +22,9 @@ import in.apnidukan.salon.api.SalonResponses.StaffResponse;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.AppointmentKind;
 import in.apnidukan.salon.domain.AppointmentStatus;
+import in.apnidukan.salon.domain.Availability;
 import in.apnidukan.salon.domain.BlockType;
+import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.SalonServiceItem;
 import in.apnidukan.salon.domain.SalonSettings;
 import in.apnidukan.salon.domain.SalonStaff;
@@ -48,7 +50,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Clock;
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.format.TextStyle;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -436,6 +440,7 @@ public class SalonSetupService {
                         + serviceId);
             }
         }
+        requireBookingsStillFit(barber, null, wanted);
         List<StaffSkill> removed = current.stream().filter(s -> !wanted.contains(s.getServiceId())).toList();
         List<StaffSkill> added = newIds.stream()
                 .map(id -> new StaffSkill(salon.shopId(), barber.getId(), id))
@@ -458,6 +463,7 @@ public class SalonSetupService {
         Membership salon = owner(userId);
         SalonStaff barber = lockedBarber(salon, staffId, in.version());
         List<Shift> week = parseWeek(in.hours());
+        requireBookingsStillFit(barber, week, null);
         List<StaffShift> current = shifts.findByStaffId(barber.getId());
         List<StaffShift> removed = current.stream().filter(s -> !week.contains(s.shift())).toList();
         Set<Shift> kept = current.stream().map(StaffShift::shift).collect(Collectors.toSet());
@@ -476,6 +482,38 @@ public class SalonSetupService {
             touch(barber);
         }
         return staffResponse(barber);
+    }
+
+    /**
+     * New hours or services must not strand a booking: each upcoming booking of his (CONFIRMED, not started) has
+     * to stay inside his new hours that day and use only services he still does. Otherwise 409
+     * BOOKINGS_IN_THE_WAY listing them, and nothing is saved: the owner reassigns or cancels them first. His row is
+     * locked (lockedBarber), and booking holds it in shared mode, so no booking can land meanwhile.
+     * @param week   the new week, or null when only the services change
+     * @param skills the new services, or null when only the hours change
+     */
+    private void requireBookingsStillFit(SalonStaff barber, List<Shift> week, Set<UUID> skills) {
+        Instant now = now();
+        // 31 days: the longest booking window a salon can set is 30
+        List<Appointment> upcoming = appointments.holding(List.of(barber.getId()), now,
+                now.plus(Duration.ofDays(31)), null).stream()
+                .filter(a -> a.kind() != AppointmentKind.BLOCK && a.status() == AppointmentStatus.CONFIRMED)
+                .toList();
+        Map<UUID, List<BookedService>> booked = skills == null ? Map.of()
+                : appointments.services(upcoming.stream().map(Appointment::id).toList());
+        List<Appointment> stranded = upcoming.stream().filter(a -> {
+            if (week != null && Availability.working(week, LocalDate.ofInstant(a.startsAt(), SalonTime.ZONE))
+                    .stream().noneMatch(w -> w.contains(a.time()))) {
+                return true;
+            }
+            return skills != null && !skills.containsAll(SalonDayService.ids(booked.getOrDefault(a.id(), List.of())));
+        }).toList();
+        if (!stranded.isEmpty()) {
+            ApiException conflicts = SalonDayService.blockConflicts(stranded);
+            throw new ApiException(HttpStatus.CONFLICT, "BOOKINGS_IN_THE_WAY",
+                    "Some of his upcoming bookings wouldn't fit any more. Reassign or cancel them first.",
+                    conflicts.getDetails());
+        }
     }
 
     /** Checks and converts the week: valid times, end after start, no duplicates, no overlaps on one day. */

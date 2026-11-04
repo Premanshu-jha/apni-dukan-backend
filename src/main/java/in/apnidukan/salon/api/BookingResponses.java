@@ -83,7 +83,8 @@ public final class BookingResponses {
      * @param startCode    the 4 digits to show at the salon; only while the booking is CONFIRMED
      * @param heldUntil    the salon keeps the booking until this moment (15 minutes after the start)
      * @param canChange    true while it can still be cancelled (CONFIRMED, before the start)
-     * @param canMove      true while it can also be moved to another time (the salon is approved and not paused)
+     * @param canMove      true while it can also be moved to another time (the salon is approved and not paused,
+     *                     and it is more than 1 hour away)
      */
     public record BookingView(UUID id, String bookingNo, UUID salonId, String salonName, String salonAddress,
                               String mapLink, List<ServiceLine> services, long totalPricePaise, boolean priceIsFrom,

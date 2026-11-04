@@ -1278,6 +1278,41 @@ class SalonBookingIntegrationTest {
                 .isEqualTo("Raju");
     }
 
+    @Test
+    void aBookingCantBeMovedInItsLastHourOnlyCancelled() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("11:01"));
+        Reply moved = post("/bookings/" + b + "/reschedule", Map.of("startAt", at("14:00").toString()), customer);
+        assertThat(field(moved.body(), "code")).as(moved.text()).isEqualTo("TOO_LATE_TO_MOVE");
+        assertThat(field(get("/bookings/" + b, customer).body(), "canMove")).isEqualTo(false);
+        assertThat(field(get("/bookings/" + b, customer).body(), "canChange")).isEqualTo(true);
+    }
+
+    @Test
+    void newHoursOrServicesCantStrandABarbersUpcomingBookings() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));   // Raju
+        List<Map<String, Object>> noTuesday = new ArrayList<>();
+        for (int day = 1; day <= 7; day++) {
+            if (day != 2) {
+                noTuesday.add(Map.of("weekday", day, "start", "10:00", "end", "21:00"));
+            }
+        }
+        Reply hours = put("/salon/staff/" + raju + "/hours", Map.of("version", rajuVersion(), "hours", noTuesday),
+                owner);
+        assertThat(field(hours.body(), "code")).as(hours.text()).isEqualTo("BOOKINGS_IN_THE_WAY");
+        assertThat(hours.text()).contains(b.toString());
+        Reply services = put("/salon/staff/" + raju + "/services", Map.of("version", rajuVersion(),
+                "serviceIds", List.of(haircut)), owner);
+        assertThat(field(services.body(), "code")).as(services.text()).isEqualTo("BOOKINGS_IN_THE_WAY");
+        // Hours that still cover it are fine
+        List<Map<String, Object>> shorter = new ArrayList<>();
+        for (int day = 1; day <= 7; day++) {
+            shorter.add(Map.of("weekday", day, "start", "11:00", "end", "20:00"));
+        }
+        assertThat(put("/salon/staff/" + raju + "/hours", Map.of("version", rajuVersion(), "hours", shorter), owner)
+                .status()).isEqualTo(200);
+    }
+
     // ---------- helpers ----------
 
     private long shopVersion() {
