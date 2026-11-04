@@ -50,6 +50,7 @@ public class SecurityConfig {
                                 "/api/v1/auth/recover/start",
                                 "/api/v1/auth/recover/complete").permitAll()
                         .requestMatchers("/error").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated())
                 .exceptionHandling(e -> e

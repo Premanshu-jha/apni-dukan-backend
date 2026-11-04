@@ -1,5 +1,8 @@
 package in.apnidukan.config;
 
+import in.apnidukan.auth.service.HumanCheck;
+import in.apnidukan.common.web.ClientAddress;
+
 import in.apnidukan.auth.notify.EmailSender;
 import in.apnidukan.auth.notify.LoggingEmailSender;
 import in.apnidukan.auth.notify.LoggingSmsSender;
@@ -21,8 +24,29 @@ public class ProductionSafetyCheck {
     public ProductionSafetyCheck(@Value("${app.production:false}") boolean production, SmsSender sms,
                                  EmailSender email, @Value("${app.cors.allowed-origins}") String corsOrigins,
                                  @Value("${app.sms.account-moved.enabled:false}") boolean accountMovedSms,
-                                 PushSender push) {
+                                 PushSender push, ClientAddress client, HumanCheck humans) {
         check(production, sms, email, corsOrigins, accountMovedSms, push);
+        checkSignInAbuse(production, client.configured(), humans.enabled());
+    }
+
+    /**
+     * Sign-in codes cost money, so production needs both guards: the caller's real IP (or every caller shares the
+     * proxy's, and one person can use up everyone's limit) and the robot check.
+     */
+    static void checkSignInAbuse(boolean production, boolean clientIpHeaderSet, boolean robotCheckOn) {
+        if (!production) {
+            return;
+        }
+        if (!clientIpHeaderSet) {
+            throw new IllegalStateException("APP_PRODUCTION=true but CLIENT_IP_HEADER is not set: every caller would "
+                    + "look like the proxy. On Railway set it to X-Forwarded-For; behind Cloudflare's proxy, "
+                    + "CF-Connecting-IP.");
+        }
+        if (!robotCheckOn) {
+            throw new IllegalStateException("APP_PRODUCTION=true but TURNSTILE_SECRET_KEY is not set: anyone could "
+                    + "script sign-in codes and use up the daily SMS limit. Create a Turnstile widget in Cloudflare "
+                    + "and set its secret key.");
+        }
     }
 
     static void check(boolean production, SmsSender sms, EmailSender email, String corsOrigins,

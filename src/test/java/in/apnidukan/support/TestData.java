@@ -27,10 +27,23 @@ public final class TestData {
         }
     }
 
+    /** A person who finished sign-up: a verified email (phone@test.in) and the name "Test person". */
     public static void user(JdbcTemplate jdbc, UUID id, String phone) {
+        bareUser(jdbc, id, phone);
+        completeProfile(jdbc, phone);
+    }
+
+    /** A person who only signed in with the phone: no verified email, no name yet. */
+    public static void bareUser(JdbcTemplate jdbc, UUID id, String phone) {
         Timestamp now = Timestamp.from(Instant.now());
         jdbc.update("INSERT INTO users (id, phone, admin, created_at, updated_at) VALUES (?, ?, false, ?, ?)",
                 id, phone, now, now);
+    }
+
+    /** Gives the account with this phone a verified email and a name, as the sign-up screens would. */
+    public static void completeProfile(JdbcTemplate jdbc, String phone) {
+        jdbc.update("UPDATE users SET name = 'Test person', email = phone || '@test.in', email_verified_at = now() "
+                + "WHERE phone = ?", phone);
     }
 
     /**

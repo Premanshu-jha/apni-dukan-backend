@@ -26,6 +26,25 @@ public class StrikeStore {
                 UUID.randomUUID(), customerId, appointmentId, kind.name(), AppointmentStore.at(at));
     }
 
+    /** Takes back the strike of this booking; false if it had none. */
+    public boolean remove(UUID appointmentId) {
+        return jdbc.update("DELETE FROM customer_strikes WHERE appointment_id = ?", appointmentId) == 1;
+    }
+
+    /** A strike with the booking it came from, for support. */
+    public record Strike(UUID appointmentId, String bookingNo, UUID shopId, StrikeKind kind, Instant struckAt) {
+    }
+
+    /** All of this customer's strikes, latest first. */
+    public List<Strike> forCustomer(UUID customerId) {
+        return jdbc.query("SELECT s.appointment_id, a.booking_no, a.shop_id, s.kind, s.struck_at "
+                        + "FROM customer_strikes s JOIN appointments a ON a.id = s.appointment_id "
+                        + "WHERE s.customer_id = ? ORDER BY s.struck_at DESC",
+                (rs, i) -> new Strike(rs.getObject(1, UUID.class), rs.getString(2), rs.getObject(3, UUID.class),
+                        StrikeKind.valueOf(rs.getString(4)), rs.getObject(5, OffsetDateTime.class).toInstant()),
+                customerId);
+    }
+
     /** When this customer's strikes since {@code since} happened, latest first. */
     public List<Instant> since(UUID customerId, Instant since) {
         return jdbc.query("SELECT struck_at FROM customer_strikes WHERE customer_id = ? AND struck_at >= ? "

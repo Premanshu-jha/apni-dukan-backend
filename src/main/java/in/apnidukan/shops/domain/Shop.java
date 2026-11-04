@@ -76,6 +76,10 @@ public class Shop {
     @Column(name = "shop_photo_file_id")
     private UUID shopPhotoFileId;
 
+    /** Why the field team sent it back to DRAFT or suspended it (shown to the owner); null otherwise. */
+    @Column(name = "status_reason", length = 200)
+    private String statusReason;
+
     @Version
     @Column(nullable = false)
     private long version;
@@ -130,6 +134,7 @@ public class Shop {
             throw new IllegalStateException("Only a DRAFT shop with both photos can be submitted, not " + status);
         }
         this.status = ShopStatus.PENDING_VISIT;
+        this.statusReason = null;
         this.updatedAt = now;
     }
 
@@ -151,6 +156,45 @@ public class Shop {
             throw new IllegalStateException("Only a PENDING_VISIT shop can be approved, not " + status);
         }
         this.status = ShopStatus.APPROVED;
+        this.statusReason = null;
+        this.updatedAt = now;
+    }
+
+    /**
+     * The visit didn't pass: PENDING_VISIT → DRAFT with the reason, so the owner can fix it and submit again.
+     */
+    public void reject(String reason, Instant now) {
+        if (status != ShopStatus.PENDING_VISIT) {
+            throw new IllegalStateException("Only a PENDING_VISIT shop can be sent back, not " + status);
+        }
+        this.status = ShopStatus.DRAFT;
+        this.statusReason = reason;
+        this.updatedAt = now;
+    }
+
+    /**
+     * Taken off the app by Apni Dukan (APPROVED, or PENDING_VISIT: e.g. a shop found shut at its re-check visit).
+     * Customers can't find it; only the field team brings it back, through a new visit (reinstate).
+     */
+    public void suspend(String reason, Instant now) {
+        if (status != ShopStatus.APPROVED && status != ShopStatus.PENDING_VISIT) {
+            throw new IllegalStateException("Only an APPROVED or PENDING_VISIT shop can be suspended, not " + status);
+        }
+        this.status = ShopStatus.SUSPENDED;
+        this.statusReason = reason;
+        this.updatedAt = now;
+    }
+
+    /**
+     * SUSPENDED → PENDING_VISIT: back in the field team's visit list, live again only after they approve it. So a
+     * shop that was never visited, or changed its address or photos while suspended, never goes live unchecked.
+     */
+    public void reinstate(Instant now) {
+        if (status != ShopStatus.SUSPENDED) {
+            throw new IllegalStateException("Only a SUSPENDED shop can be reinstated, not " + status);
+        }
+        this.status = ShopStatus.PENDING_VISIT;
+        this.statusReason = null;
         this.updatedAt = now;
     }
 
@@ -161,6 +205,7 @@ public class Shop {
     public UUID getId() { return id; }
     public long getShopCode() { return shopCode; }
     public ShopStatus getStatus() { return status; }
+    public String getStatusReason() { return statusReason; }
     public ShopType getType() { return type; }
     public UUID getOwnerPhotoFileId() { return ownerPhotoFileId; }
     public UUID getShopPhotoFileId() { return shopPhotoFileId; }

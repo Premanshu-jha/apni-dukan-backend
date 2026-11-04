@@ -51,6 +51,7 @@ class AuthIntegrationTest {
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
     @Autowired StringRedisTemplate redis;
+    @Autowired in.apnidukan.auth.service.SignInCleanupJob signInCleanup;
 
     RestClient http;
     String base;
@@ -412,6 +413,66 @@ class AuthIntegrationTest {
         // Another caller (IP passed on by the proxy) is not affected
         Reply other = postFrom("203.0.113.9", "/auth/otp/send", Map.of("phone", "9000000099"));
         assertThat(other.status()).isEqualTo(202);
+    }
+
+    @Test
+    void madeUpForwardedForEntriesDontDodgeTheNetworkLimit() {
+        // The caller writes anything on the left; the proxy's own entry (the last one) is what counts
+        for (int i = 0; i < 10; i++) {
+            assertThat(postFrom("10.0.0." + i + ", 198.51.100.7", "/auth/otp/send",
+                    Map.of("phone", "90000001" + String.format("%02d", i))).status()).isEqualTo(202);
+        }
+        Reply eleventh = postFrom("10.9.9.9, 198.51.100.7", "/auth/otp/send", Map.of("phone", "9000000199"));
+        assertThat(eleventh.status()).isEqualTo(429);
+    }
+
+    @Test
+    void aDeletedAccountCantSignInAgainButItsPhoneStartsANewOne() {
+        Reply first = signIn(PHONE);
+        String access = (String) first.body().get("accessToken");
+        String refresh = (String) first.body().get("refreshToken");
+        jdbc.update("UPDATE refresh_tokens SET device = 'Pixel 8'");
+        assertThat(post("/auth/me/delete-code", Map.of(), access).status()).isEqualTo(202);
+        String code = codeSentTo(LAST_SMS, PHONE);
+        assertThat(post("/auth/me/delete", Map.of("code", code), access).status()).isEqualTo(204);
+        assertThat(get("/auth/me", access).status()).isEqualTo(401);
+        assertThat(post("/auth/refresh", Map.of("refreshToken", refresh), null).status()).isEqualTo(401);
+        Integer labelled = jdbc.queryForObject("SELECT count(*) FROM refresh_tokens WHERE device IS NOT NULL",
+                Integer.class);
+        assertThat(labelled).isZero();   // device names can say whose phone it was
+
+        Reply again = signIn(PHONE);
+        assertThat(again.body().get("newUser")).isEqualTo(true);
+        assertThat(((Map<?, ?>) again.body().get("user")).get("id"))
+                .isNotEqualTo(((Map<?, ?>) first.body().get("user")).get("id"));
+    }
+
+    @Test
+    void signingOutEverywhereEndsEverySessionAtOnce() {
+        Reply phone = signIn(PHONE);
+        Reply laptop = signIn(PHONE);
+        assertThat(post("/auth/logout-all", Map.of(), (String) phone.body().get("accessToken")).status())
+                .isEqualTo(204);
+        assertThat(get("/auth/me", (String) laptop.body().get("accessToken")).status()).isEqualTo(401);
+        assertThat(post("/auth/refresh", Map.of("refreshToken", laptop.body().get("refreshToken")), null).status())
+                .isEqualTo(401);
+    }
+
+    @Test
+    void endedSignInsAreDeletedAfter30DaysAndTheHealthCheckIsOpen() {
+        signIn(PHONE);
+        signIn(PHONE);
+        jdbc.update("UPDATE refresh_tokens SET revoked_at = now() - interval '31 days', revoke_reason = 'SIGNED_OUT' "
+                + "WHERE id = (SELECT id FROM refresh_tokens ORDER BY created_at LIMIT 1)");
+        assertThat(signInCleanup.runOnce()).isEqualTo(1);
+        Integer left = jdbc.queryForObject("SELECT count(*) FROM refresh_tokens", Integer.class);
+        assertThat(left).isEqualTo(1);
+
+        Reply health = get(base + "/actuator/health", null);
+        assertThat(health.status()).isEqualTo(200);
+        assertThat(health.body().get("status")).isEqualTo("UP");
+        assertThat(health.body().containsKey("components")).isFalse();   // no details of what is checked
+        assertThat(health.body().containsKey("details")).isFalse();
     }
 
     @Test

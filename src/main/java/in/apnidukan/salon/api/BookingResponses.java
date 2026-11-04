@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /** What the booking, walk-in and daily-work endpoints return. Times are exact moments (ISO-8601, UTC). */
@@ -83,12 +84,13 @@ public final class BookingResponses {
      * @param startCode    the 4 digits to show at the salon; only while the booking is CONFIRMED
      * @param heldUntil    the salon keeps the booking until this moment (15 minutes after the start)
      * @param canChange    true while it can still be cancelled (CONFIRMED, before the start)
-     * @param canMove      true while it can also be moved to another time (the salon is approved and not paused)
+     * @param canMove      true while it can also be moved to another time (the salon is approved and not paused,
+     *                     and it is more than 1 hour away)
      */
     public record BookingView(UUID id, String bookingNo, UUID salonId, String salonName, String salonAddress,
                               String mapLink, List<ServiceLine> services, long totalPricePaise, boolean priceIsFrom,
                               Instant startsAt, Instant endsAt, Instant heldUntil, AppointmentStatus status,
-                              String startCode, String bookingFor, String cancelReason, boolean canChange,
+                              String startCode, String cancelReason, boolean canChange,
                               boolean canMove, Instant createdAt) {
     }
 
@@ -101,6 +103,8 @@ public final class BookingResponses {
     /**
      * An appointment on the salon's screens. Never carries the customer's start code.
      * @param customerName the customer's name (or "Customer" if they haven't set one); bookings only
+     * @param customerPhone the customer's phone, to call someone running late; bookings only, and only for the
+     *                      owner and helpers (null for barbers)
      * @param notStarted   true if it is CONFIRMED and its start has passed: the screen shows "not started" so staff
      *                     press Start or No-show
      * @param noShowFrom   bookings and walk-ins: No-show is allowed from this moment
@@ -108,17 +112,27 @@ public final class BookingResponses {
     public record AppointmentView(UUID id, AppointmentKind kind, BlockType blockType, UUID staffId,
                                   AppointmentStatus status, Instant startsAt, Instant endsAt, Instant startedAt,
                                   Boolean startedWithCode, List<ServiceLine> services, String bookingNo,
-                                  String customerName, String bookingFor, String guestName, String cancelReason,
-                                  UUID closureId, boolean notStarted, Instant noShowFrom) {
+                                  String customerName, String customerPhone, String guestName,
+                                  String cancelReason, UUID closureId, boolean notStarted, Instant noShowFrom) {
 
         public static AppointmentView of(Appointment a, List<BookedService> services, String customerName,
-                                         Instant now, Instant noShowFrom) {
+                                         String customerPhone, Instant now, Instant noShowFrom) {
             boolean notStarted = a.status() == AppointmentStatus.CONFIRMED && !now.isBefore(a.startsAt());
             return new AppointmentView(a.id(), a.kind(), a.blockType(), a.staffId(), a.status(), a.startsAt(),
                     a.endsAt(), a.startedAt(), a.startedWithCode(), ServiceLine.from(services), a.bookingNo(),
-                    customerName, a.bookingFor(), a.guestName(), a.cancelReason(), a.closureId(), notStarted,
-                    a.kind() == AppointmentKind.BLOCK ? null : noShowFrom);
+                    customerName, customerPhone, a.guestName(), a.cancelReason(), a.closureId(),
+                    notStarted, a.kind() == AppointmentKind.BLOCK ? null : noShowFrom);
         }
+    }
+
+    /**
+     * The owner's look back over a range of days.
+     * @param counts            how many appointments ended in each status (COMPLETED, NO_SHOW, ...)
+     * @param completedPaise    the list prices of everything COMPLETED ("from" prices count at their base)
+     * @param appointments      bookings and walk-ins in the range, latest first (at most 500; truncated says so)
+     */
+    public record HistoryView(LocalDate from, LocalDate to, Map<String, Long> counts, long completedPaise,
+                              List<AppointmentView> appointments, boolean truncated) {
     }
 
     /** The day screen: one column per barber. */

@@ -147,7 +147,7 @@ public class NotificationSendJob {
         Optional<String> template = smsTemplates.forType(job.type());
         UserDirectory.Person person = users.find(List.of(job.userId())).get(job.userId());
         Instant now = now();
-        if (template.isEmpty() || person == null) {
+        if (template.isEmpty() || person == null || person.phone() == null) {   // no phone: account deleted
             jobs.finish(job.id(), JobStatus.NO_DEVICE, now, lease);
         } else if (!withinSmsBudget(job.userId())) {
             jobs.finish(job.id(), JobStatus.FAILED, now, lease);   // over budget: dropped, never sent later
