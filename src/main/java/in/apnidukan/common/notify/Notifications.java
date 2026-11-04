@@ -36,7 +36,13 @@ public interface Notifications {
      *                     characters each; the SMS text itself is the DLT-approved template
      */
     record Notice(UUID userId, String type, UUID refId, Instant sendAt, String title, String body, String url,
-                  Map<String, String> smsVariables) {
+                  Map<String, String> smsVariables, UUID aboutUserId) {
+
+        /** A notice that carries only the receiver's own details. */
+        public Notice(UUID userId, String type, UUID refId, Instant sendAt, String title, String body, String url,
+                      Map<String, String> smsVariables) {
+            this(userId, type, refId, sendAt, title, body, url, smsVariables, null);
+        }
 
         /** Its own copy of the SMS variables (none = empty), so nobody can change a queued notice. */
         public Notice {
