@@ -276,6 +276,78 @@ class SalonBookingIntegrationTest {
         assertThat(field(blocked.body(), "code")).isEqualTo("BOOKING_BLOCKED");
         // Somebody else can still book
         assertThat(book(customer2, at("16:00"), List.of(haircut), UUID.randomUUID()).status()).isEqualTo(201);
+        // Deleting the account (and signing up again) is no way round the block
+        Reply delete = post("/auth/me/delete-code", Map.of(), customer);
+        assertThat(delete.status()).as(delete.text()).isEqualTo(409);
+        assertThat(field(delete.body(), "code")).isEqualTo("BOOKING_BLOCKED");
+    }
+
+    @Test
+    void anAccountCantBeDeletedWithABookingStartingWithinTheHour() {
+        UUID b = id(book(customer, at("11:00"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("10:30"));
+        Reply soon = post("/auth/me/delete-code", Map.of(), customer);
+        assertThat(soon.status()).as(soon.text()).isEqualTo(409);
+        assertThat(field(soon.body(), "code")).isEqualTo("BOOKING_SOON");
+        assertThat(status(b)).isEqualTo("CONFIRMED");
+        // Cancelling it first is the way (a late cancel, a strike), then the account can go
+        assertThat(post("/bookings/" + b + "/cancel", Map.of(), customer).status()).isEqualTo(200);
+        assertThat(post("/auth/me/delete-code", Map.of(), customer).status()).isEqualTo(202);
+    }
+
+    @Test
+    void refusedBookingAttemptsDontUseUpTheDailyChanges() {
+        for (int i = 0; i < 12; i++) {   // outside the booking window: refused, not counted
+            assertThat(field(book(customer, at("10:00").plus(Duration.ofDays(30)), List.of(haircut),
+                    UUID.randomUUID()).body(), "code")).isEqualTo("OUTSIDE_WINDOW");
+        }
+        assertThat(book(customer, at("18:00"), List.of(haircut), UUID.randomUUID()).status()).isEqualTo(201);
+    }
+
+    @Test
+    void oneCustomerCantHoldTwoBookingsAtTheSameTime() {
+        UUID first = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        Reply overlap = book(customer, at("12:15"), List.of(haircut), UUID.randomUUID());   // another barber is free
+        assertThat(overlap.status()).as(overlap.text()).isEqualTo(409);
+        assertThat(field(overlap.body(), "code")).isEqualTo("OVERLAPS_YOUR_BOOKING");
+        UUID second = id(book(customer, at("15:00"), List.of(haircut), UUID.randomUUID()));
+        Reply move = post("/bookings/" + second + "/reschedule", Map.of("startAt", at("12:15").toString()), customer);
+        assertThat(field(move.body(), "code")).isEqualTo("OVERLAPS_YOUR_BOOKING");
+        // Moving a booking a little onto its own time is fine
+        assertThat(post("/bookings/" + first + "/reschedule", Map.of("startAt", at("12:15").toString()), customer)
+                .status()).isEqualTo(200);
+    }
+
+    @Test
+    void freeTimesForAMoveCountTheBookingsOwnTimeAsFree() {
+        // Haircut + beard: only Raju does both. Booked 12:00-12:45
+        UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));
+        String path = "/salons/" + salon + "/availability?services=" + haircut + "&services=" + beard
+                + "&date=2026-11-10";
+        assertThat(get(path, customer).text()).doesNotContain(at("12:15").toString());
+        assertThat(get(path + "&moving=" + b, customer).text()).contains(at("12:15").toString());
+        // Someone else's booking can't be used to see through it
+        assertThat(get(path + "&moving=" + b, customer2).status()).isEqualTo(404);
+    }
+
+    @Test
+    void aCustomerCanBookOrMoveAtMostTenTimesADay() {
+        for (int i = 0; i < 10; i++) {
+            UUID b = id(book(customer, at("18:00"), List.of(haircut), UUID.randomUUID()));
+            assertThat(post("/bookings/" + b + "/cancel", Map.of(), customer).status()).isEqualTo(200);
+        }
+        Reply more = book(customer, at("18:00"), List.of(haircut), UUID.randomUUID());
+        assertThat(more.status()).as(more.text()).isEqualTo(429);
+        assertThat(field(more.body(), "code")).isEqualTo("TOO_MANY_CHANGES");
+        assertThat(book(customer2, at("18:00"), List.of(haircut), UUID.randomUUID()).status()).isEqualTo(201);
+    }
+
+    @Test
+    void signingOutEverywhereStopsMessagesToEveryDevice() {
+        assertThat(post("/me/push-subscriptions", subscription(FCM), customer).status()).isEqualTo(204);
+        assertThat(count("push_subscriptions")).isEqualTo(1);
+        assertThat(post("/auth/logout-all", Map.of(), customer).status()).isEqualTo(204);
+        assertThat(count("push_subscriptions")).isZero();
     }
 
     @Test
@@ -880,6 +952,86 @@ class SalonBookingIntegrationTest {
         assertThat(count("push_subscriptions")).isZero();
         assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE ref_id = ? "
                 + "AND type = 'BOOKING_REMINDER'", String.class, b)).isEqualTo("NO_DEVICE");
+    }
+
+    @Test
+    void theInAppListShowsEachAppItsOwnMessagesNewestFirstAndMarksThemRead() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        // Not sent yet (the sender hasn't run), but already due: cancelling later must not take it off the list
+        CLOCK.advance(Duration.ofMinutes(1));
+        assertThat(post("/bookings/" + b + "/cancel", null, customer).status()).isEqualTo(200);
+
+        // The customer app: confirmation and cancellation, newest first; the reminder was cancelled, not shown
+        Reply list = get("/me/notifications", customer);
+        assertThat(list.status()).as(list.text()).isEqualTo(200);
+        List<?> items = (List<?>) field(list.body(), "items");
+        assertThat(items).extracting(i -> field(i, "type")).containsExactly("BOOKING_CANCELLED", "BOOKING_CONFIRMED");
+        assertThat(field(items.get(1), "url")).isEqualTo("/bookings/" + b);
+        assertThat(field(list.body(), "unread")).isEqualTo(2);
+        assertThat(field(list.body(), "next")).isNull();
+
+        // The owner's salon messages show only in the partner app, never in their customer list
+        assertThat((List<?>) field(get("/me/notifications", owner).body(), "items")).isEmpty();
+        assertThat((List<?>) field(get("/me/notifications?app=partner", owner).body(), "items"))
+                .extracting(i -> field(i, "type")).containsExactly("SALON_BOOKING_CANCELLED", "SALON_NEW_BOOKING");
+        assertThat(get("/me/notifications?app=kirana", owner).status()).isEqualTo(400);
+
+        // Marking one read, then all; someone else's id changes nothing
+        String first = (String) field(items.get(0), "id");
+        assertThat(post("/me/notifications/read", Map.of("ids", List.of(first)), customer2).status()).isEqualTo(204);
+        assertThat(field(get("/me/notifications/unread-count", customer).body(), "unread")).isEqualTo(2);
+        assertThat(post("/me/notifications/read", Map.of("ids", List.of(first)), customer).status()).isEqualTo(204);
+        assertThat(field(get("/me/notifications/unread-count", customer).body(), "unread")).isEqualTo(1);
+        assertThat(post("/me/notifications/read", Map.of(), customer).status()).isEqualTo(204);
+        assertThat(field(get("/me/notifications/unread-count", customer).body(), "unread")).isEqualTo(0);
+        assertThat(field(get("/me/notifications/unread-count?app=partner", owner).body(), "unread")).isEqualTo(2);
+        assertThat(get("/me/notifications?cursor=nonsense", customer).status()).isEqualTo(400);
+        java.util.List<Object> withEmpty = new java.util.ArrayList<>();
+        withEmpty.add(null);
+        assertThat(post("/me/notifications/read", Map.of("ids", withEmpty), customer).status()).isEqualTo(400);
+    }
+
+    @Test
+    void deletingAnAccountBlanksTheSalonsMessagesThatNameThem() {
+        patch("/auth/me", Map.of("name", "Ravi Kumar"), customer);
+        id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        assertThat(get("/me/notifications?app=partner", owner).text()).contains("Ravi");
+        post("/auth/me/delete-code", Map.of(), customer);
+        String code = in.apnidukan.support.CapturingSenders.codeSentTo(
+                in.apnidukan.support.CapturingSenders.LAST_SMS, "9000000101");
+        assertThat(post("/auth/me/delete", Map.of("code", code), customer).status()).isEqualTo(204);
+        Reply list = get("/me/notifications?app=partner", owner);
+        assertThat(list.text()).doesNotContain("Ravi");
+        // The salon still learns the time is free, from the notice that names nobody
+        assertThat((List<?>) field(list.body(), "items")).extracting(i -> field(i, "type"))
+                .containsExactly("SALON_BOOKING_CANCELLED");
+        // A blanked message that was still waiting is never sent empty
+        sender.runOnce();
+        assertThat(jdbc.queryForList("SELECT status FROM notification_jobs WHERE title = '' AND status <> 'CANCELLED'",
+                String.class)).isEmpty();
+    }
+
+    @Test
+    void theInAppListPagesWithoutSkippingMessagesSentAtTheSameMoment() {
+        Instant now = CLOCK.instant();
+        for (int i = 0; i < 35; i++) {
+            jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, title, body, send_at, status, "
+                    + "attempts, next_try_at, created_at) VALUES (?, ?, 'PUSH', 'BOOKING_REMINDER', 'Soon', ?, ?, "
+                    + "'SENT', 1, ?, ?)", UUID.randomUUID(), customer, "message " + i,
+                    java.sql.Timestamp.from(now), java.sql.Timestamp.from(now), java.sql.Timestamp.from(now));
+        }
+        Reply one = get("/me/notifications", customer);
+        String next = (String) field(one.body(), "next");
+        assertThat((List<?>) field(one.body(), "items")).hasSize(30);
+        assertThat(next).isNotNull();
+        Reply two = get("/me/notifications?cursor=" + next, customer);   // only letters, digits, - : . _
+        assertThat(two.status()).as(two.text()).isEqualTo(200);
+        assertThat((List<?>) field(two.body(), "items")).hasSize(5);
+        assertThat(field(two.body(), "next")).isNull();
+        java.util.Set<Object> seen = new java.util.HashSet<>();
+        ((List<?>) field(one.body(), "items")).forEach(i -> seen.add(field(i, "id")));
+        ((List<?>) field(two.body(), "items")).forEach(i -> seen.add(field(i, "id")));
+        assertThat(seen).hasSize(35);
     }
 
     @Test

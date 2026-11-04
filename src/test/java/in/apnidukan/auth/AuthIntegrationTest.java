@@ -485,6 +485,36 @@ class AuthIntegrationTest {
     }
 
     @Test
+    void askingForANewCodeWhileSmsIsPausedKeepsTheCodeAlreadySent() {
+        assertThat(post("/auth/otp/send", Map.of("phone", PHONE), null).status()).isEqualTo(202);
+        String code = codeSentTo(LAST_SMS, PHONE);
+        redis.opsForValue().set("rl:sms-day", "500");
+        assertThat(post("/auth/otp/send", Map.of("phone", PHONE), null).body().get("code")).isEqualTo("SMS_PAUSED");
+        Reply in = post("/auth/otp/verify", Map.of("phone", PHONE, "code", code), null);
+        assertThat(in.status()).as(String.valueOf(in.body())).isEqualTo(200);
+    }
+
+    @Test
+    void aTypoInOneRecoveryCodeKeepsTheOtherForTheNextTry() {
+        Reply first = signIn(PHONE);
+        verifyEmail(first, "shop@gmail.com");
+        LAST_SMS.clear();
+        LAST_EMAIL.clear();
+        String newPhone = "9700000009";
+        assertThat(post("/auth/recover/start", Map.of("email", "shop@gmail.com", "newPhone", newPhone), null)
+                .status()).isEqualTo(202);
+        String emailCode = codeSentTo(LAST_EMAIL, "shop@gmail.com");
+        String phoneCode = codeSentTo(LAST_SMS, newPhone);
+        String typo = phoneCode.equals("000000") ? "111111" : "000000";
+        Reply wrong = post("/auth/recover/complete", Map.of("email", "shop@gmail.com", "emailCode", emailCode,
+                "newPhone", newPhone, "phoneCode", typo), null);
+        assertThat(wrong.body().get("code")).isEqualTo("WRONG_CODE");
+        Reply done = post("/auth/recover/complete", Map.of("email", "shop@gmail.com", "emailCode", emailCode,
+                "newPhone", newPhone, "phoneCode", phoneCode), null);
+        assertThat(done.status()).as(String.valueOf(done.body())).isEqualTo(200);
+    }
+
+    @Test
     void hugeRequestBodiesAreRefusedBeforeBeingRead() {
         Reply r = post("/auth/otp/send", Map.of("phone", "9".repeat(70_000)), null);
         assertThat(r.status()).isEqualTo(413);
