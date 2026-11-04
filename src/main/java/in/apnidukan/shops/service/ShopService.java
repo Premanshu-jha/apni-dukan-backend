@@ -91,6 +91,7 @@ public class ShopService implements ShopMemberships {
         if (!users.lockIfActive(userId)) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "NOT_SIGNED_IN", "Sign in first.");
         }
+        users.requireCompleteProfile(userId);   // verified email (for recovery) and a name
         if (members.existsByUserId(userId)) {
             throw alreadyHasShop();
         }

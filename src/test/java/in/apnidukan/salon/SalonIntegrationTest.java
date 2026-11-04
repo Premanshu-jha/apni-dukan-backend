@@ -750,6 +750,7 @@ class SalonIntegrationTest {
         post("/auth/otp/send", Map.of("phone", phone), null);
         Reply r = post("/auth/otp/verify", Map.of("phone", phone, "code", codeSentTo(LAST_SMS, phone)), null);
         assertThat(r.status()).as(r.body().toString()).isEqualTo(200);
+        in.apnidukan.support.TestData.completeProfile(jdbc, phone);   // the email and name screens
         return r.body();
     }
 

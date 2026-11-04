@@ -173,6 +173,15 @@ coming back counts as copied; an old device retrying a signed-out token just get
 | `POST /recover/start` `{email, newPhone, captchaToken}` | Lost phone: a code to the verified email and one to the new phone |
 | `POST /recover/complete` | Both codes right: moves the account to the new phone and ends every old session |
 
+### Finishing sign-up
+
+The app asks, in this order: phone → OTP (`otp/verify`, `newUser: true` the first time) → email → its code
+(`/email/send-code`, `/email/verify`; the email is how a lost phone number is recovered) → "What should we call you?"
+(`PATCH /me {name}`). `GET /me` shows `emailVerified` and `name`, so the app can resume where the person stopped.
+Until the email is verified and the name set, booking a salon and registering a shop answer
+**403 `PROFILE_INCOMPLETE`** with `details.missing` (`["email", "name"]`, `["name"]`, ...); browsing works without
+them. A barber linked by the owner needs nothing: his account is the owner's doing, and he signs in with the phone.
+
 ### Deleting an account
 
 One account works across every part of the app (kirana, salon, ...), so deleting it never deletes rows other

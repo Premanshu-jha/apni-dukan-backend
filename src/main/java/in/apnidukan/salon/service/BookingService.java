@@ -211,6 +211,7 @@ public class BookingService {
         UUID requestId = SalonDayService.requestId(idempotencyKey);
         appointments.lockCustomer(customerId);   // this person's bookings run one after the other
         requireLiveAccount(customerId);
+        users.requireCompleteProfile(customerId);   // verified email (for recovery) and a name for the salon
         Optional<Appointment> earlier = appointments.findByRequest(customerId, requestId);
         if (earlier.isPresent()) {
             requireSameBooking(earlier.get(), in);

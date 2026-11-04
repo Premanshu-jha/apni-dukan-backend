@@ -1007,7 +1007,7 @@ class SalonBookingIntegrationTest {
         UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
         put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", true), owner);
         Reply hisDay = get("/salon/day", rajuUser);
-        assertThat(hisDay.text()).contains("\"customerName\":\"Customer\"").doesNotContain("9000000101");
+        assertThat(hisDay.text()).contains("\"customerName\":\"Test person\"").doesNotContain("9000000101");
     }
 
     @Test
@@ -1219,6 +1219,22 @@ class SalonBookingIntegrationTest {
                 .isEqualTo("Raju");
         assertThat(count("shop_members WHERE user_id = '" + rajuUser + "'")).isZero();
         assertThat(count("walk_in_access")).isZero();
+    }
+
+    @Test
+    void bookingNeedsAVerifiedEmailAndANameFirst() {
+        UUID fresh = UUID.randomUUID();
+        TestData.bareUser(jdbc, fresh, "9000000150");   // signed in with the phone only
+        assertThat((List<?>) get("/salons?lat=17.466&lng=78.365", fresh).body()).hasSize(1);   // browsing is fine
+        Reply r = book(fresh, at("12:00"), List.of(haircut), UUID.randomUUID());
+        assertThat(r.status()).isEqualTo(403);
+        assertThat(field(r.body(), "code")).isEqualTo("PROFILE_INCOMPLETE");
+        assertThat(field(field(r.body(), "details"), "missing")).isEqualTo(List.of("email", "name"));
+        jdbc.update("UPDATE users SET email = 'fresh@test.in', email_verified_at = now() WHERE id = ?", fresh);
+        assertThat(field(field(book(fresh, at("12:00"), List.of(haircut), UUID.randomUUID()).body(), "details"),
+                "missing")).isEqualTo(List.of("name"));
+        patch("/auth/me", Map.of("name", "Meera"), fresh);
+        assertThat(book(fresh, at("12:00"), List.of(haircut), UUID.randomUUID()).status()).isEqualTo(201);
     }
 
     // ---------- helpers ----------

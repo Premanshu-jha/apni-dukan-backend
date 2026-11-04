@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -73,6 +74,23 @@ public class UserDirectoryService implements UserDirectory {
     @Transactional(propagation = Propagation.MANDATORY)
     public boolean lockIfActive(UUID userId) {
         return users.lockIfActive(userId).orElse(false);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<String> missingProfile(UUID userId) {
+        User u = users.findById(userId).orElse(null);
+        if (u == null) {
+            return List.of("email", "name");
+        }
+        List<String> missing = new java.util.ArrayList<>();
+        if (!u.isEmailVerified()) {
+            missing.add("email");
+        }
+        if (u.getName() == null || u.getName().isBlank()) {
+            missing.add("name");
+        }
+        return List.copyOf(missing);
     }
 
     @Override
