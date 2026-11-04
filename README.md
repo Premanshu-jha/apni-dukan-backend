@@ -13,7 +13,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, Submit for visit), field-team approval, My shop, owner/helper/barber roles, history of every change |
 | `salon` | Salon setup (services, barbers with optional sign-in and photo, weekly hours, booking settings), online booking, walk-ins, start code, no-show and strikes, breaks, leave, closed days, pause, the automatic end |
-| `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set |
+| `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
 ## How file handling works
 
@@ -121,6 +121,14 @@ sequenceDiagram
 
 ### Staying signed in
 
+"Sign out everywhere" and account recovery also forget every browser registered for notifications, so a lost
+phone stops getting booking messages (with their start codes) too. If Redis is down: new tokens are still issued
+(signing in and refreshing keep working), and a sign-out everywhere still answers 204 (done in the database;
+access tokens in use run out within 15 minutes).
+
+Codes: when SMS is paused (daily cap), asking for a new code is refused before anything changes, so the code
+already sent keeps working. Recovery checks both codes before using either up, so a typo in one keeps the other.
+
 ```mermaid
 flowchart TD
     A["Every API call:<br/>Authorization: Bearer accessToken"] --> B{"Token valid?"}
@@ -184,6 +192,10 @@ Until the email is verified and the name set, booking a salon and registering a 
 them. A barber linked by the owner needs nothing: his account is the owner's doing, and he signs in with the phone.
 
 ### Deleting an account
+
+Refused with 409 while online booking is blocked (`BOOKING_BLOCKED`, `details.until`) or when a booking starts
+within the hour or is in progress (`BOOKING_SOON`): deleting and signing up again with the same phone must not be a
+way round a block or a late-cancel strike.
 
 One account works across every part of the app (kirana, salon, ...), so deleting it never deletes rows other
 records point at. Instead, in one transaction: each module closes what is still open for the person
@@ -427,7 +439,12 @@ conditional update ("only if still CONFIRMED") and is logged in `appointment_eve
 **Rules:** 30 minutes' notice and up to 7 days ahead (the salon's settings); quarter hours only (400
 `OUTSIDE_WINDOW`); at most 2 upcoming bookings per customer (409 `TOO_MANY_BOOKINGS`); a cancel less than 1 hour
 before, or a no-show, is a strike; 3 strikes within 60 days block online booking until 30 days after the latest
-(403 `BOOKING_BLOCKED`, walking in still works). One person's bookings run one after the other (an advisory lock),
+(403 `BOOKING_BLOCKED`, walking in still works). At most 10 new bookings and moves per customer per 24 hours (429
+`TOO_MANY_CHANGES`): each one messages the salon, so a book-and-cancel loop can't flood it or use up the SMS
+budget. Only changes that happened count; a refused attempt (a taken time, a closed day) never uses one up. One
+person can't hold two bookings at the same time (409 `OVERLAPS_YOUR_BOOKING`), booking or moving. The free times
+for a move (`GET /salons/{id}/availability?...&moving={bookingId}`, the customer's own booking only, else 404)
+count that booking's own time as free, so it can move by a few minutes. One person's bookings run one after the other (an advisory lock),
 so tapping twice can't pass these limits.
 
 **Messages:** written to `notification_jobs` in the same transaction as the change; a job every 30 s sends what is
@@ -438,6 +455,20 @@ cancelled. Moving or cancelling a booking cancels its pending messages. The salo
 books, moves or cancels online (or deletes their account), the owner and the barber it's with (if he has a sign-in)
 get a message; these are never cancelled by a later change, which sends its own. The server only sends to the browsers' real
 push services (Google, Mozilla, Apple, Microsoft), so a device address can't point it anywhere else.
+
+**In-app message list:** every message is also kept for the app's own list (its PUSH row in `notification_jobs`,
+`read_at` = opened), so people who blocked notifications or missed one can read it in the app. Kept 90 days (the
+message cleanup). Each app sees only its own messages: `app=customer` (default) the `BOOKING_*` ones, `app=partner`
+the `SALON_*` and `SHOP_*` ones. A message not due yet, or cancelled before it was due (a reminder for a booking
+that was moved), isn't listed; one cancelled after it was due stays (it may already have been read). A reminder
+whose text is rewritten (the salon moved) is unread again. Messages that name a customer to the salon carry
+`about_user_id`, so deleting that customer's account blanks them too.
+
+| Endpoint | Does |
+| --- | --- |
+| `GET /api/v1/me/notifications?app=&cursor=` | Newest first, 30 a page: `{items:[{id,type,title,body,url,sentAt,read}], unread, next}`; pass `next` as `cursor` for the next page (400 `BAD_CURSOR` if it's not one) |
+| `GET /api/v1/me/notifications/unread-count?app=` | `{unread}`, for the bell |
+| `POST /api/v1/me/notifications/read?app=` `{ids}` | Marks those read (only your own, at most 100); with no body or no ids, everything in that app's list (204) |
 
 **SMS (optional, per message type, no code change):** create the template on DLT and in MSG91 with the variables
 below, then set its id on the server (Railway) and restart. From then on every new message of that type also goes
@@ -505,7 +536,7 @@ didn't answer in time; nothing was done, try again in a few seconds.
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (`V7__...`, `V8__...`).
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V9__...`).
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
 Never edit a migration that has already run. Hibernate is set to `validate`.

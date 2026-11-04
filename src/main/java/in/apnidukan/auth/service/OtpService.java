@@ -80,6 +80,27 @@ public class OtpService {
      * left; the 5th wrong attempt destroys the code (TOO_MANY_ATTEMPTS) and a new one must be requested.
      */
     public void verify(OtpPurpose purpose, String target, String code, String ip) {
+        compare(purpose, target, code, ip, true);
+    }
+
+    /**
+     * Like verify, but a right code stays (single use is up to consume). For two codes that must both be right
+     * (recovery): check both, then consume both, so a typo in one doesn't use up the other.
+     */
+    public void check(OtpPurpose purpose, String target, String code, String ip) {
+        compare(purpose, target, code, ip, false);
+    }
+
+    /** Uses up a code that check accepted. CODE_EXPIRED if someone else used it in the meantime. */
+    public void consume(OtpPurpose purpose, String target) {
+        String codeKey = codeKey(purpose, target);
+        if (!Boolean.TRUE.equals(redis.delete(codeKey))) {
+            throw codeExpired();
+        }
+        redis.delete(codeKey + ":tries");
+    }
+
+    private void compare(OtpPurpose purpose, String target, String code, String ip, boolean useUp) {
         String id = purpose.name() + ":" + target;
         String net = id + ":" + ClientIp.limitKey(ip);
         String codeKey = codeKey(purpose, target);
@@ -96,6 +117,9 @@ public class OtpService {
             throw tooManyAttempts();
         }
         if (code != null && Hashing.sameHash(stored, hash(target, code.trim()))) {
+            if (!useUp) {
+                return;
+            }
             // Single use: only the request that actually deletes the key wins, even if two arrive together.
             if (!Boolean.TRUE.equals(redis.delete(codeKey))) {
                 throw codeExpired();

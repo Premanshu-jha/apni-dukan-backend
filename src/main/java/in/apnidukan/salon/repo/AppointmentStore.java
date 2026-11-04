@@ -294,6 +294,18 @@ public class AppointmentStore {
                 + "AND status = 'CONFIRMED' AND starts_at > ? ORDER BY starts_at", ROW, shopId, at(now));
     }
 
+    /**
+     * Whether this customer already holds a booking (CONFIRMED or IN_SERVICE) overlapping [from, to), apart from
+     * the one being moved. One person can't be in two chairs at once.
+     */
+    public boolean customerHasOverlap(UUID customerId, Instant from, Instant to, UUID exceptId) {
+        Integer n = jdbc.queryForObject("SELECT count(*) FROM appointments WHERE customer_id = ? "
+                        + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND starts_at < ? AND ends_at > ? "
+                        + "AND (?::uuid IS NULL OR id <> ?::uuid)",
+                Integer.class, customerId, at(to), at(from), exceptId, exceptId);
+        return n != null && n > 0;
+    }
+
     /** Bookings of this customer that are CONFIRMED and haven't started yet (the 2-booking limit). */
     public int activeBookings(UUID customerId, Instant now) {
         Integer n = jdbc.queryForObject("SELECT count(*) FROM appointments WHERE customer_id = ? "

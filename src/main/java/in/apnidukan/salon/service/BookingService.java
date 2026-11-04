@@ -39,6 +39,10 @@ import in.apnidukan.salon.repo.StaffSkillRepository;
 import in.apnidukan.salon.repo.StrikeStore;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.PessimisticLockingFailureException;
+import in.apnidukan.common.security.RateLimiter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -86,6 +90,11 @@ public class BookingService {
     static final Duration STRIKE_WINDOW = Duration.ofDays(60);
     static final Duration BLOCK_FOR = Duration.ofDays(30);
     static final int MY_BOOKINGS_LIMIT = 50;
+    /**
+     * New bookings and moves per customer per day. Each one messages the salon (push, and SMS when set up), so a
+     * book-and-cancel loop would otherwise use up the salon's and everyone's SMS budget.
+     */
+    static final int CHANGES_PER_DAY = 10;
     /** Booking numbers: no 0/O, 1/I/L, so they can be read out over the phone. */
     private static final String BOOKING_NO_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
@@ -103,12 +112,17 @@ public class BookingService {
     private final FileRefs files;
     private final UserDirectory users;
     private final Clock clock;
+    private final RateLimiter limits;
+
+    private static final Logger log = LoggerFactory.getLogger(BookingService.class);
     private final SecureRandom random = new SecureRandom();
 
     public BookingService(ShopDirectory shops, SalonCalendar calendar, AppointmentStore appointments,
                           StrikeStore strikes, SalonAccessStore salonAccess, SalonServiceItemRepository services,
                           SalonStaffRepository staff, StaffSkillRepository skills, StaffShiftRepository shifts,
-                          StartCodes codes, SalonNotices notices, FileRefs files, UserDirectory users, Clock clock) {
+                          StartCodes codes, SalonNotices notices, FileRefs files, UserDirectory users, Clock clock,
+                          RateLimiter limits) {
+        this.limits = limits;
         this.shops = shops;
         this.calendar = calendar;
         this.appointments = appointments;
@@ -183,6 +197,16 @@ public class BookingService {
      */
     @Transactional(readOnly = true)
     public Slots availability(UUID salonId, List<UUID> serviceIds, LocalDate date) {
+        return availability(null, salonId, serviceIds, date, null);
+    }
+
+    /**
+     * @param moving one of the customer's own bookings being moved (or null): its own time counts as free, so a
+     *               move by a few minutes onto it is offered. 404 if it isn't theirs.
+     */
+    @Transactional(readOnly = true)
+    public Slots availability(UUID customerId, UUID salonId, List<UUID> serviceIds, LocalDate date, UUID moving) {
+        UUID except = moving == null ? null : mine(customerId, appointments.find(moving)).id();
         bookable(salonId);
         Instant now = now();
         List<BookedService> chosen = calendar.chosenServices(salonId, serviceIds);
@@ -191,7 +215,7 @@ public class BookingService {
         Interval window = calendar.window(calendar.settings(salonId, now), now);
         Interval day = dayInWindow(date, window, now);
         List<Instant> starts = day == null ? List.of()
-                : Availability.starts(calendar.days(barbers, date, null), length, day.start(), day.end());
+                : Availability.starts(calendar.days(barbers, date, except), length, day.start(), day.end());
         return new Slots(date, (int) length.toMinutes(), starts.stream().map(Slot::of).toList());
     }
 
@@ -220,6 +244,7 @@ public class BookingService {
             throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_BOOKINGS",
                     "You already have " + MAX_ACTIVE_BOOKINGS + " upcoming bookings. Cancel one to book another.");
         }
+        requireChangesLeft(customerId);
         ShopCard salon = bookable(in.salonId(), true);
         List<BookedService> chosen = calendar.chosenServices(salon.id(), in.serviceIds());
         Duration length = SalonCalendar.length(chosen);
@@ -228,6 +253,7 @@ public class BookingService {
         Instant start = in.startAt();
         requireInWindow(start, window);
         Interval slot = Interval.of(start, length);
+        requireNoOverlap(customerId, slot, null);
         LocalDate date = LocalDate.ofInstant(start, SalonTime.ZONE);
         List<BarberDay> days = calendar.days(barbers, date, null);
         for (UUID barberId : Availability.barbersFor(days, slot)) {
@@ -238,6 +264,7 @@ public class BookingService {
                     null, customerId, bookingNo(), null, codes.newCode(), slot.start(), slot.end(),
                     AppointmentStatus.CONFIRMED, null, null, null, customerId, requestId, now, now);
             if (appointments.insertIfFree(a)) {
+                countChange(customerId);
                 appointments.insertServices(a.id(), chosen);
                 appointments.event(a.id(), now, customerId, "BOOKED", null);
                 notices.booked(a, salon, chosen, now);
@@ -310,12 +337,14 @@ public class BookingService {
         if (newStart.equals(a.startsAt())) {
             return view(a, now);
         }
+        requireChangesLeft(customerId);
         List<BookedService> booked = appointments.services(List.of(a.id())).getOrDefault(a.id(), List.of());
         Duration length = SalonCalendar.length(booked);
         List<SalonStaff> barbers = calendar.barbersFor(a.shopId(), SalonDayService.ids(booked));
         Interval window = calendar.window(calendar.settings(a.shopId(), now), now);
         requireInWindow(newStart, window);
         Interval slot = Interval.of(newStart, length);
+        requireNoOverlap(customerId, slot, a.id());
         LocalDate date = LocalDate.ofInstant(newStart, SalonTime.ZONE);
         List<BarberDay> days = calendar.days(barbers, date, a.id());
         List<UUID> candidates = new ArrayList<>(Availability.barbersFor(days, slot));
@@ -345,6 +374,7 @@ public class BookingService {
         }
         Appointment moved = appointments.find(a.id()).orElseThrow();
         appointments.event(a.id(), now, customerId, "RESCHEDULED", a.startsAt() + " -> " + newStart);
+        countChange(customerId);
         notices.rescheduled(a, moved, salon, now);
         return view(moved, now);
     }
@@ -358,6 +388,46 @@ public class BookingService {
     private void requireLiveAccount(UUID customerId) {
         if (!users.isActive(customerId)) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "NOT_SIGNED_IN", "Sign in first.");
+        }
+    }
+
+    private static String changesKey(UUID customerId) {
+        return "booking-changes:" + customerId;
+    }
+
+    /**
+     * 429 TOO_MANY_CHANGES once CHANGES_PER_DAY bookings and moves were made in 24 hours. Only changes that
+     * happened count (countChange): a refused attempt (a taken time, a closed day) never uses one up. If Redis
+     * doesn't answer, the change goes ahead: the other limits (2 upcoming bookings, strikes) still hold.
+     */
+    private void requireChangesLeft(UUID customerId) {
+        String key = changesKey(customerId);
+        try {
+            if (limits.current(key) >= CHANGES_PER_DAY) {
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_CHANGES",
+                        "You've booked or moved " + CHANGES_PER_DAY + " times today. Try again tomorrow.")
+                        .retryAfter(limits.secondsLeft(key));
+            }
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer the booking-change count ({}); letting it through",
+                    redisDown.getClass().getSimpleName());
+        }
+    }
+
+    /** Counts one booking or move that was made (this customer's calls run one at a time, under their lock). */
+    private void countChange(UUID customerId) {
+        try {
+            limits.hit(changesKey(customerId), Duration.ofHours(24));
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't take the booking-change count ({})", redisDown.getClass().getSimpleName());
+        }
+    }
+
+    /** 409 OVERLAPS_YOUR_BOOKING if this person already holds a booking at that time (except the one moved). */
+    private void requireNoOverlap(UUID customerId, Interval slot, UUID exceptId) {
+        if (appointments.customerHasOverlap(customerId, slot.start(), slot.end(), exceptId)) {
+            throw new ApiException(HttpStatus.CONFLICT, "OVERLAPS_YOUR_BOOKING",
+                    "You already have a booking at that time. Pick another time, or cancel the other booking.");
         }
     }
 

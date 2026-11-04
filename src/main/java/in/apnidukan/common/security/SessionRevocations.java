@@ -31,6 +31,21 @@ public class SessionRevocations {
         return value == null ? 0 : Long.parseLong(value);
     }
 
+    /**
+     * The generation to put in a new access token. If Redis doesn't answer, 0: signing in and refreshing keep
+     * working (the check fails open too, see isRevoked); once Redis is back, a token older than a sign-out
+     * everywhere is refused and the app refreshes it, which the database decides.
+     */
+    public long generationForNewToken(UUID userId) {
+        try {
+            return currentGeneration(userId);
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer the session generation ({}); issuing with 0",
+                    redisDown.getClass().getSimpleName());
+            return 0;
+        }
+    }
+
     public void revokeAll(UUID userId) {
         redis.opsForValue().increment(key(userId));
     }

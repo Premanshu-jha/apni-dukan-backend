@@ -29,6 +29,13 @@ class SessionRevocationsTest {
     }
 
     @Test
+    void withRedisDownNewTokensAreStillIssued() {
+        when(redis.opsForValue()).thenReturn(values);
+        when(values.get(anyString())).thenThrow(new RedisConnectionFailureException("down"));
+        assertThat(revocations.generationForNewToken(UUID.randomUUID())).isZero();
+    }
+
+    @Test
     void withRedisDownTheTokenIsLetThrough() {
         when(redis.opsForValue()).thenReturn(values);
         when(values.get(anyString())).thenThrow(new RedisConnectionFailureException("down"));

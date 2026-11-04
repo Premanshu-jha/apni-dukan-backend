@@ -61,7 +61,7 @@ public class NotificationService implements Notifications {
         // No "…" in SMS: it isn't a GSM character and would make the whole SMS Unicode (shorter parts, higher cost)
         notice.smsVariables().forEach((k, v) -> sms.put(k, cutPlain(v, MAX_SMS_VARIABLE)));
         return new Notice(notice.userId(), notice.type(), notice.refId(), notice.sendAt(),
-                cut(notice.title(), 100), cut(notice.body(), 500), notice.url(), sms);
+                cut(notice.title(), 100), cut(notice.body(), 500), notice.url(), sms, notice.aboutUserId());
     }
 
     @Override

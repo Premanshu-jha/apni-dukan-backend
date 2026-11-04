@@ -553,3 +553,15 @@ Authorization: Bearer {{accessToken}}
 
 ### 19e. Health check (no sign-in; what Railway calls)
 GET {{host}}/actuator/health
+
+### 20. My messages in the app (customer app; ?app=partner for the salon's)
+GET {{baseUrl}}/me/notifications
+Authorization: Bearer {{accessToken}}
+
+### 20b. How many are unread (for the bell)
+GET {{baseUrl}}/me/notifications/unread-count
+Authorization: Bearer {{accessToken}}
+
+### 20c. Mark everything read (send {"ids": ["..."]} to mark only some)
+POST {{baseUrl}}/me/notifications/read
+Authorization: Bearer {{accessToken}}
