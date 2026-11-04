@@ -62,10 +62,6 @@ public class SalonDayController {
     }
 
     /**
-     * Upcoming bookings and walk-ins across the coming days, soonest first (up to 200): the owner's "what's coming"
-     * list. A barber without walk-in access sees only his own.
-     */
-    /**
      * The owner's history: bookings and walk-ins on the India dates from..to (at most 31 days), latest first, with
      * a count per status and the completed amount at list price. Owner or helper.
      */
@@ -75,6 +71,10 @@ public class SalonDayController {
         return day.history(me(), from, to);
     }
 
+    /**
+     * Upcoming bookings across the coming days, soonest first (up to 200): the owner's "what's coming" list. A
+     * barber without walk-in access sees only his own.
+     */
     @GetMapping("/upcoming")
     public List<AppointmentView> upcoming() {
         return day.upcoming(me());

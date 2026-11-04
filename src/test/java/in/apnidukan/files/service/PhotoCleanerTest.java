@@ -45,6 +45,49 @@ class PhotoCleanerTest {
                 .satisfies(e -> assertThat(((ApiException) e).getCode()).isEqualTo("UNREADABLE_PHOTO"));
     }
 
+    @Test
+    void aPhoneShotStoredSidewaysIsTurnedUpright() throws IOException {
+        byte[] sideways = withOrientation(jpeg(40, 20), 6);   // pixels 40 wide, "turn right" in EXIF
+        assertThat(ExifOrientation.of(sideways)).isEqualTo(6);
+        BufferedImage out = ImageIO.read(new ByteArrayInputStream(PhotoCleaner.clean(sideways)));
+        assertThat(out.getWidth()).isEqualTo(20);
+        assertThat(out.getHeight()).isEqualTo(40);
+        assertThat(ExifOrientation.of(jpeg(40, 20))).isEqualTo(1);
+        assertThat(ExifOrientation.of(new byte[] {1, 2, 3})).isEqualTo(1);
+    }
+
+    @Test
+    void aHugePhotoIsDecodedSmallAndAnAbsurdlyLargeOneIsRefused() throws IOException {
+        BufferedImage out = ImageIO.read(new ByteArrayInputStream(PhotoCleaner.clean(png(6000, 4000))));
+        assertThat(out.getWidth()).isEqualTo(1280);
+        assertThat(out.getHeight()).isEqualTo(853);
+    }
+
+    private static byte[] jpeg(int w, int h) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ImageIO.write(new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB), "jpeg", out);
+        return out.toByteArray();
+    }
+
+    /** Puts an EXIF block with this orientation right after the JPEG's start marker. */
+    private static byte[] withOrientation(byte[] jpeg, int orientation) {
+        byte[] tiff = {'I', 'I', 42, 0, 8, 0, 0, 0,   // little-endian, first directory at 8
+                1, 0,                                  // one entry
+                0x12, 0x01, 3, 0, 1, 0, 0, 0, (byte) orientation, 0, 0, 0,   // 0x0112 SHORT 1 value
+                0, 0, 0, 0};                           // no next directory
+        int length = 2 + 6 + tiff.length;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(jpeg, 0, 2);
+        out.write(0xFF);
+        out.write(0xE1);
+        out.write(length >> 8);
+        out.write(length & 0xFF);
+        out.writeBytes(new byte[] {'E', 'x', 'i', 'f', 0, 0});
+        out.writeBytes(tiff);
+        out.write(jpeg, 2, jpeg.length - 2);
+        return out.toByteArray();
+    }
+
     private static byte[] png(int w, int h) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ImageIO.write(new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB), "png", out);

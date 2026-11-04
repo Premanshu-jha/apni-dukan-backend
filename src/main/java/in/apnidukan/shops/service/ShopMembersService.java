@@ -31,6 +31,9 @@ import java.util.UUID;
 @Service
 public class ShopMembersService {
 
+    /** Helpers per shop: plenty for a kirana or a salon, and each new phone makes an account. */
+    static final int MAX_HELPERS = 10;
+
     private final ShopMemberRepository members;
     private final ShopService shops;
     private final UserDirectory users;
@@ -71,6 +74,12 @@ public class ShopMembersService {
     @Transactional
     public List<MemberView> addHelper(UUID ownerId, String phone) {
         ShopMember owner = owner(ownerId);
+        long helpers = members.findByShopIdOrderByCreatedAtAscIdAsc(owner.getShopId()).stream()
+                .filter(m -> m.getRole() == ShopRole.HELPER).count();
+        if (helpers >= MAX_HELPERS) {
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_HELPERS",
+                    "A shop can have up to " + MAX_HELPERS + " helpers. Remove one first.");
+        }
         UUID helper = users.findOrCreateByPhone(phone);
         shops.addMember(owner.getShopId(), helper, ShopRole.HELPER.name());
         return members(ownerId);

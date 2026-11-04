@@ -283,23 +283,21 @@ public class SalonDayService {
         if (from.plusDays(HISTORY_MAX_DAYS).isBefore(to.plusDays(1))) {
             throw SalonCalendar.invalid("to", "is too far from from (at most " + HISTORY_MAX_DAYS + " days)");
         }
-        List<Appointment> list = appointments.history(c.shopId(), Availability.dayStart(from),
-                Availability.dayStart(to.plusDays(1)), HISTORY_LIMIT + 1);
+        Instant start = Availability.dayStart(from);
+        Instant end = Availability.dayStart(to.plusDays(1));
+        List<Appointment> list = appointments.history(c.shopId(), start, end, HISTORY_LIMIT + 1);
         boolean truncated = list.size() > HISTORY_LIMIT;
         List<Appointment> shown = truncated ? list.subList(0, HISTORY_LIMIT) : list;
-        Map<String, Long> counts = new java.util.TreeMap<>();
-        shown.forEach(a -> counts.merge(a.status().name(), 1L, Long::sum));
-        Map<UUID, List<BookedService>> services = appointments.services(
-                shown.stream().filter(a -> a.status() == AppointmentStatus.COMPLETED).map(Appointment::id).toList());
-        long completed = services.values().stream().flatMap(List::stream).mapToLong(BookedService::pricePaise).sum();
-        return new HistoryView(from, to, counts, completed, views(c, shown), truncated);
+        // Counts and the amount over the whole range, in the database: right even when the list is cut at 500
+        return new HistoryView(from, to, appointments.historyCounts(c.shopId(), start, end),
+                appointments.completedPaise(c.shopId(), start, end), views(c, shown), truncated);
     }
 
     // ---------- start, no-show, reassign, cancel ----------
 
     /**
-     * CONFIRMED → IN_SERVICE, from 15 minutes before the start until 15 minutes after it (then it is a no-show). An online booking needs the customer's start code,
-     * or withoutCode (owner or helper only). A barber can start only his own appointments.
+     * CONFIRMED → IN_SERVICE, from 15 minutes before the start until 15 minutes after it (then it is a no-show).
+     * An online booking needs the customer's start code, or withoutCode (owner or helper only). A barber can start only his own appointments.
      */
     @Transactional
     public AppointmentView start(UUID userId, UUID appointmentId, Start in) {

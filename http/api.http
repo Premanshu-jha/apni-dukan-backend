@@ -534,3 +534,22 @@ Authorization: Bearer {{accessToken}}
 Content-Type: application/json
 
 { "code": "{{otp}}" }
+
+### 19. Owner: the salon's history for a range of India dates (at most 31 days)
+GET {{baseUrl}}/salon/history?from={{bookingDate}}&to={{bookingDate}}
+Authorization: Bearer {{accessToken}}
+
+### 19b. Owner: remove a helper (put their user id from 12a2 in "helperId")
+DELETE {{baseUrl}}/shops/me/helpers/{{helperId}}
+Authorization: Bearer {{accessToken}}
+
+### 19c. A helper or barber: leave the shop
+POST {{baseUrl}}/shops/me/leave
+Authorization: Bearer {{accessToken}}
+
+### 19d. Sign out of every device
+POST {{baseUrl}}/auth/logout-all
+Authorization: Bearer {{accessToken}}
+
+### 19e. Health check (no sign-in; what Railway calls)
+GET {{host}}/actuator/health

@@ -8,22 +8,23 @@ import in.apnidukan.shops.api.ShopRequests.UpdateShop;
 import in.apnidukan.shops.service.ShopMembersService;
 import in.apnidukan.shops.service.ShopMembersService.MemberView;
 import in.apnidukan.shops.service.ShopService;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
-import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import java.util.List;
-import java.util.UUID;
-import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/shops")
@@ -32,6 +33,12 @@ public class ShopController {
     private final ShopService shops;
     private final CurrentUserProvider currentUser;
     private final ShopMembersService people;
+
+    public ShopController(ShopService shops, CurrentUserProvider currentUser, ShopMembersService people) {
+        this.shops = shops;
+        this.currentUser = currentUser;
+        this.people = people;
+    }
 
     /** Everyone in my shop with name, phone and role (owner only). */
     @GetMapping("/me/members")
@@ -62,11 +69,6 @@ public class ShopController {
     public record AddHelper(@NotBlank @Size(max = 20) String phone) {
     }
 
-    public ShopController(ShopService shops, CurrentUserProvider currentUser, ShopMembersService people) {
-        this.shops = shops;
-        this.currentUser = currentUser;
-        this.people = people;
-    }
 
     /**
      * Registration step 1: creates your shop (DRAFT) with you as owner. 201.

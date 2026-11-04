@@ -4,6 +4,7 @@ import in.apnidukan.common.error.ApiException;
 
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReadParam;
 import javax.imageio.ImageReader;
 import javax.imageio.ImageWriteParam;
 import javax.imageio.ImageWriter;
@@ -12,6 +13,7 @@ import javax.imageio.stream.MemoryCacheImageOutputStream;
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
+import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -27,8 +29,8 @@ import java.util.Iterator;
 final class PhotoCleaner {
 
     static final int MAX_SIDE = 1280;
-    /** Refuses images so large that decoding them would take too much memory (a "decompression bomb"). */
-    static final long MAX_PIXELS = 50_000_000L;
+    /** Refuses images with more pixels than any phone camera makes (a "decompression bomb" is tiny but huge). */
+    static final long MAX_PIXELS = 40_000_000L;
     static final float QUALITY = 0.85f;
 
     private PhotoCleaner() {
@@ -36,7 +38,7 @@ final class PhotoCleaner {
 
     /** The cleaned JPEG. 400 UNREADABLE_PHOTO for a JPEG or PNG that can't be read, or one far too large. */
     static byte[] clean(byte[] original) {
-        BufferedImage source = read(original);
+        BufferedImage source = orient(read(original), ExifOrientation.of(original));
         int w = source.getWidth();
         int h = source.getHeight();
         double scale = Math.min(1.0, (double) MAX_SIDE / Math.max(w, h));
@@ -65,11 +67,17 @@ final class PhotoCleaner {
             ImageReader reader = readers.next();
             try {
                 reader.setInput(in, true, true);   // ignore metadata: it isn't kept anyway
-                long pixels = (long) reader.getWidth(0) * reader.getHeight(0);
-                if (pixels > MAX_PIXELS) {
+                int w = reader.getWidth(0);
+                int h = reader.getHeight(0);
+                if ((long) w * h > MAX_PIXELS) {
                     throw unreadable();
                 }
-                return reader.read(0);
+                // Decode only every n-th pixel of a big photo: at most about 2 x 1280 px wide in memory, never the
+                // full 12 or 48 megapixels (a 7000 x 7000 image would otherwise take about 200 MB)
+                ImageReadParam param = reader.getDefaultReadParam();
+                int n = Math.max(1, Math.max(w, h) / (2 * MAX_SIDE));
+                param.setSourceSubsampling(n, n, 0, 0);
+                return reader.read(0, param);
             } finally {
                 reader.dispose();
             }
@@ -79,6 +87,41 @@ final class PhotoCleaner {
             }
             throw unreadable();
         }
+    }
+
+    /**
+     * Turns the picture the way the phone meant it: cameras store the pixels as the sensor saw them plus an EXIF
+     * "orientation" (1 = as is, 6 = turn right, 3 = upside down, 8 = turn left, 2/4/5/7 = mirrored). Removing EXIF
+     * without applying it would leave portrait photos lying on their side.
+     */
+    static BufferedImage orient(BufferedImage src, int orientation) {
+        if (orientation < 2 || orientation > 8) {
+            return src;
+        }
+        int w = src.getWidth();
+        int h = src.getHeight();
+        boolean swap = orientation >= 5;
+        AffineTransform t = new AffineTransform();
+        switch (orientation) {
+            case 2 -> { t.translate(w, 0); t.scale(-1, 1); }
+            case 3 -> { t.translate(w, h); t.rotate(Math.PI); }
+            case 4 -> { t.translate(0, h); t.scale(1, -1); }
+            case 5 -> { t.rotate(Math.PI / 2); t.scale(1, -1); }
+            case 6 -> { t.translate(h, 0); t.rotate(Math.PI / 2); }
+            case 7 -> { t.scale(-1, 1); t.translate(-h, 0); t.translate(0, w); t.rotate(3 * Math.PI / 2); }
+            case 8 -> { t.translate(0, w); t.rotate(3 * Math.PI / 2); }
+            default -> { }
+        }
+        BufferedImage out = new BufferedImage(swap ? h : w, swap ? w : h, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = out.createGraphics();
+        try {
+            g.setColor(Color.WHITE);
+            g.fillRect(0, 0, out.getWidth(), out.getHeight());
+            g.drawImage(src, t, null);
+        } finally {
+            g.dispose();
+        }
+        return out;
     }
 
     private static byte[] writeJpeg(BufferedImage image) {

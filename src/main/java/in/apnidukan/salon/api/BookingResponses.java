@@ -125,7 +125,6 @@ public final class BookingResponses {
         }
     }
 
-    /** The day screen: one column per barber. */
     /**
      * The owner's look back over a range of days.
      * @param counts            how many appointments ended in each status (COMPLETED, NO_SHOW, ...)
@@ -136,6 +135,7 @@ public final class BookingResponses {
                               List<AppointmentView> appointments, boolean truncated) {
     }
 
+    /** The day screen: one column per barber. */
     public record DayView(LocalDate date, List<BarberColumn> barbers) {
     }
 

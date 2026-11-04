@@ -227,6 +227,25 @@ public class AppointmentStore {
                 at(to), limit);
     }
 
+    /** How many bookings and walk-ins starting in [from, to) are in each status. */
+    public Map<String, Long> historyCounts(UUID shopId, Instant from, Instant to) {
+        Map<String, Long> counts = new java.util.TreeMap<>();
+        jdbc.query("SELECT status, count(*) FROM appointments WHERE shop_id = ? AND kind <> 'BLOCK' AND starts_at >= ? "
+                        + "AND starts_at < ? GROUP BY status", rs -> {
+                    counts.put(rs.getString(1), rs.getLong(2));
+                }, shopId, at(from), at(to));
+        return counts;
+    }
+
+    /** The list prices of the services of everything COMPLETED that started in [from, to). */
+    public long completedPaise(UUID shopId, Instant from, Instant to) {
+        Long sum = jdbc.queryForObject("SELECT COALESCE(SUM(s.price_paise), 0) FROM appointment_services s "
+                        + "JOIN appointments a ON a.id = s.appointment_id WHERE a.shop_id = ? AND a.kind <> 'BLOCK' "
+                        + "AND a.status = 'COMPLETED' AND a.starts_at >= ? AND a.starts_at < ?", Long.class,
+                shopId, at(from), at(to));
+        return sum == null ? 0 : sum;
+    }
+
     /** Everything in the salon overlapping [from, to) except removed blocks, for the day screen. */
     public List<Appointment> forDay(UUID shopId, Instant from, Instant to) {
         return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND status <> 'REMOVED' "
