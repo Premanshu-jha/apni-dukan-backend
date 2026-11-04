@@ -23,4 +23,15 @@ public interface UserRepository extends JpaRepository<User, UUID> {
 
     @Query("SELECT u FROM User u WHERE lower(u.email) = lower(:email) AND u.emailVerifiedAt IS NOT NULL")
     Optional<User> findByVerifiedEmail(String email);
+
+    /**
+     * True while the account exists and isn't deleted, holding its row in shared mode until the transaction ends
+     * (FOR SHARE conflicts with the lock deleting an account takes, unlike a foreign-key check).
+     */
+    @Query(value = "SELECT deleted_at IS NULL FROM users WHERE id = :id FOR SHARE", nativeQuery = true)
+    Optional<Boolean> lockIfActive(UUID id);
+
+    /** Only the id, so the row locked next (lockById) is read fresh, not from this lookup's copy. */
+    @Query("SELECT u.id FROM User u WHERE lower(u.email) = lower(:email) AND u.emailVerifiedAt IS NOT NULL")
+    Optional<UUID> findIdByVerifiedEmail(String email);
 }

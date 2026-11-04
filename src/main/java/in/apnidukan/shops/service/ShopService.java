@@ -1,5 +1,6 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.context.ShopChangeListener;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.error.ApiException;
@@ -65,10 +66,12 @@ public class ShopService implements ShopMemberships {
     private final ShopMemberRepository members;
     private final FileRefs files;
     private final List<ShopChangeListener> listeners;
+    private final UserDirectory users;
     private final Clock clock;
 
-    public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files,
+    public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files, UserDirectory users,
                        List<ShopChangeListener> listeners, Clock clock) {
+        this.users = users;
         this.shops = shops;
         this.members = members;
         this.files = files;
@@ -83,6 +86,12 @@ public class ShopService implements ShopMemberships {
      */
     @Transactional
     public ShopResponse create(UUID userId, CreateShop in) {
+        // Holds the person's row: deleting the account at this moment waits, then sees them as an owner and refuses;
+        // a deletion already running is waited for, and then this refuses. Never a shop with a nameless owner.
+        if (!users.lockIfActive(userId)) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "NOT_SIGNED_IN", "Sign in first.");
+        }
+        users.requireCompleteProfile(userId);   // verified email (for recovery) and a name
         if (members.existsByUserId(userId)) {
             throw alreadyHasShop();
         }

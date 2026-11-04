@@ -5,11 +5,17 @@ import in.apnidukan.shops.api.ShopRequests.CreateShop;
 import in.apnidukan.shops.api.ShopRequests.SetPhotos;
 import in.apnidukan.shops.api.ShopRequests.Submit;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
+import in.apnidukan.shops.service.ShopMembersService;
+import in.apnidukan.shops.service.ShopMembersService.MemberView;
 import in.apnidukan.shops.service.ShopService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -17,17 +23,52 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
+import java.util.UUID;
+
 @RestController
 @RequestMapping("/api/v1/shops")
 public class ShopController {
 
     private final ShopService shops;
     private final CurrentUserProvider currentUser;
+    private final ShopMembersService people;
 
-    public ShopController(ShopService shops, CurrentUserProvider currentUser) {
+    public ShopController(ShopService shops, CurrentUserProvider currentUser, ShopMembersService people) {
         this.shops = shops;
         this.currentUser = currentUser;
+        this.people = people;
     }
+
+    /** Everyone in my shop with name, phone and role (owner only). */
+    @GetMapping("/me/members")
+    public List<MemberView> members() {
+        return people.members(currentUser.get().userId());
+    }
+
+    /** Add a helper by phone (owner only). 409 ALREADY_IN_A_SHOP if that person works in a shop. */
+    @PostMapping("/me/helpers")
+    public List<MemberView> addHelper(@Valid @RequestBody AddHelper body) {
+        return people.addHelper(currentUser.get().userId(), body.phone());
+    }
+
+    /** Remove a helper (owner only); their sessions end at once. */
+    @DeleteMapping("/me/helpers/{userId}")
+    public List<MemberView> removeHelper(@PathVariable UUID userId) {
+        return people.removeHelper(currentUser.get().userId(), userId);
+    }
+
+    /** Leave my shop (a helper or barber). 204. */
+    @PostMapping("/me/leave")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void leave() {
+        people.leave(currentUser.get().userId());
+    }
+
+    /** @param phone the helper's 10-digit mobile number; they sign in with it as usual */
+    public record AddHelper(@NotBlank @Size(max = 20) String phone) {
+    }
+
 
     /**
      * Registration step 1: creates your shop (DRAFT) with you as owner. 201.

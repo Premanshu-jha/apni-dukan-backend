@@ -16,7 +16,8 @@ public class User {
     @Id
     private UUID id;
 
-    @Column(nullable = false, length = 10, unique = true)
+    /** Null only once the account is deleted. */
+    @Column(length = 10, unique = true)
     private String phone;
 
     @Column(length = 100)
@@ -30,6 +31,10 @@ public class User {
 
     @Column(nullable = false)
     private boolean admin;
+
+    /** When the person deleted their account; null while it exists. */
+    @Column(name = "deleted_at")
+    private Instant deletedAt;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
@@ -64,6 +69,22 @@ public class User {
         this.updatedAt = now;
     }
 
+    /**
+     * The person deleted their account: everything that says who they were goes (phone, name, email, field-team
+     * access). The row stays, so their past bookings and the shops' records stay whole and simply show no name.
+     */
+    public void anonymise(Instant now) {
+        this.phone = null;
+        this.name = null;
+        this.email = null;
+        this.emailVerifiedAt = null;
+        this.admin = false;
+        this.deletedAt = now;
+        this.updatedAt = now;
+    }
+
+    public boolean isDeleted() { return deletedAt != null; }
+    public Instant getDeletedAt() { return deletedAt; }
     public UUID getId() { return id; }
     public String getPhone() { return phone; }
     public String getName() { return name; }

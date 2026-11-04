@@ -120,6 +120,7 @@ public final class TestContainers {
         registry.add("REDIS_URL", TestContainers::redisUrl);
         registry.add("JWT_SECRET", () -> JWT_SECRET);
         registry.add("app.jobs.enabled", () -> "false"); // tests run the background jobs themselves
+        registry.add("app.client-ip.header", () -> "X-Forwarded-For"); // as on Railway: the last entry counts
     }
 
     /** A plain S3 client for the test itself, to look inside the bucket. */

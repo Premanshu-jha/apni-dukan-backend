@@ -352,6 +352,19 @@ class ShopIntegrationTest {
 
     // ---------- helpers ----------
 
+    @Test
+    void registeringAShopNeedsAVerifiedEmailAndANameFirst() {
+        post("/auth/otp/send", Map.of("phone", "9000000390"), null);
+        Reply signedIn = post("/auth/otp/verify", Map.of("phone", "9000000390", "code",
+                codeSentTo(LAST_SMS, "9000000390")), null);
+        String access = (String) signedIn.body().get("accessToken");
+        Reply r = post("/shops", validShop(), access);
+        assertThat(r.status()).isEqualTo(403);
+        assertThat(r.body().get("code")).isEqualTo("PROFILE_INCOMPLETE");
+        in.apnidukan.support.TestData.completeProfile(jdbc, "9000000390");
+        assertThat(post("/shops", validShop(), access).status()).isEqualTo(201);
+    }
+
     private static Map<String, Object> validShop() {
         Map<String, Object> shop = new HashMap<>();
         shop.put("name", "Sharma Kirana Store");
@@ -379,6 +392,7 @@ class ShopIntegrationTest {
         post("/auth/otp/send", Map.of("phone", phone), null);
         Reply r = post("/auth/otp/verify", Map.of("phone", phone, "code", codeSentTo(LAST_SMS, phone)), null);
         assertThat(r.status()).as(r.body().toString()).isEqualTo(200);
+        in.apnidukan.support.TestData.completeProfile(jdbc, phone);   // the email and name screens
         return r.body();
     }
 

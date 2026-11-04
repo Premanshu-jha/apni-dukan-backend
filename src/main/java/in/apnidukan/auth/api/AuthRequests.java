@@ -9,7 +9,8 @@ public final class AuthRequests {
     private AuthRequests() {
     }
 
-    public record SendOtp(@NotBlank @Size(max = 20) String phone) {
+    /** @param captchaToken the Cloudflare Turnstile widget's token; required once TURNSTILE_SECRET_KEY is set */
+    public record SendOtp(@NotBlank @Size(max = 20) String phone, @Size(max = 2048) String captchaToken) {
     }
 
     /** @param device optional label shown later in "signed-in devices", e.g. "Redmi Note 12" */
@@ -30,7 +31,13 @@ public final class AuthRequests {
     public record VerifyEmail(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 10) String code) {
     }
 
-    public record StartRecovery(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 20) String newPhone) {
+    /** @param code the 6-digit code from POST /auth/me/delete-code */
+    public record DeleteAccount(@NotBlank @Size(max = 10) String code) {
+    }
+
+    /** @param captchaToken as in SendOtp */
+    public record StartRecovery(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 20) String newPhone,
+                                @Size(max = 2048) String captchaToken) {
     }
 
     public record CompleteRecovery(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 10) String emailCode,

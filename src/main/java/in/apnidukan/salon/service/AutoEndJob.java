@@ -8,12 +8,17 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
 /**
- * Every minute: an appointment in service ends by itself at its planned end (there is no Done button). If a
- * service runs long, the app doesn't know; the next customer may wait. A booking nobody started is left CONFIRMED
- * (the day screen shows "not started"), because ending it would hide a no-show.
+ * Every minute:
+ * <ul>
+ *   <li>an appointment in service ends by itself at its planned end (there is no Done button). If a service runs
+ *       long, the app doesn't know; the next customer may wait;</li>
+ *   <li>a booking not started 15 minutes after its start becomes a no-show (see
+ *       SalonDayService.markNoShows).</li>
+ * </ul>
  */
 @Component
 public class AutoEndJob {
@@ -21,11 +26,14 @@ public class AutoEndJob {
     private static final Logger log = LoggerFactory.getLogger(AutoEndJob.class);
 
     private final AppointmentStore appointments;
+    private final SalonDayService day;
     private final Clock clock;
     private final boolean enabled;
 
-    public AutoEndJob(AppointmentStore appointments, Clock clock, @Value("${app.jobs.enabled:true}") boolean enabled) {
+    public AutoEndJob(AppointmentStore appointments, SalonDayService day, Clock clock,
+                      @Value("${app.jobs.enabled:true}") boolean enabled) {
         this.appointments = appointments;
+        this.day = day;
         this.clock = clock;
         this.enabled = enabled;
     }
@@ -37,12 +45,14 @@ public class AutoEndJob {
         }
     }
 
-    /** One round (a single SQL statement); returns how many appointments were completed. Called by tests too. */
+    /** One round; returns how many appointments it closed (completed plus no-shows). Called by tests too. */
     public int runOnce() {
-        int done = appointments.completeEnded(clock.instant().truncatedTo(ChronoUnit.MICROS));
-        if (done > 0) {
-            log.info("Completed {} appointments at their planned end", done);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
+        int done = appointments.completeEnded(now);
+        int missed = day.markNoShows(now);
+        if (done + missed > 0) {
+            log.info("Completed {} appointments at their planned end; {} not started became no-shows", done, missed);
         }
-        return done;
+        return done + missed;
     }
 }

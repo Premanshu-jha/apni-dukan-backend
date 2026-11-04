@@ -1,10 +1,10 @@
 package in.apnidukan.salon.service;
 
 import in.apnidukan.common.context.ShopDirectory;
+import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.FileRefs;
-import in.apnidukan.common.text.TextCleaner.TextField;
 import in.apnidukan.salon.api.BookingRequests.Book;
 import in.apnidukan.salon.api.BookingResponses.BookingView;
 import in.apnidukan.salon.api.BookingResponses.CancelResult;
@@ -61,7 +61,6 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static in.apnidukan.common.error.DatabaseErrors.hasSqlState;
-import static in.apnidukan.common.text.TextCleaner.clean;
 
 /**
  * The customer side: salons near me, a salon's services and free times, booking, my bookings, cancel and
@@ -87,7 +86,6 @@ public class BookingService {
     static final Duration STRIKE_WINDOW = Duration.ofDays(60);
     static final Duration BLOCK_FOR = Duration.ofDays(30);
     static final int MY_BOOKINGS_LIMIT = 50;
-    static final TextField BOOKING_FOR = new TextField("bookingFor", 2, 60);
     /** Booking numbers: no 0/O, 1/I/L, so they can be read out over the phone. */
     private static final String BOOKING_NO_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
@@ -103,13 +101,14 @@ public class BookingService {
     private final StartCodes codes;
     private final SalonNotices notices;
     private final FileRefs files;
+    private final UserDirectory users;
     private final Clock clock;
     private final SecureRandom random = new SecureRandom();
 
     public BookingService(ShopDirectory shops, SalonCalendar calendar, AppointmentStore appointments,
                           StrikeStore strikes, SalonAccessStore salonAccess, SalonServiceItemRepository services,
                           SalonStaffRepository staff, StaffSkillRepository skills, StaffShiftRepository shifts,
-                          StartCodes codes, SalonNotices notices, FileRefs files, Clock clock) {
+                          StartCodes codes, SalonNotices notices, FileRefs files, UserDirectory users, Clock clock) {
         this.shops = shops;
         this.calendar = calendar;
         this.appointments = appointments;
@@ -122,6 +121,7 @@ public class BookingService {
         this.codes = codes;
         this.notices = notices;
         this.files = files;
+        this.users = users;
         this.clock = clock;
     }
 
@@ -207,6 +207,8 @@ public class BookingService {
     public BookingView book(UUID customerId, String idempotencyKey, Book in) {
         UUID requestId = SalonDayService.requestId(idempotencyKey);
         appointments.lockCustomer(customerId);   // this person's bookings run one after the other
+        requireLiveAccount(customerId);
+        users.requireCompleteProfile(customerId);   // verified email (for recovery) and a name for the salon
         Optional<Appointment> earlier = appointments.findByRequest(customerId, requestId);
         if (earlier.isPresent()) {
             requireSameBooking(earlier.get(), in);
@@ -228,14 +230,12 @@ public class BookingService {
         Interval slot = Interval.of(start, length);
         LocalDate date = LocalDate.ofInstant(start, SalonTime.ZONE);
         List<BarberDay> days = calendar.days(barbers, date, null);
-        String bookingFor = in.bookingFor() == null || in.bookingFor().isBlank() ? null
-                : clean(BOOKING_FOR, in.bookingFor());
         for (UUID barberId : Availability.barbersFor(days, slot)) {
             if (!appointments.lockActiveBarber(barberId)) {
                 continue;   // switched off a moment ago
             }
             Appointment a = new Appointment(UUID.randomUUID(), salon.id(), barberId, AppointmentKind.BOOKING, null,
-                    null, customerId, bookingNo(), bookingFor, null, codes.newCode(), slot.start(), slot.end(),
+                    null, customerId, bookingNo(), null, codes.newCode(), slot.start(), slot.end(),
                     AppointmentStatus.CONFIRMED, null, null, null, customerId, requestId, now, now);
             if (appointments.insertIfFree(a)) {
                 appointments.insertServices(a.id(), chosen);
@@ -290,10 +290,18 @@ public class BookingService {
     @Transactional
     public BookingView reschedule(UUID customerId, UUID bookingId, Instant newStart) {
         appointments.lockCustomer(customerId);
+        requireLiveAccount(customerId);
+        // The shop row (FOR SHARE) before the booking's row, the same order as booking and suspending a shop
+        UUID shopId = mine(customerId, appointments.find(bookingId)).shopId();
+        ShopCard salon = shops.findForBooking(shopId).orElseThrow();   // see ShopDirectory.findForBooking
         Appointment a = lockMine(customerId, bookingId);
         Instant now = now();
         requireChangeable(a, now);
-        ShopCard salon = shops.findForBooking(a.shopId()).orElseThrow();   // see ShopDirectory.findForBooking
+        if (Duration.between(now, a.startsAt()).compareTo(LATE_CANCEL) < 0) {
+            // Otherwise moving first, then cancelling more than an hour ahead, would dodge the late-cancel strike
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_LATE_TO_MOVE",
+                    "Less than 1 hour to go: this booking can't be moved any more. You can still cancel it.");
+        }
         if (!"APPROVED".equals(salon.status()) || paused(salon.id(), now)) {
             throw new ApiException(HttpStatus.CONFLICT, "SALON_NOT_BOOKABLE",
                     "The salon isn't taking online changes right now (paused, or its details are being checked "
@@ -337,11 +345,21 @@ public class BookingService {
         }
         Appointment moved = appointments.find(a.id()).orElseThrow();
         appointments.event(a.id(), now, customerId, "RESCHEDULED", a.startsAt() + " -> " + newStart);
-        notices.rescheduled(moved, salon, now);
+        notices.rescheduled(a, moved, salon, now);
         return view(moved, now);
     }
 
     // ---------- rules ----------
+
+    /**
+     * Checked after taking the customer's lock: an account deleted while this request waited (or used with a
+     * token from before the deletion while Redis is down) can't book or move. 401, like any signed-out call.
+     */
+    private void requireLiveAccount(UUID customerId) {
+        if (!users.isActive(customerId)) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "NOT_SIGNED_IN", "Sign in first.");
+        }
+    }
 
     /**
      * 403 BOOKING_BLOCKED if 3 strikes fall within 60 days of each other and the latest of them was less than
@@ -496,13 +514,14 @@ public class BookingService {
             ShopCard s = salons.get(a.shopId());
             List<BookedService> lines = booked.getOrDefault(a.id(), List.of());
             boolean changeable = a.status() == AppointmentStatus.CONFIRMED && now.isBefore(a.startsAt());
-            boolean movable = changeable && "APPROVED".equals(s.status()) && !paused(s.id(), now);
+            boolean movable = changeable && "APPROVED".equals(s.status()) && !paused(s.id(), now)
+                    && Duration.between(now, a.startsAt()).compareTo(LATE_CANCEL) >= 0;
             return new BookingView(a.id(), a.bookingNo(), s.id(), s.name(),
                     s.addressLine() + ", " + s.area() + ", " + s.city() + " " + s.pincode(), SalonNotices.mapLink(s),
                     ServiceLine.from(lines), lines.stream().mapToLong(BookedService::pricePaise).sum(),
                     lines.stream().anyMatch(BookedService::priceIsFrom), a.startsAt(), a.endsAt(),
                     a.startsAt().plus(SalonDayService.LATE_ALLOWANCE), a.status(),
-                    a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null, a.bookingFor(),
+                    a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null,
                     a.cancelReason(), changeable, movable, a.createdAt());
         }).toList();
     }

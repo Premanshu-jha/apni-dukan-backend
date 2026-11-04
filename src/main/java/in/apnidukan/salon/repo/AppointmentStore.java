@@ -32,7 +32,7 @@ import java.util.stream.Collectors;
 public class AppointmentStore {
 
     private static final String COLUMNS = "id, shop_id, staff_id, kind, block_type, closure_id, customer_id, "
-            + "booking_no, booking_for, guest_name, start_code, starts_at, ends_at, status, started_at, "
+            + "booking_no, guest_name, start_code, starts_at, ends_at, status, started_at, "
             + "started_with_code, cancel_reason, created_by, client_request_id, created_at, updated_at";
     private static final String HOLDING = "status IN ('CONFIRMED', 'IN_SERVICE', 'BLOCKED')";
     // Whole statements as constants: no SQL is ever built from values (they always go in as ? parameters)
@@ -41,6 +41,13 @@ public class AppointmentStore {
     /** Upcoming: still open (CONFIRMED or IN_SERVICE) and not over yet. Past: everything else. */
     private static final String UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
             + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ? ORDER BY starts_at, id LIMIT ?";
+    /** The salon's bookings still to come or still able to start (CONFIRMED, not over yet). */
+    private static final String SALON_UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
+            + "AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ? "
+            + "ORDER BY starts_at, id LIMIT ?";
+    private static final String BARBER_UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
+            + "AND staff_id = ? AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ? "
+            + "ORDER BY starts_at, id LIMIT ?";
     private static final String PAST_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
             + "AND NOT (status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ?) ORDER BY starts_at DESC, id LIMIT ?";
 
@@ -62,11 +69,11 @@ public class AppointmentStore {
      */
     public boolean insertIfFree(Appointment a) {
         List<UUID> saved = jdbc.query("INSERT INTO appointments (" + COLUMNS + ") VALUES "
-                        + "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        + "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                         + "ON CONFLICT ON CONSTRAINT ex_appointments_no_overlap DO NOTHING RETURNING id",
                 (rs, i) -> rs.getObject(1, UUID.class),
                 a.id(), a.shopId(), a.staffId(), a.kind().name(), a.blockType() == null ? null : a.blockType().name(),
-                a.closureId(), a.customerId(), a.bookingNo(), a.bookingFor(), a.guestName(), a.startCode(),
+                a.closureId(), a.customerId(), a.bookingNo(), a.guestName(), a.startCode(),
                 at(a.startsAt()), at(a.endsAt()), a.status().name(), at(a.startedAt()), a.startedWithCode(),
                 a.cancelReason(), a.createdBy(), a.clientRequestId(), at(a.createdAt()), at(a.updatedAt()));
         return !saved.isEmpty();
@@ -85,6 +92,22 @@ public class AppointmentStore {
     public boolean start(UUID id, Boolean withCode, Instant now) {
         return jdbc.update("UPDATE appointments SET status = 'IN_SERVICE', started_at = ?, started_with_code = ?, "
                 + "updated_at = ? WHERE id = ? AND status = 'CONFIRMED'", at(now), withCode, at(now), id) == 1;
+    }
+
+    /** Undoing a no-show: NO_SHOW → the given status (CANCELLED_BY_SALON) with the reason. */
+    public boolean undoNoShow(UUID id, AppointmentStatus to, String reason, Instant now) {
+        return jdbc.update("UPDATE appointments SET status = ?, cancel_reason = ?, updated_at = ? "
+                + "WHERE id = ? AND status = 'NO_SHOW'", to.name(), reason, at(now), id) == 1;
+    }
+
+    /**
+     * The automatic no-show: every booking still CONFIRMED whose start was at or before
+     * {@code startedBy} becomes NO_SHOW, in one statement; returns the rows it changed (each only once, even with
+     * two servers running this).
+     */
+    public List<Appointment> markNoShows(Instant startedBy, Instant now) {
+        return jdbc.query("UPDATE appointments SET status = 'NO_SHOW', updated_at = ? WHERE status = 'CONFIRMED' "
+                + "AND kind <> 'BLOCK' AND starts_at <= ? RETURNING " + COLUMNS, ROW, at(now), at(startedBy));
     }
 
     /** CONFIRMED → NO_SHOW, CANCELLED_BY_CUSTOMER or CANCELLED_BY_SALON; frees the barber's time. */
@@ -197,6 +220,32 @@ public class AppointmentStore {
         }, ROW);
     }
 
+    /** Bookings and walk-ins starting in [from, to), latest first, at most limit (the owner's history). */
+    public List<Appointment> history(UUID shopId, Instant from, Instant to, int limit) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND kind <> 'BLOCK' "
+                + "AND starts_at >= ? AND starts_at < ? ORDER BY starts_at DESC, id LIMIT ?", ROW, shopId, at(from),
+                at(to), limit);
+    }
+
+    /** How many bookings and walk-ins starting in [from, to) are in each status. */
+    public Map<String, Long> historyCounts(UUID shopId, Instant from, Instant to) {
+        Map<String, Long> counts = new java.util.TreeMap<>();
+        jdbc.query("SELECT status, count(*) FROM appointments WHERE shop_id = ? AND kind <> 'BLOCK' AND starts_at >= ? "
+                        + "AND starts_at < ? GROUP BY status", rs -> {
+                    counts.put(rs.getString(1), rs.getLong(2));
+                }, shopId, at(from), at(to));
+        return counts;
+    }
+
+    /** The list prices of the services of everything COMPLETED that started in [from, to). */
+    public long completedPaise(UUID shopId, Instant from, Instant to) {
+        Long sum = jdbc.queryForObject("SELECT COALESCE(SUM(s.price_paise), 0) FROM appointment_services s "
+                        + "JOIN appointments a ON a.id = s.appointment_id WHERE a.shop_id = ? AND a.kind <> 'BLOCK' "
+                        + "AND a.status = 'COMPLETED' AND a.starts_at >= ? AND a.starts_at < ?", Long.class,
+                shopId, at(from), at(to));
+        return sum == null ? 0 : sum;
+    }
+
     /** Everything in the salon overlapping [from, to) except removed blocks, for the day screen. */
     public List<Appointment> forDay(UUID shopId, Instant from, Instant to) {
         return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND status <> 'REMOVED' "
@@ -227,6 +276,16 @@ public class AppointmentStore {
         Integer n = jdbc.queryForObject("SELECT count(*) FROM appointments WHERE staff_id = ? "
                 + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ?", Integer.class, staffId, at(now));
         return n == null ? 0 : n;
+    }
+
+    /**
+     * What's coming up in the salon, soonest first: CONFIRMED bookings and walk-ins not over yet that start before
+     * {@code until}; only this barber's when staffId is set.
+     */
+    public List<Appointment> upcomingInSalon(UUID shopId, UUID staffId, Instant now, Instant until, int limit) {
+        return staffId == null
+                ? jdbc.query(SALON_UPCOMING_SQL, ROW, shopId, at(now), at(until), limit)
+                : jdbc.query(BARBER_UPCOMING_SQL, ROW, shopId, staffId, at(now), at(until), limit);
     }
 
     /** The salon's online bookings still to come (CONFIRMED, start in the future). */
@@ -278,7 +337,7 @@ public class AppointmentStore {
         return new Appointment(rs.getObject("id", UUID.class), rs.getObject("shop_id", UUID.class),
                 rs.getObject("staff_id", UUID.class), AppointmentKind.valueOf(rs.getString("kind")),
                 blockType == null ? null : BlockType.valueOf(blockType), rs.getObject("closure_id", UUID.class),
-                rs.getObject("customer_id", UUID.class), rs.getString("booking_no"), rs.getString("booking_for"),
+                rs.getObject("customer_id", UUID.class), rs.getString("booking_no"),
                 rs.getString("guest_name"), rs.getString("start_code"), instant(rs, "starts_at"),
                 instant(rs, "ends_at"), AppointmentStatus.valueOf(rs.getString("status")),
                 instant(rs, "started_at"), withCode == null ? null : (Boolean) withCode,

@@ -8,6 +8,7 @@ import in.apnidukan.auth.notify.SmsSender;
 import in.apnidukan.auth.repo.RefreshTokenRepository;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.async.BackgroundTasks;
+import in.apnidukan.common.context.AccountDeletionListener;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.security.AuthPrincipal;
@@ -21,11 +22,14 @@ import in.apnidukan.common.text.TextCleaner.TextField;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.security.SecureRandom;
@@ -33,6 +37,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -75,15 +80,20 @@ public class AuthService {
     private final BackgroundTasks background;
     private final TransactionTemplate tx;
     private final ShopMemberships memberships;
+    private final HumanCheck humans;
+    private final List<AccountDeletionListener> deletionListeners;
     private final int smsDailyLimit;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
                        SmsSender sms, EmailSender email, JwtService jwt, JwtProperties props, Clock clock,
                        RateLimiter limits, SessionRevocations revocations, BackgroundTasks background,
-                       PlatformTransactionManager transactions, ShopMemberships memberships,
+                       PlatformTransactionManager transactions, ShopMemberships memberships, HumanCheck humans,
+                       List<AccountDeletionListener> deletionListeners,
                        @Value("${app.sms.daily-limit:500}") int smsDailyLimit) {
         this.memberships = memberships;
+        this.humans = humans;
+        this.deletionListeners = deletionListeners;
         this.users = users;
         this.refreshTokens = refreshTokens;
         this.otp = otp;
@@ -101,9 +111,10 @@ public class AuthService {
 
     // ---------------- phone OTP sign-in ----------------
 
-    public void sendLoginOtp(String phoneInput, String ip) {
+    public void sendLoginOtp(String phoneInput, String ip, String captchaToken) {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitSends(ip);
+        humans.require(captchaToken, ip);
         String code = otp.issue(OtpPurpose.LOGIN, phone, ip);
         sendSms(() -> sms.sendOtp(phone, code));
     }
@@ -143,7 +154,7 @@ public class AuthService {
         Instant now = Instant.now(clock);
         RefreshToken stored = refreshTokens.findByTokenHash(Hashing.sha256Hex(nullToEmpty(refreshToken)))
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
-        User user = users.lockById(stored.getUserId())
+        User user = users.lockById(stored.getUserId()).filter(u -> !u.isDeleted())
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
 
         if (stored.getRevokedAt() != null) {
@@ -174,6 +185,19 @@ public class AuthService {
     public void logout(String refreshToken) {
         refreshTokens.findByTokenHash(Hashing.sha256Hex(nullToEmpty(refreshToken)))
                 .ifPresent(t -> refreshTokens.revokeIfActive(t.getId(), Instant.now(clock), RevokeReason.SIGNED_OUT));
+    }
+
+    /** Signs this person out of every device at once (a lost phone, a shared laptop). */
+    @Transactional
+    public void logoutEverywhere(UUID userId) {
+        me(userId);
+        refreshTokens.revokeAllForUser(userId, Instant.now(clock));
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                revocations.revokeAll(userId);   // access tokens in use stop at once too
+            }
+        });
     }
 
     // ---------------- email verification ----------------
@@ -222,7 +246,8 @@ public class AuthService {
         otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
         String[] previous = new String[1];
         User saved = tx.execute(status -> {
-            User user = users.findById(userId).orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+            User user = users.lockById(userId).filter(u -> !u.isDeleted())   // never onto a deleted account
+                    .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
             users.findByVerifiedEmail(address)
                     .filter(other -> !other.getId().equals(userId))
                     .ifPresent(other -> {
@@ -254,10 +279,11 @@ public class AuthService {
      * Behaves exactly the same whether or not the email has an account: same limits, the SMS is always sent, and
      * the email goes out in the background, so not even the response time differs.
      */
-    public void startRecovery(String emailInput, String newPhoneInput, String ip) {
+    public void startRecovery(String emailInput, String newPhoneInput, String ip, String captchaToken) {
         String address = Emails.normalize(emailInput);
         String newPhone = PhoneNumbers.normalize(newPhoneInput);
         limitSends(ip);
+        humans.require(captchaToken, ip);
         boolean exists = users.findByVerifiedEmail(address).isPresent();
         String emailCode = otp.issue(OtpPurpose.RECOVER_EMAIL, address, ip);
         String phoneCode = otp.issue(OtpPurpose.RECOVER_PHONE, newPhone, ip);
@@ -283,10 +309,11 @@ public class AuthService {
         otp.verify(OtpPurpose.RECOVER_PHONE, newPhone, phoneCode, ip);
         String[] oldPhone = new String[1];
         AuthTokens tokens = tx.execute(status -> {
-            UUID userId = users.findByVerifiedEmail(address)
-                    .orElseThrow(() -> ApiException.badRequest("RECOVERY_FAILED", "These details don't match an account"))
-                    .getId();
-            User user = users.lockById(userId).orElseThrow();
+            UUID userId = users.findIdByVerifiedEmail(address)
+                    .orElseThrow(() -> ApiException.badRequest("RECOVERY_FAILED", "These details don't match an account"));
+            // Locked and read fresh: an account deleted a moment ago is never brought back by moving it
+            User user = users.lockById(userId).filter(u -> !u.isDeleted())
+                    .orElseThrow(() -> ApiException.badRequest("RECOVERY_FAILED", "These details don't match an account"));
             users.findByPhone(newPhone)
                     .filter(other -> !other.getId().equals(userId))
                     .ifPresent(other -> {
@@ -318,13 +345,78 @@ public class AuthService {
     }
 
     public User me(UUID userId) {
-        return users.findById(userId).orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+        return users.findById(userId).filter(u -> !u.isDeleted())
+                .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+    }
+
+    // ---------------- deleting the account ----------------
+
+    /**
+     * Step 1: a code to the person's own phone, so a borrowed or stolen session can't delete the account.
+     * 409 SHOP_OWNER for a shop owner: they close or hand over the shop first.
+     */
+    public void sendDeleteCode(UUID userId, String ip) {
+        User user = me(userId);
+        requireNotOwner(userId);
+        limitSends(ip);
+        String code = otp.issue(OtpPurpose.DELETE_ACCOUNT, user.getPhone(), ip);
+        sendSms(() -> sms.sendOtp(user.getPhone(), code));
+    }
+
+    /**
+     * Step 2: with the code, the account is deleted, in one transaction:
+     * <ul>
+     *   <li>every module cleans up what is still open (AccountDeletionListener): upcoming salon bookings are
+     *       cancelled (the salon is told; no strike), a barber's sign-in is unlinked, waiting messages and devices
+     *       go;</li>
+     *   <li>a helper or barber leaves their shop;</li>
+     *   <li>every device is signed out, and the phone, name and email are wiped (User.anonymise).</li>
+     * </ul>
+     * Past bookings, strikes and shop records stay, linked to the nameless account. The phone can sign up again
+     * as a new account.
+     */
+    public void deleteAccount(UUID userId, String code, String ip) {
+        User me = me(userId);
+        limitVerifies(ip);
+        otp.verify(OtpPurpose.DELETE_ACCOUNT, me.getPhone(), code, ip);
+        tx.executeWithoutResult(status -> {
+            requireNotOwner(userId);
+            Instant now = Instant.now(clock);
+            // The modules first: they take their own locks (a customer's bookings) before this person's row,
+            // the order a booking takes them in too
+            deletionListeners.forEach(l -> l.accountDeleted(userId, now));
+            memberships.find(userId).ifPresent(m -> memberships.removeMember(m.shopId(), userId));
+            User user = users.lockById(userId).filter(u -> !u.isDeleted())
+                    .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));   // deleted meanwhile
+            requireNotOwner(userId);   // again, under the lock: a shop registered meanwhile held this row first
+            refreshTokens.revokeAllForUser(userId, now);
+            refreshTokens.forgetDevices(userId);
+            user.anonymise(now);
+            users.saveAndFlush(user);
+        });
+        try {
+            revocations.revokeAll(userId);   // after the commit: tokens still in use stop working now
+        } catch (DataAccessException redisDown) {
+            // The account is gone either way: its tokens find no live account (BookingService, me()) and expire
+            // within 15 minutes. Answering an error here would tell the app nothing was done.
+            log.warn("Account {} deleted, but Redis didn't take the sign-out ({})", userId,
+                    redisDown.getClass().getSimpleName());
+        }
+    }
+
+    private void requireNotOwner(UUID userId) {
+        if (memberships.find(userId).filter(m -> "OWNER".equals(m.role())).isPresent()) {
+            throw new ApiException(HttpStatus.CONFLICT, "SHOP_OWNER",
+                    "You own a shop on Apni Dukan. Close it or hand it over before deleting your account.");
+        }
     }
 
     /** Sets the person's name, cleaned like shop names (see TextCleaner). */
     @Transactional
     public User rename(UUID userId, String name) {
-        User user = me(userId);
+        // Locked: saving a copy read before a deletion committed would write the old phone and email back
+        User user = users.lockById(userId).filter(u -> !u.isDeleted())
+                .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
         String cleaned = TextCleaner.clean(NAME, name);
         if (!cleaned.equals(user.getName())) {
             user.rename(cleaned, Instant.now(clock));
@@ -368,7 +460,13 @@ public class AuthService {
 
     /** Every code SMS goes through here: a hard daily cap protects the SMS bill even if all other limits are dodged. */
     private void sendSms(Runnable send) {
-        if (!limits.tryHit("sms-day", smsDailyLimit, Duration.ofHours(24))) {
+        long sentToday = limits.hit("sms-day", Duration.ofHours(24));
+        if (sentToday == smsDailyLimit * 8L / 10) {
+            // Once, at 80%: time to look before sign-in codes stop for everyone
+            log.error("80% of the daily SMS limit used ({} of {}). Check for abuse now; at {} sign-in codes stop.",
+                    sentToday, smsDailyLimit, smsDailyLimit);
+        }
+        if (sentToday > smsDailyLimit) {
             log.error("Daily SMS limit ({}) reached: SMS paused. Check for abuse before raising SMS_DAILY_LIMIT.",
                     smsDailyLimit);
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SMS_PAUSED",

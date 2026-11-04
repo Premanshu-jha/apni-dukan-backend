@@ -49,6 +49,11 @@ public class PushSubscriptionStore {
                 userId);
     }
 
+    /** Forgets every device of this person (their account was deleted). */
+    public void deleteAll(UUID userId) {
+        jdbc.update("DELETE FROM push_subscriptions WHERE user_id = ?", userId);
+    }
+
     public void delete(UUID id) {
         jdbc.update("DELETE FROM push_subscriptions WHERE id = ?", id);
     }

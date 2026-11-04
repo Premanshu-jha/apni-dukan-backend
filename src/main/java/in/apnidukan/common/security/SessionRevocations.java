@@ -1,5 +1,9 @@
 package in.apnidukan.common.security;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
+
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -13,6 +17,8 @@ import java.util.UUID;
  */
 @Component
 public class SessionRevocations {
+
+    private static final Logger log = LoggerFactory.getLogger(SessionRevocations.class);
 
     private final StringRedisTemplate redis;
 
@@ -29,8 +35,19 @@ public class SessionRevocations {
         redis.opsForValue().increment(key(userId));
     }
 
+    /**
+     * Checked on every signed-in request. If Redis doesn't answer (down, or slower than its short timeout), the
+     * token counts as not revoked: everything that only needs the database keeps working, and the worst case is
+     * that a token signed out during the outage works until it expires (at most 15 minutes).
+     */
     public boolean isRevoked(UUID userId, long tokenGeneration) {
-        return tokenGeneration < currentGeneration(userId);
+        try {
+            return tokenGeneration < currentGeneration(userId);
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer the sign-out check ({}); letting the token through",
+                    redisDown.getClass().getSimpleName());
+            return false;
+        }
     }
 
     private static String key(UUID userId) {

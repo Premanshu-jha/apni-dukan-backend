@@ -24,6 +24,16 @@ class ProductionSafetyCheckTest {
     private final PushSender realPush = (device, payload) -> PushSender.Result.SENT;
 
     @Test
+    void productionNeedsTheRealCallerIpAndTheRobotCheck() {
+        assertThatThrownBy(() -> ProductionSafetyCheck.checkSignInAbuse(true, false, true))
+                .hasMessageContaining("CLIENT_IP_HEADER");
+        assertThatThrownBy(() -> ProductionSafetyCheck.checkSignInAbuse(true, true, false))
+                .hasMessageContaining("TURNSTILE_SECRET_KEY");
+        assertThatCode(() -> ProductionSafetyCheck.checkSignInAbuse(true, true, true)).doesNotThrowAnyException();
+        assertThatCode(() -> ProductionSafetyCheck.checkSignInAbuse(false, false, false)).doesNotThrowAnyException();
+    }
+
+    @Test
     void developmentAllowsConsoleCodesAndLocalhost() {
         assertThatCode(() -> ProductionSafetyCheck.check(false, new LoggingSmsSender(), new LoggingEmailSender(),
                 "http://localhost:5173", true, new LoggingPushSender())).doesNotThrowAnyException();
