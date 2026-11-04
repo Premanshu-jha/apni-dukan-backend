@@ -59,8 +59,9 @@ public class BookingController {
     /** Free start times for these services on this India date. */
     @GetMapping("/api/v1/salons/{id}/availability")
     public Slots availability(@PathVariable UUID id, @RequestParam List<UUID> services,
-                              @RequestParam @DateTimeFormat(iso = ISO.DATE) LocalDate date) {
-        return bookings.availability(id, services, date);
+                              @RequestParam @DateTimeFormat(iso = ISO.DATE) LocalDate date,
+                              @RequestParam(required = false) UUID moving) {
+        return bookings.availability(me(), id, services, date, moving);
     }
 
     /** Book (Idempotency-Key header required). 201. */

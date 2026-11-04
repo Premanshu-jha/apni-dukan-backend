@@ -81,7 +81,7 @@ public class SalonNotices {
         tellSalon(a, List.of(a.staffId()), "SALON_NEW_BOOKING", "New booking, " + TIME.format(a.startsAt()),
                 who + " booked " + names(services) + " with " + barber + ", " + DAY_TIME.format(a.startsAt())
                         + ". Booking " + a.bookingNo() + ".",
-                salonSms(who, a, barber), now);
+                salonSms(who, a, barber), a.customerId(), now);
     }
 
     /**
@@ -101,7 +101,7 @@ public class SalonNotices {
         tellSalon(moved, List.of(before.staffId(), moved.staffId()), "SALON_BOOKING_MOVED", "Booking moved",
                 who + " moved booking " + moved.bookingNo() + " from " + DAY_TIME.format(before.startsAt()) + " to "
                         + DAY_TIME.format(moved.startsAt()) + ", with " + barber + ".",
-                salonSms(who, moved, barber), now);
+                salonSms(who, moved, barber), moved.customerId(), now);
     }
 
     /** The customer cancelled: they and the salon are told. */
@@ -119,20 +119,20 @@ public class SalonNotices {
      * being deleted). The time is free again.
      */
     public void salonToldOfCancel(Appointment a, String note, Instant now) {
-        salonToldOfCancel(a, customerName(a), note, now);
+        salonToldOfCancel(a, customerName(a), note, a.customerId(), now);
     }
 
     /** The customer deleted their account: the salon is told the time is free, without the customer's name. */
     public void salonToldOfDeletedAccount(Appointment a, Instant now) {
-        salonToldOfCancel(a, "A customer", " They deleted their account.", now);
+        salonToldOfCancel(a, "A customer", " They deleted their account.", null, now);
     }
 
-    private void salonToldOfCancel(Appointment a, String who, String note, Instant now) {
+    private void salonToldOfCancel(Appointment a, String who, String note, UUID about, Instant now) {
         String barber = barberName(a.staffId());
         tellSalon(a, List.of(a.staffId()), "SALON_BOOKING_CANCELLED", "Booking cancelled, " + TIME.format(a.startsAt()),
                 who + " cancelled " + DAY_TIME.format(a.startsAt()) + " with " + barber + ". Booking " + a.bookingNo()
                         + "." + note + " The time is free again.",
-                salonSms(who, a, barber), now);
+                salonSms(who, a, barber), about, now);
     }
 
     /** The salon cancelled, with its reason. */
@@ -169,15 +169,18 @@ public class SalonNotices {
     }
 
     /** To the salon's owner and the given barbers' sign-ins (each person once). */
+    /**
+     * @param about the customer the text names, so their account deletion blanks it (null when it names nobody)
+     */
     private void tellSalon(Appointment a, List<UUID> barbers, String type, String title, String body,
-                           Map<String, String> sms, Instant now) {
+                           Map<String, String> sms, UUID about, Instant now) {
         Set<UUID> to = new LinkedHashSet<>();
         memberships.members(a.shopId()).stream().filter(m -> "OWNER".equals(m.role()))
                 .forEach(m -> to.add(m.userId()));
         staff.findAllById(barbers).stream().map(SalonStaff::getUserId).filter(Objects::nonNull).forEach(to::add);
         String day = "/salon/day?date=" + LocalDate.ofInstant(a.startsAt(), SalonTime.ZONE);
         for (UUID person : to) {
-            notifications.queue(new Notice(person, type, null, now, title, body, day, sms));
+            notifications.queue(new Notice(person, type, null, now, title, body, day, sms, about));
         }
     }
 
