@@ -3,6 +3,7 @@ package in.apnidukan.files.service;
 import in.apnidukan.common.context.CurrentUser;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.common.files.AttachedFiles;
 import in.apnidukan.files.domain.FilePurpose;
 import in.apnidukan.files.domain.StoredFile;
 import in.apnidukan.files.repo.StoredFileRepository;
@@ -45,23 +46,26 @@ public class FileService {
     private final Clock clock;
     private final Duration linkValidity;
     private final List<FileUsageChecker> usageCheckers;
+    private final List<AttachedFiles> attachedElsewhere;
 
     public FileService(StoredFileRepository repository,
                        FileStorage storage,
                        CurrentUserProvider currentUser,
                        Clock clock,
                        @Value("${app.files.link-minutes:5}") long linkMinutes,
-                       List<FileUsageChecker> usageCheckers) {
+                       List<FileUsageChecker> usageCheckers,
+                       List<AttachedFiles> attachedElsewhere) {
         this.repository = repository;
         this.storage = storage;
         this.currentUser = currentUser;
         this.clock = clock;
         this.linkValidity = Duration.ofMinutes(linkMinutes);
         this.usageCheckers = usageCheckers;
+        this.attachedElsewhere = attachedElsewhere;
     }
 
     public FileUploadResult upload(MultipartFile upload, FilePurpose purpose) {
-        CurrentUser user = currentUser.requireShop();
+        CurrentUser user = shopStaff();
 
         if (upload == null || upload.isEmpty()) {
             throw ApiException.badRequest("EMPTY_FILE", "The file is empty");
@@ -111,7 +115,7 @@ public class FileService {
 
     /** A link that opens the file straight from R2 for a few minutes. Only the file's own shop can get one. */
     public FileLink link(UUID fileId, boolean download) {
-        CurrentUser user = currentUser.requireShop();
+        CurrentUser user = shopStaff();
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
         String downloadName = download ? downloadName(file) : null;
@@ -126,18 +130,40 @@ public class FileService {
      */
     @Transactional
     public void delete(UUID fileId) {
-        CurrentUser user = currentUser.requireShop();
+        CurrentUser user = shopStaff();
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
-        if (usageCheckers.stream().anyMatch(checker -> checker.isInUse(file))) {
+        if (usageCheckers.stream().anyMatch(checker -> checker.isInUse(file))
+                || attachedElsewhere.stream().anyMatch(module -> module.isAttached(file.getId()))) {
             throw new ApiException(HttpStatus.CONFLICT, "FILE_IN_USE",
                     "This file is attached to a record and can't be deleted");
         }
         // Conditional delete: if two delete requests race, only one removes the row; the other gets 404.
-        if (repository.deleteByIdAndShopId(file.getId(), user.shopId()) == 0) {
+        int deleted;
+        try {
+            deleted = repository.deleteByIdAndShopId(file.getId(), user.shopId());
+        } catch (DataIntegrityViolationException attachedMeanwhile) {
+            // Set as a photo at the same moment: the database's foreign key keeps the file
+            throw new ApiException(HttpStatus.CONFLICT, "FILE_IN_USE",
+                    "This file is attached to a record and can't be deleted");
+        }
+        if (deleted == 0) {
             throw ApiException.notFound("File");
         }
         storage.delete(file.getStorageKey());
+    }
+
+    /**
+     * The owner or a helper of a shop. A salon's barber (BARBER) has no use for the shop's files (bills, receipts,
+     * the owner's photo), so he gets 403 NOT_ALLOWED. His role comes from the sign-in token; removing his sign-in
+     * ends his sessions at once, so it can't be stale.
+     */
+    private CurrentUser shopStaff() {
+        CurrentUser user = currentUser.requireShop();
+        if ("BARBER".equals(user.role())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "NOT_ALLOWED", "Barbers can't use the shop's files.");
+        }
+        return user;
     }
 
     private static Inspection inspect(MultipartFile upload) {

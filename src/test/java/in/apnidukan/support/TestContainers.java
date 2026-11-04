@@ -119,6 +119,7 @@ public final class TestContainers {
         registry.add("R2_REGION", () -> S3_REGION);
         registry.add("REDIS_URL", TestContainers::redisUrl);
         registry.add("JWT_SECRET", () -> JWT_SECRET);
+        registry.add("app.jobs.enabled", () -> "false"); // tests run the background jobs themselves
     }
 
     /** A plain S3 client for the test itself, to look inside the bucket. */

@@ -1,5 +1,6 @@
 package in.apnidukan.shops.api;
 
+import in.apnidukan.shops.domain.ShopType;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
@@ -8,6 +9,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 /**
  * Request bodies for shop registration and My shop. Unknown fields are refused (400 UNKNOWN_FIELD).
@@ -23,6 +25,7 @@ public final class ShopRequests {
      * @param latitude  the shop's GPS pin ("Use my location" in the app), inside India
      * @param gstin     optional, 15 characters, e.g. 27AAPFU0939F1ZV
      * @param udyamNumber optional, e.g. UDYAM-TS-02-0012345
+     * @param type      KIRANA or SALON; optional, KIRANA if left out. Can't be changed later.
      */
     public record CreateShop(
             @NotBlank @Size(min = 2, max = 100) String name,
@@ -34,7 +37,8 @@ public final class ShopRequests {
             @NotNull @DecimalMin("6.0") @DecimalMax("37.6") BigDecimal latitude,
             @NotNull @DecimalMin("68.0") @DecimalMax("97.5") BigDecimal longitude,
             @Size(max = 20) String gstin,
-            @Size(max = 25) String udyamNumber) {
+            @Size(max = 25) String udyamNumber,
+            ShopType type) {
     }
 
     /**
@@ -53,5 +57,17 @@ public final class ShopRequests {
             @DecimalMin("68.0") @DecimalMax("97.5") BigDecimal longitude,
             @Size(max = 20) String gstin,
             @Size(max = 25) String udyamNumber) {
+    }
+
+    /**
+     * Set the owner's photo and/or the shop's photo: ids of earlier uploads to POST /files (purpose OWNER_PHOTO and
+     * SHOP_PHOTO). Leave one out to keep it.
+     * @param version the version you last read (GET /shops/me); if someone saved in between you get 409 SHOP_CHANGED
+     */
+    public record SetPhotos(@NotNull Long version, UUID ownerPhotoFileId, UUID shopPhotoFileId) {
+    }
+
+    /** Registration done: ask for the field team's visit. Needs both photos. */
+    public record Submit(@NotNull Long version) {
     }
 }

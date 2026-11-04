@@ -13,7 +13,7 @@ import org.hibernate.envers.Audited;
 import java.time.Instant;
 import java.util.UUID;
 
-/** A person working in a shop, as OWNER or HELPER. One shop per person for now (unique user_id). */
+/** A person working in a shop, as OWNER, HELPER or BARBER (salons). One shop per person for now (unique user_id). */
 @Entity
 @Table(name = "shop_members")
 @Audited

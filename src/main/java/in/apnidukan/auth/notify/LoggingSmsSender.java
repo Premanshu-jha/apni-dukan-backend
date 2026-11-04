@@ -1,5 +1,6 @@
 package in.apnidukan.auth.notify;
 
+import in.apnidukan.common.notify.TextMessages;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -11,13 +12,20 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @ConditionalOnProperty(name = "app.sms.provider", havingValue = "log")
-public class LoggingSmsSender implements SmsSender {
+public class LoggingSmsSender implements SmsSender, TextMessages {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingSmsSender.class);
 
     @Override
     public void sendOtp(String phone, String code) {
         log.warn("[DEV SMS, not sent] code for {}: {}", phone, code);
+    }
+
+    @Override
+    public boolean send(String phone, String templateId, java.util.Map<String, String> variables) {
+        // Variable names only: values can include a start code
+        log.warn("[DEV SMS, not sent] to {}: template {} with {}", phone, templateId, variables.keySet());
+        return true;
     }
 
     @Override

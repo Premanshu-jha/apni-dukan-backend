@@ -1,14 +1,21 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.context.ShopChangeListener;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.common.text.TextCleaner.TextField;
+import in.apnidukan.common.files.FileRefs;
+import in.apnidukan.common.files.FileRefs.FileRef;
 import in.apnidukan.shops.api.ShopRequests.CreateShop;
+import in.apnidukan.shops.api.ShopRequests.SetPhotos;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
 import in.apnidukan.shops.api.ShopResponse;
 import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopDetails;
 import in.apnidukan.shops.domain.ShopMember;
 import in.apnidukan.shops.domain.ShopRole;
+import in.apnidukan.shops.domain.ShopStatus;
+import in.apnidukan.shops.domain.ShopType;
 import in.apnidukan.shops.repo.ShopMemberRepository;
 import in.apnidukan.shops.repo.ShopRepository;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -22,12 +29,16 @@ import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
-import java.text.Normalizer;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
+
+import static in.apnidukan.common.error.DatabaseErrors.violated;
+import static in.apnidukan.common.text.TextCleaner.clean;
 
 /**
  * Shop registration (step 1) and My shop. The person always comes from the sign-in token; the shop is looked up
@@ -39,16 +50,11 @@ public class ShopService implements ShopMemberships {
     /** 2-digit state code, PAN (5 letters, 4 digits, 1 letter), entity number, 'Z', check character. */
     private static final Pattern GSTIN = Pattern.compile("[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]");
     private static final String GSTIN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    /** Any kind of space, in any script (Java's \\s alone only knows ASCII spaces). */
-    private static final Pattern SPACES = Pattern.compile("[\\s\\p{Z}]+");
     /** Unique key that allows one shop per person (named in V3). */
     static final String ONE_SHOP_PER_PERSON = "ux_shop_members_user";
     private static final Pattern UDYAM = Pattern.compile("UDYAM-[A-Z]{2}-[0-9]{2}-[0-9]{7}");
 
-    /** A text field's name (for error messages) and its allowed length after cleaning; max is the column size in V3. */
-    record TextField(String name, int minLength, int maxLength) {
-    }
-
+    /** Each text field's allowed length after cleaning; max is the column size in V3. */
     static final TextField NAME = new TextField("name", 2, 100);
     static final TextField OWNER_NAME = new TextField("ownerName", 2, 100);
     static final TextField ADDRESS_LINE = new TextField("addressLine", 5, 200);
@@ -57,16 +63,22 @@ public class ShopService implements ShopMemberships {
 
     private final ShopRepository shops;
     private final ShopMemberRepository members;
+    private final FileRefs files;
+    private final List<ShopChangeListener> listeners;
     private final Clock clock;
 
-    public ShopService(ShopRepository shops, ShopMemberRepository members, Clock clock) {
+    public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files,
+                       List<ShopChangeListener> listeners, Clock clock) {
         this.shops = shops;
         this.members = members;
+        this.files = files;
+        this.listeners = listeners;
         this.clock = clock;
     }
 
     /**
-     * Registration step 1: creates the shop as DRAFT with the caller as its OWNER.
+     * Registration step 1: creates the shop as DRAFT with the caller as its OWNER. A kirana unless the app asks for a
+     * salon; the type can't be changed afterwards.
      * The caller's current access token doesn't carry the shop yet: the app calls POST /auth/refresh next.
      */
     @Transactional
@@ -75,11 +87,11 @@ public class ShopService implements ShopMemberships {
             throw alreadyHasShop();
         }
         Instant now = now();
-        ShopDetails details = new ShopDetails(text(NAME, in.name()), text(OWNER_NAME, in.ownerName()),
-                text(ADDRESS_LINE, in.addressLine()), text(AREA, in.area()), text(CITY, in.city()),
+        ShopDetails details = new ShopDetails(clean(NAME, in.name()), clean(OWNER_NAME, in.ownerName()),
+                clean(ADDRESS_LINE, in.addressLine()), clean(AREA, in.area()), clean(CITY, in.city()),
                 in.pincode(), coordinate(in.latitude()), coordinate(in.longitude()),
                 gstin(in.gstin()), udyam(in.udyamNumber()));
-        Shop shop = new Shop(shops.nextShopCode(), details, now);
+        Shop shop = new Shop(shops.nextShopCode(), in.type() == null ? ShopType.KIRANA : in.type(), details, now);
         try {
             shops.saveAndFlush(shop);   // new entity (id still null) → INSERT; Hibernate fills shop.getId()
             members.saveAndFlush(new ShopMember(shop.getId(), userId, ShopRole.OWNER, now));
@@ -97,7 +109,9 @@ public class ShopService implements ShopMemberships {
     @Transactional(readOnly = true)
     public ShopResponse mine(UUID userId) {
         ShopMember member = membership(userId);
-        return ShopResponse.from(shops.findById(member.getShopId()).orElseThrow(), member.getRole());
+        ShopResponse shop = ShopResponse.from(shops.findById(member.getShopId()).orElseThrow(), member.getRole());
+        // A barber sees where he works, not the owner's business papers or photo
+        return member.getRole() == ShopRole.BARBER ? shop.forBarber() : shop;
     }
 
     /** My shop edits. Owner only. A stale version (someone saved in between) is refused rather than overwritten. */
@@ -113,11 +127,11 @@ public class ShopService implements ShopMemberships {
         }
         ShopDetails old = shop.details();
         ShopDetails updated = new ShopDetails(
-                in.name() == null ? old.name() : text(NAME, in.name()),
-                in.ownerName() == null ? old.ownerName() : text(OWNER_NAME, in.ownerName()),
-                in.addressLine() == null ? old.addressLine() : text(ADDRESS_LINE, in.addressLine()),
-                in.area() == null ? old.area() : text(AREA, in.area()),
-                in.city() == null ? old.city() : text(CITY, in.city()),
+                in.name() == null ? old.name() : clean(NAME, in.name()),
+                in.ownerName() == null ? old.ownerName() : clean(OWNER_NAME, in.ownerName()),
+                in.addressLine() == null ? old.addressLine() : clean(ADDRESS_LINE, in.addressLine()),
+                in.area() == null ? old.area() : clean(AREA, in.area()),
+                in.city() == null ? old.city() : clean(CITY, in.city()),
                 in.pincode() == null ? old.pincode() : in.pincode(),
                 in.latitude() == null ? old.latitude() : coordinate(in.latitude()),
                 in.longitude() == null ? old.longitude() : coordinate(in.longitude()),
@@ -127,18 +141,168 @@ public class ShopService implements ShopMemberships {
             return ShopResponse.from(shop, member.getRole());
         }
         shop.apply(updated, now());
+        boolean moved = !sameLocation(old, updated);
+        if (moved) {
+            shop.recheckIfApproved(now());   // the field team checked the old address: check the new one
+        }
         try {
             shops.saveAndFlush(shop);
         } catch (ObjectOptimisticLockingFailureException e) {
             throw shopChanged();
         }
+        if (moved) {
+            listeners.forEach(l -> l.locationChanged(shop.getId()));   // e.g. salon reminders with the new address
+        }
         return ShopResponse.from(shop, member.getRole());
+    }
+
+    /**
+     * Sets the owner's photo and/or the shop's photo (owner only). Each must be a photo uploaded by this shop for
+     * that purpose (POST /files with purpose OWNER_PHOTO or SHOP_PHOTO); otherwise 400 naming the field.
+     */
+    @Transactional
+    public ShopResponse setPhotos(UUID userId, SetPhotos in) {
+        Shop shop = ownedShop(userId, in.version());
+        UUID owner = in.ownerPhotoFileId() == null ? shop.getOwnerPhotoFileId()
+                : photo("ownerPhotoFileId", in.ownerPhotoFileId(), shop, "OWNER_PHOTO");
+        UUID front = in.shopPhotoFileId() == null ? shop.getShopPhotoFileId()
+                : photo("shopPhotoFileId", in.shopPhotoFileId(), shop, "SHOP_PHOTO");
+        if (!java.util.Objects.equals(owner, shop.getOwnerPhotoFileId())
+                || !java.util.Objects.equals(front, shop.getShopPhotoFileId())) {
+            shop.setPhotos(owner, front, now());
+            shop.recheckIfApproved(now());   // the field team checked the old photos: check the new ones
+            try {
+                saveShop(shop);
+            } catch (DataIntegrityViolationException deletedMeanwhile) {
+                // A chosen file was deleted at the same moment: the database's foreign key refused the link
+                Map<String, Object> fields = new java.util.LinkedHashMap<>();
+                if (in.ownerPhotoFileId() != null) {
+                    fields.put("ownerPhotoFileId", "may have just been deleted; upload it again");
+                }
+                if (in.shopPhotoFileId() != null) {
+                    fields.put("shopPhotoFileId", "may have just been deleted; upload it again");
+                }
+                throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                        fields);
+            }
+        }
+        return ShopResponse.from(shop, ShopRole.OWNER);
+    }
+
+    /**
+     * Registration step 2: the owner asks for the field team's visit. DRAFT → PENDING_VISIT. Needs the owner's and
+     * the shop's photo (409 PHOTOS_REQUIRED); from any other status, 409 WRONG_STATUS.
+     */
+    @Transactional
+    public ShopResponse submitForVisit(UUID userId, long version) {
+        Shop shop = ownedShop(userId, version);
+        if (shop.getStatus() != ShopStatus.DRAFT) {
+            throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
+                    "Only a shop still in DRAFT can be submitted; this one is " + shop.getStatus() + ".");
+        }
+        if (!shop.hasBothPhotos()) {
+            Map<String, Object> missing = new java.util.LinkedHashMap<>();
+            if (shop.getOwnerPhotoFileId() == null) {
+                missing.put("ownerPhotoFileId", "add the owner's photo");
+            }
+            if (shop.getShopPhotoFileId() == null) {
+                missing.put("shopPhotoFileId", "add a photo of the shop");
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "PHOTOS_REQUIRED",
+                    "Add the owner's photo and a photo of the shop first.", missing);
+        }
+        shop.submitForVisit(now());
+        saveShop(shop);
+        return ShopResponse.from(shop, ShopRole.OWNER);
+    }
+
+    /** True if this file is the owner's or the shop's photo of some shop (then it can't be deleted). */
+    @Transactional(readOnly = true)
+    public boolean usesFile(UUID fileId) {
+        return shops.existsByOwnerPhotoFileIdOrShopPhotoFileId(fileId, fileId);
+    }
+
+    private Shop ownedShop(UUID userId, long version) {
+        ShopMember member = membership(userId);
+        if (member.getRole() != ShopRole.OWNER) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can change these details.");
+        }
+        Shop shop = shops.findById(member.getShopId()).orElseThrow();
+        if (version != shop.getVersion()) {
+            throw shopChanged();
+        }
+        return shop;
+    }
+
+    /** The file, if it is a photo this shop uploaded for this purpose; 400 naming the field otherwise. */
+    private UUID photo(String field, UUID fileId, Shop shop, String purpose) {
+        FileRef f = files.find(fileId)
+                .filter(x -> x.shopId().equals(shop.getId()) && purpose.equals(x.purpose()) && x.isPhoto())
+                .orElseThrow(() -> invalid(field, "must be a photo uploaded with purpose " + purpose));
+        return f.id();
+    }
+
+    private void saveShop(Shop shop) {
+        try {
+            shops.saveAndFlush(shop);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            throw shopChanged();
+        }
     }
 
     @Override
     @Transactional(readOnly = true)
     public Optional<Membership> find(UUID userId) {
-        return members.findByUserId(userId).map(m -> new Membership(m.getShopId(), m.getRole().name()));
+        return members.findByUserId(userId).map(m -> new Membership(m.getShopId(), m.getRole().name(),
+                shops.findById(m.getShopId()).orElseThrow().getType().name()));
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<Member> members(UUID shopId) {
+        return members.findByShopIdOrderByCreatedAtAscIdAsc(shopId).stream()
+                .sorted(Comparator.comparing((ShopMember m) -> m.getRole() != ShopRole.OWNER))   // owner first
+                .map(m -> new Member(m.getUserId(), m.getRole().name()))
+                .toList();
+    }
+
+    @Override
+    @Transactional
+    public void addMember(UUID shopId, UUID userId, String role) {
+        ShopRole r = ShopRole.valueOf(role);
+        if (r == ShopRole.OWNER) {
+            throw new IllegalArgumentException("A shop has exactly one owner; it can't be added as a member");
+        }
+        if (members.existsByUserId(userId)) {
+            throw alreadyInAShop();
+        }
+        try {
+            members.saveAndFlush(new ShopMember(shopId, userId, r, now()));
+        } catch (DataIntegrityViolationException e) {
+            if (violated(e, ONE_SHOP_PER_PERSON)) {   // added to two shops at the same moment
+                throw alreadyInAShop();
+            }
+            throw e;
+        }
+    }
+
+    @Override
+    @Transactional
+    public void removeMember(UUID shopId, UUID userId) {
+        members.findByShopIdAndUserId(shopId, userId).ifPresent(m -> {
+            if (m.getRole() == ShopRole.OWNER) {
+                throw new IllegalStateException("The owner can't be removed from the shop");
+            }
+            members.delete(m);
+            members.flush();
+        });
+    }
+
+    /** Address, area, city, pincode and the map pin: what the field team visits and checks. */
+    private static boolean sameLocation(ShopDetails a, ShopDetails b) {
+        return a.addressLine().equals(b.addressLine()) && a.area().equals(b.area()) && a.city().equals(b.city())
+                && a.pincode().equals(b.pincode()) && a.latitude().compareTo(b.latitude()) == 0
+                && a.longitude().compareTo(b.longitude()) == 0;
     }
 
     /** Cut to microseconds, what the database stores, so the response right after saving matches a later GET. */
@@ -149,75 +313,6 @@ public class ShopService implements ShopMemberships {
     private ShopMember membership(UUID userId) {
         return members.findByUserId(userId).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "NO_SHOP",
                 "You haven't registered or joined a shop yet."));
-    }
-
-    /**
-     * Cleans a name or address before saving, or refuses it with a 400.
-     * Example: "  Sharma   Store " becomes "Sharma Store".
-     */
-    static String text(TextField field, String value) {
-        String normal = toNormalLetters(value);
-        refuseHiddenCharacters(field.name(), normal);   // must run before collapseSpaces (see refuseHiddenCharacters)
-        String cleaned = collapseSpaces(normal);
-        requireTwoLettersOrDigits(field.name(), cleaned);
-        requireLength(field, cleaned);
-        return cleaned;
-    }
-
-    /** Look-alike letters become normal ones: full-width "Sharma" from some keyboards becomes plain "Sharma". */
-    private static String toNormalLetters(String value) {
-        return Normalizer.normalize(value, Normalizer.Form.NFKC);
-    }
-
-    /**
-     * Refuses invisible characters, such as the right-to-left override that can make a name display differently
-     * from what was typed. Tab and newline are allowed: they come from pasted addresses and collapseSpaces tidies them.
-     * Runs before collapseSpaces, because that would turn line separators into spaces and hide them from this check.
-     */
-    private static void refuseHiddenCharacters(String field, String value) {
-        boolean found = value.codePoints().anyMatch(ShopService::isHidden);
-        if (found) {
-            throw invalid(field, "contains invisible or special characters");
-        }
-    }
-
-    private static boolean isHidden(int c) {
-        if (c == '\t' || c == '\n' || c == '\r') {
-            return false;
-        }
-        int type = Character.getType(c);
-        return type == Character.CONTROL                 // control codes, e.g. the null character
-                || type == Character.FORMAT              // zero-width space, right-to-left override
-                || type == Character.PRIVATE_USE         // characters with no agreed meaning
-                || type == Character.UNASSIGNED          // not a real character
-                || type == Character.SURROGATE           // half of a broken emoji
-                || type == Character.LINE_SEPARATOR      // Unicode line separator
-                || type == Character.PARAGRAPH_SEPARATOR; // Unicode paragraph separator
-    }
-
-    /** Any run of spaces, tabs or newlines becomes one space, and the ends are trimmed. */
-    private static String collapseSpaces(String value) {
-        return SPACES.matcher(value).replaceAll(" ").strip();
-    }
-
-    /**
-     * Checks the length of the cleaned value, which is what gets saved. @Size in the request only sees what was sent:
-     * collapsing spaces can make it shorter, and toNormalLetters can make it longer (one character can become 3 or
-     * more), which would otherwise reach the database too long and fail with a 500. Counted like Postgres counts.
-     */
-    private static void requireLength(TextField field, String value) {
-        int length = value.codePointCount(0, value.length());
-        if (length < field.minLength() || length > field.maxLength()) {
-            throw invalid(field.name(), "must be " + field.minLength() + " to " + field.maxLength() + " characters");
-        }
-    }
-
-    /** Refuses values like "!!" or "--". Letters in any script count, so Hindi names pass. */
-    private static void requireTwoLettersOrDigits(String field, String value) {
-        long count = value.codePoints().filter(Character::isLetterOrDigit).count();
-        if (count < 2) {
-            throw invalid(field, "must have at least 2 letters or digits");
-        }
     }
 
     /** Stored to 6 decimals (about 10 cm), the column's precision. */
@@ -276,17 +371,6 @@ public class ShopService implements ShopMemberships {
         return number / 36 + number % 36;
     }
 
-    /** Whether the database refused the write because of this named constraint. */
-    private static boolean violated(DataIntegrityViolationException e, String constraint) {
-        for (Throwable t = e; t != null; t = t.getCause()) {
-            if (t instanceof org.hibernate.exception.ConstraintViolationException c
-                    && constraint.equalsIgnoreCase(c.getConstraintName())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static String compact(String value) {
         if (value == null) {
             return null;
@@ -298,6 +382,11 @@ public class ShopService implements ShopMemberships {
     private static ApiException invalid(String field, String problem) {
         return new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                 Map.of(field, problem));
+    }
+
+    private static ApiException alreadyInAShop() {
+        return new ApiException(HttpStatus.CONFLICT, "ALREADY_IN_A_SHOP",
+                "This person already works in a shop. One person can work in one shop only.");
     }
 
     private static ApiException alreadyHasShop() {

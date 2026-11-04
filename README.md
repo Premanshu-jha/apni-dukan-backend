@@ -11,7 +11,9 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `common` | Error format, security (JWT check, CORS), current user/shop, clock |
 | `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery |
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
-| `shops` | Shop registration step 1 (details, GPS pin, GSTIN/Udyam), My shop, owner/helper roles, history of every change |
+| `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, Submit for visit), field-team approval, My shop, owner/helper/barber roles, history of every change |
+| `salon` | Salon setup (services, barbers with optional sign-in and photo, weekly hours, booking settings), online booking, walk-ins, start code, no-show and strikes, breaks, leave, closed days, pause, the automatic end |
+| `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set |
 
 ## How file handling works
 
@@ -36,7 +38,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    A["Phone sends photo/PDF<br/>+ purpose (SHOP_PHOTO, BILL, RECEIPT)"] --> B{"Empty or over 10 MB?"}
+    A["Phone sends photo/PDF<br/>+ purpose (SHOP_PHOTO, OWNER_PHOTO, STAFF_PHOTO, BILL, RECEIPT)"] --> B{"Empty or over 10 MB?"}
     B -- yes --> E1["400 EMPTY_FILE / 413 FILE_TOO_LARGE"]
     B -- no --> C["Pass 1: read the file once<br/>first 12 bytes + SHA-256 fingerprint"]
     C --> D{"Real type from bytes:<br/>JPEG, PNG, WEBP or PDF?"}
@@ -198,10 +200,64 @@ sequenceDiagram
 | `POST /api/v1/shops` | Registers your shop as `DRAFT`, you as owner. 409 `ALREADY_HAS_SHOP` if you have one. Then refresh your token |
 | `GET /api/v1/shops/me` | Your shop, its status and your role (`myRole`). 404 `NO_SHOP` if none |
 | `PATCH /api/v1/shops/me` | Owner only (403 `OWNER_ONLY`). Send `version` and only the fields to change; `""` removes GSTIN/Udyam |
+| `PUT /api/v1/shops/me/photos` | Owner. `{version, ownerPhotoFileId?, shopPhotoFileId?}`: ids of photos uploaded to `POST /files` with purpose `OWNER_PHOTO` / `SHOP_PHOTO` |
+| `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos are set |
+| `GET /api/v1/admin/shops?status=` | Field team (`users.admin`) only, else 403. Shops in a status (default `PENDING_VISIT`) with links to both photos |
+| `POST /api/v1/admin/shops/{id}/approve` | Field team. `{version}` from the list they checked: PENDING_VISIT → APPROVED after the visit. 409 `SHOP_CHANGED` if the owner changed something since (reload, check, approve), 409 `WRONG_STATUS` from another status. Customers can find it from now on |
 
 Rules: the GPS pin is required and must be inside India; pincode is 6 digits; GSTIN and Udyam are optional, checked,
 and stored in capitals; text is trimmed. Unknown fields are refused with 400 `UNKNOWN_FIELD`, so nobody can send
-`"status": "APPROVED"` for their own shop. Status moves DRAFT → PENDING_VISIT → APPROVED in the next PR.
+`"status": "APPROVED"` for their own shop. Status moves DRAFT → (both photos, Submit) → PENDING_VISIT → (field team
+visits and approves) → APPROVED. Changing the photos or the address (address line, area, city, pincode, map pin)
+of an APPROVED shop sends it back to PENDING_VISIT for another check: customers can't find it until the field team
+approves it again. Bookings already made stay and can be cancelled; moving one to a new time answers 409
+`SALON_NOT_BOOKABLE` until the approval (`canMove` is false meanwhile). A new address rewrites the pending booking
+reminders, so customers are sent to the new place. A photo that a shop or barber uses can't be deleted
+(409 `FILE_IN_USE`).
+
+A shop is a **kirana** or a **salon**: send `"type": "SALON"` when registering (left out = `KIRANA`). The type can't
+be changed later; `GET /shops/me` returns it.
+
+## How salon setup works
+
+A salon lists its services, its barbers, which services each barber does and when each one works. Online bookings
+are worked out from exactly these. Anyone in the salon can read the setup; only the owner can change it.
+
+| Call | What it does |
+| --- | --- |
+| `GET` / `POST /api/v1/salon/services` | List (by `sortOrder`, then name) / add: `name`, `durationMinutes` (5–480, steps of 5), `pricePaise`, `priceIsFrom`, `sortOrder` |
+| `PATCH /api/v1/salon/services/{id}` | Edit, or `"active": false` to switch off (kept for old bookings). Send `version`; 409 `SERVICE_CHANGED` if stale |
+| `GET` / `POST /api/v1/salon/staff` | Barbers with their `serviceIds`, `hours`, `loginPhone`, `photoFileId` / add one: `name`, and optionally `phone` to give him his own sign-in |
+| `PATCH /api/v1/salon/staff/{id}` | Rename, or `"active": false` when a barber leaves (409 `STAFF_HAS_BOOKINGS` while he has upcoming ones; his sign-in is removed). Switching back on: 409
+`BLOCK_CONFLICTS` if a leave of his runs into a closed day (remove it, switch him on, add it again around that day). Send `version`; 409 `STAFF_CHANGED` if stale |
+| `PUT` / `DELETE /api/v1/salon/staff/{id}/login` | `{phone}`: his sign-in becomes a BARBER member of the salon (409 `ALREADY_IN_A_SHOP` if that phone works in a shop). Delete: membership and walk-in access go, his sessions end at once |
+| `PUT /api/v1/salon/staff/{id}/photo` | Optional photo: `{fileId}` of a `STAFF_PHOTO` upload, or `{"fileId": null}` to remove |
+| `PUT /api/v1/salon/staff/{id}/services` | `{"version": 3, "serviceIds": [...]}` replaces what he does; newly added ones must be active services of this salon |
+| `PUT /api/v1/salon/staff/{id}/hours` | `{"version": 3, "hours": [{"weekday": 1, "start": "10:00", "end": "14:00"}, ...]}` replaces his week |
+| `GET` / `PATCH /api/v1/salon/settings` | Earliest booking (`minLeadMinutes`, default 30) and latest (`maxDaysAhead`, default 7). `version` is null until the first save |
+
+**Database:** V4 runs `CREATE EXTENSION IF NOT EXISTS btree_gist` (needed by the no-overlap rule). Neon and the
+Docker image used by the tests have it; on your own Postgres, the role running Flyway must be allowed to create it.
+
+**Time:** every salon is in India (`Asia/Kolkata`, no daylight saving). Hours are `"HH:mm"` in salon time on
+15-minute steps, `weekday` 1 = Monday ... 7 = Sunday, up to `"24:00"`; two blocks on one day make a split shift. They
+are stored as minutes after midnight (10:00 = 600), so the database itself refuses overlapping blocks
+(`ex_staff_hours_no_overlap`). Exact moments are stored in UTC and returned with their offset.
+
+**Safety:** every call checks in the database that you belong to a salon (404 `NO_SHOP`, 409 `NOT_A_SALON`) and,
+for changes, that you are its owner (403 `OWNER_ONLY`). Services and barbers are always looked up together with your
+salon, so another salon's ids give 404; the database's keys also refuse linking a barber to another salon's service.
+Changing a barber's services or hours raises his `version`, and both calls need the version you last read: two edits
+from the same old screen run one after the other (row lock) and the second gets 409 `STAFF_CHANGED` instead of
+silently replacing the first.
+
+**Limits and errors:** up to 100 active services and 50 active barbers per salon (switched-off ones don't count):
+409 `TOO_MANY_SERVICES` / `TOO_MANY_STAFF`, also when switching one back on. Two active services can't share a name,
+capitals ignored: 409 `SERVICE_NAME_TAKEN`. Another salon's ids: 404 `SERVICE_NOT_FOUND` / `STAFF_NOT_FOUND`; in
+`serviceIds` of `PUT .../services`, another salon's or a switched-off service is 400 `VALIDATION_FAILED` naming
+`serviceIds`. A stale settings save is 409 `SETTINGS_CHANGED`. The limits are a guard against runaway lists, not
+exact: two adds at the very same moment could both pass at 99.
+Separately, one request carries at most 200 `serviceIds` and 50 blocks of `hours` (more is 400 `VALIDATION_FAILED`).
 
 ## Run it on your laptop
 
@@ -270,8 +326,90 @@ curl "http://localhost:8080/api/v1/files/<id>/link" -H "Authorization: Bearer <a
 curl -X DELETE "http://localhost:8080/api/v1/files/<id>" -H "Authorization: Bearer <accessToken>"
 ```
 
-`purpose` is one of `SHOP_PHOTO`, `BILL`, `RECEIPT`. Accepted types: JPEG, PNG, WEBP, PDF (checked from the
+`purpose` is one of `SHOP_PHOTO`, `OWNER_PHOTO`, `STAFF_PHOTO` (a salon barber), `BILL`, `RECEIPT`. A barber's
+sign-in can't use files at all (403). Accepted types: JPEG, PNG, WEBP, PDF (checked from the
 file's bytes, not its name), up to 10 MB. Another shop's file returns `404`.
+
+## How salon bookings work
+
+No money moves: customers book a time and pay the salon. One table, `appointments`, holds bookings, walk-ins and
+blocks (break, leave, closed day). While a row holds a barber's time (CONFIRMED, IN_SERVICE or BLOCKED), the
+database's rule `ex_appointments_no_overlap` stops anything else of that barber overlapping it. That rule, not Java,
+decides every race.
+
+```mermaid
+sequenceDiagram
+    participant C as Customer app
+    participant B as Backend
+    participant D as Neon
+    C->>B: GET /salons?lat&lng, /salons/{id}/services, /salons/{id}/availability?services&date
+    B-->>C: free start times (quarter hours)
+    C->>B: POST /bookings {salonId, serviceIds, startAt} + Idempotency-Key
+    B->>D: lock this customer; same key? strikes? 2 active? window?
+    loop free barbers, least booked that day first
+        B->>D: INSERT ... ON CONFLICT DO NOTHING
+    end
+    B->>D: services copied, event BOOKED, messages CONFIRMED (+ REMINDER at start - 60 min)
+    B-->>C: 201 booking with start code (or 409 SLOT_TAKEN + 3 nearest times)
+```
+
+**Customer (any signed-in person):** `GET /salons?lat=&lng=` (approved, not paused, within 5 km),
+`GET /salons/{id}`, `/services`, `/availability?services=a,b&date=YYYY-MM-DD`, `POST /bookings` (header
+`Idempotency-Key`: a new UUID per attempt, the same one on retry), `GET /me/bookings?when=upcoming|past`,
+`GET /bookings/{id}`, `POST /bookings/{id}/cancel`, `POST /bookings/{id}/reschedule {startAt}`, `PATCH /auth/me {name}`.
+The customer picks services and a time; the backend picks the barber. Another person's booking is 404.
+
+**Salon (`/api/v1/salon/...`):**
+
+| Call | Who | What it does |
+| --- | --- | --- |
+| `GET /day?date=` | owner, helper, and anyone with walk-in access: all barbers; other barbers: their own | A column per barber with his hours and appointments (`notStarted` once its time passed). Never the start code |
+| `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or his earliest start today (exact minutes). Add with `startAt` null = start now (IN_SERVICE) or a later time today (held). 409 `BARBER_BUSY` with his next free time |
+| `GET /members` · `PUT /members/{userId}/walk-in-access {allowed}` | owner | Who may add walk-ins besides the owner (a helper or barber) |
+| `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before. A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper) |
+| `POST /appointments/{id}/no-show` | owner, helper; barber: own | From 15 min after the start (the late allowance). Frees the time; a booking gives the customer a strike |
+| `POST /appointments/{id}/reassign {staffId}` · `/cancel {reason}` | owner, helper | Same time, another barber who does its services · salon cancel (customer told, no strike) |
+| `GET /staff/{id}/blocks/conflicts` · `POST /staff/{id}/blocks` · `DELETE .../blocks/{blockId}` | break: owner, helper, the barber; leave: owner | 409 `BLOCK_CONFLICTS` listing what's in the way; nothing saved |
+| `GET /closures` · `POST /closures {date}` · `DELETE /closures/{id}` | read: anyone in the salon; change: owner | A whole day closed for every barber, all or nothing; barbers added or switched on later get it too |
+| `GET /pause` · `POST /pause {until?}` · `POST /resume` | read: anyone in the salon; change: owner, helper | Stop new online bookings (default: until midnight) |
+
+**Lifecycle:** CONFIRMED → IN_SERVICE (Start) → COMPLETED by itself at its planned end (a job every minute; there is
+no Done button, so a long service makes the next customer wait). CONFIRMED → NO_SHOW / CANCELLED_BY_CUSTOMER /
+CANCELLED_BY_SALON. A booking nobody started stays CONFIRMED for staff to mark. BLOCKED → REMOVED. Every change is a
+conditional update ("only if still CONFIRMED") and is logged in `appointment_events` with who did it.
+
+**Rules:** 30 minutes' notice and up to 7 days ahead (the salon's settings); quarter hours only (400
+`OUTSIDE_WINDOW`); at most 2 upcoming bookings per customer (409 `TOO_MANY_BOOKINGS`); a cancel less than 1 hour
+before, or a no-show, is a strike; 3 strikes within 60 days block online booking until 30 days after the latest
+(403 `BOOKING_BLOCKED`, walking in still works). One person's bookings run one after the other (an advisory lock),
+so tapping twice can't pass these limits.
+
+**Messages:** written to `notification_jobs` in the same transaction as the change; a job every 30 s sends what is
+due as Web Push to each of the person's devices (`POST /me/push-subscriptions`, the key from
+`GET /push/public-key`), retrying after 1, 5 and 15 minutes. Confirmation now; reminder 60 minutes before (only for
+bookings made more than 75 minutes ahead) with the address, map link, start code and "held until"; rescheduled;
+cancelled. Moving or cancelling a booking cancels its pending messages. The server only sends to the browsers' real
+push services (Google, Mozilla, Apple, Microsoft), so a device address can't point it anywhere else.
+
+**SMS (optional, per message type, no code change):** create the template on DLT and in MSG91 with the variables
+below, then set its id on the server (Railway) and restart. From then on every new message of that type also goes
+out as one SMS to the customer's phone (its own row, retried on its own). Remove the setting again to switch that
+type's SMS off. Each variable is at most 30 characters (DLT's limit). Spending guards: at most 10 booking SMS per
+person per day and `SMS_BOOKING_DAILY_LIMIT` (default 300) in total per day, counted separately from sign-in codes;
+over a limit the SMS is dropped (the Web Push still goes out) and logged (the total limit once a day). Both limits
+run for 24 hours from the first SMS counted. They guard spending, they aren't exact counts: in rare cases (MSG91
+accepts but its answer times out, or Redis fails right after a send) one SMS can go out twice.
+
+| Message | Setting | MSG91 variables |
+| --- | --- | --- |
+| Booking confirmed | `SMS_TEMPLATE_BOOKING_CONFIRMED` | `##SALON##`, `##WHEN##` (Tue 10 Nov, 6:30 PM), `##BOOKING##` |
+| Reminder, 60 min before | `SMS_TEMPLATE_BOOKING_REMINDER` | `##SALON##`, `##TIME##` (6:30 PM), `##AREA##`, `##CODE##`, `##UNTIL##` (6:45 PM) |
+| Rescheduled | `SMS_TEMPLATE_BOOKING_RESCHEDULED` | `##SALON##`, `##WHEN##`, `##BOOKING##` |
+| Cancelled by the customer | `SMS_TEMPLATE_BOOKING_CANCELLED` | `##SALON##`, `##WHEN##` |
+| Cancelled by the salon | `SMS_TEMPLATE_BOOKING_CANCELLED_BY_SALON` | `##SALON##`, `##WHEN##`, `##REASON##` |
+
+Example DLT text for the reminder: "Reminder: {#var#} at {#var#} today, {#var#}. Show code {#var#} at the counter.
+Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sign-in OTP.
 
 ## Before going live (checklist)
 
@@ -282,15 +420,20 @@ file's bytes, not its name), up to 10 MB. Another shop's file returns `404`.
   under memory pressure.
 - **Captcha** (Cloudflare Turnstile) on the sign-in screen, plus an alert well before `SMS_DAILY_LIMIT`.
 - `APP_PRODUCTION=true`, own DLT templates, `SMS_ACCOUNT_MOVED_ENABLED=true`, a mail provider with `MAIL_FROM`.
+- **Web Push keys:** run `npx web-push generate-vapid-keys` once and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (and
+  `VAPID_SUBJECT`, e.g. `mailto:` your support address) on Railway. The real server refuses to start without them.
+  Keep the pair: a new one silences every saved device until it subscribes again.
 
 ## Errors
 
 Every error looks like `{"code": "UNSUPPORTED_FILE_TYPE", "message": "...", "details": {}}`.
 Sign-in errors use the same shape: `401 NOT_SIGNED_IN`, `401 TOKEN_EXPIRED`, `401 INVALID_TOKEN`, `403 FORBIDDEN`.
+`409 TRY_AGAIN` means two requests changed the same thing at the same moment and the database undid this one:
+nothing was saved, and sending it again works.
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (`V4__...`, `V5__...`).
+Only through new Flyway files in `src/main/resources/db/migration` (`V5__...`, `V6__...`).
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
 Never edit a migration that has already run. Hibernate is set to `validate`.

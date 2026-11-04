@@ -3,6 +3,7 @@ package in.apnidukan.files.service;
 import in.apnidukan.common.context.CurrentUser;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.common.files.AttachedFiles;
 import in.apnidukan.files.domain.FilePurpose;
 import in.apnidukan.files.domain.StoredFile;
 import in.apnidukan.files.repo.StoredFileRepository;
@@ -33,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -49,14 +51,15 @@ class FileServiceTest {
     @Mock FileStorage storage;
     @Mock CurrentUserProvider currentUser;
     @Mock FileUsageChecker usageChecker;
+    @Mock AttachedFiles attachedElsewhere;
 
     FileService service;
 
     @BeforeEach
     void setUp() {
         service = new FileService(repository, storage, currentUser, Clock.fixed(NOW, ZoneOffset.UTC), 5,
-                List.of(usageChecker));
-        when(currentUser.requireShop()).thenReturn(new CurrentUser(USER, SHOP));
+                List.of(usageChecker), List.of(attachedElsewhere));
+        lenient().when(currentUser.requireShop()).thenReturn(new CurrentUser(USER, SHOP));
     }
 
     @Test
@@ -181,6 +184,34 @@ class FileServiceTest {
                 .isEqualTo("FILE_IN_USE");
         verify(repository, never()).deleteByIdAndShopId(any(), any());
         verify(storage, never()).delete(anyString());
+    }
+
+    @Test
+    void refusesToDeleteAPhotoAnotherModuleUses() {
+        StoredFile file = billPhoto();
+        when(repository.findByIdAndShopId(file.getId(), SHOP)).thenReturn(Optional.of(file));
+        when(attachedElsewhere.isAttached(file.getId())).thenReturn(true);
+
+        assertThatThrownBy(() -> service.delete(file.getId()))
+                .isInstanceOf(ApiException.class)
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo("FILE_IN_USE");
+        verify(storage, never()).delete(anyString());
+    }
+
+    @Test
+    void barbersCantUseTheShopsFiles() {
+        when(currentUser.requireShop()).thenReturn(new CurrentUser(USER, SHOP, "BARBER"));
+        UUID fileId = UUID.randomUUID();
+        assertThatThrownBy(() -> service.link(fileId, false))
+                .isInstanceOf(ApiException.class)
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo("NOT_ALLOWED");
+        assertThatThrownBy(() -> service.delete(fileId))
+                .isInstanceOf(ApiException.class)
+                .extracting(e -> ((ApiException) e).getCode())
+                .isEqualTo("NOT_ALLOWED");
+        verify(repository, never()).findByIdAndShopId(any(), any());
     }
 
     @Test

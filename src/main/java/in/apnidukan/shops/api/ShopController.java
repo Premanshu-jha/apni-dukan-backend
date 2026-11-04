@@ -2,6 +2,8 @@ package in.apnidukan.shops.api;
 
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.shops.api.ShopRequests.CreateShop;
+import in.apnidukan.shops.api.ShopRequests.SetPhotos;
+import in.apnidukan.shops.api.ShopRequests.Submit;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
 import in.apnidukan.shops.service.ShopService;
 import jakarta.validation.Valid;
@@ -9,6 +11,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -46,5 +49,23 @@ public class ShopController {
     @PatchMapping("/me")
     public ShopResponse update(@Valid @RequestBody UpdateShop body) {
         return shops.update(currentUser.get().userId(), body);
+    }
+
+    /**
+     * Set the owner's and/or the shop's photo (owner): ids of photos uploaded to POST /files with purpose
+     * OWNER_PHOTO and SHOP_PHOTO. Send the version from GET /shops/me.
+     */
+    @PutMapping("/me/photos")
+    public ShopResponse setPhotos(@Valid @RequestBody SetPhotos body) {
+        return shops.setPhotos(currentUser.get().userId(), body);
+    }
+
+    /**
+     * Registration step 2 (owner): ask for the field team's visit. DRAFT → PENDING_VISIT.
+     * 409 PHOTOS_REQUIRED until both photos are set.
+     */
+    @PostMapping("/me/submit")
+    public ShopResponse submit(@Valid @RequestBody Submit body) {
+        return shops.submitForVisit(currentUser.get().userId(), body.version());
     }
 }

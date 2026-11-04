@@ -14,7 +14,14 @@ public final class TestData {
 
     /** Empties every table the tests write to (children first). */
     public static void clean(JdbcTemplate jdbc) {
-        for (String table : new String[] {"files", "shop_members_aud", "shops_aud", "revinfo", "shop_members", "shops",
+        // Photos point at files and files point at shops: let go of the photos first
+        jdbc.update("UPDATE shops SET owner_photo_file_id = NULL, shop_photo_file_id = NULL");
+        jdbc.update("UPDATE salon_staff SET photo_file_id = NULL");
+        for (String table : new String[] {"files", "appointment_events", "customer_strikes", "appointment_services",
+                "appointments", "walk_in_access", "salon_pauses", "notification_jobs", "push_subscriptions",
+                "staff_hours_aud", "staff_services_aud", "salon_staff_aud",
+                "salon_services_aud", "salon_settings_aud", "shop_members_aud", "shops_aud", "revinfo", "staff_hours",
+                "staff_services", "salon_staff", "salon_services", "salon_settings", "shop_members", "shops",
                 "refresh_tokens", "users"}) {
             jdbc.update("DELETE FROM " + table);
         }
@@ -26,13 +33,25 @@ public final class TestData {
                 id, phone, now, now);
     }
 
-    /** A DRAFT shop in Hyderabad with the given person as its owner. The shop code comes from the column's default. */
+    /**
+     * A DRAFT kirana in Hyderabad with the given person as its owner. The shop code comes from the column's default.
+     */
     public static void shop(JdbcTemplate jdbc, UUID shopId, UUID ownerId) {
+        shop(jdbc, shopId, ownerId, "KIRANA");
+    }
+
+    /** Like {@link #shop}, but a salon. */
+    public static void salon(JdbcTemplate jdbc, UUID shopId, UUID ownerId) {
+        shop(jdbc, shopId, ownerId, "SALON");
+    }
+
+    private static void shop(JdbcTemplate jdbc, UUID shopId, UUID ownerId, String type) {
         Timestamp now = Timestamp.from(Instant.now());
         jdbc.update("INSERT INTO shops (id, name, owner_name, address_line, area, city, pincode, latitude, "
-                        + "longitude, status, version, created_at, updated_at) VALUES (?, 'Test Kirana', 'Test Owner', "
-                        + "'Shop 4, Main Road', 'Kondapur', 'Hyderabad', '500084', 17.465000, 78.364000, 'DRAFT', 0, ?, ?)",
-                shopId, now, now);
+                        + "longitude, status, type, version, created_at, updated_at) VALUES (?, 'Test Shop', "
+                        + "'Test Owner', 'Shop 4, Main Road', 'Kondapur', 'Hyderabad', '500084', 17.465000, 78.364000, "
+                        + "'DRAFT', ?, 0, ?, ?)",
+                shopId, type, now, now);
         member(jdbc, shopId, ownerId, "OWNER");
     }
 
