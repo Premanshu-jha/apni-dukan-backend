@@ -165,6 +165,7 @@ coming back counts as copied; an old device retrying a signed-out token just get
 | `POST /otp/verify` `{phone, code}` | Signs in (creates the account the first time) |
 | `POST /refresh` `{refreshToken}` | New token pair |
 | `POST /logout` `{refreshToken}` | Ends this session, 204 |
+| `POST /logout-all` | Signs out every device at once, this one too (204) |
 | `GET /me` · `PATCH /me {name}` | The signed-in person · set your name (salons see it on bookings) |
 | `POST /me/delete-code` · `POST /me/delete {code}` | Delete your account: a code to your own phone, then 204. 409 `SHOP_OWNER` for a shop owner (close or hand over the shop first). See below |
 | `POST /email/send-code` `{email, phoneCode?}` | Sends a 6-digit code to the email (10 min). Replacing an already verified email also needs `phoneCode` |
@@ -477,6 +478,13 @@ Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sig
 - **Web Push keys:** run `npx web-push generate-vapid-keys` once and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (and
   `VAPID_SUBJECT`, e.g. `mailto:` your support address) on Railway. The real server refuses to start without them.
   Keep the pair: a new one silences every saved device until it subscribes again.
+
+## Housekeeping
+
+- **Health check:** `GET /actuator/health` answers `{"status":"UP"}` (no details; nothing else of the actuator is
+  open). Set it as Railway's Healthcheck Path. It checks the database only: the app keeps serving while Redis is down.
+- **Cleanup, every night (India time):** at 03:30 sign-ins that ended more than 30 days ago are deleted; at 03:40
+  messages that finished more than 90 days ago. Bookings, strikes, events and the `*_aud` history stay.
 
 ## Errors
 

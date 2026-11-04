@@ -69,6 +69,13 @@ public class AuthController {
         return ResponseEntity.noContent().build();
     }
 
+    /** Sign out of every device, this one included. 204. */
+    @PostMapping("/logout-all")
+    public ResponseEntity<Void> logoutEverywhere() {
+        auth.logoutEverywhere(currentUser.get().userId());
+        return ResponseEntity.noContent().build();
+    }
+
     @GetMapping("/me")
     public UserResponse me() {
         return UserResponse.from(auth.me(currentUser.get().userId()));

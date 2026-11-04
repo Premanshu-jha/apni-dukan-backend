@@ -44,6 +44,11 @@ public class NotificationStore {
                 + "WHERE ref_id = ? AND status = 'PENDING'", at(now), refId);
     }
 
+    /** Deletes messages finished (sent, failed, cancelled, no device) before this moment; returns how many. */
+    public int deleteFinishedBefore(Instant before) {
+        return jdbc.update("DELETE FROM notification_jobs WHERE status <> 'PENDING' AND finished_at < ?", at(before));
+    }
+
     /** Cancels everything still waiting to go to this person (their account was deleted). */
     public int cancelPendingForUser(UUID userId, Instant now) {
         return jdbc.update("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = ? "

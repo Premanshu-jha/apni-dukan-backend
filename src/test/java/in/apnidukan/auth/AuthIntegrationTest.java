@@ -51,6 +51,7 @@ class AuthIntegrationTest {
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
     @Autowired StringRedisTemplate redis;
+    @Autowired in.apnidukan.auth.service.SignInCleanupJob signInCleanup;
 
     RestClient http;
     String base;
@@ -444,6 +445,34 @@ class AuthIntegrationTest {
         assertThat(again.body().get("newUser")).isEqualTo(true);
         assertThat(((Map<?, ?>) again.body().get("user")).get("id"))
                 .isNotEqualTo(((Map<?, ?>) first.body().get("user")).get("id"));
+    }
+
+    @Test
+    void signingOutEverywhereEndsEverySessionAtOnce() {
+        Reply phone = signIn(PHONE);
+        Reply laptop = signIn(PHONE);
+        assertThat(post("/auth/logout-all", Map.of(), (String) phone.body().get("accessToken")).status())
+                .isEqualTo(204);
+        assertThat(get("/auth/me", (String) laptop.body().get("accessToken")).status()).isEqualTo(401);
+        assertThat(post("/auth/refresh", Map.of("refreshToken", laptop.body().get("refreshToken")), null).status())
+                .isEqualTo(401);
+    }
+
+    @Test
+    void endedSignInsAreDeletedAfter30DaysAndTheHealthCheckIsOpen() {
+        signIn(PHONE);
+        signIn(PHONE);
+        jdbc.update("UPDATE refresh_tokens SET revoked_at = now() - interval '31 days', revoke_reason = 'SIGNED_OUT' "
+                + "WHERE id = (SELECT id FROM refresh_tokens ORDER BY created_at LIMIT 1)");
+        assertThat(signInCleanup.runOnce()).isEqualTo(1);
+        Integer left = jdbc.queryForObject("SELECT count(*) FROM refresh_tokens", Integer.class);
+        assertThat(left).isEqualTo(1);
+
+        Reply health = get(base + "/actuator/health", null);
+        assertThat(health.status()).isEqualTo(200);
+        assertThat(health.body().get("status")).isEqualTo("UP");
+        assertThat(health.body().containsKey("components")).isFalse();   // no details of what is checked
+        assertThat(health.body().containsKey("details")).isFalse();
     }
 
     @Test

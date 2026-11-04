@@ -28,6 +28,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.security.SecureRandom;
@@ -183,6 +185,19 @@ public class AuthService {
     public void logout(String refreshToken) {
         refreshTokens.findByTokenHash(Hashing.sha256Hex(nullToEmpty(refreshToken)))
                 .ifPresent(t -> refreshTokens.revokeIfActive(t.getId(), Instant.now(clock), RevokeReason.SIGNED_OUT));
+    }
+
+    /** Signs this person out of every device at once (a lost phone, a shared laptop). */
+    @Transactional
+    public void logoutEverywhere(UUID userId) {
+        me(userId);
+        refreshTokens.revokeAllForUser(userId, Instant.now(clock));
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                revocations.revokeAll(userId);   // access tokens in use stop at once too
+            }
+        });
     }
 
     // ---------------- email verification ----------------

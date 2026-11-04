@@ -115,6 +115,7 @@ class SalonBookingIntegrationTest {
     @Autowired SessionRevocations sessions;
     @Autowired AutoEndJob autoEnd;
     @Autowired NotificationSendJob sender;
+    @Autowired in.apnidukan.notifications.service.MessageCleanupJob messageCleanup;
     @Autowired in.apnidukan.notifications.repo.NotificationStore store;
     @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
 
@@ -1311,6 +1312,17 @@ class SalonBookingIntegrationTest {
         }
         assertThat(put("/salon/staff/" + raju + "/hours", Map.of("version", rajuVersion(), "hours", shorter), owner)
                 .status()).isEqualTo(200);
+    }
+
+    @Test
+    void finishedMessagesAreDeletedAfter90DaysButWaitingOnesStay() {
+        book(customer, at("12:00"), List.of(haircut), UUID.randomUUID());
+        jdbc.update("UPDATE notification_jobs SET status = 'SENT', finished_at = ? WHERE type = 'BOOKING_CONFIRMED'",
+                java.sql.Timestamp.from(TUESDAY_10_00.minus(Duration.ofDays(91))));
+        int before = count("notification_jobs");
+        assertThat(messageCleanup.runOnce()).isEqualTo(1);
+        assertThat(count("notification_jobs")).isEqualTo(before - 1);
+        assertThat(count("notification_jobs WHERE status = 'PENDING'")).isEqualTo(before - 1);
     }
 
     // ---------- helpers ----------
