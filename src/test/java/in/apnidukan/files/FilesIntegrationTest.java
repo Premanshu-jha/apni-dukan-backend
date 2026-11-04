@@ -74,6 +74,22 @@ class FilesIntegrationTest {
     }
 
     @Test
+    void aShopCanUploadAtMost100FilesADayAndPhotosMustBeRealImages() {
+        for (int i = 0; i < 100; i++) {
+            jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
+                    + "uploaded_by, created_at) VALUES (?, ?, 'BILL', ?, 'image/jpeg', 1, ?, ?, now())",
+                    UUID.randomUUID(), UUID.fromString(SHOP_A), "test/" + i, String.format("%064d", i),
+                    UUID.fromString(USER));
+        }
+        Reply over = upload(SHOP_A, fakeJpeg(), "bill.jpg", "BILL");
+        assertThat(over.status()).isEqualTo(429);
+        assertThat(over.body().get("code")).isEqualTo("TOO_MANY_UPLOADS");
+        // Another shop isn't affected; a "photo" that is only a JPEG header is refused
+        Reply fakePhoto = upload(SHOP_B, fakeJpeg(), "me.jpg", "OWNER_PHOTO");
+        assertThat(fakePhoto.body().get("code")).isEqualTo("UNREADABLE_PHOTO");
+    }
+
+    @Test
     void flywayCreatedTheFilesTableAndHibernateAcceptedIt() {
         Integer applied = jdbc.queryForObject(
                 "SELECT count(*) FROM flyway_schema_history WHERE version = '1' AND success", Integer.class);

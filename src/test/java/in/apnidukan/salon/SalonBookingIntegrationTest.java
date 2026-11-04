@@ -1357,13 +1357,9 @@ class SalonBookingIntegrationTest {
         return id;
     }
 
-    /** Uploads a small fake JPEG to POST /files for this shop, as its owner. */
+    /** Uploads a small real JPEG (its colour depends on seed, so each one is a different file) as the owner. */
     private Reply upload(UUID who, UUID shopId, String purpose, int seed) {
-        byte[] bytes = new byte[1024];
-        new java.util.Random(seed).nextBytes(bytes);
-        bytes[0] = (byte) 0xFF;
-        bytes[1] = (byte) 0xD8;
-        bytes[2] = (byte) 0xFF;
+        byte[] bytes = jpeg(64, 48, new java.awt.Color(seed * 37 % 256, seed * 91 % 256, seed * 53 % 256));
         org.springframework.util.MultiValueMap<String, Object> form = new org.springframework.util.LinkedMultiValueMap<>();
         form.add("purpose", purpose);
         form.add("file", new org.springframework.core.io.ByteArrayResource(bytes) {
@@ -1375,6 +1371,22 @@ class SalonBookingIntegrationTest {
         return http.post().uri("/files").headers(h -> h.setBearerAuth(shopToken(who, shopId)))
                 .contentType(MediaType.MULTIPART_FORM_DATA).body(form)
                 .exchange((rq, res) -> read(res));
+    }
+
+    private static byte[] jpeg(int width, int height, java.awt.Color colour) {
+        java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(width, height,
+                java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = image.createGraphics();
+        g.setColor(colour);
+        g.fillRect(0, 0, width, height);
+        g.dispose();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try {
+            javax.imageio.ImageIO.write(image, "jpeg", out);
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+        return out.toByteArray();
     }
 
     private Reply delete(String path, UUID who, UUID shopId) {

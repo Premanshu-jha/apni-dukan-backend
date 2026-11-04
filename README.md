@@ -479,6 +479,14 @@ Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sig
   `VAPID_SUBJECT`, e.g. `mailto:` your support address) on Railway. The real server refuses to start without them.
   Keep the pair: a new one silences every saved device until it subscribes again.
 
+## Uploads: limits and photos
+
+- At most **100 uploads per shop per day** (India day), then 429 `TOO_MANY_UPLOADS`. A duplicate of an earlier upload
+  doesn't count.
+- **Shop, owner and barber photos** must be JPEG or PNG. They are drawn again as a JPEG of at most 1280 px on the
+  longest side: the phone's hidden details (EXIF: GPS position, phone model) are gone and the file is small. A file
+  that only looks like a photo is 400 `UNREADABLE_PHOTO`. Bills and receipts are stored exactly as uploaded.
+
 ## Housekeeping
 
 - **Health check:** `GET /actuator/health` answers `{"status":"UP"}` (no details; nothing else of the actuator is

@@ -16,6 +16,9 @@ public interface StoredFileRepository extends JpaRepository<StoredFile, UUID> {
 
     Optional<StoredFile> findByShopIdAndPurposeAndSha256(UUID shopId, FilePurpose purpose, String sha256);
 
+    /** Uploads of this shop since a moment (today's count, for the daily limit). */
+    long countByShopIdAndCreatedAtGreaterThanEqual(UUID shopId, java.time.Instant since);
+
     /**
      * Deletes the row only if it still exists and belongs to the shop, in one statement.
      * Returns 1 if it was deleted, 0 if someone else deleted it first (e.g. a double tap).

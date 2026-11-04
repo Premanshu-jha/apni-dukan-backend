@@ -37,6 +37,8 @@ import java.util.UUID;
 public class FileService {
 
     public static final long MAX_BYTES = 10L * 1024 * 1024;
+    /** Uploads one shop may make per day (India day). Bills are a handful a day; this stops a script filling R2. */
+    public static final int MAX_UPLOADS_PER_DAY = 100;
 
     private static final Logger log = LoggerFactory.getLogger(FileService.class);
 
@@ -87,11 +89,34 @@ public class FileService {
             return new FileUploadResult(existing.get(), true);
         }
 
+        java.time.LocalDate today = java.time.LocalDate.now(clock.withZone(java.time.ZoneId.of("Asia/Kolkata")));
+        Instant dayStart = today.atStartOfDay(java.time.ZoneId.of("Asia/Kolkata")).toInstant();
+        if (repository.countByShopIdAndCreatedAtGreaterThanEqual(user.shopId(), dayStart) >= MAX_UPLOADS_PER_DAY) {
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_UPLOADS",
+                    "This shop uploaded " + MAX_UPLOADS_PER_DAY + " files today. Try again tomorrow.");
+        }
+
+        // Photos of people and shops are drawn again as a smaller JPEG without the phone's hidden details (EXIF);
+        // bills and receipts are stored exactly as they came
+        byte[] cleaned = null;
+        if (isPhotoPurpose(purpose)) {
+            if (type != FileType.JPEG && type != FileType.PNG) {
+                throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE", "Photos must be JPEG or PNG");
+            }
+            try {
+                cleaned = PhotoCleaner.clean(upload.getBytes());
+            } catch (IOException e) {
+                throw new UncheckedIOException("Could not read the uploaded file", e);
+            }
+            type = FileType.JPEG;
+            size = cleaned.length;
+        }
+
         UUID id = UUID.randomUUID();
         String key = "shops/%s/%s/%s.%s".formatted(user.shopId(), purpose.folder(), id, type.extension());
 
         // Pass 2: stream the bytes to R2.
-        try (InputStream in = upload.getInputStream()) {
+        try (InputStream in = cleaned != null ? new java.io.ByteArrayInputStream(cleaned) : upload.getInputStream()) {
             storage.put(key, in, size, type.contentType());
         } catch (IOException e) {
             throw new UncheckedIOException("Could not read the uploaded file", e);
@@ -212,6 +237,11 @@ public class FileService {
         }
         String key = file.getStorageKey();
         return key.substring(key.lastIndexOf('/') + 1);
+    }
+
+    private static boolean isPhotoPurpose(FilePurpose purpose) {
+        return purpose == FilePurpose.SHOP_PHOTO || purpose == FilePurpose.OWNER_PHOTO
+                || purpose == FilePurpose.STAFF_PHOTO;
     }
 
     private record Inspection(byte[] head, int headLength, String sha256) {
