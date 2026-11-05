@@ -273,32 +273,38 @@ issued before.
 test mode). There is at most one super admin (the database refuses a second). It is set by hand, once, in Neon:
 
 ```sql
-UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE phone = '9xxxxxxxxx';
+UPDATE users SET admin_role = 'SUPER_ADMIN', admin = true WHERE phone = '9xxxxxxxxx';
 ```
 
-(Sign in once first, so the account exists.) The super admin is never changed from the website.
+(Sign in once first, so the account exists. `admin` is the old column, kept in step for a version still running
+during a deploy.) The super admin is never changed from the website and can't delete their account (409
+`SUPER_ADMIN`): without them nobody could manage admins or switch test mode off.
 
 | Endpoint | Notes |
 | --- | --- |
 | `GET /admin/me` | Who is signed in: `{userId, name, phone, adminRole, testMode: {on, until}}` (the website shows a red banner while test mode is on) |
 | `GET /admin/dashboard` | For `KIRANA` and `SALON`, how many shops are in each group: `FIRST_VISIT` (waiting, never approved), `RECHECK` (waiting, approved before: the owner moved the pin or changed a photo, or it was reinstated), `SENT_BACK` (a draft sent back with a reason), `LIVE`, `SUSPENDED`. A draft never submitted is in no group |
-| `GET /admin/shops?type=&group=&q=` | A group's shops, longest waiting first, at most 100, each with `group` and `ownerPhone`. `q`: the shop number exactly, or name, owner's name or owner's phone in part |
-| `GET /admin/shops/{id}` | The shop; a salon's barbers and services; `changes` since its last approved version (name, owner, address, area, city, pincode, pin with `pinMovedMetres`, GSTIN, Udyam, photos with the old photo links); the `timeline`, newest first |
+| `GET /admin/shops?type=&group=&q=` | A group's shops, longest in it first (`statusSince`: its latest timeline entry other than a note, so an owner fixing a typo doesn't move it), at most 100, each with `group` and `ownerPhone`. `q`: the shop number exactly (`1042` or `#1042`), the owner's phone in part (spaces, `+91` and dashes ignored), or the name or owner's name in part |
+| `GET /admin/shops/{id}` | The shop; a salon's barbers and services; `changes` since the moment it was last approved (name, owner, address, area, city, pincode, pin with `pinMovedMetres`, GSTIN, Udyam, photos with the old photo links), so edits a live shop made without needing a visit show up too; the `timeline`, newest first |
 | `POST /admin/shops/{id}/notes {note}` | A note only admins see (2–500 characters), 201 |
-| decisions | approve, reject (send back), suspend, reinstate as in "How shops work", now with an optional `note` (admins only, up to 500 characters) and, for send back and suspend, an optional `checklist`: `NAME_BOARD_NOT_VISIBLE`, `OWNER_PHOTO_UNCLEAR`, `PIN_WRONG`, `ADDRESS_MISMATCH`, `GST_UDYAM_MISMATCH`, `SHOP_SHUT`, `OTHER`. The owner sees only the `reason` |
-| `GET /admin/team` · `POST /admin/team {phone}` · `DELETE /admin/team/{userId}` | Super admin only (403 `SUPER_ADMIN_ONLY` for an admin). Add makes that phone an admin (the account is made if it has none); 409 `ALREADY_ADMIN`, 409 `TEST_PHONE`. Remove: their sessions end at once; 409 `CANT_REMOVE_SUPER_ADMIN` |
+| decisions | approve, reject (send back), suspend, reinstate as in "How shops work". The status is checked before the version: when another admin decided first, the answer is 409 `WRONG_STATUS` with `details.status`, not `SHOP_CHANGED`. Now with an optional `note` (admins only, up to 500 characters) and, for send back and suspend, an optional `checklist`: `NAME_BOARD_NOT_VISIBLE`, `OWNER_PHOTO_UNCLEAR`, `PIN_WRONG`, `ADDRESS_MISMATCH`, `GST_UDYAM_MISMATCH`, `SHOP_SHUT`, `OTHER`. The owner sees only the `reason` |
+| `GET /admin/team` · `POST /admin/team {phone}` · `DELETE /admin/team/{userId}` | Super admin only (403 `SUPER_ADMIN_ONLY` for an admin). `since` is when they became an admin. Add makes that phone an admin (the account is made if it has none) and ends any session already open on it; 409 `ALREADY_ADMIN`, 409 `TEST_PHONE` (a test number, or an account made in test mode). Remove: their sessions end at once; 409 `CANT_REMOVE_SUPER_ADMIN` |
 | `GET` · `PUT {hours}` · `DELETE /admin/test-mode` | Super admin only. OTP test mode on for 1–8 hours (it switches itself off), or off now |
-| `POST /admin/test-mode/phones {phone, label}` · `DELETE /admin/test-mode/phones/{phone}` | Super admin only. The test numbers. 409 `ADMIN_PHONE` (an admin's number can't be one), 409 `ALREADY_TEST_PHONE` |
+| `POST /admin/test-mode/phones {phone, label}` · `DELETE /admin/test-mode/phones/{phone}` | Super admin only. The test numbers. 409 `ADMIN_PHONE` (an admin's number), 409 `REAL_ACCOUNT` (a number that already has a real account), 409 `ALREADY_TEST_PHONE`. Removing one signs its test account out |
 
-**OTP test mode.** While it is on, the test numbers sign in with any 6 digits and no SMS is sent to them; their email
-code takes any 6 digits too and no email is sent. Every other number works as usual, and an admin's number is never
-treated as a test number. For testing on the real deployment without SMS credit; it works in production too, so
-add only numbers that are yours. Like the OMR project's per-student OTP bypass, but switched on for a few hours at a
-time. Every change (admins, test numbers, test mode on and off) is logged in `admin_events`.
+**OTP test mode.** While it is on, the test numbers sign in with any 6 digits and no SMS is sent to them. Only a
+number nobody has signed in with can be added; the account its first test sign-in makes is a test account
+(`users.test_account`), and only such an account ever takes any code, never a real customer's, a shop's or an
+admin's. A test account stays signed in only while test mode is on for its number: switching it off, the time
+running out, or removing the number ends its sessions (refresh answers 401 `TEST_MODE_OFF`). Email codes, recovery
+and account deletion always need the real code (otherwise a test account could claim someone's email). For testing
+on the real deployment without SMS credit; like the OMR project's per-student OTP bypass, but switched on for a few
+hours at a time. Every change (admins, test numbers, test mode on and off) is logged in `admin_events`.
 
 **Timeline** (`shop_events`): sent for a visit (owner), changed after approval (owner), approved, sent back,
-suspended, reinstated, note. A shop's last approved photos can't be deleted while they are what it is compared with
-(409 `FILE_IN_USE`).
+suspended, reinstated, note. Shops registered before it existed have an empty timeline and count their waiting time
+from registration. The photos a shop had when last approved can't be deleted while it waits for its re-check (409
+`FILE_IN_USE`): the field team compares them with the new ones.
 
 ## How salon setup works
 
