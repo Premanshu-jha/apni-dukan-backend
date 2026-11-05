@@ -74,6 +74,8 @@ public class ShopMembersService {
     @Transactional
     public List<MemberView> addHelper(UUID ownerId, String phone) {
         ShopMember owner = owner(ownerId);
+        // The owner's row, held until commit: two adds at the same moment are counted one after the other
+        users.lockIfActive(ownerId);
         long helpers = members.findByShopIdOrderByCreatedAtAscIdAsc(owner.getShopId()).stream()
                 .filter(m -> m.getRole() == ShopRole.HELPER).count();
         if (helpers >= MAX_HELPERS) {
