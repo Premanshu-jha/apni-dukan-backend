@@ -293,8 +293,11 @@ class AdminIntegrationTest {
         // The owner sees the reason, never the note
         assertThat(get("/shops/me", owner).text()).contains("100 m away").doesNotContain("called him");
 
-        // Sent again by the owner: on the timeline
-        post("/shops/me/submit", Map.of("version", version(salon)), owner);
+        // Sent again by the owner (both photos are needed to submit): on the timeline
+        jdbc.update("UPDATE shops SET owner_photo_file_id = ?, shop_photo_file_id = ? WHERE id = ?",
+                file(salon, owner, "OWNER_PHOTO"), file(salon, owner, "SHOP_PHOTO"), salon);
+        Reply submitted = post("/shops/me/submit", Map.of("version", version(salon)), owner);
+        assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
         assertThat(field(((List<?>) field(get("/admin/shops/" + salon, admin).body(), "timeline")).get(0), "event"))
                 .isEqualTo("SUBMITTED");
     }
@@ -343,6 +346,16 @@ class AdminIntegrationTest {
         jdbc.update("UPDATE shops SET status = ?, name = ?, updated_at = ? WHERE id = ?", status, name,
                 Timestamp.from(CLOCK.instant().plusSeconds(jdbc.queryForObject("SELECT count(*) FROM shops",
                         Long.class))), id);
+        return id;
+    }
+
+    /** A photo row as an upload would leave it (the stored object itself isn't needed here). */
+    private UUID file(UUID shop, UUID by, String purpose) {
+        UUID id = UUID.randomUUID();
+        jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
+                + "uploaded_by, created_at) VALUES (?, ?, ?, ?, 'image/jpeg', 10, ?, ?, ?)", id, shop, purpose,
+                "test/" + id, id.toString().replace("-", "") + "00000000000000000000000000000000".substring(0, 0),
+                by, Timestamp.from(NOW));
         return id;
     }
 
