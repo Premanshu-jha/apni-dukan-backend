@@ -977,7 +977,10 @@ public class SalonDayService {
             name = p == null || p.name() == null ? "Customer" : p.name();
             phone = showPhone && p != null ? p.phone() : null;
         }
-        return AppointmentView.of(a, services, name, phone, now, a.startsAt().plus(LATE_ALLOWANCE), c.userId());
+        // A walk-in he added counts as his (to fix) only while he may still add walk-ins; a break he added, always
+        boolean hisToFix = a.kind() == AppointmentKind.BLOCK || c.ownerOrHelper() || c.walkIns();
+        return AppointmentView.of(a, services, name, phone, now, a.startsAt().plus(LATE_ALLOWANCE),
+                hisToFix ? c.userId() : null);
     }
 
     private ShopCard salonCard(UUID shopId) {
