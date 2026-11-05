@@ -76,6 +76,12 @@ public class NotificationService implements Notifications {
         jobs.rewritePending(clean(notice));
     }
 
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void forgetSalonMessages(UUID userId) {
+        jobs.deleteSalonMessages(userId);
+    }
+
     /**
      * Saves this device (the browser's PushSubscription). Only real push services are accepted (PushEndpoints),
      * and the keys must have the right sizes.

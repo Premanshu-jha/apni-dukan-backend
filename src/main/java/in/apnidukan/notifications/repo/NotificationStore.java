@@ -121,6 +121,14 @@ public class NotificationStore {
                 + "WHERE (user_id = ? OR about_user_id = ?) AND status = 'PENDING'", at(now), userId, userId);
     }
 
+    /**
+     * Deletes this person's salon messages (SALON_*), sent or waiting. A row being sent right now just finds nothing
+     * to record its outcome on.
+     */
+    public int deleteSalonMessages(UUID userId) {
+        return jdbc.update("DELETE FROM notification_jobs WHERE user_id = ? AND type LIKE 'SALON\\_%'", userId);
+    }
+
     /** Empties the text of every message this person got or would have got (their account was deleted). */
     public int blankForUser(UUID userId) {
         // Their own messages, and the ones others got about them (a salon told "Rahul booked")
