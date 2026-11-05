@@ -113,13 +113,14 @@ public class AppointmentStore {
     }
 
     /**
-     * A walk-in already in the chair moves to another barber (added to the wrong one): it starts again with him,
-     * from now. 23P01 if his time was taken in between.
+     * A walk-in already in the chair moves to another barber (added to the wrong one): the rest of its time is with
+     * him from now. started_at stays: the customer has been in the salon's chair since then. 23P01 if his time was
+     * taken in between.
      */
     public boolean moveWalkInInService(UUID id, UUID staffId, Instant startsAt, Instant endsAt, Instant now) {
-        return jdbc.update("UPDATE appointments SET staff_id = ?, starts_at = ?, ends_at = ?, started_at = ?, "
-                        + "updated_at = ? WHERE id = ? AND status = 'IN_SERVICE' AND kind = 'WALK_IN'",
-                staffId, at(startsAt), at(endsAt), at(now), at(now), id) == 1;
+        return jdbc.update("UPDATE appointments SET staff_id = ?, starts_at = ?, ends_at = ?, updated_at = ? "
+                        + "WHERE id = ? AND status = 'IN_SERVICE' AND kind = 'WALK_IN'",
+                staffId, at(startsAt), at(endsAt), at(now), id) == 1;
     }
 
     /** Undoing a no-show: NO_SHOW → the given status (CANCELLED_BY_SALON) with the reason. */
