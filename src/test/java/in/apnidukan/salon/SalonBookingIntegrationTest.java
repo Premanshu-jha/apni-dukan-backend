@@ -1497,6 +1497,323 @@ class SalonBookingIntegrationTest {
 
     // ---------- helpers ----------
 
+    // ---------- partner gaps (fixed after the partner app's reviews) ----------
+
+    @Test
+    void aWalkInAddedToTheWrongBarberCanBeMovedOrCancelledAndADoneOneFinishedEarly() {
+        UUID first = id(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()));   // Raju 10:00-10:30, in the chair
+        CLOCK.set(at("10:05"));
+        // Given to Sunil: the rest of the visit is with him from now, and Raju is free
+        Reply moved = post("/salon/appointments/" + first + "/reassign", Map.of("staffId", sunil.toString()), owner);
+        assertThat(moved.status()).as(moved.text()).isEqualTo(200);
+        assertThat(field(moved.body(), "status")).isEqualTo("IN_SERVICE");
+        assertThat(field(moved.body(), "startsAt")).isEqualTo(at("10:05").toString());
+        assertThat(field(moved.body(), "endsAt")).isEqualTo(at("10:30").toString());
+        assertThat(staffOf(first)).isEqualTo(sunil);
+        assertThat(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()).status()).isEqualTo(201);
+
+        // Added by mistake: cancelled while in the chair, with a reason; Sunil is free again
+        Reply cancelled = post("/salon/appointments/" + first + "/cancel", Map.of("reason", "Added twice"), owner);
+        assertThat(field(cancelled.body(), "status")).as(cancelled.text()).isEqualTo("CANCELLED_BY_SALON");
+        assertThat(field(cancelled.body(), "cancelReason")).isEqualTo("Added twice");
+        UUID next = id(walkIn(owner, List.of(haircut), sunil, UUID.randomUUID()));   // Sunil 10:05-10:35
+        CLOCK.set(at("10:21"));
+        Reply tooLong = post("/salon/appointments/" + next + "/cancel", Map.of("reason", "Mistake"), owner);
+        assertThat(field(field(tooLong.body(), "details"), "reason")).as(tooLong.text()).isEqualTo("IN_CHAIR_TOO_LONG");
+        CLOCK.set(at("10:20"));
+
+        // Done early: finished now, and the rest of his time is free
+        CLOCK.set(at("10:20"));
+        Reply done = post("/salon/appointments/" + next + "/finish", Map.of(), owner);
+        assertThat(field(done.body(), "status")).as(done.text()).isEqualTo("COMPLETED");
+        assertThat(field(done.body(), "endsAt")).isEqualTo(at("10:20").toString());
+        assertThat(walkIn(owner, List.of(haircut), sunil, UUID.randomUUID()).status()).isEqualTo(201);
+        assertThat(field(post("/salon/appointments/" + next + "/finish", Map.of(), owner).body(), "details"))
+                .isEqualTo(Map.of("reason", "CHANGED", "status", "COMPLETED"));
+        // A booking that hasn't started can't be "finished"
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        assertThat(field(post("/salon/appointments/" + b + "/finish", Map.of(), owner).body(), "code"))
+                .isEqualTo("WRONG_STATUS");
+    }
+
+    @Test
+    void aBarberWhoAddedAWalkInToTheWrongBarberCanFixItAndTheOwnerIsTold() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", true), owner);
+        UUID wrong = id(walkIn(rajuUser, List.of(haircut), sunil, UUID.randomUUID()));   // meant for himself
+        UUID other = id(walkIn(owner, List.of(beard), raju, UUID.randomUUID()));
+        // He can't touch walk-ins someone else added, even ones he can see
+        assertThat(post("/salon/appointments/" + other + "/cancel", Map.of("reason", "Mine"), rajuUser).status())
+                .isEqualTo(403);
+        CLOCK.set(at("10:02"));
+        Reply moved = post("/salon/appointments/" + wrong + "/reassign", Map.of("staffId", raju.toString()), rajuUser);
+        assertThat(moved.status()).as(moved.text()).isEqualTo(409);   // Raju is busy with the beard trim until 10:15
+        CLOCK.set(at("10:16"));
+        Reply cancelled = post("/salon/appointments/" + wrong + "/cancel", Map.of("reason", "Wrong barber"), rajuUser);
+        assertThat(cancelled.status()).as(cancelled.text()).isEqualTo(409);   // over 15 minutes in the chair
+        assertThat(field(field(cancelled.body(), "details"), "reason")).isEqualTo("IN_CHAIR_TOO_LONG");
+        CLOCK.set(at("10:10"));
+        assertThat(post("/salon/appointments/" + wrong + "/cancel", Map.of("reason", "Wrong barber"), rajuUser).status())
+                .isEqualTo(200);
+        assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND user_id = '" + owner + "'"))
+                .isEqualTo(1);
+        assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND channel = 'SMS'")).isZero();
+        assertThat(walkIn(owner, List.of(haircut), sunil, UUID.randomUUID()).status()).isEqualTo(201);   // Sunil free
+    }
+
+    @Test
+    void aBarberCanFinishAWalkInHeAddedOnlyWhileHeStillHasWalkInAccessAndTheChairsBarberIsTold() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        put("/salon/staff/" + sunil + "/login", Map.of("phone", "9000000202"), owner);
+        UUID sunilUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000202'", UUID.class);
+        put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", true), owner);
+        UUID first = id(walkIn(rajuUser, List.of(haircut), sunil, UUID.randomUUID()));   // in Sunil's chair
+        CLOCK.set(at("10:05"));
+        Reply done = post("/salon/appointments/" + first + "/finish", Map.of(), rajuUser);
+        assertThat(field(done.body(), "status")).as(done.text()).isEqualTo("COMPLETED");
+
+        UUID second = id(walkIn(rajuUser, List.of(haircut), sunil, UUID.randomUUID()));
+        UUID own = id(walkIn(rajuUser, List.of(haircut), raju, UUID.randomUUID()));
+        // Someone else's walk-in on another column isn't his, even with walk-in access
+        jdbc.update("UPDATE appointments SET created_by = ? WHERE id = ?", owner, second);
+        assertThat(post("/salon/appointments/" + second + "/finish", Map.of(), rajuUser).status()).isEqualTo(404);
+        jdbc.update("UPDATE appointments SET created_by = ? WHERE id = ?", rajuUser, second);
+        jdbc.update("DELETE FROM notification_jobs");
+
+        // Walk-in access taken away: what he added is no longer his to fix, nor shown as his
+        put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", false), owner);
+        CLOCK.set(at("10:08"));
+        assertThat(post("/salon/appointments/" + second + "/finish", Map.of(), rajuUser).status()).isEqualTo(404);
+        assertThat(post("/salon/appointments/" + second + "/cancel", Map.of("reason", "Mistake"), rajuUser).status())
+                .isEqualTo(404);   // another barber's column: he no longer sees it
+        assertThat(post("/salon/appointments/" + own + "/cancel", Map.of("reason", "Mistake"), rajuUser).status())
+                .isEqualTo(403);   // his own column, but cancelling is for whoever may add walk-ins
+        assertThat(get("/salon/day?date=2026-11-10", rajuUser).text()).doesNotContain("\"addedByMe\":true");
+        assertThat(status(second)).isEqualTo("IN_SERVICE");
+        assertThat(status(own)).isEqualTo("IN_SERVICE");
+        // The owner cancels it: Sunil, whose chair it was in, is told in the app
+        assertThat(post("/salon/appointments/" + second + "/cancel", Map.of("reason", "Mistake"), owner).status())
+                .isEqualTo(200);
+        assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND channel = 'PUSH' AND user_id = '"
+                + sunilUser + "'")).isEqualTo(1);
+        assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND user_id = '" + owner + "'"))
+                .isZero();   // not the one who did it
+
+        // A barber who cancels one in his own chair isn't told about it himself
+        put("/salon/members/" + sunilUser + "/walk-in-access", Map.of("allowed", true), owner);
+        CLOCK.set(at("10:10"));
+        UUID his = id(walkIn(sunilUser, List.of(haircut), sunil, UUID.randomUUID()));
+        assertThat(post("/salon/appointments/" + his + "/cancel", Map.of("reason", "Mistake"), sunilUser).status())
+                .isEqualTo(200);
+        assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND user_id = '" + sunilUser + "'"))
+                .isEqualTo(1);   // only the one the owner cancelled
+    }
+
+    @Test
+    void aBarberCantRemoveHisOwnBreakOnceItHasStarted() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        assertThat(post("/salon/staff/" + raju + "/blocks", block("BREAK", "11:00", "11:30"), rajuUser).status())
+                .isEqualTo(201);
+        UUID hisBreak = jdbc.queryForObject("SELECT id FROM appointments WHERE kind = 'BLOCK' AND created_by = ?",
+                UUID.class, rajuUser);
+        CLOCK.set(at("11:00"));
+        Reply started = delete("/salon/staff/" + raju + "/blocks/" + hisBreak, rajuUser);
+        assertThat(field(started.body(), "code")).as(started.text()).isEqualTo("WRONG_STATUS");
+        assertThat(field(field(started.body(), "details"), "reason")).isEqualTo("STARTED");
+        // The owner still can
+        assertThat(delete("/salon/staff/" + raju + "/blocks/" + hisBreak, owner).status()).isEqualTo(204);
+    }
+
+    @Test
+    void movingAWalkInToAnotherBarberDoesntRestartItsFifteenMinutesToCancel() {
+        UUID w = id(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()));   // in Raju's chair from 10:00
+        CLOCK.set(at("10:14"));
+        assertThat(post("/salon/appointments/" + w + "/reassign", Map.of("staffId", sunil.toString()), owner).status())
+                .isEqualTo(200);
+        CLOCK.set(at("10:16"));   // 2 minutes with Sunil, 16 in the salon's chair
+        Reply late = post("/salon/appointments/" + w + "/cancel", Map.of("reason", "Mistake"), owner);
+        assertThat(field(field(late.body(), "details"), "reason")).as(late.text()).isEqualTo("IN_CHAIR_TOO_LONG");
+    }
+
+    @Test
+    void aBookingStartedLateRunsItsFullLengthWhenTheBarberIsFree() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));   // 12:00-12:30
+        CLOCK.set(at("12:10"));
+        Reply started = start(b, Map.of("withoutCode", true), owner);
+        assertThat(field(started.body(), "endsAt")).as(started.text()).isEqualTo(at("12:40").toString());
+        // Another one, with the next booking right after it: it keeps its planned end
+        UUID c1 = id(book(customer2, at("13:00"), List.of(haircut), UUID.randomUUID()));
+        UUID barber = staffOf(c1);
+        insertWalkIn(barber, "13:30", 30);
+        CLOCK.set(at("13:10"));
+        Reply late = start(c1, Map.of("withoutCode", true), owner);
+        assertThat(field(late.body(), "endsAt")).as(late.text()).isEqualTo(at("13:30").toString());
+    }
+
+    @Test
+    void startingEarlyHoldsTheBarberFromNowAndWaitsForTheCustomerBeforeIt() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));   // Raju 12:00-12:30
+        UUID onRaju = staffOf(b);
+        insertWalkIn(onRaju, "11:30", 20);   // someone in his chair 11:30-11:50
+        CLOCK.set(at("11:46"));
+        Reply busy = start(b, Map.of("withoutCode", true), owner);
+        assertThat(field(busy.body(), "code")).as(busy.text()).isEqualTo("BARBER_BUSY");
+        assertThat(field(field(busy.body(), "details"), "reason")).isEqualTo("STILL_BUSY");
+        assertThat(status(b)).isEqualTo("CONFIRMED");
+
+        CLOCK.set(at("11:52"));
+        Reply started = start(b, Map.of("withoutCode", true), owner);
+        assertThat(field(started.body(), "status")).as(started.text()).isEqualTo("IN_SERVICE");
+        assertThat(field(started.body(), "startsAt")).isEqualTo(at("11:52").toString());
+        assertThat(field(started.body(), "endsAt")).isEqualTo(at("12:22").toString());
+        // His time from 11:52 is taken: a walk-in can't squeeze in before the booking's old start
+        Reply squeeze = walkIn(owner, List.of(beard), onRaju, UUID.randomUUID());
+        assertThat(field(squeeze.body(), "code")).as(squeeze.text()).isEqualTo("BARBER_BUSY");
+        assertThat(count("appointment_events WHERE event = 'STARTED' AND detail = 'without code, early'")).isEqualTo(1);
+    }
+
+    @Test
+    void refusalsSayWhyInTheirDetails() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("11:40"));
+        Reply early = start(b, Map.of("withoutCode", true), owner);
+        assertThat(field(field(early.body(), "details"), "reason")).isEqualTo("TOO_EARLY");
+        assertThat(field(field(early.body(), "details"), "startFrom")).isEqualTo(at("11:45").toString());
+        CLOCK.set(at("12:15"));
+        Reply late = start(b, Map.of("withoutCode", true), owner);
+        assertThat(field(field(late.body(), "details"), "reason")).isEqualTo("HELD_OVER");
+        assertThat(field(field(late.body(), "details"), "heldUntil")).isEqualTo(at("12:15").toString());
+        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
+        CLOCK.set(at("12:00").plus(Duration.ofHours(25)));
+        Reply tooLate = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
+        assertThat(field(field(tooLate.body(), "details"), "reason")).as(tooLate.text()).isEqualTo("TOO_LATE");
+    }
+
+    @Test
+    void aBarberIsToldWhenHisBookingIsGivenAwayAndKnowsWhichColumnIsHis() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        put("/salon/staff/" + sunil + "/login", Map.of("phone", "9000000202"), owner);
+        UUID sunilUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000202'", UUID.class);
+        assertThat(field(get("/salon/day?date=2026-11-10", rajuUser).body(), "myStaffId")).isEqualTo(raju.toString());
+        assertThat(field(get("/salon/day?date=2026-11-10", owner).body(), "myStaffId")).isNull();
+
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        UUID from = staffOf(b);
+        UUID to = from.equals(raju) ? sunil : raju;
+        UUID fromUser = from.equals(raju) ? rajuUser : sunilUser;
+        UUID toUser = from.equals(raju) ? sunilUser : rajuUser;
+        jdbc.update("DELETE FROM notification_jobs");
+        assertThat(post("/salon/appointments/" + b + "/reassign", Map.of("staffId", to.toString()), owner).status())
+                .isEqualTo(200);
+        assertThat(count("notification_jobs WHERE type = 'SALON_BOOKING_REASSIGNED' AND channel = 'PUSH' AND user_id IN ('"
+                + fromUser + "', '" + toUser + "')")).isEqualTo(2);
+        assertThat(count("notification_jobs WHERE type = 'SALON_BOOKING_REASSIGNED' AND user_id = '" + owner + "'"))
+                .isZero();   // not the one who did it
+        assertThat(count("notification_jobs WHERE type = 'BOOKING_BARBER_CHANGED' AND channel = 'SMS'")).isZero();
+        assertThat(jobs(b)).contains("BOOKING_BARBER_CHANGED:PENDING");
+
+        // The old barber, still looking at it, is told it went to someone else (not "no such appointment")
+        CLOCK.set(at("11:50"));
+        Reply gone = start(b, Map.of("withoutCode", true), fromUser);
+        assertThat(field(gone.body(), "code")).as(gone.text()).isEqualTo("WRONG_STATUS");
+        assertThat(field(field(gone.body(), "details"), "reason")).isEqualTo("REASSIGNED");
+
+        // Cancelled by the salon: the barber it is with is told too
+        assertThat(post("/salon/appointments/" + b + "/cancel", Map.of("reason", "Power cut"), owner).status())
+                .isEqualTo(200);
+        assertThat(count("notification_jobs WHERE type = 'SALON_CANCELLED_BY_SALON' AND user_id = '" + toUser + "'"))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void helpersGetTheSalonsMessagesInTheAppButNoSms() {
+        UUID helper = person("9000000002");
+        TestData.member(jdbc, salon, helper, "HELPER");
+        book(customer, at("12:00"), List.of(haircut), UUID.randomUUID());
+        assertThat(count("notification_jobs WHERE type = 'SALON_NEW_BOOKING' AND user_id = '" + helper
+                + "' AND channel = 'PUSH'")).isEqualTo(1);
+        assertThat(count("notification_jobs WHERE type = 'SALON_NEW_BOOKING' AND user_id = '" + helper
+                + "' AND channel = 'SMS'")).isZero();
+
+        // Removed: his salon messages go with him
+        assertThat(delete("/shops/me/helpers/" + helper, owner).status()).isEqualTo(200);
+        assertThat(count("notification_jobs WHERE user_id = '" + helper + "'")).isZero();
+        assertThat(count("notification_jobs WHERE type = 'SALON_NEW_BOOKING' AND user_id = '" + owner + "'"))
+                .isPositive();
+    }
+
+    @Test
+    void aBarbersOwnBreaksAreShortAndSoonAndHeCantRemoveTheOwnersBreak() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        Reply longBreak = post("/salon/staff/" + raju + "/blocks", block("BREAK", "11:00", "16:00"), rajuUser);
+        assertThat(field(longBreak.body(), "code")).as(longBreak.text()).isEqualTo("VALIDATION_FAILED");
+        Map<String, Object> farAhead = Map.of("type", "BREAK", "startAt", at("15:00").plus(Duration.ofDays(3)).toString(),
+                "endAt", at("15:30").plus(Duration.ofDays(3)).toString());
+        assertThat(field(post("/salon/staff/" + raju + "/blocks", farAhead, rajuUser).body(), "code"))
+                .isEqualTo("VALIDATION_FAILED");
+        Map<String, Object> tomorrow = Map.of("type", "BREAK", "startAt", at("15:00").plus(Duration.ofDays(1)).toString(),
+                "endAt", at("16:00").plus(Duration.ofDays(1)).toString());
+        assertThat(post("/salon/staff/" + raju + "/blocks", tomorrow, rajuUser).status()).isEqualTo(201);
+        // At most 4 hours of his own breaks a day: 3 more hours tomorrow fit, a further minute doesn't
+        Map<String, Object> more = Map.of("type", "BREAK", "startAt", at("17:00").plus(Duration.ofDays(1)).toString(),
+                "endAt", at("20:00").plus(Duration.ofDays(1)).toString());
+        assertThat(post("/salon/staff/" + raju + "/blocks", more, rajuUser).status()).isEqualTo(201);
+        Map<String, Object> over = Map.of("type", "BREAK", "startAt", at("20:00").plus(Duration.ofDays(1)).toString(),
+                "endAt", at("20:15").plus(Duration.ofDays(1)).toString());
+        Reply capped = post("/salon/staff/" + raju + "/blocks", over, rajuUser);
+        assertThat(field(capped.body(), "code")).as(capped.text()).isEqualTo("VALIDATION_FAILED");
+        assertThat(capped.text()).contains("240 minutes used");
+        // The owner can still give a long break
+        assertThat(post("/salon/staff/" + raju + "/blocks", block("BREAK", "11:00", "16:00"), owner).status())
+                .isEqualTo(201);
+
+        UUID ownersBreak = jdbc.queryForObject("SELECT id FROM appointments WHERE kind = 'BLOCK' AND created_by = ?",
+                UUID.class, owner);
+        Reply refused = delete("/salon/staff/" + raju + "/blocks/" + ownersBreak, rajuUser);
+        assertThat(field(refused.body(), "code")).as(refused.text()).isEqualTo("NOT_ALLOWED");
+        UUID hisBreak = jdbc.queryForList("SELECT id FROM appointments WHERE kind = 'BLOCK' AND created_by = ?",
+                UUID.class, rajuUser).get(0);
+        assertThat(get("/salon/day?date=2026-11-11", rajuUser).text()).contains("\"addedByMe\":true");
+        assertThat(delete("/salon/staff/" + raju + "/blocks/" + hisBreak, rajuUser).status()).isEqualTo(204);
+
+        // Sign-in removed: his salon messages go too
+        jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, title, body, status, attempts, "
+                + "send_at, next_try_at, created_at) VALUES (gen_random_uuid(), ?, 'PUSH', 'SALON_NEW_BOOKING', 't', "
+                + "'b', 'SENT', 1, now(), now(), now())", rajuUser);
+        assertThat(delete("/salon/staff/" + raju + "/login", owner).status()).isEqualTo(200);
+        assertThat(count("notification_jobs WHERE user_id = '" + rajuUser + "'")).isZero();
+    }
+
+    @Test
+    void undoingANoShowTellsTheCustomerItNoLongerCounts() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("12:15"));
+        post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
+        assertThat(post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner).status()).isEqualTo(200);
+        assertThat(jobs(b)).contains("BOOKING_NO_SHOW_UNDONE:PENDING");
+        assertThat(count("notification_jobs WHERE type = 'BOOKING_NO_SHOW_UNDONE' AND channel = 'SMS'")).isZero();
+    }
+
+    @Test
+    void aSuspensionAlsoCancelsBookingsWhoseCustomerMayStillArrive() {
+        UUID admin = person("9000000999");
+        jdbc.update("UPDATE users SET admin = TRUE WHERE id = ?", admin);
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("12:05"));   // started 5 minutes ago, still held until 12:15
+        Reply suspended = post("/admin/shops/" + salon + "/suspend", Map.of("version", shopVersion(), "reason",
+                "Fake shop"), admin);
+        assertThat(suspended.status()).as(suspended.text()).isEqualTo(200);
+        assertThat(status(b)).isEqualTo("CANCELLED_BY_SALON");
+        CLOCK.set(at("12:16"));
+        assertThat(autoEnd.runOnce()).isZero();
+        assertThat(count("customer_strikes")).isZero();   // no no-show strike for a salon that was shut down
+    }
+
     private long shopVersion() {
         Long v = jdbc.queryForObject("SELECT version FROM shops WHERE id = ?", Long.class, salon);
         return v == null ? 0 : v;
