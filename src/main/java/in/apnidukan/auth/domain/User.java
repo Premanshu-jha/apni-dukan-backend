@@ -2,6 +2,8 @@ package in.apnidukan.auth.domain;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
@@ -29,8 +31,10 @@ public class User {
     @Column(name = "email_verified_at")
     private Instant emailVerifiedAt;
 
-    @Column(nullable = false)
-    private boolean admin;
+    /** Admin website access (V9). The old boolean column users.admin is no longer read. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "admin_role", nullable = false, length = 12)
+    private AdminRole adminRole = AdminRole.NONE;
 
     /** When the person deleted their account; null while it exists. */
     @Column(name = "deleted_at")
@@ -78,7 +82,7 @@ public class User {
         this.name = null;
         this.email = null;
         this.emailVerifiedAt = null;
-        this.admin = false;
+        this.adminRole = AdminRole.NONE;
         this.deletedAt = now;
         this.updatedAt = now;
     }
@@ -91,7 +95,20 @@ public class User {
     public String getEmail() { return email; }
     public Instant getEmailVerifiedAt() { return emailVerifiedAt; }
     public boolean isEmailVerified() { return emailVerifiedAt != null; }
-    public boolean isAdmin() { return admin; }
+    public boolean isAdmin() { return adminRole.isAdmin(); }
+    public AdminRole getAdminRole() { return adminRole; }
+
+    /** The super admin made this person an admin (only from NONE; the caller checks). */
+    public void makeAdmin(Instant now) {
+        this.adminRole = AdminRole.ADMIN;
+        this.updatedAt = now;
+    }
+
+    /** The super admin removed this admin (never the super admin: the caller checks). */
+    public void removeAdmin(Instant now) {
+        this.adminRole = AdminRole.NONE;
+        this.updatedAt = now;
+    }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
 }

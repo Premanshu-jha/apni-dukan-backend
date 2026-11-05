@@ -13,12 +13,14 @@ import in.apnidukan.shops.api.ShopRequests.UpdateShop;
 import in.apnidukan.shops.api.ShopResponse;
 import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopDetails;
+import in.apnidukan.shops.domain.ShopEventType;
 import in.apnidukan.shops.domain.ShopMember;
 import in.apnidukan.shops.domain.ShopRole;
 import in.apnidukan.shops.domain.ShopStatus;
 import in.apnidukan.shops.domain.ShopType;
 import in.apnidukan.shops.repo.ShopMemberRepository;
 import in.apnidukan.shops.repo.ShopRepository;
+import in.apnidukan.shops.repo.ShopReviewStore;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
@@ -67,10 +69,12 @@ public class ShopService implements ShopMemberships {
     private final FileRefs files;
     private final List<ShopChangeListener> listeners;
     private final UserDirectory users;
+    private final ShopReviewStore review;
     private final Clock clock;
 
     public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files, UserDirectory users,
-                       List<ShopChangeListener> listeners, Clock clock) {
+                       List<ShopChangeListener> listeners, ShopReviewStore review, Clock clock) {
+        this.review = review;
         this.users = users;
         this.shops = shops;
         this.members = members;
@@ -152,7 +156,7 @@ public class ShopService implements ShopMemberships {
         shop.apply(updated, now());
         boolean moved = !sameLocation(old, updated);
         if (moved) {
-            shop.recheckIfApproved(now());   // the field team checked the old address: check the new one
+            recheck(shop, userId);   // the field team checked the old address: check the new one
         }
         try {
             shops.saveAndFlush(shop);
@@ -179,7 +183,7 @@ public class ShopService implements ShopMemberships {
         if (!java.util.Objects.equals(owner, shop.getOwnerPhotoFileId())
                 || !java.util.Objects.equals(front, shop.getShopPhotoFileId())) {
             shop.setPhotos(owner, front, now());
-            shop.recheckIfApproved(now());   // the field team checked the old photos: check the new ones
+            recheck(shop, userId);   // the field team checked the old photos: check the new ones
             try {
                 saveShop(shop);
             } catch (DataIntegrityViolationException deletedMeanwhile) {
@@ -222,13 +226,23 @@ public class ShopService implements ShopMemberships {
         }
         shop.submitForVisit(now());
         saveShop(shop);
+        review.addEvent(shop.getId(), now(), userId, false, ShopEventType.SUBMITTED, null, null, List.of());
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
 
     /** True if this file is the owner's or the shop's photo of some shop (then it can't be deleted). */
     @Transactional(readOnly = true)
     public boolean usesFile(UUID fileId) {
-        return shops.existsByOwnerPhotoFileIdOrShopPhotoFileId(fileId, fileId);
+        // A photo of the last approved version stays too: the field team compares it with the new one
+        return shops.existsByOwnerPhotoFileIdOrShopPhotoFileId(fileId, fileId) || review.isLastApprovedPhoto(fileId);
+    }
+
+    /** An approved shop changed what the field team checked: back to them, noted on its timeline. */
+    private void recheck(Shop shop, UUID ownerId) {
+        if (shop.getStatus() == ShopStatus.APPROVED) {
+            shop.recheckIfApproved(now());
+            review.addEvent(shop.getId(), now(), ownerId, false, ShopEventType.EDITED, null, null, List.of());
+        }
     }
 
     private Shop ownedShop(UUID userId, long version) {

@@ -85,6 +85,7 @@ public class AuthService {
     private final List<AccountDeletionListener> deletionListeners;
     private final List<SignOutEverywhereListener> signOutListeners;
     private final int smsDailyLimit;
+    private final TestModeService testMode;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
@@ -93,7 +94,8 @@ public class AuthService {
                        PlatformTransactionManager transactions, ShopMemberships memberships, HumanCheck humans,
                        List<AccountDeletionListener> deletionListeners,
                        List<SignOutEverywhereListener> signOutListeners,
-                       @Value("${app.sms.daily-limit:500}") int smsDailyLimit) {
+                       @Value("${app.sms.daily-limit:500}") int smsDailyLimit, TestModeService testMode) {
+        this.testMode = testMode;
         this.memberships = memberships;
         this.signOutListeners = signOutListeners;
         this.humans = humans;
@@ -115,10 +117,21 @@ public class AuthService {
 
     // ---------------- phone OTP sign-in ----------------
 
+    /**
+     * OTP test mode (TestModeService): a test number's code is any 6 digits while it is on. Any other number, or
+     * anything that isn't 6 digits, goes through the normal check.
+     */
+    private boolean testCodeAccepted(String phone, String code) {
+        return code != null && code.trim().matches("\\d{6}") && phone != null && testMode.acceptsAnyCode(phone);
+    }
+
     public void sendLoginOtp(String phoneInput, String ip, String captchaToken) {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitSends(ip);
         humans.require(captchaToken, ip);
+        if (testMode.acceptsAnyCode(phone)) {
+            return;   // OTP test mode: a test number signs in with any 6 digits, no SMS
+        }
         requireSmsNotPaused();   // before a new code replaces the one they already have
         String code = otp.issue(OtpPurpose.LOGIN, phone, ip);
         sendSms(() -> sms.sendOtp(phone, code));
@@ -128,7 +141,9 @@ public class AuthService {
     public AuthTokens verifyLoginOtp(String phoneInput, String code, String device, String ip) {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitVerifies(ip);
-        otp.verify(OtpPurpose.LOGIN, phone, code, ip);
+        if (!testCodeAccepted(phone, code)) {
+            otp.verify(OtpPurpose.LOGIN, phone, code, ip);
+        }
         return tx.execute(status -> {
             User existing = users.findByPhone(phone).orElse(null);
             if (existing != null) {
@@ -250,6 +265,9 @@ public class AuthService {
         if (!limits.tryHit("email-send-user:" + userId, EMAIL_SENDS_PER_ACCOUNT_PER_DAY, Duration.ofHours(24))) {
             throw tooManyEmailCodes(userId);
         }
+        if (testMode.acceptsAnyCode(user.getPhone())) {
+            return;   // OTP test mode: a test number's email code is any 6 digits, no email
+        }
         String code = otp.issue(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, ip);
         email.send(address, "Your Apni Dukan verification code",
                 "Your Apni Dukan verification code is " + code + ".\n\nIt works for 10 minutes. "
@@ -259,7 +277,9 @@ public class AuthService {
     public User verifyEmail(UUID userId, String emailInput, String code, String ip) {
         String address = Emails.normalize(emailInput);
         limitVerifies(ip);
-        otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
+        if (!testCodeAccepted(me(userId).getPhone(), code)) {
+            otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
+        }
         String[] previous = new String[1];
         User saved = tx.execute(status -> {
             User user = users.lockById(userId).filter(u -> !u.isDeleted())   // never onto a deleted account
