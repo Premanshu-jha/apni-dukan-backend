@@ -107,13 +107,14 @@ public class SalonSetupService {
     private final SalonAccessStore salonAccess;
     private final FileRefs files;
     private final AppointmentStore appointments;
+    private final SalonNotices notices;
     private final Clock clock;
 
     public SalonSetupService(SalonServiceItemRepository services, SalonStaffRepository staff,
                              StaffSkillRepository skills, StaffShiftRepository shifts,
                              SalonSettingsRepository settings, ShopMemberships memberships, UserDirectory users,
                              SessionRevocations sessions, SalonAccessStore salonAccess, FileRefs files,
-                             AppointmentStore appointments, Clock clock) {
+                             AppointmentStore appointments, SalonNotices notices, Clock clock) {
         this.services = services;
         this.staff = staff;
         this.skills = skills;
@@ -125,6 +126,7 @@ public class SalonSetupService {
         this.salonAccess = salonAccess;
         this.files = files;
         this.appointments = appointments;
+        this.notices = notices;
         this.clock = clock;
     }
 
@@ -178,8 +180,12 @@ public class SalonSetupService {
         return ServiceResponse.from(item);
     }
 
-    /** Active services only: switched-off ones don't count, so switching some off makes room. */
+    /**
+     * Active services only: switched-off ones don't count, so switching some off makes room. Counted under the salon's
+     * lock, so two adds at the same moment can't both slip under the limit.
+     */
     private void requireRoomForService(Membership salon) {
+        appointments.lockSalonCalendar(salon.shopId());
         if (services.countByShopIdAndActiveTrue(salon.shopId()) >= MAX_SERVICES) {
             throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_SERVICES",
                     "A salon can have up to " + MAX_SERVICES
@@ -364,6 +370,7 @@ public class SalonSetupService {
         }
         memberships.removeMember(salon.shopId(), login);
         salonAccess.revokeWalkIns(salon.shopId(), login);
+        notices.forgetSalonMessages(login);
         barber.unlinkLogin(now());
         saveStaff(barber);
         // After the commit: a token refreshed in between would otherwise still name the salon for 15 minutes

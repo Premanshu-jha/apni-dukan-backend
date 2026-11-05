@@ -81,8 +81,8 @@ public class SalonDayController {
     }
 
     /**
-     * Undo a No-show pressed by mistake (owner or helper, within 24 hours): the strike goes; the appointment waits
-     * again if its time isn't over and the barber is free, otherwise it is closed. 409 WRONG_STATUS / BARBER_BUSY.
+     * Undo a No-show pressed by mistake (owner or helper, within 24 hours): the strike goes, the booking is closed as
+     * cancelled by the salon ("No-show undone") and the customer is told. 409 WRONG_STATUS (details.reason TOO_LATE).
      */
     @PostMapping("/appointments/{id}/undo-no-show")
     public AppointmentView undoNoShow(@PathVariable UUID id) {
@@ -109,13 +109,22 @@ public class SalonDayController {
         return day.start(me(), id, body);
     }
 
+    /** Done before the planned end (IN_SERVICE → COMPLETED now): the rest of the barber's time is free again. */
+    @PostMapping("/appointments/{id}/finish")
+    public AppointmentView finish(@PathVariable UUID id) {
+        return day.finish(me(), id);
+    }
+
     /** No-show, from 15 minutes after the start. Frees the time; an online customer gets a strike. */
     @PostMapping("/appointments/{id}/no-show")
     public AppointmentView noShow(@PathVariable UUID id) {
         return day.noShow(me(), id);
     }
 
-    /** Give it to another barber at the same time (owner or helper). */
+    /**
+     * Give it to another barber (owner or helper): a booking at the same time; a walk-in already in the chair starts
+     * again with him now.
+     */
     @PostMapping("/appointments/{id}/reassign")
     public AppointmentView reassign(@PathVariable UUID id, @Valid @RequestBody Reassign body) {
         return day.reassign(me(), id, body);
