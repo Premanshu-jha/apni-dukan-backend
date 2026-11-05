@@ -261,7 +261,7 @@ class AdminIntegrationTest {
         approve(salon);
         UUID owner = ownerOf(salon);
         Reply edited = patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair Studio",
-                "latitude", 17.466000, "gstin", "36ABCDE1234F1Z5"), owner);
+                "latitude", 17.466000, "gstin", "27AAPFU0939F1ZV"), owner);
         assertThat(field(edited.body(), "status")).as(edited.text()).isEqualTo("PENDING_VISIT");
 
         Reply page = get("/admin/shops/" + salon, admin);
