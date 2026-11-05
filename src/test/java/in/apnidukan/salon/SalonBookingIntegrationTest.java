@@ -1563,6 +1563,52 @@ class SalonBookingIntegrationTest {
     }
 
     @Test
+    void aBarberCanFinishAWalkInHeAddedOnlyWhileHeStillHasWalkInAccessAndTheChairsBarberIsTold() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        put("/salon/staff/" + sunil + "/login", Map.of("phone", "9000000202"), owner);
+        UUID sunilUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000202'", UUID.class);
+        put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", true), owner);
+        UUID first = id(walkIn(rajuUser, List.of(haircut), sunil, UUID.randomUUID()));   // in Sunil's chair
+        CLOCK.set(at("10:05"));
+        Reply done = post("/salon/appointments/" + first + "/finish", Map.of(), rajuUser);
+        assertThat(field(done.body(), "status")).as(done.text()).isEqualTo("COMPLETED");
+
+        UUID second = id(walkIn(rajuUser, List.of(beard), sunil, UUID.randomUUID()));
+        jdbc.update("DELETE FROM notification_jobs");
+        // Walk-in access taken away: what he added is no longer his to fix
+        put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", false), owner);
+        CLOCK.set(at("10:08"));
+        assertThat(post("/salon/appointments/" + second + "/finish", Map.of(), rajuUser).status()).isEqualTo(403);
+        assertThat(post("/salon/appointments/" + second + "/cancel", Map.of("reason", "Mistake"), rajuUser).status())
+                .isEqualTo(403);
+        assertThat(status(second)).isEqualTo("IN_SERVICE");
+        // The owner cancels it: Sunil, whose chair it was in, is told in the app
+        assertThat(post("/salon/appointments/" + second + "/cancel", Map.of("reason", "Mistake"), owner).status())
+                .isEqualTo(200);
+        assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND channel = 'PUSH' AND user_id = '"
+                + sunilUser + "'")).isEqualTo(1);
+        assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND user_id = '" + owner + "'"))
+                .isZero();   // not the one who did it
+    }
+
+    @Test
+    void aBarberCantRemoveHisOwnBreakOnceItHasStarted() {
+        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        UUID rajuUser = jdbc.queryForObject("SELECT id FROM users WHERE phone = '9000000201'", UUID.class);
+        assertThat(post("/salon/staff/" + raju + "/blocks", block("BREAK", "11:00", "11:30"), rajuUser).status())
+                .isEqualTo(201);
+        UUID hisBreak = jdbc.queryForObject("SELECT id FROM appointments WHERE kind = 'BLOCK' AND created_by = ?",
+                UUID.class, rajuUser);
+        CLOCK.set(at("11:00"));
+        Reply started = delete("/salon/staff/" + raju + "/blocks/" + hisBreak, rajuUser);
+        assertThat(field(started.body(), "code")).as(started.text()).isEqualTo("WRONG_STATUS");
+        assertThat(field(field(started.body(), "details"), "reason")).isEqualTo("STARTED");
+        // The owner still can
+        assertThat(delete("/salon/staff/" + raju + "/blocks/" + hisBreak, owner).status()).isEqualTo(204);
+    }
+
+    @Test
     void movingAWalkInToAnotherBarberDoesntRestartItsFifteenMinutesToCancel() {
         UUID w = id(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()));   // in Raju's chair from 10:00
         CLOCK.set(at("10:14"));
