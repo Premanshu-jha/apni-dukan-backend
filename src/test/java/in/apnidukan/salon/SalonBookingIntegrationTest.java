@@ -1574,7 +1574,7 @@ class SalonBookingIntegrationTest {
         Reply done = post("/salon/appointments/" + first + "/finish", Map.of(), rajuUser);
         assertThat(field(done.body(), "status")).as(done.text()).isEqualTo("COMPLETED");
 
-        UUID second = id(walkIn(rajuUser, List.of(beard), sunil, UUID.randomUUID()));
+        UUID second = id(walkIn(rajuUser, List.of(haircut), sunil, UUID.randomUUID()));   // Sunil doesn't do beards
         jdbc.update("DELETE FROM notification_jobs");
         // Walk-in access taken away: what he added is no longer his to fix
         put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", false), owner);
