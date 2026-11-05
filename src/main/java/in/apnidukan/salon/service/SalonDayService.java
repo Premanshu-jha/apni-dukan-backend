@@ -86,6 +86,11 @@ public class SalonDayService {
     /** No-show can be undone at the salon until this long after the start; after that only support can. */
     static final Duration UNDO_NO_SHOW_WITHIN = Duration.ofHours(24);
     static final Duration MAX_BREAK = Duration.ofHours(12);
+    /**
+     * A barber's own breaks (not the owner's or a helper's): short, and today or tomorrow only. Longer time off is
+     * leave, which only the owner gives; without this a barber could block his whole month with back-to-back breaks.
+     */
+    static final Duration MAX_OWN_BREAK = Duration.ofHours(4);
     static final Duration MAX_LEAVE = Duration.ofDays(30);
     static final Duration MAX_PAUSE = Duration.ofDays(30);
     static final Duration MAX_CONFLICT_RANGE = Duration.ofDays(31);
@@ -168,7 +173,7 @@ public class SalonDayService {
                                 c.ownerOrHelper()))
                         .toList()))
                 .toList();
-        return new DayView(day, columns);
+        return new DayView(day, columns, c.staffId());
     }
 
     // ---------- walk-ins ----------
@@ -305,13 +310,15 @@ public class SalonDayService {
         Appointment a = lockedFor(c, appointmentId);
         Instant now = now();
         requireStatus(a, AppointmentStatus.CONFIRMED);
-        if (now.isBefore(a.startsAt().minus(EARLY_START))) {
-            throw wrongStatus("Too early: Start is allowed from 15 minutes before " + clockTime(a.startsAt()) + ".");
+        Instant startFrom = a.startsAt().minus(EARLY_START);
+        if (now.isBefore(startFrom)) {
+            throw wrongStatus("Too early: Start is allowed from 15 minutes before " + clockTime(a.startsAt()) + ".",
+                    Map.of("reason", "TOO_EARLY", "startFrom", startFrom.toString()));
         }
         Instant heldUntil = a.startsAt().plus(LATE_ALLOWANCE);
         if (!now.isBefore(heldUntil)) {
             throw wrongStatus("It was held until " + clockTime(heldUntil) + " and is a no-show now. Add the customer "
-                    + "as a walk-in.");
+                    + "as a walk-in.", Map.of("reason", "HELD_OVER", "heldUntil", heldUntil.toString()));
         }
         Boolean withCode = null;
         if (a.isBooking()) {
@@ -326,11 +333,55 @@ public class SalonDayService {
                 withCode = true;
             }
         }
-        if (!appointments.start(a.id(), withCode, now)) {
-            throw wrongStatus("It was changed in the meantime. Reload.");
+        // Started early: the customer is in the chair from now, so the barber is busy from now (the same length)
+        Instant from = a.startsAt();
+        Instant to = a.endsAt();
+        Instant minute = now.truncatedTo(ChronoUnit.MINUTES);
+        if (minute.isBefore(from)) {
+            to = minute.plus(Duration.between(from, to));
+            from = minute;
         }
-        appointments.event(a.id(), now, c.userId(), "STARTED", Boolean.FALSE.equals(withCode) ? "without code" : null);
+        boolean started;
+        try {
+            started = appointments.start(a.id(), withCode, from, to, now);
+        } catch (DataIntegrityViolationException e) {
+            if (hasSqlState(e, OVERLAP)) {
+                // Someone else is still in his chair before this booking's time
+                throw new ApiException(HttpStatus.CONFLICT, "BARBER_BUSY",
+                        barberName(a.staffId()) + " is still busy until " + clockTime(a.startsAt())
+                                + ". Finish that first, or start this at " + clockTime(a.startsAt()) + ".",
+                        Map.of("reason", "STILL_BUSY", "startAt", a.startsAt().toString()));
+            }
+            throw e;
+        }
+        if (!started) {
+            throw changed();
+        }
+        appointments.event(a.id(), now, c.userId(), "STARTED", Boolean.FALSE.equals(withCode) ? "without code"
+                : from.isBefore(a.startsAt()) ? "early" : null);
         notices.closed(a);
+        return salonView(c, appointments.find(a.id()).orElseThrow());
+    }
+
+    /**
+     * IN_SERVICE → COMPLETED now: the customer is done before the planned end, so the rest of the barber's time is
+     * free for the next walk-in or booking. Anyone who may act on the barber's appointments.
+     */
+    @Transactional
+    public AppointmentView finish(UUID userId, UUID appointmentId) {
+        Caller c = access.caller(userId);
+        Appointment a = lockedFor(c, appointmentId);
+        requireStatus(a, AppointmentStatus.IN_SERVICE);
+        Instant now = now();
+        // Never before its own start (the database wants a time range that isn't empty)
+        Instant end = now.isAfter(a.startsAt()) ? now : a.startsAt().plus(Duration.ofMinutes(1));
+        if (end.isAfter(a.endsAt())) {
+            end = a.endsAt();
+        }
+        if (!appointments.finish(a.id(), end, now)) {
+            throw changed();
+        }
+        appointments.event(a.id(), now, c.userId(), "FINISHED", null);
         return salonView(c, appointments.find(a.id()).orElseThrow());
     }
 
@@ -348,10 +399,10 @@ public class SalonDayService {
         if (now.isBefore(from)) {
             throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
                     "The customer may still come: No-show is allowed from " + clockTime(from) + ".",
-                    Map.of("noShowFrom", from.toString()));
+                    Map.of("reason", "TOO_EARLY", "noShowFrom", from.toString()));
         }
         if (!appointments.close(a.id(), AppointmentStatus.NO_SHOW, null, now)) {
-            throw wrongStatus("It was changed in the meantime. Reload.");
+            throw changed();
         }
         if (a.isBooking()) {
             // Dated at the booking's start, not when staff pressed the button (it may be pressed late)
@@ -363,9 +414,9 @@ public class SalonDayService {
     }
 
     /**
-     * Undo a No-show (owner or helper, within 24 hours of the start): the customer's strike is taken back and the
-     * booking is closed as cancelled by the salon ("No-show undone"), with no message to the customer. It never
-     * waits again: its 15 minutes to start are over by the time it can be a no-show.
+     * Undo a No-show (owner or helper, within 24 hours of the start): the customer's strike is taken back, the booking
+     * is closed as cancelled by the salon ("No-show undone"), and the customer is told the missed booking no longer
+     * counts. It never waits again: its 15 minutes to start are over by the time it can be a no-show.
      */
     @Transactional
     public AppointmentView undoNoShow(UUID userId, UUID appointmentId) {
@@ -375,13 +426,17 @@ public class SalonDayService {
         requireStatus(a, AppointmentStatus.NO_SHOW);
         if (now.isAfter(a.startsAt().plus(UNDO_NO_SHOW_WITHIN))) {
             throw wrongStatus("Too late to undo here (more than 24 hours). Apni Dukan support can still remove the "
-                    + "customer's strike.");
+                    + "customer's strike.", Map.of("reason", "TOO_LATE"));
         }
         if (!appointments.undoNoShow(a.id(), AppointmentStatus.CANCELLED_BY_SALON, "No-show undone", now)) {
-            throw wrongStatus("It was changed in the meantime. Reload.");
+            throw changed();
         }
         boolean hadStrike = a.isBooking() && strikes.remove(a.id());
         appointments.event(a.id(), now, c.userId(), "NO_SHOW_UNDONE", hadStrike ? "strike removed" : null);
+        if (a.isBooking()) {
+            // The "Missed booking" message they got is taken back
+            notices.noShowUndone(a, salonCard(c.shopId()), now);
+        }
         return salonView(c, appointments.find(a.id()).orElseThrow());
     }
 
@@ -409,12 +464,19 @@ public class SalonDayService {
         return missed.size();
     }
 
-    /** Gives a CONFIRMED appointment to another barber who does its services, same time. Owner or helper. */
+    /**
+     * Gives an appointment to another barber who does its services. Owner or helper. A CONFIRMED one keeps its time;
+     * a walk-in already in the chair (added to the wrong barber) starts again with him now, for its full length. The
+     * barbers it moved between are told (and the customer, for an online booking).
+     */
     @Transactional
     public AppointmentView reassign(UUID userId, UUID appointmentId, Reassign in) {
         Caller c = access.ownerOrHelper(userId);
         Appointment a = lockedFor(c, appointmentId);
-        requireStatus(a, AppointmentStatus.CONFIRMED);
+        boolean walkInInChair = a.kind() == AppointmentKind.WALK_IN && a.status() == AppointmentStatus.IN_SERVICE;
+        if (!walkInInChair) {
+            requireStatus(a, AppointmentStatus.CONFIRMED);
+        }
         if (a.staffId().equals(in.staffId())) {
             return salonView(c, a);
         }
@@ -423,31 +485,53 @@ public class SalonDayService {
         if (calendar.barbersFor(c.shopId(), serviceIds).stream().noneMatch(b -> b.getId().equals(target.getId()))) {
             throw SalonCalendar.invalid("staffId", "this barber doesn't do all of its services");
         }
-        if (!calendar.day(target, LocalDate.ofInstant(a.startsAt(), SalonTime.ZONE), a.id()).isFree(a.time())) {
+        Instant now = now();
+        Instant start = a.startsAt();
+        Instant end = a.endsAt();
+        if (walkInInChair) {
+            start = now.truncatedTo(ChronoUnit.MINUTES);
+            end = start.plus(Duration.between(a.startsAt(), a.endsAt()));
+        }
+        if (!calendar.day(target, LocalDate.ofInstant(start, SalonTime.ZONE), a.id()).isFree(new Interval(start, end))) {
             throw barberBusy(target);
         }
-        Instant now = now();
         if (!appointments.lockActiveBarber(target.getId())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "STAFF_NOT_FOUND", "No such barber.");
         }
-        moveOrBusy(a, target, a.startsAt(), a.endsAt(), now);
+        if (walkInInChair) {
+            moveWalkInOrBusy(a, target, start, end, now);
+        } else {
+            moveOrBusy(a, target, start, end, now);
+        }
         appointments.event(a.id(), now, c.userId(), "REASSIGNED", a.staffId() + " -> " + target.getId());
-        return salonView(c, appointments.find(a.id()).orElseThrow());
+        Appointment moved = appointments.find(a.id()).orElseThrow();
+        notices.reassigned(a, moved, salonCard(c.shopId()), c.userId(), now);
+        return salonView(c, moved);
     }
 
-    /** The salon cancels a CONFIRMED booking or walk-in, with a reason sent to the customer. No strike. */
+    /**
+     * The salon cancels a CONFIRMED booking or walk-in, or a walk-in already in the chair (added by mistake), with a
+     * reason. An online booking's customer gets the reason; the barber is told. No strike.
+     */
     @Transactional
     public AppointmentView cancel(UUID userId, UUID appointmentId, SalonCancel in) {
         Caller c = access.ownerOrHelper(userId);
         Appointment a = lockedFor(c, appointmentId);
-        requireStatus(a, AppointmentStatus.CONFIRMED);
+        boolean walkInInChair = a.kind() == AppointmentKind.WALK_IN && a.status() == AppointmentStatus.IN_SERVICE;
+        if (!walkInInChair) {
+            requireStatus(a, AppointmentStatus.CONFIRMED);
+        }
         String reason = clean(REASON, in.reason());
         Instant now = now();
-        if (!appointments.close(a.id(), AppointmentStatus.CANCELLED_BY_SALON, reason, now)) {
-            throw wrongStatus("It was changed in the meantime. Reload.");
+        boolean closed = walkInInChair
+                ? appointments.cancelWalkInInService(a.id(), reason, now)
+                : appointments.close(a.id(), AppointmentStatus.CANCELLED_BY_SALON, reason, now);
+        if (!closed) {
+            throw changed();
         }
         if (a.isBooking()) {
             notices.cancelledBySalon(a, salonCard(c.shopId()), reason, now);
+            notices.barberToldOfSalonCancel(a, reason, c.userId(), now);
         }
         appointments.event(a.id(), now, c.userId(), "CANCELLED_BY_SALON", reason);
         return salonView(c, appointments.find(a.id()).orElseThrow());
@@ -485,10 +569,15 @@ public class SalonDayService {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the salon owner can add leave.");
         }
         Instant now = now();
+        boolean own = !c.ownerOrHelper();   // a barber's break for himself
         Interval time = range(in.startAt().truncatedTo(ChronoUnit.MINUTES), in.endAt().truncatedTo(ChronoUnit.MINUTES),
-                in.type() == BlockType.BREAK ? MAX_BREAK : MAX_LEAVE);
+                in.type() == BlockType.LEAVE ? MAX_LEAVE : own ? MAX_OWN_BREAK : MAX_BREAK);
         if (!time.end().isAfter(now)) {
             throw SalonCalendar.invalid("endAt", "is in the past");
+        }
+        if (own && !time.start().isBefore(Availability.dayStart(today(now).plusDays(2)))) {
+            throw SalonCalendar.invalid("startAt", "your own breaks can be for today or tomorrow; ask the owner for "
+                    + "time off further ahead");
         }
         Appointment block = block(c, barber.getId(), in.type(), null, time, now);
         if (!appointments.insertIfFree(block)) {
@@ -511,6 +600,10 @@ public class SalonDayService {
         Appointment a = appointments.lock(blockId).filter(ours).orElseThrow(SalonDayService::notFound);
         if (a.blockType() == BlockType.LEAVE && !c.isOwner()) {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the salon owner can remove leave.");
+        }
+        if (!c.ownerOrHelper() && !c.userId().equals(a.createdBy())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "NOT_ALLOWED",
+                    "The owner or a helper added this break; ask them to remove it.");
         }
         Instant now = now();
         if (!appointments.removeBlock(a.id(), now)) {
@@ -659,13 +752,54 @@ public class SalonDayService {
      * (a barber: his own only). Otherwise 404, so ids of other salons or barbers can't be probed.
      */
     private Appointment lockedFor(Caller c, UUID id) {
-        java.util.function.Predicate<Appointment> mine = a -> a.shopId().equals(c.shopId())
-                && a.kind() != AppointmentKind.BLOCK && c.actsFor(a.staffId());
+        java.util.function.Predicate<Appointment> ours = a -> a.shopId().equals(c.shopId())
+                && a.kind() != AppointmentKind.BLOCK;
+        java.util.function.Predicate<Appointment> mine = a -> ours.test(a) && c.actsFor(a.staffId());
         // Checked before locking too, so nobody can lock another salon's rows by guessing ids
-        if (appointments.find(id).filter(mine).isEmpty()) {
+        Optional<Appointment> seen = appointments.find(id).filter(ours);
+        if (seen.isEmpty()) {
             throw notFound();
         }
-        return appointments.lock(id).filter(mine).orElseThrow(SalonDayService::notFound);
+        if (!mine.test(seen.get())) {
+            throw notMine(c, id);
+        }
+        Appointment a = appointments.lock(id).filter(ours).orElseThrow(SalonDayService::notFound);
+        if (!mine.test(a)) {
+            throw notMine(c, id);
+        }
+        return a;
+    }
+
+    /**
+     * Another barber's appointment: 404 as if it didn't exist, unless it was this barber's and was just given to
+     * someone else (then he is told so, rather than "no such appointment" while it is on his screen).
+     */
+    private ApiException notMine(Caller c, UUID id) {
+        if (c.staffId() != null && appointments.wasReassignedFrom(id, c.staffId())) {
+            return new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS", "It was given to another barber. Reload.",
+                    Map.of("reason", "REASSIGNED"));
+        }
+        return notFound();
+    }
+
+    /** Like moveOrBusy, for a walk-in already in the chair. */
+    private void moveWalkInOrBusy(Appointment a, SalonStaff target, Instant start, Instant end, Instant now) {
+        try {
+            if (!appointments.moveWalkInInService(a.id(), target.getId(), start, end, now)) {
+                throw changed();
+            }
+        } catch (DataIntegrityViolationException e) {
+            if (hasSqlState(e, OVERLAP)) {
+                throw barberBusy(target);
+            }
+            throw e;
+        } catch (PessimisticLockingFailureException e) {
+            throw tryAgain();
+        }
+    }
+
+    private String barberName(UUID staffId) {
+        return staff.findById(staffId).map(SalonStaff::getName).orElse("The barber");
     }
 
     private SalonStaff activeBarber(Caller c, UUID staffId) {
@@ -680,7 +814,7 @@ public class SalonDayService {
     private void moveOrBusy(Appointment a, SalonStaff target, Instant start, Instant end, Instant now) {
         try {
             if (!appointments.move(a.id(), target.getId(), start, end, now)) {
-                throw wrongStatus("It was changed in the meantime. Reload.");
+                throw changed();
             }
         } catch (DataIntegrityViolationException e) {
             if (hasSqlState(e, OVERLAP)) {
@@ -792,7 +926,7 @@ public class SalonDayService {
 
     private static void requireStatus(Appointment a, AppointmentStatus expected) {
         if (a.status() != expected) {
-            throw wrongStatus("It is " + a.status() + " now. Reload.");
+            throw wrongStatus("It is " + a.status() + " now. Reload.", Map.of("reason", "CHANGED", "status", a.status().name()));
         }
     }
 
@@ -806,6 +940,16 @@ public class SalonDayService {
 
     static ApiException wrongStatus(String message) {
         return new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS", message);
+    }
+
+    /** WRONG_STATUS with details.reason (TOO_EARLY, HELD_OVER, TOO_LATE, CHANGED, REASSIGNED), so apps needn't parse words. */
+    static ApiException wrongStatus(String message, Map<String, Object> details) {
+        return new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS", message, details);
+    }
+
+    /** Someone else changed it first. */
+    static ApiException changed() {
+        return wrongStatus("It was changed in the meantime. Reload.", Map.of("reason", "CHANGED"));
     }
 
     private static ApiException barberBusy(SalonStaff target) {

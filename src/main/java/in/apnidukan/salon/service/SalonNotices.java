@@ -153,6 +153,49 @@ public class SalonNotices {
                 url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()))));
     }
 
+    /** A no-show undone by the salon: the customer's "Missed booking" no longer counts. No SMS. */
+    public void noShowUndone(Appointment a, ShopCard salon, Instant now) {
+        notifications.queue(new Notice(a.customerId(), "BOOKING_NO_SHOW_UNDONE", a.id(), now, "Missed booking removed",
+                salon.name() + " says you weren't a no-show on " + DAY_TIME.format(a.startsAt())
+                        + ". It doesn't count against you.",
+                url(a), Map.of()));
+    }
+
+    /**
+     * Given to another barber by the owner or a helper: both barbers are told (not the person who did it), and the
+     * customer of an online booking. No SMS: it is the same visit at the same salon.
+     */
+    public void reassigned(Appointment before, Appointment moved, ShopCard salon, UUID by, Instant now) {
+        String to = barberName(moved.staffId());
+        String from = barberName(before.staffId());
+        String who = moved.isBooking() ? customerName(moved) : guestName(moved);
+        if (moved.isBooking()) {
+            notifications.queue(new Notice(moved.customerId(), "BOOKING_BARBER_CHANGED", moved.id(), now,
+                    "Your barber changed",
+                    salon.name() + ", " + DAY_TIME.format(moved.startsAt()) + ": now with " + to + ". Booking "
+                            + moved.bookingNo() + ".",
+                    url(moved), Map.of()));
+        }
+        tellBarbers(moved, List.of(before.staffId(), moved.staffId()), "SALON_BOOKING_REASSIGNED",
+                "Booking moved to " + to + ", " + TIME.format(moved.startsAt()),
+                who + ", " + DAY_TIME.format(moved.startsAt()) + ": now with " + to + " instead of " + from + ".",
+                moved.isBooking() ? moved.customerId() : null, by, now);
+    }
+
+    /** The salon cancelled an online booking: the barber it was with is told (the customer already was). */
+    public void barberToldOfSalonCancel(Appointment a, String reason, UUID by, Instant now) {
+        tellBarbers(a, List.of(a.staffId()), "SALON_CANCELLED_BY_SALON",
+                "Booking cancelled by the salon, " + TIME.format(a.startsAt()),
+                customerName(a) + ", " + DAY_TIME.format(a.startsAt()) + ": cancelled by the salon (" + reason
+                        + "). The time is free again.",
+                a.customerId(), by, now);
+    }
+
+    /** Someone left the salon or lost their sign-in: their salon messages go. */
+    public void forgetSalonMessages(UUID userId) {
+        notifications.forgetSalonMessages(userId);
+    }
+
     /** Started, no-show: nothing more to remind about. */
     public void closed(Appointment a) {
         notifications.cancelPending(a.id());
@@ -168,20 +211,50 @@ public class SalonNotices {
         }
     }
 
-    /** To the salon's owner and the given barbers' sign-ins (each person once). */
     /**
+     * To the salon's owner and the given barbers' sign-ins (with the SMS, when a template is set), and to its helpers
+     * (in the app only: they run the front desk, and SMS costs per message). Each person once.
      * @param about the customer the text names, so their account deletion blanks it (null when it names nobody)
      */
     private void tellSalon(Appointment a, List<UUID> barbers, String type, String title, String body,
                            Map<String, String> sms, UUID about, Instant now) {
-        Set<UUID> to = new LinkedHashSet<>();
-        memberships.members(a.shopId()).stream().filter(m -> "OWNER".equals(m.role()))
-                .forEach(m -> to.add(m.userId()));
-        staff.findAllById(barbers).stream().map(SalonStaff::getUserId).filter(Objects::nonNull).forEach(to::add);
-        String day = "/salon/day?date=" + LocalDate.ofInstant(a.startsAt(), SalonTime.ZONE);
-        for (UUID person : to) {
+        Set<UUID> withSms = new LinkedHashSet<>();
+        Set<UUID> appOnly = new LinkedHashSet<>();
+        for (var m : memberships.members(a.shopId())) {
+            if ("OWNER".equals(m.role())) {
+                withSms.add(m.userId());
+            } else if ("HELPER".equals(m.role())) {
+                appOnly.add(m.userId());
+            }
+        }
+        staff.findAllById(barbers).stream().map(SalonStaff::getUserId).filter(Objects::nonNull).forEach(withSms::add);
+        appOnly.removeAll(withSms);
+        String day = dayUrl(a);
+        for (UUID person : withSms) {
             notifications.queue(new Notice(person, type, null, now, title, body, day, sms, about));
         }
+        for (UUID person : appOnly) {
+            notifications.queue(new Notice(person, type, null, now, title, body, day, Map.of(), about));
+        }
+    }
+
+    /** To the given barbers' sign-ins only, in the app (no SMS), never to the person who made the change. */
+    private void tellBarbers(Appointment a, List<UUID> barbers, String type, String title, String body, UUID about,
+                             UUID by, Instant now) {
+        Set<UUID> to = new LinkedHashSet<>();
+        staff.findAllById(barbers).stream().map(SalonStaff::getUserId).filter(Objects::nonNull).forEach(to::add);
+        to.remove(by);
+        for (UUID person : to) {
+            notifications.queue(new Notice(person, type, null, now, title, body, dayUrl(a), Map.of(), about));
+        }
+    }
+
+    private static String dayUrl(Appointment a) {
+        return "/salon/day?date=" + LocalDate.ofInstant(a.startsAt(), SalonTime.ZONE);
+    }
+
+    private static String guestName(Appointment a) {
+        return a.guestName() == null ? "A walk-in" : a.guestName();
     }
 
     private static Map<String, String> salonSms(String who, Appointment a, String barber) {

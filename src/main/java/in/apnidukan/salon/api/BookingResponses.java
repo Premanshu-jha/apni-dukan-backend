@@ -136,7 +136,8 @@ public final class BookingResponses {
     }
 
     /** The day screen: one column per barber. */
-    public record DayView(LocalDate date, List<BarberColumn> barbers) {
+    /** @param myStaffId the caller's own barber profile (a barber), so the app knows which column is his; else null */
+    public record DayView(LocalDate date, List<BarberColumn> barbers, UUID myStaffId) {
     }
 
     /** @param hours his working hours that day, "HH:mm" in India time */
