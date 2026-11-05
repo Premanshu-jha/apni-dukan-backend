@@ -478,11 +478,15 @@ Authorization: Bearer {{accessToken}}
 POST {{baseUrl}}/salon/appointments/{{bookingId}}/no-show
 Authorization: Bearer {{accessToken}}
 
-### 16a. Salon: undo a No-show (owner or helper, within 24 hours): the strike goes, the booking is closed
+### 16a. Salon: undo a No-show (owner or helper, within 24 hours): the strike goes, the booking is closed, the customer is told
 POST {{baseUrl}}/salon/appointments/{{bookingId}}/undo-no-show
 Authorization: Bearer {{accessToken}}
 
-### 16b. Salon: give the booking to another barber at the same time
+### 16a2. Salon: done before the planned end (frees the rest of the barber's time)
+POST {{baseUrl}}/salon/appointments/{{bookingId}}/finish
+Authorization: Bearer {{accessToken}}
+
+### 16b. Salon: give the booking (or a walk-in in the chair) to another barber
 POST {{baseUrl}}/salon/appointments/{{bookingId}}/reassign
 Authorization: Bearer {{accessToken}}
 Content-Type: application/json
