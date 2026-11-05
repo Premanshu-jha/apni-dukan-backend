@@ -88,10 +88,39 @@ public class AppointmentStore {
         }
     }
 
-    /** CONFIRMED → IN_SERVICE. withCode: null for walk-ins (they have no code). */
-    public boolean start(UUID id, Boolean withCode, Instant now) {
+    /**
+     * CONFIRMED → IN_SERVICE, and its time becomes [startsAt, endsAt): the same as planned, or earlier when it starts
+     * before its planned start (the customer is in the chair from now on, so the barber is busy from now). If that
+     * earlier time overlaps someone else, the database refuses it with SQL state 23P01 (the caller turns that into a
+     * 409). withCode: null for walk-ins (they have no code).
+     */
+    public boolean start(UUID id, Boolean withCode, Instant startsAt, Instant endsAt, Instant now) {
         return jdbc.update("UPDATE appointments SET status = 'IN_SERVICE', started_at = ?, started_with_code = ?, "
-                + "updated_at = ? WHERE id = ? AND status = 'CONFIRMED'", at(now), withCode, at(now), id) == 1;
+                        + "starts_at = ?, ends_at = ?, updated_at = ? WHERE id = ? AND status = 'CONFIRMED'",
+                at(now), withCode, at(startsAt), at(endsAt), at(now), id) == 1;
+    }
+
+    /** IN_SERVICE → COMPLETED now (done before the planned end): the rest of the barber's time is free again. */
+    public boolean finish(UUID id, Instant endsAt, Instant now) {
+        return jdbc.update("UPDATE appointments SET status = 'COMPLETED', ends_at = ?, updated_at = ? "
+                + "WHERE id = ? AND status = 'IN_SERVICE'", at(endsAt), at(now), id) == 1;
+    }
+
+    /** A walk-in already in the chair, cancelled (added by mistake): IN_SERVICE → CANCELLED_BY_SALON. */
+    public boolean cancelWalkInInService(UUID id, String reason, Instant now) {
+        return jdbc.update("UPDATE appointments SET status = 'CANCELLED_BY_SALON', cancel_reason = ?, updated_at = ? "
+                + "WHERE id = ? AND status = 'IN_SERVICE' AND kind = 'WALK_IN'", reason, at(now), id) == 1;
+    }
+
+    /**
+     * A walk-in already in the chair moves to another barber (added to the wrong one): the rest of its time is with
+     * him from now. started_at stays: the customer has been in the salon's chair since then. 23P01 if his time was
+     * taken in between.
+     */
+    public boolean moveWalkInInService(UUID id, UUID staffId, Instant startsAt, Instant endsAt, Instant now) {
+        return jdbc.update("UPDATE appointments SET staff_id = ?, starts_at = ?, ends_at = ?, updated_at = ? "
+                        + "WHERE id = ? AND status = 'IN_SERVICE' AND kind = 'WALK_IN'",
+                staffId, at(startsAt), at(endsAt), at(now), id) == 1;
     }
 
     /** Undoing a no-show: NO_SHOW → the given status (CANCELLED_BY_SALON) with the reason. */
@@ -195,6 +224,23 @@ public class AppointmentStore {
                 .stream().findFirst();
     }
 
+    /** Minutes of breaks this person added for this barber that are still on, within [from, to). */
+    public long ownBreakMinutes(UUID staffId, UUID createdBy, Instant from, Instant to) {
+        Long minutes = jdbc.queryForObject("SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (LEAST(ends_at, ?) - "
+                        + "GREATEST(starts_at, ?))) / 60), 0)::bigint FROM appointments WHERE staff_id = ? "
+                        + "AND created_by = ? AND kind = 'BLOCK' AND block_type = 'BREAK' AND status = 'BLOCKED' "
+                        + "AND starts_at < ? AND ends_at > ?",
+                Long.class, at(to), at(from), staffId, createdBy, at(to), at(from));
+        return minutes == null ? 0 : minutes;
+    }
+
+    /** Whether this appointment was given away from this barber (its REASSIGNED events read "from -> to"). */
+    public boolean wasReassignedFrom(UUID appointmentId, UUID staffId) {
+        Boolean found = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM appointment_events WHERE appointment_id = ? "
+                + "AND event = 'REASSIGNED' AND detail LIKE ?)", Boolean.class, appointmentId, staffId + " -> %");
+        return Boolean.TRUE.equals(found);
+    }
+
     public boolean hasEvent(UUID appointmentId, String event) {
         Integer n = jdbc.queryForObject("SELECT count(*) FROM appointment_events WHERE appointment_id = ? AND event = ?",
                 Integer.class, appointmentId, event);
@@ -288,10 +334,13 @@ public class AppointmentStore {
                 : jdbc.query(BARBER_UPCOMING_SQL, ROW, shopId, staffId, at(now), at(until), limit);
     }
 
-    /** The salon's online bookings still to come (CONFIRMED, start in the future). */
-    public List<Appointment> upcomingBookings(UUID shopId, Instant now) {
+    /**
+     * The salon's online bookings still open that start after {@code since} (CONFIRMED). Pass now for those still to
+     * come, or a little earlier to include ones whose customer may still arrive (the 15 minutes they are held).
+     */
+    public List<Appointment> upcomingBookings(UUID shopId, Instant since) {
         return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND kind = 'BOOKING' "
-                + "AND status = 'CONFIRMED' AND starts_at > ? ORDER BY starts_at", ROW, shopId, at(now));
+                + "AND status = 'CONFIRMED' AND starts_at > ? ORDER BY starts_at", ROW, shopId, at(since));
     }
 
     /**
