@@ -481,12 +481,9 @@ class AdminIntegrationTest {
 
     /** A salon list, with the search text encoded exactly as a browser would send it. */
     private List<?> search(String group, String q) {
-        org.springframework.web.util.UriComponentsBuilder b = org.springframework.web.util.UriComponentsBuilder
-                .fromUriString(base + "/admin/shops").queryParam("type", "SALON").queryParam("group", group);
-        if (q != null) {
-            b.queryParam("q", q);
-        }
-        java.net.URI uri = b.encode().build().toUri();
+        // As a browser's URLSearchParams does: a space as "+", and "+" itself as %2B
+        java.net.URI uri = java.net.URI.create(base + "/admin/shops?type=SALON&group=" + group + (q == null ? ""
+                : "&q=" + java.net.URLEncoder.encode(q, java.nio.charset.StandardCharsets.UTF_8)));
         Reply r = http.get().uri(uri).headers(h -> h.setBearerAuth(token(admin))).exchange((rq, res) -> read(res));
         assertThat(r.status()).as(r.text()).isEqualTo(200);
         return (List<?>) r.body();
