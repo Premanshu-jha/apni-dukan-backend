@@ -397,7 +397,8 @@ public class SalonDayService {
     @Transactional
     public AppointmentView finish(UUID userId, UUID appointmentId) {
         Caller c = access.caller(userId);
-        Appointment a = lockedFor(c, appointmentId);
+        // As for reassign and cancel, whoever added a walk-in still in the chair may finish it too
+        Appointment a = c.ownerOrHelper() ? lockedFor(c, appointmentId) : lockedForOwnOrAdded(c, appointmentId);
         requireStatus(a, AppointmentStatus.IN_SERVICE);
         Instant now = now();
         // Never before its own start (the database wants a time range that isn't empty)
@@ -656,6 +657,11 @@ public class SalonDayService {
                     "The owner or a helper added this break; ask them to remove it.");
         }
         Instant now = now();
+        if (!c.ownerOrHelper() && !now.isBefore(a.startsAt())) {
+            // Taken (or being taken): it stays on the record, and it keeps counting towards his 4 hours that day
+            throw wrongStatus("This break has started; it stays. Ask the owner if it was a mistake.",
+                    Map.of("reason", "STARTED"));
+        }
         if (!appointments.removeBlock(a.id(), now)) {
             throw wrongStatus("It was already removed.");
         }
@@ -829,6 +835,15 @@ public class SalonDayService {
         if (c.ownerOrHelper()) {
             return lockedFor(c, id);
         }
+        Appointment a = lockedForOwnOrAdded(c, id);
+        if (!addedInChairBy(a, c)) {
+            throw SalonAccess.notAllowed();   // his own column, but not a walk-in he added that is still in the chair
+        }
+        return a;
+    }
+
+    /** A barber's own appointment, or a walk-in he added that is still in the chair (on any column). */
+    private Appointment lockedForOwnOrAdded(Caller c, UUID id) {
         Optional<Appointment> seen = appointments.find(id)
                 .filter(a -> a.shopId().equals(c.shopId()) && a.kind() != AppointmentKind.BLOCK);
         if (seen.isPresent() && addedInChairBy(seen.get(), c)) {
@@ -837,12 +852,12 @@ public class SalonDayService {
                 return a;
             }
         }
-        lockedFor(c, id);   // 404 / REASSIGNED for another barber's
-        throw SalonAccess.notAllowed();
+        return lockedFor(c, id);   // his own; 404 / REASSIGNED for another barber's
     }
 
+    /** A walk-in he added, still in the chair, while he still has walk-in access. */
     private static boolean addedInChairBy(Appointment a, Caller c) {
-        return a.kind() == AppointmentKind.WALK_IN && a.status() == AppointmentStatus.IN_SERVICE
+        return c.walkIns() && a.kind() == AppointmentKind.WALK_IN && a.status() == AppointmentStatus.IN_SERVICE
                 && c.userId().equals(a.createdBy());
     }
 

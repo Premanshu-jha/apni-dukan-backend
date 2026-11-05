@@ -206,6 +206,9 @@ public class SalonNotices {
                         dayUrl(a), Map.of(), null));
             }
         }
+        // And the barber whose chair it was in (in the app; not if he did it himself)
+        tellBarbers(a, List.of(a.staffId()), "SALON_WALK_IN_CANCELLED", "Walk-in cancelled, " + TIME.format(a.startsAt()),
+                guestName(a) + " at " + TIME.format(a.startsAt()) + " was cancelled: " + reason, null, by, now);
     }
 
     /** Someone left the salon or lost their sign-in: their salon messages go. */
