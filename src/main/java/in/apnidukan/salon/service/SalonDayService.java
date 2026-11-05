@@ -360,6 +360,10 @@ public class SalonDayService {
         try {
             started = appointments.start(a.id(), withCode, from, to, now);
         } catch (DataIntegrityViolationException e) {
+            if (hasSqlState(e, OVERLAP) && !early) {
+                // A late start whose longer time was just taken by someone else: the next try keeps the planned end
+                throw tryAgain();
+            }
             if (hasSqlState(e, OVERLAP)) {
                 // Someone (or a break) still holds his chair before this booking's time
                 throw new ApiException(HttpStatus.CONFLICT, "BARBER_BUSY",
@@ -548,7 +552,9 @@ public class SalonDayService {
         }
         String reason = clean(REASON, in.reason());
         Instant now = now();
-        if (walkInInChair && now.isAfter(a.startsAt().plus(MISTAKE_WINDOW))) {
+        // From when it was first put in a chair (started_at), which a move to another barber doesn't reset
+        Instant inChairSince = a.startedAt() != null ? a.startedAt() : a.startsAt();
+        if (walkInInChair && now.isAfter(inChairSince.plus(MISTAKE_WINDOW))) {
             // Served for a while: it happened, so it stays in the day's takings; Finish ends it
             throw wrongStatus("It has been in the chair for more than " + MISTAKE_WINDOW.toMinutes()
                     + " minutes. Finish it instead.", Map.of("reason", "IN_CHAIR_TOO_LONG"));
