@@ -1574,15 +1574,25 @@ class SalonBookingIntegrationTest {
         Reply done = post("/salon/appointments/" + first + "/finish", Map.of(), rajuUser);
         assertThat(field(done.body(), "status")).as(done.text()).isEqualTo("COMPLETED");
 
-        UUID second = id(walkIn(rajuUser, List.of(haircut), sunil, UUID.randomUUID()));   // Sunil doesn't do beards
+        UUID second = id(walkIn(rajuUser, List.of(haircut), sunil, UUID.randomUUID()));
+        UUID own = id(walkIn(rajuUser, List.of(haircut), raju, UUID.randomUUID()));
+        // Someone else's walk-in on another column isn't his, even with walk-in access
+        jdbc.update("UPDATE appointments SET created_by = ? WHERE id = ?", owner, second);
+        assertThat(post("/salon/appointments/" + second + "/finish", Map.of(), rajuUser).status()).isEqualTo(404);
+        jdbc.update("UPDATE appointments SET created_by = ? WHERE id = ?", rajuUser, second);
         jdbc.update("DELETE FROM notification_jobs");
-        // Walk-in access taken away: what he added is no longer his to fix
+
+        // Walk-in access taken away: what he added is no longer his to fix, nor shown as his
         put("/salon/members/" + rajuUser + "/walk-in-access", Map.of("allowed", false), owner);
         CLOCK.set(at("10:08"));
-        assertThat(post("/salon/appointments/" + second + "/finish", Map.of(), rajuUser).status()).isEqualTo(403);
+        assertThat(post("/salon/appointments/" + second + "/finish", Map.of(), rajuUser).status()).isEqualTo(404);
         assertThat(post("/salon/appointments/" + second + "/cancel", Map.of("reason", "Mistake"), rajuUser).status())
-                .isEqualTo(403);
+                .isEqualTo(404);   // another barber's column: he no longer sees it
+        assertThat(post("/salon/appointments/" + own + "/cancel", Map.of("reason", "Mistake"), rajuUser).status())
+                .isEqualTo(403);   // his own column, but cancelling is for whoever may add walk-ins
+        assertThat(get("/salon/day?date=2026-11-10", rajuUser).text()).doesNotContain("\"addedByMe\":true");
         assertThat(status(second)).isEqualTo("IN_SERVICE");
+        assertThat(status(own)).isEqualTo("IN_SERVICE");
         // The owner cancels it: Sunil, whose chair it was in, is told in the app
         assertThat(post("/salon/appointments/" + second + "/cancel", Map.of("reason", "Mistake"), owner).status())
                 .isEqualTo(200);
@@ -1590,6 +1600,15 @@ class SalonBookingIntegrationTest {
                 + sunilUser + "'")).isEqualTo(1);
         assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND user_id = '" + owner + "'"))
                 .isZero();   // not the one who did it
+
+        // A barber who cancels one in his own chair isn't told about it himself
+        put("/salon/members/" + sunilUser + "/walk-in-access", Map.of("allowed", true), owner);
+        CLOCK.set(at("10:10"));
+        UUID his = id(walkIn(sunilUser, List.of(haircut), sunil, UUID.randomUUID()));
+        assertThat(post("/salon/appointments/" + his + "/cancel", Map.of("reason", "Mistake"), sunilUser).status())
+                .isEqualTo(200);
+        assertThat(count("notification_jobs WHERE type = 'SALON_WALK_IN_CANCELLED' AND user_id = '" + sunilUser + "'"))
+                .isEqualTo(1);   // only the one the owner cancelled
     }
 
     @Test
