@@ -1,5 +1,6 @@
 package in.apnidukan.auth.api;
 
+import in.apnidukan.auth.domain.AdminRole;
 import in.apnidukan.auth.domain.User;
 import in.apnidukan.auth.service.AuthTokens;
 
@@ -11,11 +12,15 @@ public final class AuthResponses {
     private AuthResponses() {
     }
 
+    /**
+     * @param admin     true for the admin website's users (ADMIN or SUPER_ADMIN)
+     * @param adminRole NONE, ADMIN or SUPER_ADMIN
+     */
     public record UserResponse(UUID id, String phone, String name, String email, boolean emailVerified,
-                               boolean admin) {
+                               boolean admin, AdminRole adminRole) {
         static UserResponse from(User u) {
             return new UserResponse(u.getId(), u.getPhone(), u.getName(), u.getEmail(), u.isEmailVerified(),
-                    u.isAdmin());
+                    u.isAdmin(), u.getAdminRole());
         }
     }
 
