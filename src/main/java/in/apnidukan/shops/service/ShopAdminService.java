@@ -156,7 +156,9 @@ public class ShopAdminService {
     @Transactional
     public TimelineEntry addNote(UUID adminId, UUID shopId, String noteInput) {
         requireAdmin(adminId);
-        shops.findById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
+        if (!shops.existsById(shopId)) {
+            throw ApiException.notFound("Shop");
+        }
         String note = TextCleaner.clean(NOTE, noteInput);
         Instant now = now();
         review.addEvent(shopId, now, adminId, true, ShopEventType.NOTE, null, note, List.of());

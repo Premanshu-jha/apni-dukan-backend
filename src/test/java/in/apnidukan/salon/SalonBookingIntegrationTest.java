@@ -2053,7 +2053,8 @@ class SalonBookingIntegrationTest {
      * matter here: the salon module reads the membership from the database).
      */
     private String token(UUID who) {
-        Boolean admin = jdbc.queryForObject("SELECT admin FROM users WHERE id = ?", Boolean.class, who);
+        Boolean admin = jdbc.queryForObject("SELECT admin_role <> 'NONE' FROM users WHERE id = ?", Boolean.class,
+                who);
         return jwt.issue(new AuthPrincipal(who, null, null, Boolean.TRUE.equals(admin)),
                 sessions.currentGeneration(who)).token();
     }
