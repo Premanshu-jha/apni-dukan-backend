@@ -31,7 +31,7 @@ public class User {
     @Column(name = "email_verified_at")
     private Instant emailVerifiedAt;
 
-    /** Admin website access (V9). The old boolean column users.admin is no longer read. */
+    /** Admin website access (V9). */
     @Enumerated(EnumType.STRING)
     @Column(name = "admin_role", nullable = false, length = 12)
     private AdminRole adminRole = AdminRole.NONE;
@@ -131,6 +131,17 @@ public class User {
     /** This account was first made by a sign-in in OTP test mode. */
     public void markTestAccount() {
         this.testAccount = true;
+    }
+
+    /**
+     * Someone proved they hold this number with a real code (a sign-in with an SMS code, or account recovery): from
+     * now on it is a normal account, never covered by test mode again.
+     */
+    public void becomeRealAccount(Instant now) {
+        if (testAccount) {
+            this.testAccount = false;
+            this.updatedAt = now;
+        }
     }
 
     public boolean isTestAccount() { return testAccount; }

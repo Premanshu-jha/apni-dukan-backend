@@ -93,10 +93,11 @@ public class ShopReviewStore {
             text = text.codePoints().limit(60).collect(StringBuilder::new, StringBuilder::appendCodePoint,
                     StringBuilder::append).toString();
             String number = text.startsWith("#") ? text.substring(1) : text;
-            String digits = text.replaceAll("[\\s+()-]", "");
-            if (digits.matches("\\d{12}") && digits.startsWith("91")) {
-                digits = digits.substring(2);   // +91 98480 12345
-            }
+            String compact = text.replaceAll("[\\s()-]", "");
+            String digits = compact.startsWith("+91") ? compact.substring(3)   // +91 98480 12345, +91 98480
+                    : compact.matches("91\\d{10}") ? compact.substring(2)
+                    : compact.matches("0\\d{10}") ? compact.substring(1)      // 09848012345
+                    : compact;
             sql.append(" AND (CAST(s.shop_code AS text) = ? OR lower(s.name) LIKE ? OR lower(s.owner_name) LIKE ?");
             args.addAll(List.of(number, like(text), like(text)));
             if (digits.matches("\\d{3,10}")) {

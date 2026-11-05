@@ -153,6 +153,11 @@ public class AuthService {
                     // Changed between the check and now (made an admin, or a real account): the real code only
                     throw new ApiException(HttpStatus.BAD_REQUEST, "WRONG_CODE", "That code is not correct");
                 }
+                if (!testSignIn && existing.isTestAccount()) {
+                    // The real holder of a former test number signed in with the SMS code: the account is theirs
+                    // now, and every tester still signed in to it is signed out
+                    becomeReal(existing);
+                }
                 return issueTokens(existing, device, false);
             }
             User created;
@@ -168,6 +173,20 @@ public class AuthService {
             }
             return issueTokens(created, device, true);
         });
+    }
+
+    /** A test account claimed with a real code: normal from now on, and nobody else stays signed in to it. */
+    private void becomeReal(User user) {
+        Instant now = Instant.now(clock);
+        user.becomeRealAccount(now);
+        users.saveAndFlush(user);
+        refreshTokens.revokeAllForUser(user.getId(), now);
+        // Before the new token is made (as recovery does), so the new one carries the new generation
+        try {
+            revocations.revokeAll(user.getId());
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer; testers' tokens on {} end within 15 minutes", user.getId());
+        }
     }
 
     // ---------------- refresh and sign-out ----------------
@@ -372,6 +391,7 @@ public class AuthService {
             oldPhone[0] = user.getPhone();
             Instant now = Instant.now(clock);
             user.changePhone(newPhone, now);
+            user.becomeRealAccount(now);   // proved with real codes to a real phone and inbox (if a test account)
             try {
                 users.saveAndFlush(user);
             } catch (DataIntegrityViolationException e) {

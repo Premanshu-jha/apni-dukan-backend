@@ -1,6 +1,6 @@
 -- Who may use the admin website. ADMIN: the field team (shop visits, support). SUPER_ADMIN: also adds and removes
 -- admins and runs OTP test mode. There is at most one super admin; it is set by hand in the database, once:
---   UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE phone = '9xxxxxxxxx';
+--   UPDATE users SET admin_role = 'SUPER_ADMIN', admin = true WHERE phone = '9xxxxxxxxx';
 -- The old users.admin column is kept in step (true for ADMIN and SUPER_ADMIN) so a version still running during a
 -- deploy, or one rolled back to, sees the same people as admins; it is dropped in a later migration.
 ALTER TABLE users ADD COLUMN admin_role VARCHAR(12) NOT NULL DEFAULT 'NONE'

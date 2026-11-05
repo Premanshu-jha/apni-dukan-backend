@@ -219,6 +219,20 @@ class AdminIntegrationTest {
         assertThat(get("/auth/me", (String) field(in.body(), "accessToken")).status()).isEqualTo(401);   // out
         assertThat(field(post("/admin/team", Map.of("phone", "9111111111"), boss).body(), "code"))
                 .isEqualTo("TEST_PHONE");
+
+        // The number's real holder signs in later with the SMS code: the account becomes a normal one for good
+        String tester = (String) field(post("/auth/otp/verify", Map.of("phone", "9111111111", "code", "424242"),
+                (String) null).body(), "refreshToken");
+        assertThat(tester).isNull();   // no longer a test number: any code is refused
+        post("/auth/otp/send", Map.of("phone", "9111111111"), (String) null);
+        Reply real = post("/auth/otp/verify", Map.of("phone", "9111111111", "code",
+                CapturingSenders.codeSentTo(LAST_SMS, "9111111111")), (String) null);
+        assertThat(real.status()).as(real.text()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT test_account FROM users WHERE phone = '9111111111'", Boolean.class))
+                .isFalse();
+        Reply renewed = post("/auth/refresh", Map.of("refreshToken", field(real.body(), "refreshToken")),
+                (String) null);
+        assertThat(renewed.status()).as(renewed.text()).isEqualTo(200);
     }
 
     @Test
@@ -381,6 +395,8 @@ class AdminIntegrationTest {
         long code = jdbc.queryForObject("SELECT shop_code FROM shops WHERE id = ?", Long.class, salon);
         assertThat(search("RECHECK", "#" + code)).hasSize(1);
         assertThat(search("RECHECK", "+91 92000 00002")).hasSize(1);
+        assertThat(search("RECHECK", "+91 92000")).hasSize(1);
+        assertThat(search("RECHECK", "09200000002")).hasSize(1);
         assertThat(search("RECHECK", "_")).isEmpty();
         assertThat(search("RECHECK", "%")).isEmpty();
 
