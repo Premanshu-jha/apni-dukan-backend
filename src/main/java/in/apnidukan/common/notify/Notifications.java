@@ -26,6 +26,13 @@ public interface Notifications {
     void replacePending(Notice notice);
 
     /**
+     * Forgets this person's salon messages (types starting SALON_): the ones still waiting aren't sent, and the app's
+     * list no longer shows them. For someone who left a salon or was removed from it: its customers' names and
+     * booking numbers aren't theirs to keep, and its day links would open another salon's day if they join one.
+     */
+    void forgetSalonMessages(UUID userId);
+
+    /**
      * @param type   what kind of message, e.g. BOOKING_CONFIRMED (for the log and the history)
      * @param refId  what it is about (e.g. the booking id), so pending messages can be cancelled; may be null
      * @param sendAt when to send it; now or in the past means as soon as possible
