@@ -1,6 +1,8 @@
 -- OTP test mode: while it is on, the numbers listed here sign in with any 6-digit code (no SMS is sent) and their
 -- email code takes any 6 digits too. Every other number works as usual. For testing on the real deployment
--- without spending SMS credit. An admin's number can never be a test number.
+-- without spending SMS credit. An admin's number can never be a test number, and neither can a number that already
+-- belongs to a real account: only an account first made by a test sign-in (users.test_account) takes any code, and
+-- such an account stays signed in only while test mode is on for its number.
 CREATE TABLE test_phones (
     phone      VARCHAR(10)   PRIMARY KEY CHECK (phone ~ '^[6-9][0-9]{9}$'),
     label      VARCHAR(60)   NOT NULL,                   -- e.g. "Prem's test barber"
@@ -16,3 +18,5 @@ CREATE TABLE otp_test_mode (
     turned_on_at    TIMESTAMPTZ
 );
 INSERT INTO otp_test_mode (id) VALUES (1);
+
+ALTER TABLE users ADD COLUMN test_account BOOLEAN NOT NULL DEFAULT FALSE;

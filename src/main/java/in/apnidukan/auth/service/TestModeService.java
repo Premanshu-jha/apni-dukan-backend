@@ -5,10 +5,14 @@ import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.text.TextCleaner;
 import in.apnidukan.common.text.TextCleaner.TextField;
+import in.apnidukan.common.security.SessionRevocations;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.sql.Timestamp;
 import java.time.Clock;
@@ -20,9 +24,12 @@ import java.util.UUID;
 
 /**
  * OTP test mode, run by the super admin from the admin website. While it is on (otp_test_mode.until in the
- * future), the numbers in test_phones sign in with any 6-digit code and no SMS is sent to them; their email code
- * takes any 6 digits too and no email is sent. Every other number works exactly as usual, and an admin's number is
- * never treated as a test number (not even if both somehow happened), so test mode can't open the admin website.
+ * future), the numbers in test_phones sign in with any 6-digit code and no SMS is sent to them. Only for numbers with
+ * no account yet, or whose account was made this way (users.test_account): a number that belongs to a real
+ * customer or shop can't be added, and an admin's account never takes any code (not even if both somehow
+ * happened), so test mode can't open someone's real account or the admin website. A test account stays signed in
+ * only while test mode is on for its number (AuthService.refresh). Email codes, recovery and account deletion
+ * always need the real code.
  * It switches itself off at `until`: nothing has to run for that, every check compares with the clock.
  *
  * Changes to test numbers and to admins take the same database lock (AdminTeamService.LOCK), so a number can't
@@ -38,9 +45,12 @@ public class TestModeService {
     private final JdbcTemplate jdbc;
     private final UserRepository users;
     private final AdminEvents events;
+    private final SessionRevocations revocations;
     private final Clock clock;
 
-    public TestModeService(JdbcTemplate jdbc, UserRepository users, AdminEvents events, Clock clock) {
+    public TestModeService(JdbcTemplate jdbc, UserRepository users, AdminEvents events, SessionRevocations revocations,
+                           Clock clock) {
+        this.revocations = revocations;
         this.jdbc = jdbc;
         this.users = users;
         this.events = events;
@@ -52,7 +62,8 @@ public class TestModeService {
     public boolean acceptsAnyCode(String phone) {
         Boolean yes = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM otp_test_mode m JOIN test_phones t "
                 + "ON t.phone = ? WHERE m.id = 1 AND m.until > ? "
-                + "AND NOT EXISTS (SELECT 1 FROM users u WHERE u.phone = t.phone AND u.admin_role <> 'NONE'))",
+                + "AND NOT EXISTS (SELECT 1 FROM users u WHERE u.phone = t.phone "
+                + "AND (u.admin_role <> 'NONE' OR NOT u.test_account)))",
                 Boolean.class, phone, Timestamp.from(now()));
         return Boolean.TRUE.equals(yes);
     }
@@ -95,6 +106,8 @@ public class TestModeService {
         int changed = jdbc.update("UPDATE otp_test_mode SET until = NULL WHERE id = 1 AND until IS NOT NULL");
         if (changed > 0) {
             events.record(superAdminId, "TEST_MODE_OFF", null, null);
+            signOutTestAccounts(jdbc.queryForList("SELECT u.id FROM users u JOIN test_phones t ON t.phone = u.phone "
+                    + "WHERE u.test_account", UUID.class));
         }
         return read();
     }
@@ -106,9 +119,15 @@ public class TestModeService {
         String phone = PhoneNumbers.normalize(phoneInput);
         String label = TextCleaner.clean(LABEL, labelInput);
         AdminTeamService.lockTeam(jdbc);
-        if (users.findByPhone(phone).map(User::isAdmin).orElse(false)) {
+        User existing = users.findByPhone(phone).orElse(null);
+        if (existing != null && existing.isAdmin()) {
             throw new ApiException(HttpStatus.CONFLICT, "ADMIN_PHONE",
                     "That is an admin's number. An admin's number can't be a test number.");
+        }
+        if (existing != null && !existing.isTestAccount()) {
+            throw new ApiException(HttpStatus.CONFLICT, "REAL_ACCOUNT",
+                    "That number already has a real account (a customer or a shop). Use a number nobody has "
+                            + "signed in with.");
         }
         int added = jdbc.update("INSERT INTO test_phones (phone, label, added_by, added_at) VALUES (?, ?, ?, ?) "
                 + "ON CONFLICT (phone) DO NOTHING", phone, label, superAdminId, Timestamp.from(now()));
@@ -126,6 +145,8 @@ public class TestModeService {
         AdminTeamService.lockTeam(jdbc);
         if (jdbc.update("DELETE FROM test_phones WHERE phone = ?", phone) > 0) {
             events.record(superAdminId, "TEST_PHONE_REMOVED", phone, null);
+            signOutTestAccounts(jdbc.queryForList("SELECT id FROM users WHERE phone = ? AND test_account",
+                    UUID.class, phone));
         }
         return read();
     }
@@ -135,6 +156,28 @@ public class TestModeService {
         Boolean yes = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM test_phones WHERE phone = ?)",
                 Boolean.class, phone);
         return Boolean.TRUE.equals(yes);
+    }
+
+    /**
+     * Their access tokens stop at once (after the change is saved); their refresh is refused from now on, because
+     * test mode no longer covers their number (AuthService.refresh).
+     */
+    private void signOutTestAccounts(List<UUID> accounts) {
+        if (accounts.isEmpty()) {
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                for (UUID id : accounts) {
+                    try {
+                        revocations.revokeAll(id);
+                    } catch (DataAccessException redisDown) {
+                        return;   // their tokens expire within 15 minutes, and none can be refreshed
+                    }
+                }
+            }
+        });
     }
 
     private State read() {

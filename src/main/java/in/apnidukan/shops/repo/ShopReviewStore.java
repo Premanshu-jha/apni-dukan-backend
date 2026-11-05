@@ -45,6 +45,13 @@ public class ShopReviewStore {
             + "WHEN s.status = 'APPROVED' THEN 'LIVE' "
             + "WHEN s.status = 'SUSPENDED' THEN 'SUSPENDED' END";
 
+    /**
+     * When the shop entered its current status: its latest timeline entry other than a note (the owner's edits to a
+     * waiting shop don't move it). Shops from before the timeline existed (V11) fall back to when they registered.
+     */
+    private static final String STATUS_SINCE = "COALESCE((SELECT max(e.at) FROM shop_events e "
+            + "WHERE e.shop_id = s.id AND e.event <> 'NOTE'), s.created_at)";
+
     private final JdbcTemplate jdbc;
 
     public ShopReviewStore(JdbcTemplate jdbc) {
@@ -71,8 +78,9 @@ public class ShopReviewStore {
     }
 
     /**
-     * Shop ids in a group, longest waiting first (by when the shop last changed), at most LIST_LIMIT. `q` (optional)
-     * matches the shop number exactly, or the name, owner's name or owner's phone in part.
+     * Shop ids in a group, longest in it first (by STATUS_SINCE), at most LIST_LIMIT. `q` (optional) matches the
+     * shop number exactly ("1042" or "#1042"), the owner's phone in part (spaces, "+91" and dashes ignored), or the
+     * name or owner's name in part.
      */
     public List<UUID> search(ShopType type, ReviewGroup group, String q) {
         StringBuilder sql = new StringBuilder("SELECT s.id FROM shops s "
@@ -80,16 +88,46 @@ public class ShopReviewStore {
                 + "LEFT JOIN users u ON u.id = m.user_id "
                 + "WHERE s.type = ? AND " + GROUP + " = ?");
         List<Object> args = new ArrayList<>(List.of(type.name(), group.name()));
-        if (q != null && !q.isBlank()) {
-            q = q.length() > 60 ? q.substring(0, 60) : q;
-            String like = "%" + q.trim().toLowerCase().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                    + "%";
-            sql.append(" AND (CAST(s.shop_code AS text) = ? OR lower(s.name) LIKE ? OR lower(s.owner_name) LIKE ?"
-                    + " OR u.phone LIKE ?)");
-            args.addAll(List.of(q.trim(), like, like, like));
+        String text = q == null ? "" : q.strip();
+        if (!text.isEmpty()) {
+            text = text.codePoints().limit(60).collect(StringBuilder::new, StringBuilder::appendCodePoint,
+                    StringBuilder::append).toString();
+            String number = text.startsWith("#") ? text.substring(1) : text;
+            String digits = text.replaceAll("[\\s+()-]", "");
+            if (digits.matches("\\d{12}") && digits.startsWith("91")) {
+                digits = digits.substring(2);   // +91 98480 12345
+            }
+            sql.append(" AND (CAST(s.shop_code AS text) = ? OR lower(s.name) LIKE ? OR lower(s.owner_name) LIKE ?");
+            args.addAll(List.of(number, like(text), like(text)));
+            if (digits.matches("\\d{3,10}")) {
+                sql.append(" OR u.phone LIKE ?");
+                args.add(like(digits));
+            }
+            sql.append(")");
         }
-        sql.append(" ORDER BY s.updated_at, s.id LIMIT ").append(LIST_LIMIT);
+        // Only constants and bound values go into this SQL (never the search text itself)
+        sql.append(" ORDER BY ").append(STATUS_SINCE).append(", s.id LIMIT ").append(LIST_LIMIT);
         return jdbc.queryForList(sql.toString(), UUID.class, args.toArray());
+    }
+
+    /** "Contains", with LIKE's own characters (%, _ and the backslash) taken literally. */
+    private static String like(String text) {
+        return "%" + text.toLowerCase(java.util.Locale.ROOT).replace("\\", "\\\\").replace("%", "\\%")
+                .replace("_", "\\_") + "%";
+    }
+
+    /** When each of these shops entered its current status (see STATUS_SINCE). */
+    public Map<UUID, Instant> statusSince(Collection<UUID> shopIds) {
+        Map<UUID, Instant> out = new HashMap<>();
+        if (shopIds.isEmpty()) {
+            return out;
+        }
+        jdbc.query("SELECT s.id, " + STATUS_SINCE + " AS since FROM shops s WHERE s.id = ANY (?)",
+                ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", shopIds.toArray())),
+                rs -> {
+                    out.put(rs.getObject("id", UUID.class), rs.getTimestamp("since").toInstant());
+                });
+        return out;
     }
 
     /** Which of these shops were ever approved. */
@@ -121,9 +159,15 @@ public class ShopReviewStore {
         return out;
     }
 
-    /** The shop as it was when last approved (from its history), if it ever was. */
+    /**
+     * The shop as it was at the moment it was last approved (the history row where it became APPROVED), if it ever
+     * was. Not a later row saved while it stayed live: edits that didn't need a visit (a new name, GSTIN) were never
+     * checked, so they must show up as changes too.
+     */
     public Optional<Snapshot> lastApproved(UUID shopId) {
-        return jdbc.query("SELECT * FROM shops_aud WHERE id = ? AND status = 'APPROVED' ORDER BY rev DESC LIMIT 1",
+        return jdbc.query("SELECT a.* FROM shops_aud a WHERE a.id = ? AND a.status = 'APPROVED' "
+                        + "AND COALESCE((SELECT p.status FROM shops_aud p WHERE p.id = a.id AND p.rev < a.rev "
+                        + "ORDER BY p.rev DESC LIMIT 1), '') <> 'APPROVED' ORDER BY a.rev DESC LIMIT 1",
                 rs -> rs.next() ? Optional.of(snapshot(rs)) : Optional.<Snapshot>empty(), shopId);
     }
 

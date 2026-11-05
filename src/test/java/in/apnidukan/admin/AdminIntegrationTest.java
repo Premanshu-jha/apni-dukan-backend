@@ -72,15 +72,17 @@ class AdminIntegrationTest {
     @Autowired SessionRevocations sessions;
 
     RestClient http;
+    String base;
     UUID boss;
     UUID admin;
     UUID customer;
 
     @BeforeEach
     void setUp() {
+        base = "http://localhost:" + environment.getProperty("local.server.port") + "/api/v1";
         http = RestClient.builder()
-                .requestFactory(new org.springframework.http.client.JdkClientHttpRequestFactory())
-                .baseUrl("http://localhost:" + environment.getProperty("local.server.port") + "/api/v1").build();
+                .requestFactory(new org.springframework.http.client.JdkClientHttpRequestFactory()).baseUrl(base)
+                .build();
         TestData.clean(jdbc);
         redis.execute((org.springframework.data.redis.core.RedisCallback<Object>) connection -> {
             connection.serverCommands().flushAll();
@@ -176,20 +178,59 @@ class AdminIntegrationTest {
         Reply other = post("/auth/otp/verify", Map.of("phone", "9111111112", "code", "424242"), (String) null);
         assertThat(other.status()).isEqualTo(400);   // the real code is needed for everyone else
 
-        // Its email code is any 6 digits too, and no email goes out
+        assertThat(jdbc.queryForObject("SELECT test_account FROM users WHERE phone = '9111111111'", Boolean.class))
+                .isTrue();
+        // The email code is always the real one (else a test account could claim someone's email)
         String access = (String) field(in.body(), "accessToken");
         assertThat(post("/auth/email/send-code", Map.of("email", "tester@example.com"), access).status())
                 .isEqualTo(202);
-        assertThat(LAST_EMAIL).isEmpty();
-        Reply verified = post("/auth/email/verify", Map.of("email", "tester@example.com", "code", "777777"), access);
-        assertThat(verified.status()).as(verified.text()).isEqualTo(200);
+        assertThat(LAST_EMAIL).containsKey("tester@example.com");
+        assertThat(post("/auth/email/verify", Map.of("email", "tester@example.com", "code", "777777"), access)
+                .status()).isEqualTo(400);
 
-        // It switches itself off when the time is up
+        // It switches itself off when the time is up, and the test account's session can't be renewed then
+        String refresh = (String) field(in.body(), "refreshToken");
         CLOCK.advance(Duration.ofHours(2).plusMinutes(1));
         assertThat(field(get("/admin/test-mode", boss).body(), "on")).isEqualTo(false);
+        Reply renewed = post("/auth/refresh", Map.of("refreshToken", refresh), (String) null);
+        assertThat(field(renewed.body(), "code")).as(renewed.text()).isEqualTo("TEST_MODE_OFF");
         post("/auth/otp/send", Map.of("phone", "9111111111"), (String) null);
         assertThat(LAST_SMS).containsKey("9111111111");
         assertThat(count("admin_events WHERE event IN ('TEST_PHONE_ADDED', 'TEST_MODE_ON')")).isEqualTo(2);
+    }
+
+    @Test
+    void aRealAccountsNumberCantBecomeATestNumberAndATestAccountCantBecomeAnAdmin() {
+        assertThat(field(post("/admin/test-mode/phones", Map.of("phone", "9000000003", "label", "Oops"), boss)
+                .body(), "code")).isEqualTo("REAL_ACCOUNT");   // the customer's number
+        // Even if it got onto the list by hand, a real account never takes any code
+        jdbc.update("INSERT INTO test_phones (phone, label, added_by, added_at) VALUES ('9000000003', 'x', ?, ?)",
+                boss, Timestamp.from(NOW));
+        put("/admin/test-mode", Map.of("hours", 1), boss);
+        assertThat(post("/auth/otp/verify", Map.of("phone", "9000000003", "code", "123456"), (String) null)
+                .status()).isEqualTo(400);
+
+        // A number used for testing, then taken off the list, still can't be made an admin
+        post("/admin/test-mode/phones", Map.of("phone", "9111111111", "label", "Tester"), boss);
+        Reply in = post("/auth/otp/verify", Map.of("phone", "9111111111", "code", "424242"), (String) null);
+        assertThat(in.status()).as(in.text()).isEqualTo(200);
+        Reply removed = delete("/admin/test-mode/phones/9111111111", boss);
+        assertThat(removed.status()).isEqualTo(200);
+        assertThat(get("/auth/me", (String) field(in.body(), "accessToken")).status()).isEqualTo(401);   // out
+        assertThat(field(post("/admin/team", Map.of("phone", "9111111111"), boss).body(), "code"))
+                .isEqualTo("TEST_PHONE");
+    }
+
+    @Test
+    void theSuperAdminCantDeleteTheirAccountAndANewAdminSignsInAfresh() {
+        Reply refused = post("/auth/me/delete-code", Map.of(), boss);
+        assertThat(field(refused.body(), "code")).as(refused.text()).isEqualTo("SUPER_ADMIN");
+        // Someone already signed in to a customer's account made an admin: that session ends
+        String held = token(customer);
+        assertThat(post("/admin/team", Map.of("phone", "9000000003"), boss).status()).isEqualTo(201);
+        assertThat(get("/auth/me", held).status()).isEqualTo(401);
+        List<?> team = (List<?>) get("/admin/team", boss).body();
+        assertThat(field(team.get(team.size() - 1), "since")).isEqualTo(NOW.toString());
     }
 
     @Test
@@ -247,7 +288,6 @@ class AdminIntegrationTest {
         // Search: name in part, owner phone in part, shop number exactly; LIKE wildcards are plain text
         assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=cuts", admin).body()).hasSize(1);
         assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=920000000", admin).body()).hasSize(1);
-        assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=%25", admin).body()).isEmpty();
         long code = jdbc.queryForObject("SELECT shop_code FROM shops WHERE id = ?", Long.class, first);
         assertThat((List<?>) get("/admin/shops?type=SALON&group=FIRST_VISIT&q=" + code, admin).body()).hasSize(1);
         assertThat(get("/admin/dashboard", customer).status()).isEqualTo(403);
@@ -300,6 +340,55 @@ class AdminIntegrationTest {
         assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
         assertThat(field(((List<?>) field(get("/admin/shops/" + salon, admin).body(), "timeline")).get(0), "event"))
                 .isEqualTo("SUBMITTED");
+    }
+
+    @Test
+    void whenAnotherAdminDecidedFirstTheSecondIsToldSoNotThatTheOwnerChangedIt() {
+        UUID shop = shop("SALON", "PENDING_VISIT", "Raju Hair", "9200000001");
+        long seen = version(shop);
+        approve(shop);
+        Reply late = post("/admin/shops/" + shop + "/reject", Map.of("version", seen, "reason", "Pin is wrong"),
+                admin);
+        assertThat(field(late.body(), "code")).as(late.text()).isEqualTo("WRONG_STATUS");
+        assertThat(field(field(late.body(), "details"), "status")).isEqualTo("APPROVED");
+    }
+
+    @Test
+    void editsMadeWhileLiveShowAtTheReCheckAndTheQueueKeepsItsOrder() {
+        UUID older = shop("SALON", "PENDING_VISIT", "First In", "9200000007");
+        UUID salon = shop("SALON", "PENDING_VISIT", "Sharma Salon", "9200000002");
+        CLOCK.advance(Duration.ofMinutes(1));
+        approve(salon);
+        // Live: a new name needs no visit, and it shows as a change since approval
+        CLOCK.advance(Duration.ofMinutes(1));
+        UUID owner = ownerOf(salon);
+        patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair Studio"), owner);
+        assertThat(((List<?>) field(get("/admin/shops/" + salon, admin).body(), "changes"))).hasSize(1);
+        moveThePin(salon);
+        List<?> changes = (List<?>) field(get("/admin/shops/" + salon, admin).body(), "changes");
+        assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "location");
+
+        // The waiting shop sent first stays first, even after its owner fixes a typo (which saves the shop again)
+        UUID newer = shop("SALON", "PENDING_VISIT", "Second In", "9200000008");
+        submittedAt(older, NOW);
+        submittedAt(newer, NOW.plusSeconds(30));
+        patch("/shops/me", Map.of("version", version(older), "name", "First In Salon"), ownerOf(older));
+        List<?> queue = search("FIRST_VISIT", null);
+        assertThat(queue).extracting(x -> field(x, "id")).containsExactly(older.toString(), newer.toString());
+        assertThat(field(queue.get(0), "statusSince")).isEqualTo(NOW.toString());
+
+        // Search as the screen shows them: "#1042" and "+91 92000 00002"; LIKE's own characters are plain text
+        long code = jdbc.queryForObject("SELECT shop_code FROM shops WHERE id = ?", Long.class, salon);
+        assertThat(search("RECHECK", "#" + code)).hasSize(1);
+        assertThat(search("RECHECK", "+91 92000 00002")).hasSize(1);
+        assertThat(search("RECHECK", "_")).isEmpty();
+        assertThat(search("RECHECK", "%")).isEmpty();
+
+        // Suspended and reinstated after being live: a re-check
+        approve(salon);
+        post("/admin/shops/" + salon + "/suspend", Map.of("version", version(salon), "reason", "Found shut"), admin);
+        Reply back = post("/admin/shops/" + salon + "/reinstate", Map.of("version", version(salon)), admin);
+        assertThat(field(back.body(), "group")).as(back.text()).isEqualTo("RECHECK");
     }
 
     @Test
@@ -367,6 +456,24 @@ class AdminIntegrationTest {
     private void moveThePin(UUID shop) {
         Reply r = patch("/shops/me", Map.of("version", version(shop), "latitude", 17.470000), ownerOf(shop));
         assertThat(field(r.body(), "status")).as(r.text()).isEqualTo("PENDING_VISIT");
+    }
+
+    private void submittedAt(UUID shop, Instant at) {
+        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, false, "
+                + "'SUBMITTED')", UUID.randomUUID(), shop, Timestamp.from(at), ownerOf(shop));
+    }
+
+    /** A salon list, with the search text encoded exactly as a browser would send it. */
+    private List<?> search(String group, String q) {
+        org.springframework.web.util.UriComponentsBuilder b = org.springframework.web.util.UriComponentsBuilder
+                .fromUriString(base + "/admin/shops").queryParam("type", "SALON").queryParam("group", group);
+        if (q != null) {
+            b.queryParam("q", q);
+        }
+        java.net.URI uri = b.encode().build().toUri();
+        Reply r = http.get().uri(uri).headers(h -> h.setBearerAuth(token(admin))).exchange((rq, res) -> read(res));
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        return (List<?>) r.body();
     }
 
     private long version(UUID shop) {

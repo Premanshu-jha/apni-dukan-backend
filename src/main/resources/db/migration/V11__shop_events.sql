@@ -15,5 +15,8 @@ CREATE TABLE shop_events (
 );
 CREATE INDEX ix_shop_events_shop ON shop_events (shop_id, at DESC, seq DESC);
 
--- The field team's lists read the latest approved version of a shop from its history
+-- The field team's pages read a shop's approved versions from its history, and deleting a photo checks whether it is
+-- one of them
 CREATE INDEX ix_shops_aud_approved ON shops_aud (id, rev DESC) WHERE status = 'APPROVED';
+CREATE INDEX ix_shops_aud_approved_owner_photo ON shops_aud (owner_photo_file_id) WHERE status = 'APPROVED';
+CREATE INDEX ix_shops_aud_approved_shop_photo ON shops_aud (shop_photo_file_id) WHERE status = 'APPROVED';

@@ -233,7 +233,7 @@ public class ShopAdminService {
         save(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.REINSTATED, null, note, List.of());
         tellOwner(shop, "SHOP_REINSTATED", "Your shop will be checked again",
-                shop.details().name() + " is no longer suspended. Our team will visit; after that it is live again.");
+                shop.details().name() + " is no longer suspended. Our team will visit; it goes live once approved.");
         return view(shop);
     }
 
@@ -241,13 +241,15 @@ public class ShopAdminService {
     private Shop checked(UUID adminId, UUID shopId, long version, String what, ShopStatus... allowed) {
         requireAdmin(adminId);
         Shop shop = shops.findById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
+        // Status first: when another admin decided meanwhile, say so (not "the owner changed it")
+        if (!java.util.Arrays.asList(allowed).contains(shop.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
+                    "A shop that is " + shop.getStatus() + " can't be " + what + ". Someone may have decided "
+                            + "already; reload.", Map.of("status", shop.getStatus().name()));
+        }
         if (shop.getVersion() != version) {
             throw new ApiException(HttpStatus.CONFLICT, "SHOP_CHANGED",
                     "The shop changed after you loaded it. Reload and check the new details first.");
-        }
-        if (!java.util.Arrays.asList(allowed).contains(shop.getStatus())) {
-            throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
-                    "A shop that is " + shop.getStatus() + " can't be " + what + ".");
         }
         return shop;
     }
@@ -281,9 +283,10 @@ public class ShopAdminService {
         List<UUID> ids = list.stream().map(Shop::getId).toList();
         Set<UUID> approvedBefore = review.everApproved(ids);
         Map<UUID, String> phones = review.ownerPhones(ids);
+        Map<UUID, Instant> since = review.statusSince(ids);
         return list.stream().map(shop -> AdminShopResponse.from(shop, link(shop.getOwnerPhotoFileId()),
-                link(shop.getShopPhotoFileId()), approvedBefore.contains(shop.getId()), phones.get(shop.getId())))
-                .toList();
+                link(shop.getShopPhotoFileId()), approvedBefore.contains(shop.getId()), phones.get(shop.getId()),
+                since.get(shop.getId()))).toList();
     }
 
     private static void change(List<Change> out, String field, String label, String before, String after) {

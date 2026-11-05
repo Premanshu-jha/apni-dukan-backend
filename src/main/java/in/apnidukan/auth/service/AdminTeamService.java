@@ -2,6 +2,7 @@ package in.apnidukan.auth.service;
 
 import in.apnidukan.auth.domain.AdminRole;
 import in.apnidukan.auth.domain.User;
+import in.apnidukan.auth.repo.RefreshTokenRepository;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.security.SessionRevocations;
@@ -42,11 +43,14 @@ public class AdminTeamService {
     private final JdbcTemplate jdbc;
     private final TestModeService testMode;
     private final SessionRevocations revocations;
+    private final RefreshTokenRepository refreshTokens;
     private final AdminEvents events;
     private final Clock clock;
 
     public AdminTeamService(UserRepository users, JdbcTemplate jdbc, TestModeService testMode,
-                            SessionRevocations revocations, AdminEvents events, Clock clock) {
+                            SessionRevocations revocations, RefreshTokenRepository refreshTokens,
+                            AdminEvents events, Clock clock) {
+        this.refreshTokens = refreshTokens;
         this.users = users;
         this.jdbc = jdbc;
         this.testMode = testMode;
@@ -67,11 +71,11 @@ public class AdminTeamService {
     @Transactional(readOnly = true)
     public List<Member> team(UUID superAdminId) {
         requireSuperAdmin(users, superAdminId);
-        return jdbc.query("SELECT id, name, phone, admin_role, updated_at FROM users "
+        return jdbc.query("SELECT id, name, phone, admin_role, COALESCE(admin_since, created_at) AS since FROM users "
                         + "WHERE admin_role <> 'NONE' AND deleted_at IS NULL",
                         (rs, i) -> new Member(rs.getObject("id", UUID.class), rs.getString("name"),
                                 rs.getString("phone"), AdminRole.valueOf(rs.getString("admin_role")),
-                                rs.getTimestamp("updated_at").toInstant()))
+                                rs.getTimestamp("since").toInstant()))
                 .stream()
                 .sorted(Comparator.comparing((Member m) -> m.adminRole() != AdminRole.SUPER_ADMIN)
                         .thenComparing(Member::since))
@@ -99,8 +103,16 @@ public class AdminTeamService {
         if (user.isAdmin()) {
             throw new ApiException(HttpStatus.CONFLICT, "ALREADY_ADMIN", "That person is an admin already.");
         }
+        if (user.isTestAccount()) {
+            throw new ApiException(HttpStatus.CONFLICT, "TEST_PHONE",
+                    "That number's account was made in test mode, so others may be signed in to it. Use another "
+                            + "number.");
+        }
         user.makeAdmin(now);
         users.saveAndFlush(user);
+        // Anyone already signed in to this account starts again: admin rights come only with a new sign-in
+        refreshTokens.revokeAllForUser(user.getId(), now);
+        signOutAfterCommit(user.getId());
         events.record(superAdminId, "ADMIN_ADDED", phone, null);
         return new Member(user.getId(), user.getName(), user.getPhone(), user.getAdminRole(), now);
     }
@@ -118,16 +130,19 @@ public class AdminTeamService {
         user.removeAdmin(now());
         users.saveAndFlush(user);
         events.record(superAdminId, "ADMIN_REMOVED", user.getPhone(), null);
-        // After the change is saved: a token refreshed in between would otherwise still say admin
+        signOutAfterCommit(adminId);
+    }
+
+    /** After the change is saved: a token refreshed in between would otherwise still carry the old rights. */
+    private void signOutAfterCommit(UUID userId) {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
                 try {
-                    revocations.revokeAll(adminId);
+                    revocations.revokeAll(userId);
                 } catch (DataAccessException redisDown) {
-                    // Every admin page reads the role from the database anyway: they are refused from now on
-                    log.warn("Redis didn't answer; admin {} keeps a token until it expires, but is refused",
-                            adminId);
+                    // Every admin page reads the role from the database anyway; the token expires within 15 min
+                    log.warn("Redis didn't answer; sessions of {} end when their tokens expire", userId);
                 }
             }
         });
@@ -156,7 +171,7 @@ public class AdminTeamService {
     public record Me(UUID userId, String name, String phone, AdminRole adminRole, TestModeService.Switch testMode) {
     }
 
-    /** @param since when they became an admin (their account's last change, close enough for the list) */
+    /** @param since when they became an admin (for the super admin, set by hand: when the account was made) */
     public record Member(UUID userId, String name, String phone, AdminRole adminRole, Instant since) {
     }
 }

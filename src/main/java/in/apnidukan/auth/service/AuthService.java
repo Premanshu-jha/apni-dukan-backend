@@ -1,5 +1,6 @@
 package in.apnidukan.auth.service;
 
+import in.apnidukan.auth.domain.AdminRole;
 import in.apnidukan.auth.domain.RefreshToken;
 import in.apnidukan.auth.domain.RevokeReason;
 import in.apnidukan.auth.domain.User;
@@ -141,17 +142,26 @@ public class AuthService {
     public AuthTokens verifyLoginOtp(String phoneInput, String code, String device, String ip) {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitVerifies(ip);
-        if (!testCodeAccepted(phone, code)) {
+        boolean testSignIn = testCodeAccepted(phone, code);
+        if (!testSignIn) {
             otp.verify(OtpPurpose.LOGIN, phone, code, ip);
         }
         return tx.execute(status -> {
             User existing = users.findByPhone(phone).orElse(null);
             if (existing != null) {
+                if (testSignIn && (existing.isAdmin() || !existing.isTestAccount())) {
+                    // Changed between the check and now (made an admin, or a real account): the real code only
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "WRONG_CODE", "That code is not correct");
+                }
                 return issueTokens(existing, device, false);
             }
             User created;
             try {
-                created = users.saveAndFlush(new User(UUID.randomUUID(), phone, Instant.now(clock)));
+                User fresh = new User(UUID.randomUUID(), phone, Instant.now(clock));
+                if (testSignIn) {
+                    fresh.markTestAccount();   // only such an account ever takes any code (TestModeService)
+                }
+                created = users.saveAndFlush(fresh);
             } catch (DataIntegrityViolationException e) {
                 // The same phone signed up at the same moment from another request: retry once
                 throw new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN", "Please try again.");
@@ -192,6 +202,11 @@ public class AuthService {
         if (!stored.getExpiresAt().isAfter(now)) {
             refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
             throw unauthorized("REFRESH_TOKEN_EXPIRED", "Sign in again.");
+        }
+        if (user.isTestAccount() && !testMode.acceptsAnyCode(user.getPhone())) {
+            // A test account lives only while OTP test mode is on for its number
+            refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
+            throw unauthorized("TEST_MODE_OFF", "Test mode is off. Sign in again.");
         }
         if (refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.ROTATED) == 0) {
             // Another request with this same token swapped it a moment ago (we waited for its lock): a retry
@@ -265,9 +280,6 @@ public class AuthService {
         if (!limits.tryHit("email-send-user:" + userId, EMAIL_SENDS_PER_ACCOUNT_PER_DAY, Duration.ofHours(24))) {
             throw tooManyEmailCodes(userId);
         }
-        if (testMode.acceptsAnyCode(user.getPhone())) {
-            return;   // OTP test mode: a test number's email code is any 6 digits, no email
-        }
         String code = otp.issue(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, ip);
         email.send(address, "Your Apni Dukan verification code",
                 "Your Apni Dukan verification code is " + code + ".\n\nIt works for 10 minutes. "
@@ -277,9 +289,7 @@ public class AuthService {
     public User verifyEmail(UUID userId, String emailInput, String code, String ip) {
         String address = Emails.normalize(emailInput);
         limitVerifies(ip);
-        if (!testCodeAccepted(me(userId).getPhone(), code)) {
-            otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
-        }
+        otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
         String[] previous = new String[1];
         User saved = tx.execute(status -> {
             User user = users.lockById(userId).filter(u -> !u.isDeleted())   // never onto a deleted account
@@ -461,6 +471,11 @@ public class AuthService {
         if (memberships.find(userId).filter(m -> "OWNER".equals(m.role())).isPresent()) {
             throw new ApiException(HttpStatus.CONFLICT, "SHOP_OWNER",
                     "You own a shop on Apni Dukan. Close it or hand it over before deleting your account.");
+        }
+        // Without the super admin nobody could manage admins or switch test mode off until the database is edited
+        if (users.findById(userId).map(User::getAdminRole).orElse(AdminRole.NONE) == AdminRole.SUPER_ADMIN) {
+            throw new ApiException(HttpStatus.CONFLICT, "SUPER_ADMIN",
+                    "You are the super admin. Hand the role to someone else in the database first.");
         }
     }
 

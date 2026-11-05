@@ -36,6 +36,18 @@ public class User {
     @Column(name = "admin_role", nullable = false, length = 12)
     private AdminRole adminRole = AdminRole.NONE;
 
+    /** The old column, kept in step with adminRole for a version still running during a deploy (V9). */
+    @Column(nullable = false)
+    private boolean admin;
+
+    /** When they became an admin (null for the super admin set by hand, or a non-admin). */
+    @Column(name = "admin_since")
+    private Instant adminSince;
+
+    /** Made by a sign-in in OTP test mode: only such an account takes any code while test mode is on (V10). */
+    @Column(name = "test_account", nullable = false)
+    private boolean testAccount;
+
     /** When the person deleted their account; null while it exists. */
     @Column(name = "deleted_at")
     private Instant deletedAt;
@@ -83,6 +95,8 @@ public class User {
         this.email = null;
         this.emailVerifiedAt = null;
         this.adminRole = AdminRole.NONE;
+        this.admin = false;
+        this.adminSince = null;
         this.deletedAt = now;
         this.updatedAt = now;
     }
@@ -101,14 +115,26 @@ public class User {
     /** The super admin made this person an admin (only from NONE; the caller checks). */
     public void makeAdmin(Instant now) {
         this.adminRole = AdminRole.ADMIN;
+        this.admin = true;
+        this.adminSince = now;
         this.updatedAt = now;
     }
 
     /** The super admin removed this admin (never the super admin: the caller checks). */
     public void removeAdmin(Instant now) {
         this.adminRole = AdminRole.NONE;
+        this.admin = false;
+        this.adminSince = null;
         this.updatedAt = now;
     }
+
+    /** This account was first made by a sign-in in OTP test mode. */
+    public void markTestAccount() {
+        this.testAccount = true;
+    }
+
+    public boolean isTestAccount() { return testAccount; }
+    public Instant getAdminSince() { return adminSince; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
 }
