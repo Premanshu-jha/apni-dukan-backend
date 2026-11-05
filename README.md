@@ -409,16 +409,17 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 | Call | Who | What it does |
 | --- | --- | --- |
-| `GET /day?date=` | owner, helper, and anyone with walk-in access: all barbers; other barbers: their own | A column per barber with his hours and appointments (`notStarted` once its time passed). Never the start code |
+| `GET /day?date=` | owner, helper, and anyone with walk-in access: all barbers; other barbers: their own | A column per barber with his hours and appointments (`notStarted` once its time passed), and `myStaffId` (the caller's own barber profile, null for owner and helpers). Never the start code |
 | `GET /upcoming` | owner, helper, anyone with walk-in access: the salon; other barbers: their own | Online bookings still to come across the next 31 days, soonest first (up to 200), including ones running late |
 | `GET /history?from=&to=` | owner, helper | India dates, at most 31 days: bookings and walk-ins latest first (up to 500), how many ended in each status, and what the completed ones were worth at list price |
 | `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or when he is next free today (exact minutes, for information). A walk-in always starts now with a barber who is free now (IN_SERVICE at once, no code: the customer is in the chair); there is no booking a walk-in for later. 409 `BARBER_BUSY` with his next free time |
 | `GET /members` · `PUT /members/{userId}/walk-in-access {allowed}` | owner | Who may add walk-ins besides the owner (a helper or barber) |
-| `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before until 15 min after the start (then it is a no-show). A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper) |
+| `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before until 15 min after the start (then it is a no-show). A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper). Started early, it holds the barber from now for its length; if someone (or a break) still holds his chair, 409 `BARBER_BUSY` (`reason: STILL_BUSY`). Started late, it runs its full length from now when he is free for that, else keeps its planned end |
+| `POST /appointments/{id}/finish` | owner, helper; barber: own; and whoever added a walk-in that is still in the chair | Done before the planned end: IN_SERVICE → COMPLETED now, and the rest of the barber's time is free |
 | `POST /appointments/{id}/no-show` | owner, helper; barber: own | From 15 min after the start (the late allowance). Frees the time; a booking gives the customer a strike. Rarely needed: the job below does it within a minute |
-| `POST /appointments/{id}/undo-no-show` | owner, helper | Within 24 h of the start: the strike goes and the booking is closed as cancelled by the salon ("No-show undone"), with no message to the customer. Later, only support can remove the strike |
-| `POST /appointments/{id}/reassign {staffId}` · `/cancel {reason}` | owner, helper | Same time, another barber who does its services · salon cancel (customer told, no strike) |
-| `GET /staff/{id}/blocks/conflicts` · `POST /staff/{id}/blocks` · `DELETE .../blocks/{blockId}` | break: owner, helper, the barber; leave: owner | 409 `BLOCK_CONFLICTS` listing what's in the way; nothing saved |
+| `POST /appointments/{id}/undo-no-show` | owner, helper | Within 24 h of the start: the strike goes, the booking is closed as cancelled by the salon ("No-show undone"), and the customer is told it no longer counts. Later, only support can remove the strike |
+| `POST /appointments/{id}/reassign {staffId}` · `/cancel {reason}` | owner, helper; and whoever added a walk-in that is still in the chair (while he still has walk-in access) | Another barber who does its services: a booking at the same time; a walk-in already in the chair (added to the wrong barber) continues with him from now for the rest of its time; both barbers and an online customer are told · salon cancel of a booking, a walk-in, or a walk-in in the chair within 15 minutes of it being put in a chair, which a move doesn't reset (later: 409 `IN_CHAIR_TOO_LONG`, finish it instead; the owner and that chair's barber are told when someone else cancels one). A booking's customer and barber are told; no strike |
+| `GET /staff/{id}/blocks/conflicts` · `POST /staff/{id}/blocks` · `DELETE .../blocks/{blockId}` | break: owner, helper, the barber; leave: owner | 409 `BLOCK_CONFLICTS` listing what's in the way; nothing saved. A barber's own breaks: today or tomorrow, at most 4 hours a day in all (longer time off is leave); he removes only breaks he added (`addedByMe` on each appointment says which; on a walk-in it is set only while the viewer may add walk-ins, so it marks what he may fix) and only before they start (409 `WRONG_STATUS`, `reason: STARTED`) |
 | `GET /closures` · `POST /closures {date}` · `DELETE /closures/{id}` | read: anyone in the salon; change: owner | A whole day closed for every barber, all or nothing; barbers added or switched on later get it too |
 | `GET /pause` · `POST /pause {until?}` · `POST /resume` | read: anyone in the salon; change: owner, helper | Stop new online bookings (default: until midnight) |
 
@@ -430,11 +431,16 @@ first, with salon and booking number) and `blockedUntil`; `POST /strikes/{appoin
 one back (204; the reason goes into the booking's history as `STRIKE_REMOVED`).
 
 **Lifecycle:** CONFIRMED → IN_SERVICE (Start, with the customer's code) → COMPLETED by itself at its planned end (a
-job every minute; there is no Done button, so a long service makes the next customer wait). CONFIRMED →
+job every minute), or earlier with Finish. CONFIRMED →
 CANCELLED_BY_CUSTOMER / CANCELLED_BY_SALON. A booking not started 15 minutes after its start becomes
 NO_SHOW by itself (the same job; a customer being served has always been started with their code by then): an online
 booking gives the customer a strike and a "missed booking" message. BLOCKED → REMOVED. Every change is a
 conditional update ("only if still CONFIRMED") and is logged in `appointment_events` with who did it.
+
+**Refusals say why:** 409 `WRONG_STATUS` carries `details.reason`: `TOO_EARLY` (with `startFrom` or `noShowFrom`),
+`HELD_OVER` (with `heldUntil`), `TOO_LATE` (undo after 24 h), `CHANGED` (someone changed it first; with `status`),
+`REASSIGNED` (a barber's appointment that was just given to another barber), `IN_CHAIR_TOO_LONG` (a walk-in cancelled
+more than 15 minutes into its visit), `STARTED` (a barber removing his own break once it began).
 
 **Rules:** 30 minutes' notice and up to 7 days ahead (the salon's settings); quarter hours only (400
 `OUTSIDE_WINDOW`); at most 2 upcoming bookings per customer (409 `TOO_MANY_BOOKINGS`); a cancel less than 1 hour
@@ -452,8 +458,11 @@ due as Web Push to each of the person's devices (`POST /me/push-subscriptions`, 
 `GET /push/public-key`), retrying after 1, 5 and 15 minutes. Confirmation now; reminder 60 minutes before (only for
 bookings made more than 75 minutes ahead) with the address, map link, start code and "held until"; rescheduled;
 cancelled. Moving or cancelling a booking cancels its pending messages. The salon is told too: when a customer
-books, moves or cancels online (or deletes their account), the owner and the barber it's with (if he has a sign-in)
-get a message; these are never cancelled by a later change, which sends its own. The server only sends to the browsers' real
+books, moves or cancels online (or deletes their account), the owner, the helpers (in the app only, never SMS) and the
+barber it's with (if he has a sign-in) get a message; these are never cancelled by a later change, which sends its
+own. When the owner or a helper gives a booking to another barber or cancels it, the barbers concerned are told (not
+the person who did it). Someone who leaves a salon, is removed, or loses their barber sign-in loses its messages
+(`SALON_*`) too: its customers' names aren't theirs to keep. The server only sends to the browsers' real
 push services (Google, Mozilla, Apple, Microsoft), so a device address can't point it anywhere else.
 
 **In-app message list:** every message is also kept for the app's own list (its PUSH row in `notification_jobs`,
@@ -490,6 +499,9 @@ accepts but its answer times out, or Redis fails right after a send) one SMS can
 | To the salon: new booking | `SMS_TEMPLATE_SALON_NEW_BOOKING` | `##CUSTOMER##`, `##WHEN##`, `##BARBER##`, `##BOOKING##` |
 | To the salon: moved | `SMS_TEMPLATE_SALON_BOOKING_MOVED` | `##CUSTOMER##`, `##WHEN##` (the new time), `##BARBER##`, `##BOOKING##` |
 | To the salon: cancelled | `SMS_TEMPLATE_SALON_BOOKING_CANCELLED` | `##CUSTOMER##`, `##WHEN##`, `##BARBER##`, `##BOOKING##` |
+
+In the app only (no SMS): `BOOKING_BARBER_CHANGED`, `BOOKING_NO_SHOW_UNDONE`, `SALON_BOOKING_REASSIGNED`,
+`SALON_CANCELLED_BY_SALON`, `SALON_WALK_IN_CANCELLED` (to the owner).
 
 Example DLT text for the reminder: "Reminder: {#var#} at {#var#} today, {#var#}. Show code {#var#} at the counter.
 Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sign-in OTP.
