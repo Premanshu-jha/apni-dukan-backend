@@ -52,6 +52,7 @@ class SalonShopChanges implements ShopChangeListener {
     @Transactional(propagation = Propagation.MANDATORY)
     public void memberRemoved(UUID shopId, UUID userId) {
         access.revokeWalkIns(shopId, userId);
+        notices.forgetSalonMessages(userId);
         staff.findByUserId(userId).filter(b -> b.getShopId().equals(shopId)).ifPresent(barber -> {
             barber.unlinkLogin(clock.instant());
             staff.saveAndFlush(barber);
@@ -75,7 +76,8 @@ class SalonShopChanges implements ShopChangeListener {
     public void suspended(UUID shopId) {
         Instant now = clock.instant();
         ShopCard card = shops.find(shopId).orElseThrow();
-        for (Appointment a : appointments.upcomingBookings(shopId, now)) {
+        // Also those whose customer may still be on the way (held 15 minutes): left open, they'd become no-shows
+        for (Appointment a : appointments.upcomingBookings(shopId, now.minus(SalonDayService.LATE_ALLOWANCE))) {
             if (appointments.close(a.id(), AppointmentStatus.CANCELLED_BY_SALON, SUSPENDED_REASON, now)) {
                 appointments.event(a.id(), now, null, "CANCELLED_BY_SALON", "salon suspended by Apni Dukan");
                 notices.cancelledBySalon(a, card, SUSPENDED_REASON, now);

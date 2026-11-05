@@ -108,20 +108,23 @@ public final class BookingResponses {
      * @param notStarted   true if it is CONFIRMED and its start has passed: the screen shows "not started" so staff
      *                     press Start or No-show
      * @param noShowFrom   bookings and walk-ins: No-show is allowed from this moment
+     * @param addedByMe    whether the person asking added it (a barber may remove only the breaks he added)
      */
     public record AppointmentView(UUID id, AppointmentKind kind, BlockType blockType, UUID staffId,
                                   AppointmentStatus status, Instant startsAt, Instant endsAt, Instant startedAt,
                                   Boolean startedWithCode, List<ServiceLine> services, String bookingNo,
                                   String customerName, String customerPhone, String guestName,
-                                  String cancelReason, UUID closureId, boolean notStarted, Instant noShowFrom) {
+                                  String cancelReason, UUID closureId, boolean notStarted, Instant noShowFrom,
+                                  boolean addedByMe) {
 
         public static AppointmentView of(Appointment a, List<BookedService> services, String customerName,
-                                         String customerPhone, Instant now, Instant noShowFrom) {
+                                         String customerPhone, Instant now, Instant noShowFrom, UUID viewer) {
             boolean notStarted = a.status() == AppointmentStatus.CONFIRMED && !now.isBefore(a.startsAt());
             return new AppointmentView(a.id(), a.kind(), a.blockType(), a.staffId(), a.status(), a.startsAt(),
                     a.endsAt(), a.startedAt(), a.startedWithCode(), ServiceLine.from(services), a.bookingNo(),
                     customerName, customerPhone, a.guestName(), a.cancelReason(), a.closureId(),
-                    notStarted, a.kind() == AppointmentKind.BLOCK ? null : noShowFrom);
+                    notStarted, a.kind() == AppointmentKind.BLOCK ? null : noShowFrom,
+                    viewer != null && viewer.equals(a.createdBy()));
         }
     }
 
@@ -136,7 +139,8 @@ public final class BookingResponses {
     }
 
     /** The day screen: one column per barber. */
-    public record DayView(LocalDate date, List<BarberColumn> barbers) {
+    /** @param myStaffId the caller's own barber profile (a barber), so the app knows which column is his; else null */
+    public record DayView(LocalDate date, List<BarberColumn> barbers, UUID myStaffId) {
     }
 
     /** @param hours his working hours that day, "HH:mm" in India time */
