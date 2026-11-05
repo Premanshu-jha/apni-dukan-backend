@@ -1563,6 +1563,17 @@ class SalonBookingIntegrationTest {
     }
 
     @Test
+    void movingAWalkInToAnotherBarberDoesntRestartItsFifteenMinutesToCancel() {
+        UUID w = id(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()));   // in Raju's chair from 10:00
+        CLOCK.set(at("10:14"));
+        assertThat(post("/salon/appointments/" + w + "/reassign", Map.of("staffId", sunil.toString()), owner).status())
+                .isEqualTo(200);
+        CLOCK.set(at("10:16"));   // 2 minutes with Sunil, 16 in the salon's chair
+        Reply late = post("/salon/appointments/" + w + "/cancel", Map.of("reason", "Mistake"), owner);
+        assertThat(field(field(late.body(), "details"), "reason")).as(late.text()).isEqualTo("IN_CHAIR_TOO_LONG");
+    }
+
+    @Test
     void aBookingStartedLateRunsItsFullLengthWhenTheBarberIsFree() {
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));   // 12:00-12:30
         CLOCK.set(at("12:10"));
