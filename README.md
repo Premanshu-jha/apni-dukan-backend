@@ -296,7 +296,9 @@ during a deploy.) The super admin is never changed from the website and can't de
 number nobody has signed in with can be added; the account its first test sign-in makes is a test account
 (`users.test_account`), and only such an account ever takes any code, never a real customer's, a shop's or an
 admin's. A test account stays signed in only while test mode is on for its number: switching it off, the time
-running out, or removing the number ends its sessions (refresh answers 401 `TEST_MODE_OFF`). Email codes, recovery
+running out, or removing the number ends its sessions (refresh answers 401 `TEST_MODE_OFF`). If the number's real holder
+later signs in with the SMS code (or the account is recovered onto a real phone), it becomes a normal account for
+good and every tester still signed in to it is signed out. Email codes, recovery
 and account deletion always need the real code (otherwise a test account could claim someone's email). For testing
 on the real deployment without SMS credit; like the OMR project's per-student OTP bypass, but switched on for a few
 hours at a time. Every change (admins, test numbers, test mode on and off) is logged in `admin_events`.
