@@ -299,7 +299,7 @@ Content-Type: application/json
     }
 %}
 
-### 11e. Field team only (users.admin = true): shops waiting for a visit, with photo links. Saves the first one.
+### 11e. Field team only (users.admin_role ADMIN or SUPER_ADMIN): shops waiting for a visit, with photo links. Saves the first one.
 GET {{baseUrl}}/admin/shops
 Authorization: Bearer {{accessToken}}
 
@@ -568,4 +568,71 @@ Authorization: Bearer {{accessToken}}
 
 ### 20c. Mark everything read (send {"ids": ["..."]} to mark only some)
 POST {{baseUrl}}/me/notifications/read
+Authorization: Bearer {{accessToken}}
+
+### 21. Admin website: who I am, my role, and whether OTP test mode is on
+GET {{baseUrl}}/admin/me
+Authorization: Bearer {{accessToken}}
+
+### 21b. Dashboard: kiranas and salons in each group
+GET {{baseUrl}}/admin/dashboard
+Authorization: Bearer {{accessToken}}
+
+### 21c. Salons waiting for their first visit (q: shop number, name or owner phone)
+GET {{baseUrl}}/admin/shops?type=SALON&group=FIRST_VISIT&q=
+Authorization: Bearer {{accessToken}}
+
+> {%
+    if (response.body.length > 0) {
+        client.global.set("adminShopId", response.body[0].id);
+        client.global.set("adminShopVersion", response.body[0].version);
+    }
+%}
+
+### 21d. One shop: what changed since approval, and its timeline
+GET {{baseUrl}}/admin/shops/{{adminShopId}}
+Authorization: Bearer {{accessToken}}
+
+### 21e. Send back with a checklist, a reason for the owner and a note only admins see
+POST {{baseUrl}}/admin/shops/{{adminShopId}}/reject
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "version": {{adminShopVersion}}, "reason": "The pin is not at the shop.", "note": "Called the owner, no answer.",
+  "checklist": ["PIN_WRONG"] }
+
+### 21f. A note on the timeline (admins only)
+POST {{baseUrl}}/admin/shops/{{adminShopId}}/notes
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "note": "Shop is behind the temple; call before going." }
+
+### 21g. Super admin: the team; add an admin by phone
+GET {{baseUrl}}/admin/team
+Authorization: Bearer {{accessToken}}
+
+###
+POST {{baseUrl}}/admin/team
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "phone": "9000000002" }
+
+### 21h. Super admin: add a test number, then OTP test mode on for 2 hours (and off)
+POST {{baseUrl}}/admin/test-mode/phones
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "phone": "9111111111", "label": "My test barber" }
+
+###
+PUT {{baseUrl}}/admin/test-mode
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "hours": 2 }
+
+###
+DELETE {{baseUrl}}/admin/test-mode
 Authorization: Bearer {{accessToken}}

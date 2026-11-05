@@ -147,7 +147,7 @@ public class ShopReviewStore {
     /** Newest first. */
     public List<Event> timeline(UUID shopId) {
         return jdbc.query("SELECT e.*, u.name AS by_name FROM shop_events e LEFT JOIN users u ON u.id = e.by_user "
-                + "WHERE e.shop_id = ? ORDER BY e.at DESC, e.id DESC", (rs, i) -> {
+                + "WHERE e.shop_id = ? ORDER BY e.at DESC, e.seq DESC", (rs, i) -> {
                     String list = rs.getString("checklist");
                     return new Event(rs.getTimestamp("at").toInstant(), ShopEventType.valueOf(rs.getString("event")),
                             rs.getString("by_name"), rs.getBoolean("by_admin"), rs.getString("reason"),

@@ -9,9 +9,9 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | Module | Status |
 | --- | --- |
 | `common` | Error format, security (JWT check, CORS), current user/shop, clock |
-| `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery |
+| `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery; admin roles (one super admin, admins) and OTP test mode |
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
-| `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, Submit for visit), field-team approval, My shop, owner/helper/barber roles, history of every change |
+| `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, history of every change |
 | `salon` | Salon setup (services, barbers with optional sign-in and photo, weekly hours, booking settings), online booking, walk-ins, start code, no-show and strikes, breaks, leave, closed days, pause, the automatic end |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
@@ -242,11 +242,11 @@ sequenceDiagram
 | `POST /api/v1/shops/me/helpers` · `DELETE /api/v1/shops/me/helpers/{userId}` | Owner. `{phone}`: adds a helper (an account is made if that phone has none; they sign in with OTP and find the shop). 409 `ALREADY_IN_A_SHOP`. Remove: membership and walk-in access go, their sessions end at once. A salon's helper sees every barber, starts (also without code), cancels, reassigns and adds breaks; in a kirana the helper's billing and stock rights come with the kirana work |
 | `POST /api/v1/shops/me/leave` | A helper or barber leaves the shop (204), e.g. a phone added without asking. A barber's profile, hours and bookings stay with the salon; only his sign-in goes. 409 `OWNER_CANT_LEAVE` |
 | `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos are set |
-| `GET /api/v1/admin/shops?status=` | Field team (`users.admin`) only, else 403. Shops in a status (default `PENDING_VISIT`) with links to both photos |
-| `POST /api/v1/admin/shops/{id}/approve` | Field team. `{version}` from the list they checked: PENDING_VISIT → APPROVED after the visit. 409 `SHOP_CHANGED` if the owner changed something since (reload, check, approve), 409 `WRONG_STATUS` from another status. Customers can find it from now on |
-| `POST /api/v1/admin/shops/{id}/reject` | Field team. `{version, reason}`: the visit didn't pass but can be fixed, PENDING_VISIT → DRAFT. The owner sees `statusReason`, fixes it and submits again. Bookings already made stay (suspend to cancel them) |
-| `POST /api/v1/admin/shops/{id}/suspend` | Field team. `{version, reason}`: APPROVED or PENDING_VISIT (e.g. found shut at its visit) → SUSPENDED, off the app. A salon's upcoming online bookings are cancelled and each customer is told ("isn't taking online bookings for now"; the field team's reason goes only to the owner). The salon can still run its own day (walk-ins) |
-| `POST /api/v1/admin/shops/{id}/reinstate` | Field team. `{version}`: SUSPENDED → PENDING_VISIT, back in the visit list; live again only once approved after a new check (so nothing changed while suspended goes live unchecked). Cancelled bookings stay cancelled |
+| `GET /api/v1/admin/shops?status=` | Field team (admins) only, else 403. Shops in a status (default `PENDING_VISIT`) with links to both photos. The admin website uses `?type=&group=` instead (see "The admin website") |
+| `POST /api/v1/admin/shops/{id}/approve` | Field team. `{version, note?}` from the page they checked: PENDING_VISIT → APPROVED after the visit. 409 `SHOP_CHANGED` if the owner changed something since (reload, check, approve), 409 `WRONG_STATUS` from another status. Customers can find it from now on |
+| `POST /api/v1/admin/shops/{id}/reject` | Field team. `{version, reason, note?, checklist?}`: the visit didn't pass but can be fixed, PENDING_VISIT → DRAFT. The owner sees `statusReason`, fixes it and submits again. Bookings already made stay (suspend to cancel them) |
+| `POST /api/v1/admin/shops/{id}/suspend` | Field team. `{version, reason, note?, checklist?}`: APPROVED or PENDING_VISIT (e.g. found shut at its visit) → SUSPENDED, off the app. A salon's upcoming online bookings are cancelled and each customer is told ("isn't taking online bookings for now"; the field team's reason goes only to the owner). The salon can still run its own day (walk-ins) |
+| `POST /api/v1/admin/shops/{id}/reinstate` | Field team. `{version, note?}`: SUSPENDED → PENDING_VISIT, back in the visit list; live again only once approved after a new check (so nothing changed while suspended goes live unchecked). Cancelled bookings stay cancelled |
 
 The owner gets a message for each field-team decision (approved, sent back, suspended, reinstated).
 
@@ -262,6 +262,43 @@ reminders, so customers are sent to the new place. A photo that a shop or barber
 
 A shop is a **kirana** or a **salon**: send `"type": "SALON"` when registering (left out = `KIRANA`). The type can't
 be changed later; `GET /shops/me` returns it.
+
+## The admin website (`/api/v1/admin`)
+
+For Apni Dukan's own team. Everything here needs an admin's sign-in (the normal phone OTP); anyone else gets 403.
+Who is an admin is read from the database on every call, so someone removed is refused at once even with a token
+issued before.
+
+**Roles** (`users.admin_role`): `ADMIN` (field team: visits and support) and `SUPER_ADMIN` (also the team and OTP
+test mode). There is at most one super admin (the database refuses a second). It is set by hand, once, in Neon:
+
+```sql
+UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE phone = '9xxxxxxxxx';
+```
+
+(Sign in once first, so the account exists.) The super admin is never changed from the website.
+
+| Endpoint | Notes |
+| --- | --- |
+| `GET /admin/me` | Who is signed in: `{userId, name, phone, adminRole, testMode: {on, until}}` (the website shows a red banner while test mode is on) |
+| `GET /admin/dashboard` | For `KIRANA` and `SALON`, how many shops are in each group: `FIRST_VISIT` (waiting, never approved), `RECHECK` (waiting, approved before: the owner moved the pin or changed a photo, or it was reinstated), `SENT_BACK` (a draft sent back with a reason), `LIVE`, `SUSPENDED`. A draft never submitted is in no group |
+| `GET /admin/shops?type=&group=&q=` | A group's shops, longest waiting first, at most 100, each with `group` and `ownerPhone`. `q`: the shop number exactly, or name, owner's name or owner's phone in part |
+| `GET /admin/shops/{id}` | The shop; a salon's barbers and services; `changes` since its last approved version (name, owner, address, area, city, pincode, pin with `pinMovedMetres`, GSTIN, Udyam, photos with the old photo links); the `timeline`, newest first |
+| `POST /admin/shops/{id}/notes {note}` | A note only admins see (2–500 characters), 201 |
+| decisions | approve, reject (send back), suspend, reinstate as in "How shops work", now with an optional `note` (admins only, up to 500 characters) and, for send back and suspend, an optional `checklist`: `NAME_BOARD_NOT_VISIBLE`, `OWNER_PHOTO_UNCLEAR`, `PIN_WRONG`, `ADDRESS_MISMATCH`, `GST_UDYAM_MISMATCH`, `SHOP_SHUT`, `OTHER`. The owner sees only the `reason` |
+| `GET /admin/team` · `POST /admin/team {phone}` · `DELETE /admin/team/{userId}` | Super admin only (403 `SUPER_ADMIN_ONLY` for an admin). Add makes that phone an admin (the account is made if it has none); 409 `ALREADY_ADMIN`, 409 `TEST_PHONE`. Remove: their sessions end at once; 409 `CANT_REMOVE_SUPER_ADMIN` |
+| `GET` · `PUT {hours}` · `DELETE /admin/test-mode` | Super admin only. OTP test mode on for 1–8 hours (it switches itself off), or off now |
+| `POST /admin/test-mode/phones {phone, label}` · `DELETE /admin/test-mode/phones/{phone}` | Super admin only. The test numbers. 409 `ADMIN_PHONE` (an admin's number can't be one), 409 `ALREADY_TEST_PHONE` |
+
+**OTP test mode.** While it is on, the test numbers sign in with any 6 digits and no SMS is sent to them; their email
+code takes any 6 digits too and no email is sent. Every other number works as usual, and an admin's number is never
+treated as a test number. For testing on the real deployment without SMS credit; it works in production too, so
+add only numbers that are yours. Like the OMR project's per-student OTP bypass, but switched on for a few hours at a
+time. Every change (admins, test numbers, test mode on and off) is logged in `admin_events`.
+
+**Timeline** (`shop_events`): sent for a visit (owner), changed after approval (owner), approved, sent back,
+suspended, reinstated, note. A shop's last approved photos can't be deleted while they are what it is compared with
+(409 `FILE_IN_USE`).
 
 ## How salon setup works
 
@@ -426,7 +463,7 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
-**Support (`/api/v1/admin/salon`, `users.admin` only):** `POST /strikes/lookup {phone}` lists a customer's strikes (latest
+**Support (`/api/v1/admin/salon`, admins only):** `POST /strikes/lookup {phone}` lists a customer's strikes (latest
 first, with salon and booking number) and `blockedUntil`; `POST /strikes/{appointmentId}/remove {reason}` takes
 one back (204; the reason goes into the booking's history as `STRIKE_REMOVED`).
 
@@ -548,7 +585,8 @@ didn't answer in time; nothing was done, try again in a few seconds.
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V9__...`).
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V12__...`). `users.admin` (replaced
+by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
 Never edit a migration that has already run. Hibernate is set to `validate`.
