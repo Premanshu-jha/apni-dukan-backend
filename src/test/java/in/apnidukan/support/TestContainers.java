@@ -53,7 +53,7 @@ public final class TestContainers {
 
     public static synchronized GenericContainer<?> postgres() {
         if (postgres == null) {
-            postgres = new GenericContainer<>("postgres:16-alpine")
+            postgres = new GenericContainer<>("postgis/postgis:16-3.4-alpine")
                     .withEnv("POSTGRES_DB", DB_NAME)
                     .withEnv("POSTGRES_USER", DB_USER)
                     .withEnv("POSTGRES_PASSWORD", DB_PASSWORD)
