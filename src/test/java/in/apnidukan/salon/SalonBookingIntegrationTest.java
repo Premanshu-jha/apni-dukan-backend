@@ -1161,6 +1161,11 @@ class SalonBookingIntegrationTest {
         // Their own messages are emptied by the wipe job, a slice at a time, over as many runs as it takes
         assertThat(count("notification_jobs WHERE user_id = '" + customer + "' AND title <> ''")).isPositive();
         assertThat(count("account_wipes")).isEqualTo(1);
+        int own = count("notification_jobs WHERE user_id = '" + customer + "'");
+        wipes.runOnce();
+        if (own > 4) {   // more than one run's share: it remembers how far it got and carries on from there
+            assertThat(count("account_wipes WHERE after_id <> '00000000-0000-0000-0000-000000000000'")).isEqualTo(1);
+        }
         int runs = 0;
         while (count("account_wipes") > 0 && runs < 20) {
             wipes.runOnce();

@@ -17,7 +17,8 @@ import java.util.UUID;
  * {@code slice} (1,000) rows per statement, walking each person's rows in id order. A salon owner with lakhs of
  * messages is emptied over a few short statements instead of one huge update inside the delete request. At most
  * {@code perRun} (100,000) rows a minute, so a run stays short; whoever isn't finished is continued next minute
- * (from the start of their rows: the already-empty ones are only read, not written again).
+ * from where it stopped (account_wipes.after_id), so a person with lakhs of messages is done after a few runs and
+ * those queued after them wait only that long.
  * Under a job lease, so one copy of the backend does it.
  */
 @Component
@@ -59,8 +60,9 @@ public class AccountWipeJob {
     public int runOnce() {
         int rows = 0;
         int finished = 0;
-        for (UUID person : jobs.wipesDue(20)) {
-            UUID after = NotificationStore.FIRST;
+        for (NotificationStore.Wipe wipe : jobs.wipesDue(20)) {
+            UUID person = wipe.userId();
+            UUID after = wipe.afterId();
             boolean done = false;
             while (rows < perRun) {
                 Optional<UUID> last = jobs.wipeSlice(person, after, slice);
@@ -70,9 +72,10 @@ public class AccountWipeJob {
                     break;
                 }
                 after = last.get();
+                jobs.wipeProgress(person, after);   // a run that stops (or dies) here carries on from this id
             }
             if (!done) {
-                break;   // this minute's share is used; this person continues next minute
+                break;   // this minute's share is used; this person continues next minute, from `after`
             }
             jobs.wipeDone(person);
             finished++;

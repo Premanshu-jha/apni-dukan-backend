@@ -194,6 +194,7 @@ public class ShopReviewStore {
         return Boolean.TRUE.equals(yes);
     }
 
+    /** Writes a timeline entry; a trigger (V16) keeps the shop's status_since and ever_approved from it. */
     public void addEvent(UUID shopId, Instant at, UUID by, boolean byAdmin, ShopEventType event, String reason,
                          String note, Collection<VisitIssue> checklist) {
         jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event, reason, note, checklist) "
@@ -201,15 +202,6 @@ public class ShopReviewStore {
                 UUID.randomUUID(), shopId, Timestamp.from(at), by, byAdmin, event.name(), reason, note,
                 checklist == null || checklist.isEmpty() ? null
                         : String.join(",", checklist.stream().map(Enum::name).toList()));
-
-        if (event != ShopEventType.NOTE) {
-            // Every status change writes an entry here, so this is where the list's columns are kept (V16): when the
-            // shop entered its current status, and whether it was ever approved (a later visit is a re-check)
-            // (reinstating sends a shop back for a visit, PENDING_VISIT: only APPROVED makes it approved)
-            boolean approved = event == ShopEventType.APPROVED;
-            jdbc.update("UPDATE shops SET status_since = GREATEST(status_since, ?), "
-                    + "ever_approved = ever_approved OR ? WHERE id = ?", Timestamp.from(at), approved, shopId);
-        }
     }
 
     /** Newest first. */

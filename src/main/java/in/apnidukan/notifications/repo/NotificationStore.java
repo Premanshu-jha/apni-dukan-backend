@@ -200,14 +200,20 @@ public class NotificationStore {
                 userId, at(now));
     }
 
-    /** The oldest people still to wipe. */
-    public List<UUID> wipesDue(int max) {
-        return jdbc.queryForList("SELECT user_id FROM account_wipes ORDER BY queued_at, user_id LIMIT ?",
-                UUID.class, max);
+    /** A person still to wipe, and the last message id already emptied. */
+    public record Wipe(UUID userId, UUID afterId) {
     }
 
-    /** Where a wipe starts: before every id. */
-    public static final UUID FIRST = new UUID(0, 0);
+    /** The oldest people still to wipe. */
+    public List<Wipe> wipesDue(int max) {
+        return jdbc.query("SELECT user_id, after_id FROM account_wipes ORDER BY queued_at, user_id LIMIT ?",
+                (rs, i) -> new Wipe(rs.getObject("user_id", UUID.class), rs.getObject("after_id", UUID.class)), max);
+    }
+
+    /** Remembers how far a wipe got, so the next run carries on from there instead of reading it all again. */
+    public void wipeProgress(UUID userId, UUID afterId) {
+        jdbc.update("UPDATE account_wipes SET after_id = ? WHERE user_id = ?", afterId, userId);
+    }
 
     /**
      * Empties the next {@code max} of this person's own messages after {@code afterId} (in id order, one range of

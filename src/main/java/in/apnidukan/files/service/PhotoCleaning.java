@@ -47,7 +47,7 @@ class PhotoCleaning {
         }
         if (!got) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "PHOTOS_BUSY",
-                    "Lots of photos are being sent right now. Try again in a minute.");
+                    "Lots of photos are being sent right now. Try again in a minute.").retryAfter(60);
         }
         try {
             return PhotoCleaner.clean(original);

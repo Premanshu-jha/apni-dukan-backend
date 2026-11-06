@@ -461,6 +461,25 @@ class AdminIntegrationTest {
     }
 
     @Test
+    void anyTimelineEntryKeepsTheListColumnsEvenFromCodeThatDoesntKnowThem() {
+        // As a copy of the backend on the previous version would write it, straight into the timeline
+        UUID shop = shop("KIRANA", "APPROVED", "Old Code Store", "9300000098");
+        Instant later = NOW.plusSeconds(3600);
+        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, true, "
+                + "'APPROVED')", UUID.randomUUID(), shop, Timestamp.from(later), admin);
+        assertThat(jdbc.queryForObject("SELECT ever_approved FROM shops WHERE id = ?", Boolean.class, shop)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status_since FROM shops WHERE id = ?", Timestamp.class, shop)
+                .toInstant()).isEqualTo(later);
+        // A note moves nothing; an earlier entry never moves it back
+        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event, note) VALUES (?, ?, ?, ?, "
+                + "true, 'NOTE', 'x')", UUID.randomUUID(), shop, Timestamp.from(later.plusSeconds(60)), admin);
+        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, true, "
+                + "'SUSPENDED')", UUID.randomUUID(), shop, Timestamp.from(NOW), admin);
+        assertThat(jdbc.queryForObject("SELECT status_since FROM shops WHERE id = ?", Timestamp.class, shop)
+                .toInstant()).isEqualTo(later);
+    }
+
+    @Test
     void anUnchangedAnswerIsA304WithNoBodyAndAChangeGivesANewOne() {
         UUID shop = shop("SALON", "PENDING_VISIT", "Etag Salon", "9300000099");
         String path = base + "/admin/dashboard";
