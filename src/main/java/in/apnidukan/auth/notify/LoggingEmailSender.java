@@ -2,12 +2,11 @@ package in.apnidukan.auth.notify;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.stereotype.Component;
 
-/** Only if you choose it (MAIL_ENABLED=false): prints the email (with its code) in the console. Refused in production. */
-@Component
-@ConditionalOnProperty(name = "app.mail.enabled", havingValue = "false")
+/**
+ * Only if you choose it (MAIL_ENABLED=false): prints the email (with its code) in the console. Refused in production.
+ * Chosen by EmailConfig.
+ */
 public class LoggingEmailSender implements EmailSender {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingEmailSender.class);

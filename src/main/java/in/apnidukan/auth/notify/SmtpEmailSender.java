@@ -3,21 +3,17 @@ package in.apnidukan.auth.notify;
 import in.apnidukan.common.error.ApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.mail.MailException;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.stereotype.Component;
 
 /**
  * Sends real email over SMTP, the same setup as Vidyavriti (Gmail: smtp.gmail.com:587 with an app password).
  * Sends while the request waits, so if Gmail refuses, the app is told to try again instead of waiting for a code
- * that never comes. Never logs the email body (it contains the code).
+ * that never comes. Never logs the email body (it contains the code). Used while RESEND_API_KEY is not set
+ * (EmailConfig).
  */
-@Component
-@ConditionalOnProperty(name = "app.mail.enabled", havingValue = "true", matchIfMissing = true)
 public class SmtpEmailSender implements EmailSender {
 
     private static final Logger log = LoggerFactory.getLogger(SmtpEmailSender.class);
@@ -25,13 +21,11 @@ public class SmtpEmailSender implements EmailSender {
     private final JavaMailSender mailSender;
     private final String from;
 
-    public SmtpEmailSender(JavaMailSender mailSender,
-                           @Value("${spring.mail.username:}") String username,
-                           @Value("${spring.mail.password:}") String password,
-                           @Value("${app.mail.from:}") String from) {
+    public SmtpEmailSender(JavaMailSender mailSender, String username, String password, String from) {
         if (username.isBlank() || password.isBlank()) {
             throw new IllegalStateException("Email: set MAIL_USERNAME and MAIL_PASSWORD (the Gmail app password, "
-                    + "as in Vidyavriti), or MAIL_ENABLED=false to print emails in the console.");
+                    + "as in Vidyavriti), RESEND_API_KEY to send through Resend, or MAIL_ENABLED=false to print "
+                    + "emails in the console.");
         }
         this.mailSender = mailSender;
         // Gmail only sends "from" the signed-in account, so that is the default sender
