@@ -12,7 +12,10 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -53,6 +56,32 @@ public class NotificationService implements Notifications {
         if (!cleaned.smsVariables().isEmpty() && smsTemplates.forType(notice.type()).isPresent()) {
             jobs.insert(cleaned, Channel.SMS, clock.instant());
         }
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void queueAll(List<Notice> notices) {
+        List<Map.Entry<Notice, Channel>> rows = new ArrayList<>();
+        for (Notice notice : notices) {
+            Notice cleaned = clean(notice);
+            rows.add(Map.entry(cleaned, Channel.PUSH));
+            if (!cleaned.smsVariables().isEmpty() && smsTemplates.forType(notice.type()).isPresent()) {
+                rows.add(Map.entry(cleaned, Channel.SMS));
+            }
+        }
+        jobs.insertAll(rows, clock.instant());
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void cancelPendingAll(Collection<UUID> refIds) {
+        jobs.cancelPendingAll(refIds, clock.instant());
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void replacePendingAll(List<Notice> notices) {
+        jobs.rewritePendingAll(notices.stream().map(NotificationService::clean).toList());
     }
 
     /** Title, body and SMS variables cut to what the columns and DLT allow. */

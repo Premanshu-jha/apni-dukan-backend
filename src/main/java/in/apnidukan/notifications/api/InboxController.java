@@ -45,6 +45,7 @@ public class InboxController {
         inbox.markRead(me(), app, body == null ? null : body.ids());
     }
 
+    /** @param unread unread messages in this app's list, counted up to 100: the apps show "99+" from 100 on */
     public record Unread(long unread) {
     }
 
