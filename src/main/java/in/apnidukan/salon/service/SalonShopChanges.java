@@ -4,7 +4,6 @@ import in.apnidukan.common.context.ShopChangeListener;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
 import in.apnidukan.salon.domain.Appointment;
-import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.salon.repo.SalonAccessStore;
 import in.apnidukan.salon.repo.SalonStaffRepository;
@@ -14,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -76,12 +76,11 @@ class SalonShopChanges implements ShopChangeListener {
     public void suspended(UUID shopId) {
         Instant now = clock.instant();
         ShopCard card = shops.find(shopId).orElseThrow();
-        // Also those whose customer may still be on the way (held 15 minutes): left open, they'd become no-shows
-        for (Appointment a : appointments.upcomingBookings(shopId, now.minus(SalonDayService.LATE_ALLOWANCE))) {
-            if (appointments.close(a.id(), AppointmentStatus.CANCELLED_BY_SALON, SUSPENDED_REASON, now)) {
-                appointments.event(a.id(), now, null, "CANCELLED_BY_SALON", "salon suspended by Apni Dukan");
-                notices.cancelledBySalon(a, card, SUSPENDED_REASON, now);
-            }
-        }
+        // Also those whose customer may still be on the way (held 15 minutes): left open, they'd become no-shows.
+        // One statement closes them all and logs each (a busy salon can have thousands ahead); then each customer is
+        // told (queued messages, sent by the sender job).
+        List<Appointment> closed = appointments.cancelAllUpcoming(shopId, now.minus(SalonDayService.LATE_ALLOWANCE),
+                SUSPENDED_REASON, "salon suspended by Apni Dukan", now);
+        notices.cancelledBySalon(closed, card, SUSPENDED_REASON, now);
     }
 }

@@ -49,6 +49,7 @@ public class FileService {
     private final Duration linkValidity;
     private final List<FileUsageChecker> usageCheckers;
     private final List<AttachedFiles> attachedElsewhere;
+    private final PhotoCleaning photos;
 
     public FileService(StoredFileRepository repository,
                        FileStorage storage,
@@ -56,7 +57,9 @@ public class FileService {
                        Clock clock,
                        @Value("${app.files.link-minutes:5}") long linkMinutes,
                        List<FileUsageChecker> usageCheckers,
-                       List<AttachedFiles> attachedElsewhere) {
+                       List<AttachedFiles> attachedElsewhere,
+                       PhotoCleaning photos) {
+        this.photos = photos;
         this.repository = repository;
         this.storage = storage;
         this.currentUser = currentUser;
@@ -104,7 +107,7 @@ public class FileService {
                 throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE", "Photos must be JPEG or PNG");
             }
             try {
-                cleaned = PhotoCleaner.clean(upload.getBytes());
+                cleaned = photos.clean(upload.getBytes());   // a few at a time per server
             } catch (IOException e) {
                 throw new UncheckedIOException("Could not read the uploaded file", e);
             }

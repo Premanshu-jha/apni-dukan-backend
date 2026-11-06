@@ -35,6 +35,9 @@ public class R2FileStorage implements FileStorage {
                 .bucket(bucket)
                 .key(key)
                 .contentType(contentType)
+                // A file never changes under its key (a new photo gets a new key), so a phone may keep it for as long
+                // as a link lasts; "private": only that phone's browser, never a shared cache
+                .cacheControl("private, max-age=3600")
                 .contentLength(sizeBytes)
                 .build();
         s3.putObject(request, RequestBody.fromInputStream(content, sizeBytes));

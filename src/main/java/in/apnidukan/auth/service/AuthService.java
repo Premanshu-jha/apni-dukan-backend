@@ -23,7 +23,6 @@ import in.apnidukan.common.text.TextCleaner;
 import in.apnidukan.common.text.TextCleaner.TextField;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -54,9 +53,7 @@ public class AuthService {
 
     private static final Logger log = LoggerFactory.getLogger(AuthService.class);
 
-    /** Per caller network: codes requested (SMS or email) and codes tried, per hour. Stops one machine spraying. */
-    static final int IP_SENDS_PER_HOUR = 10;
-    static final int IP_VERIFIES_PER_HOUR = 30;
+    /** Per caller network (see SignInLimits): codes requested and codes tried are counted per hour. */
     static final Duration HOUR = Duration.ofHours(1);
     /** Email codes one account may request per day (each goes out through our mail account). */
     static final int EMAIL_SENDS_PER_ACCOUNT_PER_DAY = 10;
@@ -85,7 +82,7 @@ public class AuthService {
     private final HumanCheck humans;
     private final List<AccountDeletionListener> deletionListeners;
     private final List<SignOutEverywhereListener> signOutListeners;
-    private final int smsDailyLimit;
+    private final SignInLimits signInLimits;
     private final TestModeService testMode;
     private final SecureRandom random = new SecureRandom();
 
@@ -95,7 +92,7 @@ public class AuthService {
                        PlatformTransactionManager transactions, ShopMemberships memberships, HumanCheck humans,
                        List<AccountDeletionListener> deletionListeners,
                        List<SignOutEverywhereListener> signOutListeners,
-                       @Value("${app.sms.daily-limit:500}") int smsDailyLimit, TestModeService testMode) {
+                       SignInLimits signInLimits, TestModeService testMode) {
         this.testMode = testMode;
         this.memberships = memberships;
         this.signOutListeners = signOutListeners;
@@ -113,7 +110,7 @@ public class AuthService {
         this.revocations = revocations;
         this.background = background;
         this.tx = new TransactionTemplate(transactions);
-        this.smsDailyLimit = smsDailyLimit;
+        this.signInLimits = signInLimits;
     }
 
     // ---------------- phone OTP sign-in ----------------
@@ -330,7 +327,7 @@ public class AuthService {
         });
         if (previous[0] != null) {
             String old = previous[0];
-            background.run("email-changed notice", () -> email.send(old, "Your Apni Dukan email was changed",
+            background.runAlways("email-changed notice", () -> email.send(old, "Your Apni Dukan email was changed",
                     "The recovery email of your Apni Dukan account was changed to " + mask(address) + ".\n\n"
                             + "If this wasn't you, contact Apni Dukan support immediately."));
         }
@@ -407,9 +404,9 @@ public class AuthService {
         String previousPhone = oldPhone[0];
         if (!previousPhone.equals(newPhone)) {
             // Not under the daily SMS cap: this warning must get out even if someone used up the cap
-            background.run("account-moved SMS", () -> sms.sendAccountMoved(previousPhone, ending));
+            background.runAlways("account-moved SMS", () -> sms.sendAccountMoved(previousPhone, ending));
         }
-        background.run("account-moved email", () -> email.send(address, "Your Apni Dukan account moved to a new phone",
+        background.runAlways("account-moved email", () -> email.send(address, "Your Apni Dukan account moved to a new phone",
                 "Your account now uses the phone number ending " + ending + ". Every other device was signed out."
                         + "\n\nIf this wasn't you, contact Apni Dukan support immediately."));
         return tokens;
@@ -533,15 +530,17 @@ public class AuthService {
     }
 
     private void limitSends(String ip) {
-        String key = "ip-send:" + ClientIp.limitKey(ip);
-        if (!limits.tryHit(key, IP_SENDS_PER_HOUR, HOUR)) {
+        String network = ClientIp.limitKey(ip);
+        String key = "ip-send:" + network;
+        if (!limits.tryHit(key, signInLimits.sendsPerHour(network), HOUR)) {
             throw tooManyRequests(limits.secondsLeft(key));
         }
     }
 
     private void limitVerifies(String ip) {
-        String key = "ip-verify:" + ClientIp.limitKey(ip);
-        if (!limits.tryHit(key, IP_VERIFIES_PER_HOUR, HOUR)) {
+        String network = ClientIp.limitKey(ip);
+        String key = "ip-verify:" + network;
+        if (!limits.tryHit(key, signInLimits.verifiesPerHour(network), HOUR)) {
             throw tooManyRequests(limits.secondsLeft(key));
         }
     }
@@ -549,7 +548,7 @@ public class AuthService {
     /** Every code SMS goes through here: a hard daily cap protects the SMS bill even if all other limits are dodged. */
     /** SMS_PAUSED before anything is issued: a refused send must not break a code the person already has. */
     private void requireSmsNotPaused() {
-        if (limits.current("sms-day") >= smsDailyLimit) {
+        if (limits.current("sms-day") >= signInLimits.smsDailyLimit()) {
             throw smsPaused();
         }
     }
@@ -560,10 +559,12 @@ public class AuthService {
     }
 
     private void sendSms(Runnable send) {
+        int smsDailyLimit = signInLimits.smsDailyLimit();
         long sentToday = limits.hit("sms-day", Duration.ofHours(24));
-        if (sentToday == smsDailyLimit * 8L / 10) {
-            // Once, at 80%: time to look before sign-in codes stop for everyone
-            log.error("80% of the daily SMS limit used ({} of {}). Check for abuse now; at {} sign-in codes stop.",
+        if (sentToday == SignInLimits.warnAt(smsDailyLimit)) {
+            // Once a day (the counter passes each number once per 24 hours), at 80%: time to look before sign-in
+            // codes stop for everyone. Point an alert at this line.
+            log.warn("80% of the daily SMS limit used ({} of {}). Check for abuse now; at {} sign-in codes stop.",
                     sentToday, smsDailyLimit, smsDailyLimit);
         }
         if (sentToday > smsDailyLimit) {

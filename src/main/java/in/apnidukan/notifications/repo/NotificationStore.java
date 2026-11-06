@@ -16,9 +16,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 import java.util.UUID;
 
@@ -40,6 +42,36 @@ public class NotificationStore {
                 UUID.randomUUID(), n.userId(), channel.name(), n.type(), n.refId(), n.title(), n.body(), n.url(),
                 channel == Channel.SMS ? encode(n.smsVariables()) : null, at(sendAt), at(sendAt), at(now),
                 n.aboutUserId());
+    }
+
+    /** One message on one channel for each pair, in batched statements (a salon suspended with 2,000 bookings). */
+    public void insertAll(List<Map.Entry<Notice, Channel>> rows, Instant now) {
+        if (rows.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("INSERT INTO notification_jobs (id, user_id, channel, type, ref_id, title, body, url, "
+                        + "sms_variables, send_at, status, attempts, next_try_at, created_at, about_user_id) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)",
+                rows.stream().map(row -> {
+                    Notice n = row.getKey();
+                    Channel channel = row.getValue();
+                    Instant sendAt = n.sendAt().isBefore(now) ? now : n.sendAt();
+                    return new Object[] {UUID.randomUUID(), n.userId(), channel.name(), n.type(), n.refId(),
+                        n.title(), n.body(), n.url(), channel == Channel.SMS ? encode(n.smsVariables()) : null,
+                        at(sendAt), at(sendAt), at(now), n.aboutUserId()};
+                }).toList());
+    }
+
+    /** cancelPending for many subjects in one statement. */
+    public int cancelPendingAll(java.util.Collection<UUID> refIds, Instant now) {
+        if (refIds.isEmpty()) {
+            return 0;
+        }
+        return jdbc.update("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = ? "
+                + "WHERE ref_id = ANY (?) AND status = 'PENDING'", ps -> {
+                    ps.setObject(1, at(now));
+                    ps.setArray(2, ps.getConnection().createArrayOf("uuid", refIds.toArray()));
+                });
     }
 
     public int cancelPending(UUID refId, Instant now) {
@@ -84,9 +116,19 @@ public class NotificationStore {
                 (rs, i) -> inboxItem(rs), userId, at(now), groups(audience), at(beforeAt), beforeId, limit);
     }
 
+    /**
+     * The bell's number stops counting here: a busy salon can have thousands of unread messages, and counting them
+     * all on every app open would read all those rows. The apps show "99+" from 100 on.
+     */
+    public static final int UNREAD_CAP = 100;
+
+    /**
+     * How many of this app's messages are unread, counted up to {@link #UNREAD_CAP}: the exact number below it,
+     * {@code UNREAD_CAP} for that many or more. Still a plain number for the apps, so their contract is unchanged.
+     */
     public long unreadCount(UUID userId, Audience audience, Instant now) {
-        Long n = jdbc.queryForObject("SELECT count(*)" + INBOX + " AND read_at IS NULL", Long.class,
-                userId, at(now), groups(audience));
+        Long n = jdbc.queryForObject("SELECT count(*) FROM (SELECT 1" + INBOX + " AND read_at IS NULL LIMIT ?) AS unread",
+                Long.class, userId, at(now), groups(audience), UNREAD_CAP);
         return n == null ? 0 : n;
     }
 
@@ -106,9 +148,23 @@ public class NotificationStore {
                 + " AND read_at IS NULL)", at(now), userId, at(now), groups(audience));
     }
 
-    /** Deletes messages finished (sent, failed, cancelled, no device) before this moment; returns how many. */
-    public int deleteFinishedBefore(Instant before) {
-        return jdbc.update("DELETE FROM notification_jobs WHERE status <> 'PENDING' AND finished_at < ?", at(before));
+    /**
+     * Deletes up to {@code max} messages that finished (sent, failed, cancelled, no device) before this moment;
+     * returns how many. One short statement (Postgres has no DELETE … LIMIT, hence the MATERIALIZED CTE: picked
+     * once, so never more than {@code max} rows), found through ix_notification_jobs_finished; the caller repeats it
+     * while slices come back full.
+     */
+    public int deleteFinishedBefore(Instant before, int max) {
+        return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs "
+                + "WHERE status <> 'PENDING' AND finished_at < ? LIMIT ?) "
+                + "DELETE FROM notification_jobs WHERE id IN (SELECT id FROM slice)", at(before), max);
+    }
+
+    /** Like deleteFinishedBefore, SMS rows only (ix_notification_jobs_sms_finished): they are kept a shorter time. */
+    public int deleteFinishedSmsBefore(Instant before, int max) {
+        return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs "
+                + "WHERE status <> 'PENDING' AND channel = 'SMS' AND finished_at < ? LIMIT ?) "
+                + "DELETE FROM notification_jobs WHERE id IN (SELECT id FROM slice)", at(before), max);
     }
 
     /**
@@ -129,17 +185,84 @@ public class NotificationStore {
         return jdbc.update("DELETE FROM notification_jobs WHERE user_id = ? AND type LIKE 'SALON\\_%'", userId);
     }
 
-    /** Empties the text of every message this person got or would have got (their account was deleted). */
-    public int blankForUser(UUID userId) {
-        // Their own messages, and the ones others got about them (a salon told "Rahul booked")
+    /**
+     * Empties the messages others got about this person (a salon told "Ravi booked"), at once: they are other people's
+     * lists, and a customer is named in only a few messages per booking.
+     */
+    public int blankAbout(UUID userId) {
         return jdbc.update("UPDATE notification_jobs SET title = '', body = '', url = NULL, sms_variables = NULL "
-                + "WHERE user_id = ? OR about_user_id = ?", userId, userId);
+                + "WHERE about_user_id = ? AND title <> ''", userId);
+    }
+
+    /** Their own messages are emptied later, a slice at a time (AccountWipeJob): nobody can open them any more. */
+    public void queueWipe(UUID userId, Instant now) {
+        jdbc.update("INSERT INTO account_wipes (user_id, queued_at) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                userId, at(now));
+    }
+
+    /** A person still to wipe, and the last message id already emptied. */
+    public record Wipe(UUID userId, UUID afterId) {
+    }
+
+    /** The oldest people still to wipe. */
+    public List<Wipe> wipesDue(int max) {
+        return jdbc.query("SELECT user_id, after_id FROM account_wipes ORDER BY queued_at, user_id LIMIT ?",
+                (rs, i) -> new Wipe(rs.getObject("user_id", UUID.class), rs.getObject("after_id", UUID.class)), max);
+    }
+
+    /** Remembers how far a wipe got, so the next run carries on from there instead of reading it all again. */
+    public void wipeProgress(UUID userId, UUID afterId) {
+        jdbc.update("UPDATE account_wipes SET after_id = ? WHERE user_id = ?", afterId, userId);
+    }
+
+    /**
+     * Empties the next {@code max} of this person's own messages after {@code afterId} (in id order, one range of
+     * ix_notification_jobs_user, so each slice reads only its own rows). Returns the last id of the slice, or empty
+     * when there were none left.
+     */
+    public Optional<UUID> wipeSlice(UUID userId, UUID afterId, int max) {
+        List<UUID> last = jdbc.queryForList("""
+                WITH slice AS MATERIALIZED (
+                    SELECT id FROM notification_jobs WHERE user_id = ? AND id > ? ORDER BY id LIMIT ?),
+                emptied AS (
+                    UPDATE notification_jobs SET title = '', body = '', url = NULL, sms_variables = NULL
+                    WHERE id IN (SELECT id FROM slice)
+                    AND NOT (title = '' AND body = '' AND url IS NULL AND sms_variables IS NULL))
+                SELECT id FROM slice ORDER BY id DESC LIMIT 1""", UUID.class, userId, afterId, max);
+        return last.stream().findFirst();
+    }
+
+    /**
+     * Ends the wipe if none of their messages holds text any more, and returns true. Otherwise (a message added while
+     * the wipe ran, with an id below where it had got: ids are random) it starts over from the first id and returns
+     * false. Reads all their rows once, only at the end.
+     */
+    public boolean wipeDone(UUID userId) {
+        int ended = jdbc.update("DELETE FROM account_wipes WHERE user_id = ? AND NOT EXISTS (SELECT 1 FROM "
+                + "notification_jobs WHERE user_id = ? AND NOT (title = '' AND body = '' AND url IS NULL "
+                + "AND sms_variables IS NULL))", userId, userId);
+        if (ended == 0) {
+            wipeProgress(userId, new UUID(0, 0));
+        }
+        return ended == 1;
     }
 
     /**
      * New text for one message type about this subject, on the rows still waiting. Their lease and place in the
      * queue (next_try_at) don't change: a server sending one right now keeps it and records its outcome as usual.
      */
+    /** rewritePending for many messages, in batched statements. */
+    public void rewritePendingAll(List<Notice> notices) {
+        if (notices.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("UPDATE notification_jobs SET title = ?, body = ?, url = ?, read_at = NULL, "
+                        + "sms_variables = CASE WHEN channel = 'SMS' THEN ? ELSE NULL END "
+                        + "WHERE ref_id = ? AND type = ? AND status = 'PENDING'",
+                notices.stream().map(n -> new Object[] {n.title(), n.body(), n.url(), encode(n.smsVariables()),
+                    n.refId(), n.type()}).toList());
+    }
+
     public int rewritePending(Notice n) {
         // A new text is a new message: unread again in the app list
         return jdbc.update("UPDATE notification_jobs SET title = ?, body = ?, url = ?, read_at = NULL, "
@@ -152,20 +275,24 @@ public class NotificationStore {
      * Takes up to {@code max} due messages for this server. Each one's next try is pushed back by {@code lease}
      * and its attempt counted in the same statement, so another server (or the next run) won't take it while it is
      * being sent; if this server dies mid-send, the message becomes due again when the lease runs out.
-     * SKIP LOCKED: two servers claiming at once each get different rows, never the same one.
+     * SKIP LOCKED: two servers claiming at once each get different rows, never the same one. The chosen ids are
+     * a MATERIALIZED CTE, so they are picked exactly once: as a plain IN (sub-select), Postgres may run the
+     * sub-select again and change more than {@code max} rows.
      */
     public List<NotificationJob> claimDue(Instant now, int max, Duration lease, int maxAttempts) {
         return jdbc.query("""
+                        WITH due AS MATERIALIZED (
+                            SELECT id FROM notification_jobs
+                            WHERE status = 'PENDING' AND next_try_at <= ? AND attempts < ?
+                            ORDER BY next_try_at LIMIT ? FOR UPDATE SKIP LOCKED)
                         UPDATE notification_jobs SET next_try_at = ?, attempts = attempts + 1
-                        WHERE id IN (SELECT id FROM notification_jobs
-                                     WHERE status = 'PENDING' AND next_try_at <= ? AND attempts < ?
-                                     ORDER BY next_try_at LIMIT ? FOR UPDATE SKIP LOCKED)
+                        WHERE id IN (SELECT id FROM due)
                         RETURNING id, user_id, channel, type, title, body, url, sms_variables, attempts""",
                 (rs, i) -> new NotificationJob(rs.getObject("id", UUID.class), rs.getObject("user_id", UUID.class),
                         Channel.valueOf(rs.getString("channel")), rs.getString("type"), rs.getString("title"),
                         rs.getString("body"), rs.getString("url"), decode(rs.getString("sms_variables")),
                         rs.getInt("attempts")),
-                at(now.plus(lease)), at(now), maxAttempts, max);
+                at(now), maxAttempts, max, at(now.plus(lease)));
     }
 
     /**
@@ -187,16 +314,67 @@ public class NotificationStore {
                 + "AND next_try_at = ?", at(newLease), id, at(lease)) == 1;
     }
 
+    /**
+     * Gives a claimed message back without trying it (its batch ran out of time, or the server is stopping): the
+     * attempt counted at claim is taken back and it is due again at {@code dueAt}. Only while still ours.
+     */
+    public boolean release(UUID id, Instant lease, Instant dueAt) {
+        return jdbc.update("UPDATE notification_jobs SET attempts = attempts - 1, next_try_at = ? WHERE id = ? "
+                + "AND status = 'PENDING' AND next_try_at = ?", at(dueAt), id, at(lease)) == 1;
+    }
+
     /** Final outcome; only while still PENDING and still ours (lease). A cancel in between wins. */
     public void finish(UUID id, JobStatus status, Instant now, Instant lease) {
-        jdbc.update("UPDATE notification_jobs SET status = ?, finished_at = ? WHERE id = ? AND status = 'PENDING' "
-                + "AND next_try_at = ?", status.name(), at(now), id, at(lease));
+        jdbc.update(FINISH, status.name(), at(now), id, at(lease));
     }
 
     /** Try again later; only while still PENDING and still ours. */
     public void retryAt(UUID id, Instant when, Instant lease) {
-        jdbc.update("UPDATE notification_jobs SET next_try_at = ? WHERE id = ? AND status = 'PENDING' "
-                + "AND next_try_at = ?", at(when), id, at(lease));
+        jdbc.update(RETRY, at(when), id, at(lease));
+    }
+
+    private static final String FINISH = "UPDATE notification_jobs SET status = ?, finished_at = ? WHERE id = ? "
+            + "AND status = 'PENDING' AND next_try_at = ?";
+    private static final String RETRY = "UPDATE notification_jobs SET next_try_at = ? WHERE id = ? "
+            + "AND status = 'PENDING' AND next_try_at = ?";
+
+    /**
+     * The outcomes of a whole batch, as two JDBC batches (one round trip each) instead of one statement per message.
+     * Each row is changed only while still PENDING and still ours, exactly as {@link #finish} and {@link #retryAt}.
+     */
+    public void record(List<Outcome> outcomes) {
+        List<Object[]> finished = new ArrayList<>();
+        List<Object[]> retries = new ArrayList<>();
+        for (Outcome o : outcomes) {
+            if (o.status() == null) {
+                retries.add(new Object[] {at(o.at()), o.id(), at(o.lease())});
+            } else {
+                finished.add(new Object[] {o.status().name(), at(o.at()), o.id(), at(o.lease())});
+            }
+        }
+        if (!finished.isEmpty()) {
+            jdbc.batchUpdate(FINISH, finished);
+        }
+        if (!retries.isEmpty()) {
+            jdbc.batchUpdate(RETRY, retries);
+        }
+    }
+
+    /**
+     * What happened to one claimed message.
+     * @param status the final status, or null to try again at {@code at}
+     * @param at     when it finished, or (status null) when to try again
+     * @param lease  the lease it was sent under (it must still be ours)
+     */
+    public record Outcome(UUID id, JobStatus status, Instant at, Instant lease) {
+
+        public static Outcome finished(UUID id, JobStatus status, Instant at, Instant lease) {
+            return new Outcome(id, status, at, lease);
+        }
+
+        public static Outcome retry(UUID id, Instant at, Instant lease) {
+            return new Outcome(id, null, at, lease);
+        }
     }
 
     /** SMS variables as a query string (SALON=Sharma%20Hair&TIME=6%3A30%20PM), kept in one text column. */

@@ -36,8 +36,17 @@ public class AppointmentStore {
             + "started_with_code, cancel_reason, created_by, client_request_id, created_at, updated_at";
     private static final String HOLDING = "status IN ('CONFIRMED', 'IN_SERVICE', 'BLOCKED')";
     // Whole statements as constants: no SQL is ever built from values (they always go in as ? parameters)
-    private static final String HOLDING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE staff_id = ANY(?) AND "
-            + HOLDING + " AND starts_at < ? AND ends_at > ? AND id <> ? ORDER BY starts_at";
+    /**
+     * What holds these barbers' time in [from, to). Joined barber by barber with an overlap test on time_range, so
+     * the no-overlap index (ex_appointments_no_overlap: staff_id, time_range) answers it from the few rows around
+     * that time, not from each barber's whole history.
+     */
+    private static final String HOLDING_SQL = "SELECT a.id, a.shop_id, a.staff_id, a.kind, a.block_type, "
+            + "a.closure_id, a.customer_id, a.booking_no, a.guest_name, a.start_code, a.starts_at, a.ends_at, a.status, "
+            + "a.started_at, a.started_with_code, a.cancel_reason, a.created_by, a.client_request_id, a.created_at, "
+            + "a.updated_at FROM unnest(?::uuid[]) AS b(id) "
+            + "JOIN appointments a ON a.staff_id = b.id AND a.time_range && tstzrange(?, ?, '[)') "
+            + "WHERE a." + HOLDING + " AND a.id <> ? ORDER BY a.starts_at";
     /** Upcoming: still open (CONFIRMED or IN_SERVICE) and not over yet. Past: everything else. */
     private static final String UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
             + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ? ORDER BY starts_at, id LIMIT ?";
@@ -130,13 +139,31 @@ public class AppointmentStore {
     }
 
     /**
-     * The automatic no-show: every booking still CONFIRMED whose start was at or before
-     * {@code startedBy} becomes NO_SHOW, in one statement; returns the rows it changed (each only once, even with
-     * two servers running this).
+     * The automatic no-show: up to `limit` bookings still CONFIRMED whose start was at or before {@code startedBy}
+     * become NO_SHOW, oldest first; returns the rows it changed. Found through ix_appointments_confirmed_start (V13),
+     * so it reads only bookings waiting to start, never the whole table. Rows another server or request holds are
+     * skipped (SKIP LOCKED) and picked up next time, and each row changes only once.
      */
-    public List<Appointment> markNoShows(Instant startedBy, Instant now) {
-        return jdbc.query("UPDATE appointments SET status = 'NO_SHOW', updated_at = ? WHERE status = 'CONFIRMED' "
-                + "AND kind <> 'BLOCK' AND starts_at <= ? RETURNING " + COLUMNS, ROW, at(now), at(startedBy));
+    public List<Appointment> markNoShows(Instant startedBy, Instant now, int limit) {
+        // MATERIALIZED: picked once; as a plain subquery Postgres may run it again per row and pass the limit
+        return jdbc.query("WITH due AS MATERIALIZED (SELECT id FROM appointments WHERE status = 'CONFIRMED' "
+                + "AND kind <> 'BLOCK' AND starts_at <= ? ORDER BY starts_at LIMIT ? FOR UPDATE SKIP LOCKED) "
+                + "UPDATE appointments SET status = 'NO_SHOW', updated_at = ? WHERE id IN (SELECT id FROM due) "
+                + "AND status = 'CONFIRMED' RETURNING " + COLUMNS, ROW, at(startedBy), limit, at(now));
+    }
+
+    /**
+     * Every online booking of the salon still CONFIRMED that starts after {@code since} becomes CANCELLED_BY_SALON with
+     * the reason, each with an event, in one statement (through ix_appointments_shop_confirmed); returns them.
+     */
+    public List<Appointment> cancelAllUpcoming(UUID shopId, Instant since, String reason, String detail, Instant now) {
+        return jdbc.query("WITH closed AS (UPDATE appointments SET status = 'CANCELLED_BY_SALON', cancel_reason = ?, "
+                        + "updated_at = ? WHERE shop_id = ? AND kind = 'BOOKING' AND status = 'CONFIRMED' "
+                        + "AND starts_at > ? RETURNING " + COLUMNS + "), "
+                        + "logged AS (INSERT INTO appointment_events (appointment_id, happened_at, by_user, event, detail) "
+                        + "SELECT id, ?, NULL, 'CANCELLED_BY_SALON', ? FROM closed) "
+                        + "SELECT " + COLUMNS + " FROM closed ORDER BY starts_at", ROW,
+                reason, at(now), shopId, at(since), at(now), detail);
     }
 
     /** CONFIRMED → NO_SHOW, CANCELLED_BY_CUSTOMER or CANCELLED_BY_SALON; frees the barber's time. */
@@ -169,22 +196,41 @@ public class AppointmentStore {
     }
 
     /**
-     * The automatic end: every IN_SERVICE appointment whose planned end has passed becomes COMPLETED, and each gets
-     * an event, in one statement. Safe to run on two servers at once: a row already completed no longer matches.
+     * The automatic end: up to `limit` IN_SERVICE appointments whose planned end has passed become COMPLETED, each
+     * with an event, in one statement (through ix_appointments_in_service). Safe on two servers at once: locked rows
+     * are skipped and a row already completed no longer matches.
      * @return how many were completed
      */
-    public int completeEnded(Instant now) {
+    public int completeEnded(Instant now, int limit) {
         Integer count = jdbc.queryForObject("""
-                        WITH done AS (
+                        WITH due AS MATERIALIZED (
+                            SELECT id FROM appointments WHERE status = 'IN_SERVICE' AND ends_at <= ?
+                            ORDER BY ends_at LIMIT ? FOR UPDATE SKIP LOCKED),
+                        done AS (
                             UPDATE appointments SET status = 'COMPLETED', updated_at = ?
-                            WHERE status = 'IN_SERVICE' AND ends_at <= ?
+                            WHERE id IN (SELECT id FROM due) AND status = 'IN_SERVICE'
                             RETURNING id),
                         logged AS (
                             INSERT INTO appointment_events (appointment_id, happened_at, by_user, event)
                             SELECT id, ?, NULL, 'COMPLETED' FROM done)
                         SELECT count(*) FROM done""",
-                Integer.class, at(now), at(now), at(now));
+                Integer.class, at(now), limit, at(now), at(now));
         return count == null ? 0 : count;
+    }
+
+    /** The same history row for many appointments, in one statement (see event()). */
+    public void eventAll(java.util.Collection<UUID> appointmentIds, Instant at, UUID by, String event, String detail) {
+        if (appointmentIds.isEmpty()) {
+            return;
+        }
+        jdbc.update("INSERT INTO appointment_events (appointment_id, happened_at, by_user, event, detail) "
+                + "SELECT id, ?, ?, ?, ? FROM unnest(?::uuid[]) AS id", ps -> {
+                    ps.setObject(1, at(at));
+                    ps.setObject(2, by);
+                    ps.setString(3, event);
+                    ps.setString(4, detail);
+                    ps.setArray(5, ps.getConnection().createArrayOf("uuid", appointmentIds.toArray()));
+                });
     }
 
     /** Appends to the appointment's history. by is null for the system (the automatic end). */
@@ -260,8 +306,8 @@ public class AppointmentStore {
         }
         return jdbc.query(HOLDING_SQL, ps -> {
             ps.setArray(1, ps.getConnection().createArrayOf("uuid", staffIds.toArray()));
-            ps.setObject(2, at(to));
-            ps.setObject(3, at(from));
+            ps.setObject(2, at(from));
+            ps.setObject(3, at(to));
             ps.setObject(4, except == null ? new UUID(0, 0) : except);
         }, ROW);
     }
@@ -294,8 +340,9 @@ public class AppointmentStore {
 
     /** Everything in the salon overlapping [from, to) except removed blocks, for the day screen. */
     public List<Appointment> forDay(UUID shopId, Instant from, Instant to) {
+        // Overlap on time_range: answered by ix_appointments_shop_range (V13) from that day's rows only
         return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND status <> 'REMOVED' "
-                + "AND starts_at < ? AND ends_at > ? ORDER BY starts_at, id", ROW, shopId, at(to), at(from));
+                + "AND time_range && tstzrange(?, ?, '[)') ORDER BY starts_at, id", ROW, shopId, at(from), at(to));
     }
 
     /**

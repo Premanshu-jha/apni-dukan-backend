@@ -12,8 +12,8 @@ import java.util.UUID;
 
 /**
  * A shop as the field team sees it in the approval list.
- * @param ownerPhotoUrl a link to the owner's photo, valid for a few minutes; null if not set
- * @param shopPhotoUrl  a link to the shop's photo, valid for a few minutes; null if not set
+ * @param ownerPhotoUrl a link to the owner's photo, valid for at least 15 more minutes; null if not set
+ * @param shopPhotoUrl  a link to the shop's photo, valid for at least 15 more minutes; null if not set
  * @param statusReason  why it was sent back to DRAFT or suspended; null otherwise
  * @param version       send it back with approve, reject, suspend or reinstate: it proves the decision is for what
  *                      was checked

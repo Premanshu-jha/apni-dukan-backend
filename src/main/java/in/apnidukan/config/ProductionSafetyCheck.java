@@ -6,6 +6,10 @@ import in.apnidukan.common.web.ClientAddress;
 import in.apnidukan.auth.notify.EmailSender;
 import in.apnidukan.auth.notify.LoggingEmailSender;
 import in.apnidukan.auth.notify.LoggingSmsSender;
+import in.apnidukan.auth.notify.ResendEmailSender;
+import in.apnidukan.auth.notify.SmtpEmailSender;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import in.apnidukan.auth.notify.SmsSender;
 import in.apnidukan.notifications.service.LoggingPushSender;
 import in.apnidukan.notifications.service.PushSender;
@@ -20,6 +24,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class ProductionSafetyCheck {
+
+    private static final Logger log = LoggerFactory.getLogger(ProductionSafetyCheck.class);
 
     public ProductionSafetyCheck(@Value("${app.production:false}") boolean production, SmsSender sms,
                                  EmailSender email, @Value("${app.cors.allowed-origins}") String corsOrigins,
@@ -60,7 +66,16 @@ public class ProductionSafetyCheck {
         }
         if (email instanceof LoggingEmailSender) {
             throw new IllegalStateException("APP_PRODUCTION=true but MAIL_ENABLED=false: email codes would be "
-                    + "printed in the log. Configure SMTP.");
+                    + "printed in the log. Configure Resend (RESEND_API_KEY) or SMTP.");
+        }
+        if (email instanceof SmtpEmailSender) {
+            // Not refused: Gmail works until the Resend account exists; it just can't carry real volume
+            log.warn("APP_PRODUCTION=true but email goes through Gmail SMTP (RESEND_API_KEY not set): Gmail sends a "
+                    + "few hundred emails a day. Recommended: set RESEND_API_KEY and EMAIL_FROM.");
+        }
+        if (email instanceof ResendEmailSender resend && resend.usesTestSender()) {
+            throw new IllegalStateException("APP_PRODUCTION=true but EMAIL_FROM is Resend's test address: it only "
+                    + "reaches the Resend account's own inbox. Verify the app's domain in Resend and send from it.");
         }
         if (!accountMovedSms) {
             throw new IllegalStateException("APP_PRODUCTION=true but SMS_ACCOUNT_MOVED_ENABLED=false: the old phone "

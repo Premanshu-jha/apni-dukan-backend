@@ -78,8 +78,9 @@ public class SecurityConfig {
         CorsConfiguration cors = new CorsConfiguration();
         cors.setAllowedOrigins(Arrays.stream(origins.split(",")).map(String::trim).filter(o -> !o.isEmpty()).toList());
         cors.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
-        cors.setAllowedHeaders(List.of("Authorization", "Content-Type", "Idempotency-Key"));
-        cors.setExposedHeaders(List.of("Retry-After"));
+        // If-None-Match / ETag: the apps ask "changed since?" when they refresh (EtagConfig)
+        cors.setAllowedHeaders(List.of("Authorization", "Content-Type", "Idempotency-Key", "If-None-Match"));
+        cors.setExposedHeaders(List.of("Retry-After", "ETag"));
         cors.setAllowCredentials(false);
         cors.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

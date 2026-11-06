@@ -36,13 +36,15 @@ public final class BookingResponses {
 
     /**
      * A salon in the list near the customer.
-     * @param photoUrl the salon's photo, a link valid for a few minutes; null if none
+     * @param photoUrl the salon's photo, a link valid for at least 15 more minutes; null if none
      */
-    public record SalonSummary(UUID id, String name, String area, String city, double distanceKm, String photoUrl) {
+    public record SalonSummary(UUID id, String name, String area, String city, double distanceKm, String photoUrl,
+                               double distanceMetres) {
 
         public static SalonSummary from(ShopCard card, String photoUrl) {
             return new SalonSummary(card.id(), card.name(), card.area(), card.city(),
-                    card.distanceKm() == null ? 0 : card.distanceKm(), photoUrl);
+                    card.distanceKm() == null ? 0 : card.distanceKm(), photoUrl,
+                    card.distanceMetres() == null ? 0 : card.distanceMetres());
         }
     }
 
@@ -51,7 +53,7 @@ public final class BookingResponses {
      * @param hours per weekday (1 = Monday), the earliest start and latest end of any barber; a day without
      *              barbers is left out
      * @param pausedUntil set while the salon has paused online bookings
-     * @param photoUrl    the salon's photo, a link valid for a few minutes; null if none
+     * @param photoUrl    the salon's photo, a link valid for at least 15 more minutes; null if none
      */
     public record SalonDetails(UUID id, String name, String addressLine, String area, String city, String pincode,
                                BigDecimal latitude, BigDecimal longitude, String mapLink, List<DayHours> hours,
