@@ -83,7 +83,7 @@ public class ShopAdminService {
     @Transactional(readOnly = true)
     public List<AdminShopResponse> list(UUID adminId, ShopStatus status) {
         requireAdmin(adminId);
-        return views(shops.findByStatusOrderByCreatedAtAsc(status));
+        return views(shops.findTop50ByStatusOrderByCreatedAtAsc(status));
     }
 
     /** The dashboard: how many shops of each type are in each group. */
@@ -93,11 +93,16 @@ public class ShopAdminService {
         return review.counts();
     }
 
-    /** A group's shops, longest waiting first (at most 100); `q` searches shop number, names and owner phone. */
+    /**
+     * One page (50) of a group's shops, longest waiting first, after the cursor (null: the first page); `q` searches
+     * shop number, names and owner phone.
+     */
     @Transactional(readOnly = true)
-    public List<AdminShopResponse> list(UUID adminId, ShopType type, ReviewGroup group, String q) {
+    public List<AdminShopResponse> list(UUID adminId, ShopType type, ReviewGroup group, String q,
+                                        Instant afterSince, UUID afterId) {
         requireAdmin(adminId);
-        List<UUID> ids = review.search(type, group, q);
+        List<UUID> ids = review.search(type, group, q,
+                afterId == null ? null : new ShopReviewStore.Cursor(afterSince, afterId));
         Map<UUID, Shop> byId = shops.findAllById(ids).stream().collect(Collectors.toMap(Shop::getId,
                 Function.identity()));
         return views(ids.stream().map(byId::get).filter(Objects::nonNull).toList());
@@ -284,8 +289,12 @@ public class ShopAdminService {
         Set<UUID> approvedBefore = review.everApproved(ids);
         Map<UUID, String> phones = review.ownerPhones(ids);
         Map<UUID, Instant> since = review.statusSince(ids);
-        return list.stream().map(shop -> AdminShopResponse.from(shop, link(shop.getOwnerPhotoFileId()),
-                link(shop.getShopPhotoFileId()), approvedBefore.contains(shop.getId()), phones.get(shop.getId()),
+        // Every photo link of the page with one read of the files table
+        Map<UUID, String> links = files.links(list.stream()
+                .flatMap(shop -> java.util.stream.Stream.of(shop.getOwnerPhotoFileId(), shop.getShopPhotoFileId()))
+                .filter(Objects::nonNull).toList());
+        return list.stream().map(shop -> AdminShopResponse.from(shop, link(links, shop.getOwnerPhotoFileId()),
+                link(links, shop.getShopPhotoFileId()), approvedBefore.contains(shop.getId()), phones.get(shop.getId()),
                 since.get(shop.getId()))).toList();
     }
 
@@ -318,8 +327,8 @@ public class ShopAdminService {
         return 2 * r * Math.asin(Math.min(1, Math.sqrt(a)));
     }
 
-    private String link(java.util.UUID fileId) {
-        return fileId == null ? null : files.link(fileId);
+    private static String link(Map<UUID, String> links, UUID fileId) {
+        return fileId == null ? null : links.get(fileId);
     }
 
     /**

@@ -16,7 +16,7 @@ CREATE INDEX ix_appointments_shop_confirmed ON appointments (shop_id, starts_at)
 
 -- Message cleanup (finished messages older than the retention) and account deletion (all of a person's messages)
 CREATE INDEX ix_notification_jobs_finished ON notification_jobs (finished_at) WHERE status <> 'PENDING';
-CREATE INDEX ix_notification_jobs_user ON notification_jobs (user_id);
+CREATE INDEX ix_notification_jobs_user ON notification_jobs (user_id, id);   -- also walks a deleted account's rows
 
 -- Sign-in cleanup: expired and revoked refresh tokens
 CREATE INDEX ix_refresh_tokens_expires ON refresh_tokens (expires_at);
@@ -32,4 +32,3 @@ CREATE INDEX ix_users_phone_trgm ON users USING gin (phone gin_trgm_ops);   -- o
 CREATE INDEX ix_walk_in_access_user ON walk_in_access (user_id);
 CREATE INDEX ix_shops_owner_photo ON shops (owner_photo_file_id) WHERE owner_photo_file_id IS NOT NULL;
 CREATE INDEX ix_shops_shop_photo ON shops (shop_photo_file_id) WHERE shop_photo_file_id IS NOT NULL;
-CREATE INDEX ix_shops_type_status ON shops (type, status, created_at);

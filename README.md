@@ -669,8 +669,26 @@ Written for tens of thousands of shops, lakhs of customers and several copies of
 - **Migrations V12 and V13** build their indexes with plain `CREATE INDEX`, which blocks writes to that table while it
   builds: a few seconds at today's size. On a much larger database, build such indexes `CONCURRENTLY` in a separate
   migration.
-- **Not yet done** (later PRs): keyset paging for the admin lists (they page by offset, fine for a few thousand
-  shops), batching the per-booking notices, caching photo links, and polling with ETags in the apps.
+- **The field team's lists** come 50 a page, longest waiting first: `GET /api/v1/admin/shops?type&group[&q]` and
+  the next page with `afterSince` and `afterId` (the last shop's `statusSince` and `id`; both or neither, else 400
+  `VALIDATION_FAILED`). When a shop entered its status and whether it was ever approved are columns (V16, kept by
+  `ShopReviewStore.addEvent`), so a page and the dashboard counts are index reads, never the whole timeline. The
+  older `?status=` form answers the 50 oldest.
+- **Many messages at once are written together**: a suspended salon's cancellations, a no-show round's strikes,
+  history rows and messages, and a salon's moved-location reminders are batched statements, not one per booking
+  (`Notifications.queueAll`, `cancelPendingAll`, `replacePendingAll`).
+- **Photo links in lists stay the same for most of an hour** (`app.files.photo-link-minutes`, default 60; a link is
+  given again while 15 minutes are left; up to 20,000 per server in memory). The phone shows photos it already has
+  instead of downloading them again; stored files say `Cache-Control: private, max-age=3600`.
+- **Unchanged answers cost no data**: every `GET /api/v1/**` answer has an `ETag`; the apps send it back as
+  `If-None-Match` when they refresh and get `304` with no body if nothing changed (`EtagConfig`). Answers are still
+  `Cache-Control: no-store` (a shared phone keeps nothing after sign-out): the apps keep the last answer in memory.
+  CORS allows `If-None-Match` and exposes `ETag`.
+- **Photos are cleaned a few at a time per server** (`app.files.photo-cleaning-at-once`, default 4, about 30 MB
+  each): more wait up to 10 seconds, then get `503 PHOTOS_BUSY` ("try again in a minute").
+- **Deleting an account** empties the messages others got about the person at once, and queues their own messages
+  (`account_wipes`, V16): `AccountWipeJob` empties them every minute in slices of 1,000, at most 100,000 rows a run,
+  so a salon owner with lakhs of messages never makes one huge update inside the delete request.
 - **Tests** run on the PostGIS image of Postgres 16 (`postgis/postgis:16-3.4-alpine`), the same extensions as Neon.
 
 ## Email

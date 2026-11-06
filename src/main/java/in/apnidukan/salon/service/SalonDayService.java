@@ -482,16 +482,15 @@ public class SalonDayService {
     public int markNoShows(Instant now, int batch) {
         List<Appointment> missed = appointments.markNoShows(now.minus(LATE_ALLOWANCE), now, batch);
         Instant recent = now.minus(Duration.ofDays(1));
+        // The whole batch in a few statements: history rows, strikes and messages each written together
+        appointments.eventAll(missed.stream().map(Appointment::id).toList(), now, null, "NO_SHOW", "automatic");
+        // A booking from more than a day ago (left from before the automatic no-show existed, or the job was
+        // stopped for a day) is closed quietly: no strike or message that late
+        List<Appointment> struck = missed.stream().filter(a -> a.isBooking() && a.startsAt().isAfter(recent))
+                .toList();
+        strikes.addAll(struck, StrikeKind.NO_SHOW);
         Map<UUID, ShopCard> salons = new HashMap<>();   // once per salon in the batch
-        for (Appointment a : missed) {
-            appointments.event(a.id(), now, null, "NO_SHOW", "automatic");
-            // A booking from more than a day ago (left from before the automatic no-show existed, or the job was
-            // stopped for a day) is closed quietly: no strike or message that late
-            if (a.isBooking() && a.startsAt().isAfter(recent)) {
-                strikes.add(a.customerId(), a.id(), StrikeKind.NO_SHOW, a.startsAt());
-                notices.noShow(a, salons.computeIfAbsent(a.shopId(), this::salonCard), now);
-            }
-        }
+        notices.noShows(struck, shopId -> salons.computeIfAbsent(shopId, this::salonCard), now);
         return missed.size();
     }
 

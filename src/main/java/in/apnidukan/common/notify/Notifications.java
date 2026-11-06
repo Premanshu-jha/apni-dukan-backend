@@ -14,6 +14,15 @@ public interface Notifications {
 
     void queue(Notice notice);
 
+    /** queue() for many notices, written in batches (one round trip per few hundred rows, not one per row). */
+    void queueAll(java.util.List<Notice> notices);
+
+    /** cancelPending() for many subjects, in one statement. */
+    void cancelPendingAll(java.util.Collection<UUID> refIds);
+
+    /** replacePending() for many notices, in batches. */
+    void replacePendingAll(java.util.List<Notice> notices);
+
     /** Cancels every message about this subject (e.g. a booking) that hasn't gone out yet. */
     void cancelPending(UUID refId);
 

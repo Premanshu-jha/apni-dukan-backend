@@ -27,5 +27,6 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     boolean existsByOwnerPhotoFileIdOrShopPhotoFileId(UUID ownerPhotoFileId, UUID shopPhotoFileId);
 
     /** For the field team: shops waiting for approval (or in any other status), oldest first. */
-    List<Shop> findByStatusOrderByCreatedAtAsc(ShopStatus status);
+    /** The older list form (?status=): the 50 oldest; the field team's lists page through groups instead. */
+    List<Shop> findTop50ByStatusOrderByCreatedAtAsc(ShopStatus status);
 }

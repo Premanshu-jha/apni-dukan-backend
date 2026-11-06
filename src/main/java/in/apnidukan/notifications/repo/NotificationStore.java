@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 import java.util.UUID;
 
@@ -41,6 +42,38 @@ public class NotificationStore {
                 UUID.randomUUID(), n.userId(), channel.name(), n.type(), n.refId(), n.title(), n.body(), n.url(),
                 channel == Channel.SMS ? encode(n.smsVariables()) : null, at(sendAt), at(sendAt), at(now),
                 n.aboutUserId());
+    }
+
+    /** One message on one channel for each pair, in batched statements (a salon suspended with 2,000 bookings). */
+    public void insertAll(List<Map.Entry<Notice, Channel>> rows, Instant now) {
+        if (rows.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("INSERT INTO notification_jobs (id, user_id, channel, type, ref_id, title, body, url, "
+                        + "sms_variables, send_at, status, attempts, next_try_at, created_at, about_user_id) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)",
+                rows.stream().map(row -> {
+                    Notice n = row.getKey();
+                    Channel channel = row.getValue();
+                    Instant sendAt = n.sendAt().isBefore(now) ? now : n.sendAt();
+                    return new Object[] {UUID.randomUUID(), n.userId(), channel.name(), n.type(), n.refId(),
+                        n.title(), n.body(), n.url(), channel == Channel.SMS ? encode(n.smsVariables()) : null,
+                        at(sendAt), at(sendAt), at(now), n.aboutUserId()};
+                }).toList());
+    }
+
+    /** cancelPending for many subjects in one statement. */
+    public int cancelPendingAll(java.util.Collection<UUID> refIds, Instant now) {
+        if (refIds.isEmpty()) {
+            return 0;
+        }
+        return jdbc.update(con -> {
+            var ps = con.prepareStatement("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = ? "
+                    + "WHERE ref_id = ANY (?) AND status = 'PENDING'");
+            ps.setObject(1, at(now));
+            ps.setArray(2, con.createArrayOf("uuid", refIds.toArray()));
+            return ps;
+        });
     }
 
     public int cancelPending(UUID refId, Instant now) {
@@ -154,17 +187,67 @@ public class NotificationStore {
         return jdbc.update("DELETE FROM notification_jobs WHERE user_id = ? AND type LIKE 'SALON\\_%'", userId);
     }
 
-    /** Empties the text of every message this person got or would have got (their account was deleted). */
-    public int blankForUser(UUID userId) {
-        // Their own messages, and the ones others got about them (a salon told "Rahul booked")
+    /**
+     * Empties the messages others got about this person (a salon told "Ravi booked"), at once: they are other people's
+     * lists, and a customer is named in only a few messages per booking.
+     */
+    public int blankAbout(UUID userId) {
         return jdbc.update("UPDATE notification_jobs SET title = '', body = '', url = NULL, sms_variables = NULL "
-                + "WHERE user_id = ? OR about_user_id = ?", userId, userId);
+                + "WHERE about_user_id = ? AND title <> ''", userId);
+    }
+
+    /** Their own messages are emptied later, a slice at a time (AccountWipeJob): nobody can open them any more. */
+    public void queueWipe(UUID userId, Instant now) {
+        jdbc.update("INSERT INTO account_wipes (user_id, queued_at) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                userId, at(now));
+    }
+
+    /** The oldest people still to wipe. */
+    public List<UUID> wipesDue(int max) {
+        return jdbc.queryForList("SELECT user_id FROM account_wipes ORDER BY queued_at, user_id LIMIT ?",
+                UUID.class, max);
+    }
+
+    /** Where a wipe starts: before every id. */
+    public static final UUID FIRST = new UUID(0, 0);
+
+    /**
+     * Empties the next {@code max} of this person's own messages after {@code afterId} (in id order, one range of
+     * ix_notification_jobs_user, so each slice reads only its own rows). Returns the last id of the slice, or empty
+     * when there were none left.
+     */
+    public Optional<UUID> wipeSlice(UUID userId, UUID afterId, int max) {
+        List<UUID> last = jdbc.queryForList("""
+                WITH slice AS MATERIALIZED (
+                    SELECT id FROM notification_jobs WHERE user_id = ? AND id > ? ORDER BY id LIMIT ?),
+                emptied AS (
+                    UPDATE notification_jobs SET title = '', body = '', url = NULL, sms_variables = NULL
+                    WHERE id IN (SELECT id FROM slice)
+                    AND NOT (title = '' AND body = '' AND url IS NULL AND sms_variables IS NULL))
+                SELECT id FROM slice ORDER BY id DESC LIMIT 1""", UUID.class, userId, afterId, max);
+        return last.stream().findFirst();
+    }
+
+    public void wipeDone(UUID userId) {
+        jdbc.update("DELETE FROM account_wipes WHERE user_id = ?", userId);
     }
 
     /**
      * New text for one message type about this subject, on the rows still waiting. Their lease and place in the
      * queue (next_try_at) don't change: a server sending one right now keeps it and records its outcome as usual.
      */
+    /** rewritePending for many messages, in batched statements. */
+    public void rewritePendingAll(List<Notice> notices) {
+        if (notices.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("UPDATE notification_jobs SET title = ?, body = ?, url = ?, read_at = NULL, "
+                        + "sms_variables = CASE WHEN channel = 'SMS' THEN ? ELSE NULL END "
+                        + "WHERE ref_id = ? AND type = ? AND status = 'PENDING'",
+                notices.stream().map(n -> new Object[] {n.title(), n.body(), n.url(), encode(n.smsVariables()),
+                    n.refId(), n.type()}).toList());
+    }
+
     public int rewritePending(Notice n) {
         // A new text is a new message: unread again in the app list
         return jdbc.update("UPDATE notification_jobs SET title = ?, body = ?, url = ?, read_at = NULL, "

@@ -219,6 +219,23 @@ public class AppointmentStore {
     }
 
     /** Appends to the appointment's history. by is null for the system (the automatic end). */
+    /** The same history row for many appointments, in one statement. */
+    public void eventAll(java.util.Collection<UUID> appointmentIds, Instant at, UUID by, String event, String detail) {
+        if (appointmentIds.isEmpty()) {
+            return;
+        }
+        jdbc.update(con -> {
+            var ps = con.prepareStatement("INSERT INTO appointment_events (appointment_id, happened_at, by_user, "
+                    + "event, detail) SELECT id, ?, ?, ?, ? FROM unnest(?::uuid[]) AS id");
+            ps.setObject(1, at(at));
+            ps.setObject(2, by);
+            ps.setString(3, event);
+            ps.setString(4, detail);
+            ps.setArray(5, con.createArrayOf("uuid", appointmentIds.toArray()));
+            return ps;
+        });
+    }
+
     public void event(UUID appointmentId, Instant at, UUID by, String event, String detail) {
         jdbc.update("INSERT INTO appointment_events (appointment_id, happened_at, by_user, event, detail) "
                         + "VALUES (?, ?, ?, ?, ?)",

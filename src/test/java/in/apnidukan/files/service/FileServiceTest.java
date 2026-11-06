@@ -58,7 +58,7 @@ class FileServiceTest {
     @BeforeEach
     void setUp() {
         service = new FileService(repository, storage, currentUser, Clock.fixed(NOW, ZoneOffset.UTC), 5,
-                List.of(usageChecker), List.of(attachedElsewhere));
+                List.of(usageChecker), List.of(attachedElsewhere), new PhotoCleaning(4));
         lenient().when(currentUser.requireShop()).thenReturn(new CurrentUser(USER, SHOP));
     }
 

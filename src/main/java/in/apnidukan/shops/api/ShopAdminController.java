@@ -1,6 +1,7 @@
 package in.apnidukan.shops.api;
 
 import in.apnidukan.common.context.CurrentUserProvider;
+import in.apnidukan.common.error.ApiException;
 import in.apnidukan.shops.api.AdminShopDetail.TimelineEntry;
 import in.apnidukan.shops.domain.ReviewGroup;
 import in.apnidukan.shops.domain.ShopStatus;
@@ -21,6 +22,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -48,16 +50,24 @@ public class ShopAdminController {
     }
 
     /**
-     * A group's shops, longest waiting first (at most 100), with `type` and `group`; `q` searches the shop number,
-     * name, owner's name and owner's phone. The older form `?status=` (default PENDING_VISIT) still answers too.
+     * A group's shops, longest waiting first, 50 a page, with `type` and `group`; `q` searches the shop number,
+     * name, owner's name and owner's phone. The next page: `afterSince` and `afterId` = the last shop's statusSince
+     * and id (both or neither, else 400 VALIDATION_FAILED); fewer than 50 means it was the last page. The older form
+     * `?status=` (default PENDING_VISIT) still answers, with the 50 oldest.
      */
     @GetMapping("/shops")
     public List<AdminShopResponse> list(@RequestParam(required = false) ShopType type,
                                         @RequestParam(required = false) ReviewGroup group,
                                         @RequestParam(required = false) String q,
+                                        @RequestParam(required = false) Instant afterSince,
+                                        @RequestParam(required = false) UUID afterId,
                                         @RequestParam(defaultValue = "PENDING_VISIT") ShopStatus status) {
+        if ((afterSince == null) != (afterId == null)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("afterId", "send afterSince and afterId together"));
+        }
         if (type != null && group != null) {
-            return admin.list(caller(), type, group, q);
+            return admin.list(caller(), type, group, q, afterSince, afterId);
         }
         return admin.list(caller(), status);
     }

@@ -31,26 +31,22 @@ import java.util.UUID;
 @Repository
 public class ShopReviewStore {
 
-    /** Most rows a list returns (the field team searches beyond that). */
-    public static final int LIST_LIMIT = 100;
-
-    /** "Was this shop ever approved?" from its history. */
-    private static final String EVER_APPROVED =
-            "EXISTS (SELECT 1 FROM shops_aud a WHERE a.id = s.id AND a.status = 'APPROVED')";
+    /** Shops a list page returns; the next page starts after the last one (see {@link Cursor}). */
+    public static final int PAGE = 50;
 
     private static final String GROUP = "CASE "
-            + "WHEN s.status = 'PENDING_VISIT' AND " + EVER_APPROVED + " THEN 'RECHECK' "
+            + "WHEN s.status = 'PENDING_VISIT' AND s.ever_approved THEN 'RECHECK' "
             + "WHEN s.status = 'PENDING_VISIT' THEN 'FIRST_VISIT' "
             + "WHEN s.status = 'DRAFT' AND s.status_reason IS NOT NULL THEN 'SENT_BACK' "
             + "WHEN s.status = 'APPROVED' THEN 'LIVE' "
             + "WHEN s.status = 'SUSPENDED' THEN 'SUSPENDED' END";
 
     /**
-     * When the shop entered its current status: its latest timeline entry other than a note (the owner's edits to a
-     * waiting shop don't move it). Shops from before the timeline existed (V11) fall back to when they registered.
+     * Where a list page ends: the last shop's status_since and id. Lists are ordered by both (longest in the group
+     * first), so the next page is everything after this pair: each page is one index range, however deep.
      */
-    private static final String STATUS_SINCE = "COALESCE((SELECT max(e.at) FROM shop_events e "
-            + "WHERE e.shop_id = s.id AND e.event <> 'NOTE'), s.created_at)";
+    public record Cursor(Instant statusSince, UUID id) {
+    }
 
     private final JdbcTemplate jdbc;
 
@@ -78,17 +74,16 @@ public class ShopReviewStore {
     }
 
     /**
-     * Shop ids in a group, longest in it first (by STATUS_SINCE), at most LIST_LIMIT. `q` (optional) matches the
-     * shop number exactly ("1042" or "#1042"), the owner's phone in part (spaces, "+91" and dashes ignored), or the
-     * name or owner's name in part.
+     * One page of shop ids in a group, longest in it first (status_since, then id), at most PAGE, after the cursor
+     * (null: the first page). `q` (optional) matches the shop number exactly ("1042" or "#1042"), the owner's phone in
+     * part (spaces, "+91" and dashes ignored), or the name or owner's name in part.
      */
-    public List<UUID> search(ShopType type, ReviewGroup group, String q) {
-        // The group as plain conditions on the shop's status (indexed by ix_shops_type_status), not the CASE: history
-        // is read only for waiting shops, where first visit and re-check differ
+    public List<UUID> search(ShopType type, ReviewGroup group, String q, Cursor after) {
+        // The group as plain conditions on the shop's columns, so a page is one range of ix_shops_review_list
         StringBuilder sql = new StringBuilder("SELECT s.id FROM shops s WHERE s.type = ? AND ");
         sql.append(switch (group) {
-            case FIRST_VISIT -> "s.status = 'PENDING_VISIT' AND NOT " + EVER_APPROVED;
-            case RECHECK -> "s.status = 'PENDING_VISIT' AND " + EVER_APPROVED;
+            case FIRST_VISIT -> "s.status = 'PENDING_VISIT' AND NOT s.ever_approved";
+            case RECHECK -> "s.status = 'PENDING_VISIT' AND s.ever_approved";
             case SENT_BACK -> "s.status = 'DRAFT' AND s.status_reason IS NOT NULL";
             case LIVE -> "s.status = 'APPROVED'";
             case SUSPENDED -> "s.status = 'SUSPENDED'";
@@ -120,8 +115,13 @@ public class ShopReviewStore {
             }
             sql.append(")");
         }
+        if (after != null) {
+            sql.append(" AND (s.status_since, s.id) > (?, ?)");
+            args.add(Timestamp.from(after.statusSince()));
+            args.add(after.id());
+        }
         // Only constants and bound values go into this SQL (never the search text itself)
-        sql.append(" ORDER BY ").append(STATUS_SINCE).append(", s.id LIMIT ").append(LIST_LIMIT);
+        sql.append(" ORDER BY s.status_since, s.id LIMIT ").append(PAGE);
         return jdbc.queryForList(sql.toString(), UUID.class, args.toArray());
     }
 
@@ -131,13 +131,13 @@ public class ShopReviewStore {
                 .replace("_", "\\_") + "%";
     }
 
-    /** When each of these shops entered its current status (see STATUS_SINCE). */
+    /** When each of these shops entered its current status (its latest timeline entry other than a note). */
     public Map<UUID, Instant> statusSince(Collection<UUID> shopIds) {
         Map<UUID, Instant> out = new HashMap<>();
         if (shopIds.isEmpty()) {
             return out;
         }
-        jdbc.query("SELECT s.id, " + STATUS_SINCE + " AS since FROM shops s WHERE s.id = ANY (?)",
+        jdbc.query("SELECT s.id, s.status_since AS since FROM shops s WHERE s.id = ANY (?)",
                 ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", shopIds.toArray())),
                 rs -> {
                     out.put(rs.getObject("id", UUID.class), rs.getTimestamp("since").toInstant());
@@ -151,7 +151,7 @@ public class ShopReviewStore {
             return Set.of();
         }
         Set<UUID> out = new HashSet<>();
-        jdbc.query("SELECT DISTINCT a.id FROM shops_aud a WHERE a.status = 'APPROVED' AND a.id = ANY (?)",
+        jdbc.query("SELECT s.id FROM shops s WHERE s.ever_approved AND s.id = ANY (?)",
                 ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", shopIds.toArray())),
                 rs -> {
                     out.add(rs.getObject("id", UUID.class));
@@ -201,6 +201,15 @@ public class ShopReviewStore {
                 UUID.randomUUID(), shopId, Timestamp.from(at), by, byAdmin, event.name(), reason, note,
                 checklist == null || checklist.isEmpty() ? null
                         : String.join(",", checklist.stream().map(Enum::name).toList()));
+
+        if (event != ShopEventType.NOTE) {
+            // Every status change writes an entry here, so this is where the list's columns are kept (V16): when the
+            // shop entered its current status, and whether it was ever approved (a later visit is a re-check)
+            // (reinstating sends a shop back for a visit, PENDING_VISIT: only APPROVED makes it approved)
+            boolean approved = event == ShopEventType.APPROVED;
+            jdbc.update("UPDATE shops SET status_since = GREATEST(status_since, ?), "
+                    + "ever_approved = ever_approved OR ? WHERE id = ?", Timestamp.from(at), approved, shopId);
+        }
     }
 
     /** Newest first. */

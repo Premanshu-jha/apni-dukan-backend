@@ -108,6 +108,9 @@ class SalonBookingIntegrationTest {
         registry.add("app.sms.template.booking-cancelled-by-salon", () -> "tpl-salon-cancel");
         // Batches of one: every automatic-end round in these tests goes through the batch loop
         registry.add("app.jobs.auto-end-batch", () -> "1");
+        // Slices of two rows, four rows a run: a deleted account's messages take several slices and runs
+        registry.add("app.jobs.account-wipe-slice", () -> "2");
+        registry.add("app.jobs.account-wipe-per-run", () -> "4");
     }
 
     @Autowired Environment environment;
@@ -116,6 +119,7 @@ class SalonBookingIntegrationTest {
     @Autowired JwtService jwt;
     @Autowired SessionRevocations sessions;
     @Autowired AutoEndJob autoEnd;
+    @Autowired in.apnidukan.notifications.service.AccountWipeJob wipes;
     @Autowired in.apnidukan.salon.repo.AppointmentStore store_;
     @Autowired NotificationSendJob sender;
     @Autowired in.apnidukan.notifications.service.MessageCleanupJob messageCleanup;
@@ -1153,6 +1157,47 @@ class SalonBookingIntegrationTest {
         sender.runOnce();
         assertThat(jdbc.queryForList("SELECT status FROM notification_jobs WHERE title = '' AND status <> 'CANCELLED'",
                 String.class)).isEmpty();
+
+        // Their own messages are emptied by the wipe job, a slice at a time, over as many runs as it takes
+        assertThat(count("notification_jobs WHERE user_id = '" + customer + "' AND title <> ''")).isPositive();
+        assertThat(count("account_wipes")).isEqualTo(1);
+        int runs = 0;
+        while (count("account_wipes") > 0 && runs < 20) {
+            wipes.runOnce();
+            runs++;
+        }
+        assertThat(count("account_wipes")).isZero();
+        assertThat(count("notification_jobs WHERE user_id = '" + customer + "' AND (title <> '' OR body <> '' "
+                + "OR url IS NOT NULL OR sms_variables IS NOT NULL)")).isZero();
+        assertThat(count("notification_jobs WHERE user_id <> '" + customer + "' AND title = ''")).isEqualTo(
+                count("notification_jobs WHERE about_user_id = '" + customer + "'"));   // nobody else's emptied
+    }
+
+    @Test
+    void aRefreshedSalonListKeepsItsPhotoLinksAndAnUnchangedOneIsA304() throws InterruptedException {
+        UUID photo = UUID.randomUUID();
+        jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
+                + "uploaded_by, created_at) VALUES (?, ?, 'SHOP_PHOTO', ?, 'image/jpeg', 10, ?, ?, now())", photo, salon,
+                "test/" + photo, photo.toString().replace("-", ""), owner);
+        jdbc.update("UPDATE shops SET shop_photo_file_id = ? WHERE id = ?", photo, salon);
+        String path = "/salons?lat=17.466&lng=78.365";
+        var first = http.get().uri(path).headers(h -> h.setBearerAuth(token(customer)))
+                .exchange((rq, res) -> java.util.Map.entry(String.valueOf(res.getHeaders().getETag()),
+                        new String(res.getBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)));
+        assertThat(first.getValue()).contains("test/" + photo);
+        CLOCK.advance(Duration.ofMinutes(30));   // still 30 minutes left on the link: the same one
+        var again = http.get().uri(path).headers(h -> {
+            h.setBearerAuth(token(customer));
+            h.setIfNoneMatch(first.getKey());
+        }).exchange((rq, res) -> res.getStatusCode().value());
+        assertThat(again).isEqualTo(304);
+        CLOCK.advance(Duration.ofMinutes(20));   // 10 minutes left: a fresh link, so the list changed
+        Thread.sleep(1100);   // a signature names its second: a new one must not fall in the same second
+        var fresh = http.get().uri(path).headers(h -> {
+            h.setBearerAuth(token(customer));
+            h.setIfNoneMatch(first.getKey());
+        }).exchange((rq, res) -> res.getStatusCode().value());
+        assertThat(fresh).isEqualTo(200);
     }
 
     @Test

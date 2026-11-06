@@ -26,6 +26,17 @@ public class StrikeStore {
                 UUID.randomUUID(), customerId, appointmentId, kind.name(), AppointmentStore.at(at));
     }
 
+    /** add() for many bookings (each its own customer and time), in batched statements. */
+    public void addAll(List<in.apnidukan.salon.domain.Appointment> bookings, StrikeKind kind) {
+        if (bookings.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("INSERT INTO customer_strikes (id, customer_id, appointment_id, kind, struck_at) "
+                        + "VALUES (?, ?, ?, ?, ?) ON CONFLICT (appointment_id) DO NOTHING",
+                bookings.stream().map(a -> new Object[] {UUID.randomUUID(), a.customerId(), a.id(), kind.name(),
+                    AppointmentStore.at(a.startsAt())}).toList());
+    }
+
     /** Takes back the strike of this booking; false if it had none. */
     public boolean remove(UUID appointmentId) {
         return jdbc.update("DELETE FROM customer_strikes WHERE appointment_id = ?", appointmentId) == 1;

@@ -81,8 +81,6 @@ class SalonShopChanges implements ShopChangeListener {
         // told (queued messages, sent by the sender job).
         List<Appointment> closed = appointments.cancelAllUpcoming(shopId, now.minus(SalonDayService.LATE_ALLOWANCE),
                 SUSPENDED_REASON, "salon suspended by Apni Dukan", now);
-        for (Appointment a : closed) {
-            notices.cancelledBySalon(a, card, SUSPENDED_REASON, now);
-        }
+        notices.cancelledBySalon(closed, card, SUSPENDED_REASON, now);
     }
 }
