@@ -41,6 +41,9 @@ public class AutoEndJob {
     public AutoEndJob(AppointmentStore appointments, SalonDayService day, JobLeases leases, Clock clock,
                       @Value("${app.jobs.enabled:true}") boolean enabled,
                       @Value("${app.jobs.auto-end-batch:500}") int batchSize) {
+        if (batchSize < 1) {   // 0 would loop forever (every batch "full"), below 0 fail every minute
+            throw new IllegalStateException("app.jobs.auto-end-batch must be at least 1");
+        }
         this.batchSize = batchSize;
         this.leases = leases;
         this.appointments = appointments;

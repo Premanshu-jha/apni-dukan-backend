@@ -104,6 +104,16 @@ class ResendEmailSenderTest {
     }
 
     @Test
+    void anotherUnprocessableAnswerIsOurFaultNotTheUsers() throws IOException {
+        answer = 422;
+        errorBody = "{\"statusCode\":422,\"name\":\"missing_required_field\",\"message\":\"Missing `from`\"}";
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
+                .satisfies(e -> assertThat(((ApiException) e).getCode()).isEqualTo("EMAIL_FAILED"));
+        assertThat(requests.get()).isEqualTo(1);
+    }
+
+    @Test
     void aBadKeyIsNotTheUsersFault() throws IOException {
         answer = 401;
         ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());

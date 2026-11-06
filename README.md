@@ -681,7 +681,7 @@ account exists. A code email is sent while the request waits (3 s to connect, 5 
 under a second): `send-code` answers 202 only after Resend accepted it, so the code arrives within seconds, and
 `503 EMAIL_FAILED` if Resend didn't answer or failed (5xx, our key or domain refused), so the app asks the person to
 try again. Too many at once (429) is tried once more after Resend's `Retry-After` (at most 2 s). An address Resend
-can't send to (422) answers `400 INVALID_EMAIL`. Only the HTTP status and Resend's error name are logged, never the
+can't send to (422 `validation_error`) answers `400 INVALID_EMAIL`; Resend's other 422s are our request's fault (503). Only the HTTP status and Resend's error name are logged, never the
 address, the text or the key. Codes are never written to the database or the log (a queue in Postgres would keep
 live codes in plain text in every backup). The recovery code email goes out just after the reply (so the reply
 doesn't reveal whether the email has an account); if the in-memory line is full it is dropped (the person asks

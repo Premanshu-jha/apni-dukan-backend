@@ -21,8 +21,8 @@ import java.time.Duration;
  * Sends while the request waits, with short timeouts (3 s to connect, 5 s for the answer): a code email is sent
  * before the app is told 202, so the person can expect it within seconds, and if Resend refuses or doesn't answer,
  * the app is told what happened instead of waiting for a code that never comes: 429 (too many at once) is tried once
- * more after Resend's Retry-After (at most 2 s); 422 (Resend can't send to that address) answers 400 INVALID_EMAIL;
- * other 4xx (our key or domain) and 5xx or timeouts answer 503 EMAIL_FAILED. Never logs the email's address or
+ * more after Resend's Retry-After (at most 2 s); 422 validation_error (Resend can't send to that address) answers 400 INVALID_EMAIL;
+ * other 4xx (also the other 422s) (our key or domain) and 5xx or timeouts answer 503 EMAIL_FAILED. Never logs the email's address or
  * text or the API key (only the subject, Resend's HTTP status and its error name).
  */
 public class ResendEmailSender implements EmailSender {
@@ -88,8 +88,9 @@ public class ResendEmailSender implements EmailSender {
         }
         // Only the status and Resend's error name are logged: never the key, the address or the text we sent
         log.error("Resend refused the email ({}): HTTP {} {}", subject, status, errorName(answer.body()));
-        if (status == 422) {
-            // Resend's validation error: the address it was given can't receive email
+        if (status == 422 && "validation_error".equals(errorName(answer.body()))) {
+            // Resend's validation error is about the address it was given. Its other 422s (missing_required_field,
+            // invalid_parameter, invalid_attachment) are our request's fault: 503 below
             throw ApiException.badRequest("INVALID_EMAIL", "We couldn't send to this address. Check the email.");
         }
         if (status >= 400 && status < 500 && status != 429) {

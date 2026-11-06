@@ -62,7 +62,10 @@ public class ClientAddress {
         }
         String bare = value.startsWith("[") ? value.substring(1, value.length() - 1) : value;
         try {
-            return java.net.InetAddress.getByName(bare).getAddress().length == 16;
+            // Only hex digits, colons and dots got here, so this parses and never looks a name up. An IPv4-mapped
+            // address (::ffff:1.2.3.4) comes back as IPv4: still a valid client address
+            java.net.InetAddress.getByName(bare);
+            return true;
         } catch (java.net.UnknownHostException e) {
             return false;
         }
