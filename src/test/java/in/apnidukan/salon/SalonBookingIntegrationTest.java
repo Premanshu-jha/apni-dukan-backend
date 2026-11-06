@@ -816,7 +816,7 @@ class SalonBookingIntegrationTest {
         assertThat(delete("/files/" + ownerPhoto, newOwner, newSalon).status()).isEqualTo(409);
 
         UUID admin = person("9000000099");
-        jdbc.update("UPDATE users SET admin = true WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
         assertThat(approve(newSalon, admin).status()).isEqualTo(409);   // DRAFT
         Reply submitted = post("/shops/me/submit", Map.of("version", field(photos.body(), "version")), newOwner);
         assertThat(field(submitted.body(), "status")).as(submitted.text()).isEqualTo("PENDING_VISIT");
@@ -1240,7 +1240,7 @@ class SalonBookingIntegrationTest {
                 .contains("WRONG_STATUS").contains("support");
 
         UUID admin = person("9000000999");
-        jdbc.update("UPDATE users SET admin = TRUE WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
         assertThat(post("/admin/salon/strikes/lookup", Map.of("phone", "9000000101"), owner).status()).isEqualTo(403);
         Reply list = post("/admin/salon/strikes/lookup", Map.of("phone", "9000000101"), admin);
         assertThat(list.status()).as(list.text()).isEqualTo(200);
@@ -1263,7 +1263,7 @@ class SalonBookingIntegrationTest {
     @Test
     void aSuspendedSalonDisappearsItsUpcomingBookingsAreCancelledAndItCanComeBack() {
         UUID admin = person("9000000999");
-        jdbc.update("UPDATE users SET admin = TRUE WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
         assertThat(field(post("/admin/shops/" + salon + "/reject", Map.of("version", shopVersion(), "reason",
                 "Photo is blurry"), admin).body(), "code")).isEqualTo("WRONG_STATUS");   // only before approval
@@ -1300,7 +1300,7 @@ class SalonBookingIntegrationTest {
     @Test
     void aShopWhoseVisitDidntPassGoesBackToDraftWithTheReason() {
         UUID admin = person("9000000999");
-        jdbc.update("UPDATE users SET admin = TRUE WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
         jdbc.update("UPDATE shops SET status = 'PENDING_VISIT' WHERE id = ?", salon);
         assertThat(post("/admin/shops/" + salon + "/reject", Map.of("version", shopVersion(), "reason", "x"), admin)
                 .status()).isEqualTo(400);
@@ -1802,7 +1802,7 @@ class SalonBookingIntegrationTest {
     @Test
     void aSuspensionAlsoCancelsBookingsWhoseCustomerMayStillArrive() {
         UUID admin = person("9000000999");
-        jdbc.update("UPDATE users SET admin = TRUE WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
         CLOCK.set(at("12:05"));   // started 5 minutes ago, still held until 12:15
         Reply suspended = post("/admin/shops/" + salon + "/suspend", Map.of("version", shopVersion(), "reason",
@@ -2053,7 +2053,8 @@ class SalonBookingIntegrationTest {
      * matter here: the salon module reads the membership from the database).
      */
     private String token(UUID who) {
-        Boolean admin = jdbc.queryForObject("SELECT admin FROM users WHERE id = ?", Boolean.class, who);
+        Boolean admin = jdbc.queryForObject("SELECT admin_role <> 'NONE' FROM users WHERE id = ?", Boolean.class,
+                who);
         return jwt.issue(new AuthPrincipal(who, null, null, Boolean.TRUE.equals(admin)),
                 sessions.currentGeneration(who)).token();
     }

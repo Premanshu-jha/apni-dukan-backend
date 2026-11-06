@@ -1,5 +1,6 @@
 package in.apnidukan.auth.service;
 
+import in.apnidukan.auth.domain.AdminRole;
 import in.apnidukan.auth.domain.RefreshToken;
 import in.apnidukan.auth.domain.RevokeReason;
 import in.apnidukan.auth.domain.User;
@@ -85,6 +86,7 @@ public class AuthService {
     private final List<AccountDeletionListener> deletionListeners;
     private final List<SignOutEverywhereListener> signOutListeners;
     private final int smsDailyLimit;
+    private final TestModeService testMode;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
@@ -93,7 +95,8 @@ public class AuthService {
                        PlatformTransactionManager transactions, ShopMemberships memberships, HumanCheck humans,
                        List<AccountDeletionListener> deletionListeners,
                        List<SignOutEverywhereListener> signOutListeners,
-                       @Value("${app.sms.daily-limit:500}") int smsDailyLimit) {
+                       @Value("${app.sms.daily-limit:500}") int smsDailyLimit, TestModeService testMode) {
+        this.testMode = testMode;
         this.memberships = memberships;
         this.signOutListeners = signOutListeners;
         this.humans = humans;
@@ -115,10 +118,21 @@ public class AuthService {
 
     // ---------------- phone OTP sign-in ----------------
 
+    /**
+     * OTP test mode (TestModeService): a test number's code is any 6 digits while it is on. Any other number, or
+     * anything that isn't 6 digits, goes through the normal check.
+     */
+    private boolean testCodeAccepted(String phone, String code) {
+        return code != null && code.trim().matches("\\d{6}") && phone != null && testMode.acceptsAnyCode(phone);
+    }
+
     public void sendLoginOtp(String phoneInput, String ip, String captchaToken) {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitSends(ip);
         humans.require(captchaToken, ip);
+        if (testMode.acceptsAnyCode(phone)) {
+            return;   // OTP test mode: a test number signs in with any 6 digits, no SMS
+        }
         requireSmsNotPaused();   // before a new code replaces the one they already have
         String code = otp.issue(OtpPurpose.LOGIN, phone, ip);
         sendSms(() -> sms.sendOtp(phone, code));
@@ -128,21 +142,51 @@ public class AuthService {
     public AuthTokens verifyLoginOtp(String phoneInput, String code, String device, String ip) {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitVerifies(ip);
-        otp.verify(OtpPurpose.LOGIN, phone, code, ip);
+        boolean testSignIn = testCodeAccepted(phone, code);
+        if (!testSignIn) {
+            otp.verify(OtpPurpose.LOGIN, phone, code, ip);
+        }
         return tx.execute(status -> {
             User existing = users.findByPhone(phone).orElse(null);
             if (existing != null) {
+                if (testSignIn && (existing.isAdmin() || !existing.isTestAccount())) {
+                    // Changed between the check and now (made an admin, or a real account): the real code only
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "WRONG_CODE", "That code is not correct");
+                }
+                if (!testSignIn && existing.isTestAccount()) {
+                    // The real holder of a former test number signed in with the SMS code: the account is theirs
+                    // now, and every tester still signed in to it is signed out
+                    becomeReal(existing);
+                }
                 return issueTokens(existing, device, false);
             }
             User created;
             try {
-                created = users.saveAndFlush(new User(UUID.randomUUID(), phone, Instant.now(clock)));
+                User fresh = new User(UUID.randomUUID(), phone, Instant.now(clock));
+                if (testSignIn) {
+                    fresh.markTestAccount();   // only such an account ever takes any code (TestModeService)
+                }
+                created = users.saveAndFlush(fresh);
             } catch (DataIntegrityViolationException e) {
                 // The same phone signed up at the same moment from another request: retry once
                 throw new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN", "Please try again.");
             }
             return issueTokens(created, device, true);
         });
+    }
+
+    /** A test account claimed with a real code: normal from now on, and nobody else stays signed in to it. */
+    private void becomeReal(User user) {
+        Instant now = Instant.now(clock);
+        user.becomeRealAccount(now);
+        users.saveAndFlush(user);
+        refreshTokens.revokeAllForUser(user.getId(), now);
+        // Before the new token is made (as recovery does), so the new one carries the new generation
+        try {
+            revocations.revokeAll(user.getId());
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer; testers' tokens on {} end within 15 minutes", user.getId());
+        }
     }
 
     // ---------------- refresh and sign-out ----------------
@@ -177,6 +221,11 @@ public class AuthService {
         if (!stored.getExpiresAt().isAfter(now)) {
             refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
             throw unauthorized("REFRESH_TOKEN_EXPIRED", "Sign in again.");
+        }
+        if (user.isTestAccount() && !testMode.acceptsAnyCode(user.getPhone())) {
+            // A test account lives only while OTP test mode is on for its number
+            refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
+            throw unauthorized("TEST_MODE_OFF", "Test mode is off. Sign in again.");
         }
         if (refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.ROTATED) == 0) {
             // Another request with this same token swapped it a moment ago (we waited for its lock): a retry
@@ -342,6 +391,7 @@ public class AuthService {
             oldPhone[0] = user.getPhone();
             Instant now = Instant.now(clock);
             user.changePhone(newPhone, now);
+            user.becomeRealAccount(now);   // proved with real codes to a real phone and inbox (if a test account)
             try {
                 users.saveAndFlush(user);
             } catch (DataIntegrityViolationException e) {
@@ -441,6 +491,11 @@ public class AuthService {
         if (memberships.find(userId).filter(m -> "OWNER".equals(m.role())).isPresent()) {
             throw new ApiException(HttpStatus.CONFLICT, "SHOP_OWNER",
                     "You own a shop on Apni Dukan. Close it or hand it over before deleting your account.");
+        }
+        // Without the super admin nobody could manage admins or switch test mode off until the database is edited
+        if (users.findById(userId).map(User::getAdminRole).orElse(AdminRole.NONE) == AdminRole.SUPER_ADMIN) {
+            throw new ApiException(HttpStatus.CONFLICT, "SUPER_ADMIN",
+                    "You are the super admin. Hand the role to someone else in the database first.");
         }
     }
 

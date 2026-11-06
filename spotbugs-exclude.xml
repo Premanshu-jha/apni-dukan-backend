@@ -19,6 +19,12 @@
             <Class name="~.*(Config|Properties)"/>
         </Or>
     </Match>
+    <!-- A sign-in result carries the person just read for that request; the controller only turns it into the JSON
+         reply. Nothing keeps it or changes it afterwards. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+        <Class name="in.apnidukan.auth.service.AuthTokens"/>
+    </Match>
     <!-- We turn off CSRF on purpose: there are no cookies or server sessions, every call carries a bearer token
          (see SecurityConfig). CSRF only matters for cookie-based sign-in. -->
     <Match>
