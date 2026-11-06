@@ -38,11 +38,13 @@ public final class BookingResponses {
      * A salon in the list near the customer.
      * @param photoUrl the salon's photo, a link valid for a few minutes; null if none
      */
-    public record SalonSummary(UUID id, String name, String area, String city, double distanceKm, String photoUrl) {
+    public record SalonSummary(UUID id, String name, String area, String city, double distanceKm, String photoUrl,
+                               double distanceMetres) {
 
         public static SalonSummary from(ShopCard card, String photoUrl) {
             return new SalonSummary(card.id(), card.name(), card.area(), card.city(),
-                    card.distanceKm() == null ? 0 : card.distanceKm(), photoUrl);
+                    card.distanceKm() == null ? 0 : card.distanceKm(), photoUrl,
+                    card.distanceMetres() == null ? 0 : card.distanceMetres());
         }
     }
 
