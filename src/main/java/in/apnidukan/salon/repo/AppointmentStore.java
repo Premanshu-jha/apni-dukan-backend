@@ -147,10 +147,11 @@ public class AppointmentStore {
      * skipped (SKIP LOCKED) and picked up next time, and each row changes only once.
      */
     public List<Appointment> markNoShows(Instant startedBy, Instant now, int limit) {
-        return jdbc.query("UPDATE appointments SET status = 'NO_SHOW', updated_at = ? WHERE id IN ("
-                + "SELECT id FROM appointments WHERE status = 'CONFIRMED' AND kind <> 'BLOCK' AND starts_at <= ? "
-                + "ORDER BY starts_at LIMIT ? FOR UPDATE SKIP LOCKED) AND status = 'CONFIRMED' RETURNING " + COLUMNS,
-                ROW, at(now), at(startedBy), limit);
+        // MATERIALIZED: picked once; as a plain subquery Postgres may run it again per row and pass the limit
+        return jdbc.query("WITH due AS MATERIALIZED (SELECT id FROM appointments WHERE status = 'CONFIRMED' "
+                + "AND kind <> 'BLOCK' AND starts_at <= ? ORDER BY starts_at LIMIT ? FOR UPDATE SKIP LOCKED) "
+                + "UPDATE appointments SET status = 'NO_SHOW', updated_at = ? WHERE id IN (SELECT id FROM due) "
+                + "AND status = 'CONFIRMED' RETURNING " + COLUMNS, ROW, at(startedBy), limit, at(now));
     }
 
     /** CONFIRMED → NO_SHOW, CANCELLED_BY_CUSTOMER or CANCELLED_BY_SALON; frees the barber's time. */
@@ -190,7 +191,7 @@ public class AppointmentStore {
      */
     public int completeEnded(Instant now, int limit) {
         Integer count = jdbc.queryForObject("""
-                        WITH due AS (
+                        WITH due AS MATERIALIZED (
                             SELECT id FROM appointments WHERE status = 'IN_SERVICE' AND ends_at <= ?
                             ORDER BY ends_at LIMIT ? FOR UPDATE SKIP LOCKED),
                         done AS (

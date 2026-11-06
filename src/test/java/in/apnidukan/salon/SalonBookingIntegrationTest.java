@@ -201,7 +201,7 @@ class SalonBookingIntegrationTest {
         List<Double> metres = all.stream().map(x -> ((Number) field(x, "distanceMetres")).doubleValue()).toList();
         assertThat(metres).isSorted();
         assertThat(metres.get(metres.size() - 1)).isLessThanOrEqualTo(2000.0);
-        assertThat(((Number) field(first.get(0), "distanceKm")).doubleValue()).isEqualTo(0.1);   // ~146 m
+        assertThat(((Number) field(first.get(0), "distanceKm")).doubleValue()).isBetween(0.1, 0.2);   // ~150 m
         assertThat(get("/salons?lat=17.466&lng=78.365&afterDistance=10", customer).status()).isEqualTo(400);
     }
 

@@ -443,7 +443,9 @@ sequenceDiagram
     B-->>C: 201 booking with start code (or 409 SLOT_TAKEN + 3 nearest times)
 ```
 
-**Customer (any signed-in person):** `GET /salons?lat=&lng=` (approved, not paused, within 5 km),
+**Customer (any signed-in person):** `GET /salons?lat=&lng=` (approved, not paused, within 2 km, nearest first, 30
+a page; the next page with the last salon's `distanceMetres` and `id` as `afterDistance` and `afterId`; see "Built for
+scale"),
 `GET /salons/{id}`, `/services`, `/availability?services=a,b&date=YYYY-MM-DD`, `POST /bookings` (header
 `Idempotency-Key`: a new UUID per attempt, the same one on retry), `GET /me/bookings?when=upcoming|past`,
 `GET /bookings/{id}`, `POST /bookings/{id}/cancel`, `POST /bookings/{id}/reschedule {startAt}` (not in the last hour:
@@ -591,9 +593,32 @@ Sign-in errors use the same shape: `401 NOT_SIGNED_IN`, `401 TOKEN_EXPIRED`, `40
 nothing was saved, and sending it again works. `503 SERVICE_BUSY` (with `Retry-After`) means Redis or the database
 didn't answer in time; nothing was done, try again in a few seconds.
 
+## Built for scale
+
+Written for tens of thousands of shops, lakhs of customers and several copies of the backend at once.
+
+- **Nearby salons (PostGIS, V12).** Each shop's pin is also a PostGIS `geography` point (`shops.location`, computed
+  by the database), with a map index on approved shops. One query finds the salons within 2 km
+  (`ST_DWithin`), measures each in metres (`ST_Distance`, on a sphere: within 0.3%), leaves out paused ones, sorts
+  nearest first and returns one page of 30. The next page starts after the last one's (distance, id) (keyset
+  paging), so a dense city with hundreds of salons costs the same as a quiet one. Photos' links come from one read
+  for the whole page.
+- **Indexes (V13)** for every query that runs all the time: bookings waiting to start (the no-show job), a salon's
+  day (overlap on `time_range`, so it reads that day only), a salon's upcoming bookings, finished messages and
+  refresh tokens (cleanup), a person's messages (account deletion), shop name search (trigram), and foreign-key
+  lookups.
+- **Busy time** of barbers is read barber by barber with an overlap test, so the no-overlap index answers it from
+  the few rows around that time.
+- **Background jobs in batches, one server at a time.** The automatic end and no-show round closes 500 rows per
+  short transaction until none are left, skipping rows another server or request holds (`FOR UPDATE SKIP LOCKED`).
+  Each round takes a lease in `job_leases` (V14), so with several servers only one does it; a server that dies
+  frees it when the lease runs out.
+- **Tests** run on the PostGIS image of Postgres 16 (`postgis/postgis:16-3.4-alpine`), the same extensions as Neon.
+
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V12__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V15__...`, or later if the scale PR's
+message changes took V15). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
