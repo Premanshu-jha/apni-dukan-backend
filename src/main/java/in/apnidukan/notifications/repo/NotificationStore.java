@@ -67,13 +67,11 @@ public class NotificationStore {
         if (refIds.isEmpty()) {
             return 0;
         }
-        return jdbc.update(con -> {
-            var ps = con.prepareStatement("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = ? "
-                    + "WHERE ref_id = ANY (?) AND status = 'PENDING'");
-            ps.setObject(1, at(now));
-            ps.setArray(2, con.createArrayOf("uuid", refIds.toArray()));
-            return ps;
-        });
+        return jdbc.update("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = ? "
+                + "WHERE ref_id = ANY (?) AND status = 'PENDING'", ps -> {
+                    ps.setObject(1, at(now));
+                    ps.setArray(2, ps.getConnection().createArrayOf("uuid", refIds.toArray()));
+                });
     }
 
     public int cancelPending(UUID refId, Instant now) {
