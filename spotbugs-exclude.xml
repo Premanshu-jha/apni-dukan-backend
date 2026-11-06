@@ -45,6 +45,7 @@
             <Class name="in.apnidukan.auth.service.SignInCleanupJob"/>
             <Class name="in.apnidukan.notifications.service.MessageCleanupJob"/>
             <Class name="in.apnidukan.notifications.service.NotificationSendJob"/>
+            <Class name="in.apnidukan.salon.service.AutoEndJob"/>
         </Or>
     </Match>
 </FindBugsFilter>
