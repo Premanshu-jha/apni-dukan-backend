@@ -1535,7 +1535,10 @@ class SalonBookingIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE type = 'SALON_BOOKING_CANCELLED' "
                 + "AND user_id = ?", String.class, owner)).startsWith("A customer cancelled")
                 .contains("deleted their account").doesNotContain("Ravi");
-        // Their own messages keep no text
+        // Their own messages keep no text once the wipe job has run (it empties them a slice at a time)
+        while (count("account_wipes") > 0) {
+            wipes.runOnce();
+        }
         assertThat(count("notification_jobs WHERE user_id = '" + customer + "' AND body <> ''")).isZero();
         // A token from before the deletion can't book, even if the sign-out check let it through (Redis down)
         assertThat(field(book(customer, at("15:00"), List.of(haircut), UUID.randomUUID()).body(), "code"))
