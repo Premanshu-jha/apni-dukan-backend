@@ -1027,7 +1027,9 @@ class SalonBookingIntegrationTest {
             waitUntilBlocked("select active from salon_staff");
             move = background(() -> patch("/shops/me",
                     Map.of("version", version, "addressLine", "Shop 9, New Market Road"), owner));
-            waitUntilBlocked("update shops");   // blocked by the booking's hold on the shop
+            // Blocked by the booking's hold on the shop: at its timeline entry, whose trigger (V16) updates the shop
+            // row before the shop's own update is written
+            waitUntilBlocked("insert into shop_events");
             barbers.commit();
         }
         Reply booked = second.get(10, TimeUnit.SECONDS);
