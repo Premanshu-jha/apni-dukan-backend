@@ -26,11 +26,6 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
             + "WHERE t.id = :id AND t.revokeReason = in.apnidukan.auth.domain.RevokeReason.ROTATED")
     int markReuseDetected(UUID id);
 
-    /** Deletes sign-ins that ended (expired or signed out) before this moment; returns how many. */
-    @Modifying
-    @Query("DELETE FROM RefreshToken t WHERE t.expiresAt < :before OR (t.revokedAt IS NOT NULL AND t.revokedAt < :before)")
-    int deleteEndedBefore(Instant before);
-
     /** Forgets the device labels of a person's sign-ins (their account was deleted). */
     @Modifying
     @Query("UPDATE RefreshToken t SET t.device = NULL WHERE t.userId = :userId")
