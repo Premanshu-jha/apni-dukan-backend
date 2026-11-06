@@ -22,10 +22,11 @@ CREATE INDEX ix_notification_jobs_user ON notification_jobs (user_id);
 CREATE INDEX ix_refresh_tokens_expires ON refresh_tokens (expires_at);
 CREATE INDEX ix_refresh_tokens_revoked ON refresh_tokens (revoked_at) WHERE revoked_at IS NOT NULL;
 
--- Field team's search by name or owner's name in part (LIKE '%…%'), with trigram indexes
+-- Field team's search by name, owner's name or owner's phone in part (LIKE '%…%'), with trigram indexes
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX ix_shops_name_trgm ON shops USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX ix_shops_owner_name_trgm ON shops USING gin (lower(owner_name) gin_trgm_ops);
+CREATE INDEX ix_users_phone_trgm ON users USING gin (phone gin_trgm_ops);   -- owner's phone in part
 
 -- Lookups and foreign-key checks that would otherwise read whole tables
 CREATE INDEX ix_walk_in_access_user ON walk_in_access (user_id);

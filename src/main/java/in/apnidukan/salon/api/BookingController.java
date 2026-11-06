@@ -56,6 +56,10 @@ public class BookingController {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                     Map.of("afterId", "send afterDistance and afterId together"));
         }
+        if (afterDistance != null && !(afterDistance >= 0 && afterDistance <= 1_000_000)) {   // also NaN, Infinity
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("afterDistance", "must be a distance in metres from the last salon of the page before"));
+        }
         ShopDirectory.Cursor after = afterId == null ? null : new ShopDirectory.Cursor(afterDistance, afterId);
         return bookings.salonsNear(lat, lng, after);
     }

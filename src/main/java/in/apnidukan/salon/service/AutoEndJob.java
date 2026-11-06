@@ -27,8 +27,8 @@ public class AutoEndJob {
 
     private static final Logger log = LoggerFactory.getLogger(AutoEndJob.class);
 
-    /** Rows per batch: each batch is its own short transaction. */
-    static final int BATCH = 500;
+    /** Rows per batch (app.jobs.auto-end-batch, default 500): each batch is its own short transaction. */
+    private final int batchSize;
     /** A round never runs longer than this (another server takes over after it). */
     private static final Duration MAX_ROUND = Duration.ofMinutes(5);
 
@@ -39,7 +39,9 @@ public class AutoEndJob {
     private final boolean enabled;
 
     public AutoEndJob(AppointmentStore appointments, SalonDayService day, JobLeases leases, Clock clock,
-                      @Value("${app.jobs.enabled:true}") boolean enabled) {
+                      @Value("${app.jobs.enabled:true}") boolean enabled,
+                      @Value("${app.jobs.auto-end-batch:500}") int batchSize) {
+        this.batchSize = batchSize;
         this.leases = leases;
         this.appointments = appointments;
         this.day = day;
@@ -64,14 +66,14 @@ public class AutoEndJob {
         int done = 0;
         int batch;
         do {
-            batch = appointments.completeEnded(now, BATCH);
+            batch = appointments.completeEnded(now, batchSize);
             done += batch;
-        } while (batch == BATCH);
+        } while (batch == batchSize);
         int missed = 0;
         do {
-            batch = day.markNoShows(now, BATCH);
+            batch = day.markNoShows(now, batchSize);
             missed += batch;
-        } while (batch == BATCH);
+        } while (batch == batchSize);
         if (done + missed > 0) {
             log.info("Completed {} appointments at their planned end; {} not started became no-shows", done, missed);
         }

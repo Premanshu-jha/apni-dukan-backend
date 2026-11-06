@@ -3,10 +3,7 @@ package in.apnidukan.common.jobs;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
-import java.sql.Timestamp;
-import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.UUID;
 
 /**
@@ -16,6 +13,8 @@ import java.util.UUID;
  * (their updates decide what each row becomes); the lease only stops several copies doing the same scan.
  *
  * Each call runs in its own short statement (no surrounding transaction), so the lease is visible to others at once.
+ * Times come from the database's clock, the one clock every server shares, so a server whose own clock runs ahead
+ * can't take a lease early.
  */
 @Component
 public class JobLeases {
@@ -24,11 +23,9 @@ public class JobLeases {
     private static final String ME = hostName() + "/" + UUID.randomUUID().toString().substring(0, 8);
 
     private final JdbcTemplate jdbc;
-    private final Clock clock;
 
-    public JobLeases(JdbcTemplate jdbc, Clock clock) {
+    public JobLeases(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
-        this.clock = clock;
     }
 
     /** Runs `round` if this copy gets the lease; returns whether it ran. */
@@ -45,12 +42,12 @@ public class JobLeases {
     }
 
     boolean take(String job, Duration maxRun) {
-        Instant now = Instant.now(clock);
-        int got = jdbc.update("INSERT INTO job_leases (name, locked_until, locked_by, locked_at) VALUES (?, ?, ?, ?) "
+        int got = jdbc.update("INSERT INTO job_leases (name, locked_until, locked_by, locked_at) "
+                        + "VALUES (?, clock_timestamp() + make_interval(secs => ?), ?, clock_timestamp()) "
                         + "ON CONFLICT (name) DO UPDATE SET locked_until = EXCLUDED.locked_until, "
                         + "locked_by = EXCLUDED.locked_by, locked_at = EXCLUDED.locked_at "
                         + "WHERE job_leases.locked_until <= EXCLUDED.locked_at",
-                job, Timestamp.from(now.plus(maxRun)), ME, Timestamp.from(now));
+                job, (double) maxRun.toSeconds(), ME);
         return got == 1;
     }
 

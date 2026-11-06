@@ -152,6 +152,20 @@ public class AppointmentStore {
                 + "AND status = 'CONFIRMED' RETURNING " + COLUMNS, ROW, at(startedBy), limit, at(now));
     }
 
+    /**
+     * Every online booking of the salon still CONFIRMED that starts after {@code since} becomes CANCELLED_BY_SALON with
+     * the reason, each with an event, in one statement (through ix_appointments_shop_confirmed); returns them.
+     */
+    public List<Appointment> cancelAllUpcoming(UUID shopId, Instant since, String reason, String detail, Instant now) {
+        return jdbc.query("WITH closed AS (UPDATE appointments SET status = 'CANCELLED_BY_SALON', cancel_reason = ?, "
+                        + "updated_at = ? WHERE shop_id = ? AND kind = 'BOOKING' AND status = 'CONFIRMED' "
+                        + "AND starts_at > ? RETURNING " + COLUMNS + "), "
+                        + "logged AS (INSERT INTO appointment_events (appointment_id, happened_at, by_user, event, detail) "
+                        + "SELECT id, ?, NULL, 'CANCELLED_BY_SALON', ? FROM closed) "
+                        + "SELECT " + COLUMNS + " FROM closed ORDER BY starts_at", ROW,
+                reason, at(now), shopId, at(since), at(now), detail);
+    }
+
     /** CONFIRMED → NO_SHOW, CANCELLED_BY_CUSTOMER or CANCELLED_BY_SALON; frees the barber's time. */
     public boolean close(UUID id, AppointmentStatus to, String reason, Instant now) {
         return jdbc.update("UPDATE appointments SET status = ?, cancel_reason = ?, updated_at = ? "

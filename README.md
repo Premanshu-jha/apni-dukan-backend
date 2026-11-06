@@ -643,6 +643,20 @@ Written for tens of thousands of shops, lakhs of customers and several copies of
 - **Connections and threads:** 20 database connections per server (`DB_POOL_SIZE`), 4 scheduler threads
   (`SCHEDULER_THREADS`), so a long cleanup can't hold up the no-show job. Servers × `DB_POOL_SIZE` must stay under
   the database's connection limit (use Neon's pooled URL).
+- **Field-team search** (admin visit lists) looks up shop name, owner name, shop code and owner phone with one
+  indexed lookup each (trigram indexes, V13), joined with `UNION`, instead of one `OR` that reads every shop.
+- **Suspending a salon** cancels all its upcoming bookings in one statement (with their history rows), then queues
+  each customer's message: a salon with hundreds of bookings is still one short transaction.
+- **Job leases use the database's clock**, so servers whose clocks differ can't both think a lease has run out. The
+  automatic-end batch size is `app.jobs.auto-end-batch` (default 500; the tests use 1 to exercise the loop).
+- **Salon paging**: `afterDistance` must be a number of metres from 0 to 1,000,000 and comes with `afterId`, else
+  400 `VALIDATION_FAILED`. The cursor isn't tied to the point: an app that moves the pin must start again from page 1
+  (the customer app does).
+- **Migrations V12 and V13** build their indexes with plain `CREATE INDEX`, which blocks writes to that table while it
+  builds: a few seconds at today's size. On a much larger database, build such indexes `CONCURRENTLY` in a separate
+  migration.
+- **Not yet done** (later PRs): keyset paging for the admin lists (they page by offset, fine for a few thousand
+  shops), batching the per-booking notices, caching photo links, and polling with ETags in the apps.
 - **Tests** run on the PostGIS image of Postgres 16 (`postgis/postgis:16-3.4-alpine`), the same extensions as Neon.
 
 ## Email

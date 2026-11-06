@@ -83,11 +83,17 @@ public class ShopReviewStore {
      * name or owner's name in part.
      */
     public List<UUID> search(ShopType type, ReviewGroup group, String q) {
-        StringBuilder sql = new StringBuilder("SELECT s.id FROM shops s "
-                + "LEFT JOIN shop_members m ON m.shop_id = s.id AND m.role = 'OWNER' "
-                + "LEFT JOIN users u ON u.id = m.user_id "
-                + "WHERE s.type = ? AND " + GROUP + " = ?");
-        List<Object> args = new ArrayList<>(List.of(type.name(), group.name()));
+        // The group as plain conditions on the shop's status (indexed by ix_shops_type_status), not the CASE: history
+        // is read only for waiting shops, where first visit and re-check differ
+        StringBuilder sql = new StringBuilder("SELECT s.id FROM shops s WHERE s.type = ? AND ");
+        sql.append(switch (group) {
+            case FIRST_VISIT -> "s.status = 'PENDING_VISIT' AND NOT " + EVER_APPROVED;
+            case RECHECK -> "s.status = 'PENDING_VISIT' AND " + EVER_APPROVED;
+            case SENT_BACK -> "s.status = 'DRAFT' AND s.status_reason IS NOT NULL";
+            case LIVE -> "s.status = 'APPROVED'";
+            case SUSPENDED -> "s.status = 'SUSPENDED'";
+        });
+        List<Object> args = new ArrayList<>(List.of(type.name()));
         String text = q == null ? "" : q.strip();
         if (!text.isEmpty()) {
             text = text.codePoints().limit(60).collect(StringBuilder::new, StringBuilder::appendCodePoint,
@@ -98,10 +104,18 @@ public class ShopReviewStore {
                     : compact.matches("91\\d{10}") ? compact.substring(2)
                     : compact.matches("0\\d{10}") ? compact.substring(1)      // 09848012345
                     : compact;
-            sql.append(" AND (CAST(s.shop_code AS text) = ? OR lower(s.name) LIKE ? OR lower(s.owner_name) LIKE ?");
-            args.addAll(List.of(number, like(text), like(text)));
+            // Each way of matching is its own indexed lookup (trigram on names and phones, the unique shop number),
+            // joined with UNION: an OR across them would make the database read every shop instead
+            sql.append(" AND s.id IN (SELECT id FROM shops WHERE lower(name) LIKE ? "
+                    + "UNION SELECT id FROM shops WHERE lower(owner_name) LIKE ?");
+            args.addAll(List.of(like(text), like(text)));
+            if (number.matches("\\d{1,12}")) {
+                sql.append(" UNION SELECT id FROM shops WHERE shop_code = ?");
+                args.add(Long.parseLong(number));
+            }
             if (digits.matches("\\d{3,10}")) {
-                sql.append(" OR u.phone LIKE ?");
+                sql.append(" UNION SELECT m.shop_id FROM shop_members m JOIN users u ON u.id = m.user_id "
+                        + "WHERE m.role = 'OWNER' AND u.phone LIKE ?");
                 args.add(like(digits));
             }
             sql.append(")");
