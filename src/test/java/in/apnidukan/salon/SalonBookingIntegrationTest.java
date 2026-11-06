@@ -106,6 +106,8 @@ class SalonBookingIntegrationTest {
         TestContainers.register(registry);
         // Only this type has an SMS template in the tests: it goes out as SMS too, the others don't
         registry.add("app.sms.template.booking-cancelled-by-salon", () -> "tpl-salon-cancel");
+        // Batches of one: every automatic-end round in these tests goes through the batch loop
+        registry.add("app.jobs.auto-end-batch", () -> "1");
     }
 
     @Autowired Environment environment;
@@ -114,6 +116,7 @@ class SalonBookingIntegrationTest {
     @Autowired JwtService jwt;
     @Autowired SessionRevocations sessions;
     @Autowired AutoEndJob autoEnd;
+    @Autowired in.apnidukan.salon.repo.AppointmentStore store_;
     @Autowired NotificationSendJob sender;
     @Autowired in.apnidukan.notifications.service.MessageCleanupJob messageCleanup;
     @Autowired in.apnidukan.notifications.repo.NotificationStore store;
@@ -162,6 +165,147 @@ class SalonBookingIntegrationTest {
     }
 
     // ---------- booking ----------
+
+    @Test
+    void salonsWithin2KmComeNearestFirst30APageAndPausedOrFarOnesNeverCutAPageShort() {
+        // 34 more salons around the customer, 30 m apart going north from the existing one (~150 m away)
+        java.util.Set<String> expected = new java.util.HashSet<>(List.of(salon.toString()));
+        for (int i = 0; i < 34; i++) {
+            UUID id = UUID.randomUUID();
+            TestData.salon(jdbc, id, person("97000000" + String.format("%02d", i)));
+            jdbc.update("UPDATE shops SET status = 'APPROVED', name = ?, latitude = ? WHERE id = ?", "Salon " + i,
+                    new java.math.BigDecimal("17.467000").add(new java.math.BigDecimal("0.000300")
+                            .multiply(java.math.BigDecimal.valueOf(i))), id);
+            expected.add(id.toString());
+        }
+        UUID paused = UUID.randomUUID();
+        TestData.salon(jdbc, paused, person("9700000099"));
+        jdbc.update("UPDATE shops SET status = 'APPROVED' WHERE id = ?", paused);
+        jdbc.update("INSERT INTO salon_pauses (shop_id, paused_until, updated_by, updated_at) VALUES (?, ?, ?, ?)",
+                paused, java.sql.Timestamp.from(TUESDAY_10_00.plusSeconds(3600)), owner,
+                java.sql.Timestamp.from(TUESDAY_10_00));
+        UUID far = UUID.randomUUID();   // about 3.3 km north: outside 2 km
+        TestData.salon(jdbc, far, person("9700000098"));
+        jdbc.update("UPDATE shops SET status = 'APPROVED', latitude = 17.496000 WHERE id = ?", far);
+        UUID kirana = UUID.randomUUID();   // near, but not a salon
+        TestData.shop(jdbc, kirana, person("9700000097"));
+        jdbc.update("UPDATE shops SET status = 'APPROVED' WHERE id = ?", kirana);
+
+        List<?> first = (List<?>) get("/salons?lat=17.466&lng=78.365", customer).body();
+        assertThat(first).hasSize(30);
+        Object last = first.get(29);
+        List<?> second = (List<?>) get("/salons?lat=17.466&lng=78.365&afterDistance="
+                + field(last, "distanceMetres") + "&afterId=" + field(last, "id"), customer).body();
+        assertThat(second).hasSize(5);   // 35 in all: the last page is shorter than 30
+        List<Object> all = new java.util.ArrayList<>(first);
+        all.addAll(second);
+        assertThat(all).extracting(x -> (String) field(x, "id")).containsExactlyInAnyOrderElementsOf(expected);
+        List<Double> metres = all.stream().map(x -> ((Number) field(x, "distanceMetres")).doubleValue()).toList();
+        assertThat(metres).isSorted();
+        assertThat(metres.get(metres.size() - 1)).isLessThanOrEqualTo(2000.0);
+        assertThat(((Number) field(first.get(0), "distanceKm")).doubleValue()).isBetween(0.1, 0.2);   // ~150 m
+        assertThat(get("/salons?lat=17.466&lng=78.365&afterDistance=10", customer).status()).isEqualTo(400);
+    }
+
+    /** An approved salon at this latitude, on the customer's longitude (78.365). */
+    private UUID salonAt(String latitude, String phone) {
+        UUID id = UUID.randomUUID();
+        TestData.salon(jdbc, id, person(phone));
+        jdbc.update("UPDATE shops SET status = 'APPROVED', latitude = ?, longitude = 78.365 WHERE id = ?",
+                new java.math.BigDecimal(latitude), id);
+        return id;
+    }
+
+    private List<?> salonsPage(Object after) {
+        String cursor = after == null ? "" : "&afterDistance=" + field(after, "distanceMetres") + "&afterId="
+                + field(after, "id");
+        Reply r = get("/salons?lat=17.466&lng=78.365" + cursor, customer);
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        return (List<?>) r.body();
+    }
+
+    @Test
+    void salonsAtTheSameSpotAcrossAPageEdgeAreEachShownOnceAndExactly30GiveAnEmptySecondPage() {
+        jdbc.update("UPDATE shops SET latitude = 17.467, longitude = 78.365 WHERE id = ?", salon);
+        java.util.Set<String> expected = new java.util.HashSet<>(List.of(salon.toString()));
+        for (int i = 0; i < 29; i++) {   // 30 salons, all the same distance away: only the id orders them
+            expected.add(salonAt("17.467000", "97100000" + String.format("%02d", i)).toString());
+        }
+        List<?> first = salonsPage(null);
+        assertThat(first).hasSize(30);
+        assertThat(first).extracting(x -> (String) field(x, "id")).containsExactlyInAnyOrderElementsOf(expected);
+        assertThat(salonsPage(first.get(29))).isEmpty();
+
+        String extra = salonAt("17.467000", "9710000099").toString();   // a 31st at the same spot
+        List<?> again = salonsPage(null);
+        List<?> rest = salonsPage(again.get(29));
+        assertThat(rest).hasSize(1);
+        expected.add(extra);
+        List<Object> all = new java.util.ArrayList<>(again);
+        all.addAll(rest);
+        assertThat(all).extracting(x -> (String) field(x, "id")).containsExactlyInAnyOrderElementsOf(expected);
+    }
+
+    @Test
+    void theSalonsEdgeIs2KmAndBadPagingOrAPointOutsideIndiaIsRefused() {
+        jdbc.update("UPDATE shops SET status = 'SUSPENDED' WHERE id = ?", salon);
+        // On a sphere 0.017897 degrees of latitude is ~1990 m and 0.018076 is ~2010 m
+        UUID inside = salonAt("17.483897", "9720000001");
+        salonAt("17.484076", "9720000002");
+        List<?> near = salonsPage(null);
+        assertThat(near).extracting(x -> (String) field(x, "id")).containsExactly(inside.toString());
+        assertThat(((Number) field(near.get(0), "distanceMetres")).doubleValue()).isBetween(1985.0, 1995.0);
+
+        assertThat(field(get("/salons?lat=51.5&lng=-0.12", customer).body(), "code")).isEqualTo("VALIDATION_FAILED");
+        assertThat(get("/salons?lat=17.466&lng=78.365&afterId=" + UUID.randomUUID(), customer).status())
+                .isEqualTo(400);
+        for (String bad : List.of("abc", "NaN", "Infinity", "-1")) {
+            assertThat(get("/salons?lat=17.466&lng=78.365&afterDistance=" + bad + "&afterId=" + UUID.randomUUID(),
+                    customer).status()).as(bad).isEqualTo(400);
+        }
+    }
+
+    @Test
+    void aBookingLeftUnstartedForMoreThanADayIsClosedQuietly() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("12:00").plus(Duration.ofDays(1)).plus(Duration.ofMinutes(16)));
+        assertThat(autoEnd.runOnce()).isEqualTo(1);
+        assertThat(status(b)).isEqualTo("NO_SHOW");
+        assertThat(count("customer_strikes")).isZero();
+        assertThat(jobs(b)).noneMatch(j -> j.startsWith("BOOKING_NO_SHOW"));
+    }
+
+    @Test
+    void theNoShowRoundWorksInBatchesAndTheDayQueryReadsOnlyThatDay() {
+        UUID first = id(book(customer, at("10:30"), List.of(beard), UUID.randomUUID()));
+        UUID second = id(book(customer2, at("10:30"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("10:46"));
+        // Two waiting bookings, a batch of one: one at a time, oldest first, each only once
+        assertThat(store_.markNoShows(at("10:31"), at("10:46"), 1)).hasSize(1);
+        assertThat(store_.markNoShows(at("10:31"), at("10:46"), 1)).hasSize(1);
+        assertThat(store_.markNoShows(at("10:31"), at("10:46"), 1)).isEmpty();
+        assertThat(List.of(status(first), status(second))).containsOnly("NO_SHOW");
+        // The day view finds what overlaps the day through time_range, including one that started the day before
+        assertThat(store_.forDay(salon, at("10:00"), at("11:00"))).extracting(a -> a.id())
+                .contains(first, second);
+        assertThat(store_.forDay(salon, at("11:00"), at("12:00"))).extracting(a -> a.id())
+                .doesNotContain(first, second);
+
+        // A leave from 11 to 13 Nov shows on the 12th though it started the day before and ends the day after;
+        // a removed block never shows
+        Instant day12 = at("00:00").plus(Duration.ofDays(2));
+        UUID leave = id(post("/salon/staff/" + sunil + "/blocks", Map.of("type", "LEAVE",
+                "startAt", day12.minus(Duration.ofDays(1)).toString(),
+                "endAt", day12.plus(Duration.ofDays(2)).toString()), owner));
+        UUID gone = id(post("/salon/staff/" + raju + "/blocks", Map.of("type", "LEAVE",
+                "startAt", day12.toString(), "endAt", day12.plus(Duration.ofHours(10)).toString()), owner));
+        assertThat(delete("/salon/staff/" + raju + "/blocks/" + gone, owner).status()).isEqualTo(204);
+        assertThat(store_.forDay(salon, day12, day12.plus(Duration.ofDays(1)))).extracting(a -> a.id())
+                .containsExactly(leave);
+        // A day ending exactly when something starts doesn't include it ([) ranges)
+        assertThat(store_.forDay(salon, day12.minus(Duration.ofDays(2)), day12.minus(Duration.ofDays(1))))
+                .extracting(a -> a.id()).doesNotContain(leave);
+    }
 
     @Test
     void aCustomerFindsTheSalonSeesFreeTimesAndBooks() {
@@ -1265,6 +1409,9 @@ class SalonBookingIntegrationTest {
         UUID admin = person("9000000999");
         jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        UUID b2 = id(book(customer2, at("12:00"), List.of(haircut), UUID.randomUUID()));   // Sunil
+        UUID tomorrow = id(book(customer, at("12:00").plus(Duration.ofDays(1)), List.of(beard), UUID.randomUUID()));
+        UUID walk = id(walkIn(owner, List.of(haircut), sunil, UUID.randomUUID()));   // in the chair: not cancelled
         assertThat(field(post("/admin/shops/" + salon + "/reject", Map.of("version", shopVersion(), "reason",
                 "Photo is blurry"), admin).body(), "code")).isEqualTo("WRONG_STATUS");   // only before approval
         assertThat(post("/admin/shops/" + salon + "/suspend", Map.of("version", shopVersion() - 1, "reason",
@@ -1274,7 +1421,11 @@ class SalonBookingIntegrationTest {
                 "Customers report it closed for months."), admin);
         assertThat(suspended.status()).as(suspended.text()).isEqualTo(200);
         assertThat(field(suspended.body(), "status")).isEqualTo("SUSPENDED");
-        assertThat(status(b)).isEqualTo("CANCELLED_BY_SALON");
+        assertThat(List.of(status(b), status(b2), status(tomorrow))).containsOnly("CANCELLED_BY_SALON");
+        assertThat(status(walk)).isEqualTo("IN_SERVICE");
+        assertThat(count("appointment_events WHERE event = 'CANCELLED_BY_SALON'")).isEqualTo(3);
+        assertThat(count("notification_jobs WHERE type = 'BOOKING_CANCELLED_BY_SALON' AND channel = 'PUSH'"))
+                .isEqualTo(3);
         String toCustomer = jdbc.queryForObject("SELECT body FROM notification_jobs WHERE ref_id = ? "
                 + "AND type = 'BOOKING_CANCELLED_BY_SALON' AND channel = 'PUSH'", String.class, b);
         assertThat(toCustomer).contains("isn't taking online bookings").doesNotContain("months");

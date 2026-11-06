@@ -18,7 +18,7 @@ public final class TestData {
         jdbc.update("UPDATE shops SET owner_photo_file_id = NULL, shop_photo_file_id = NULL");
         jdbc.update("UPDATE salon_staff SET photo_file_id = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
-        for (String table : new String[] {"shop_events", "admin_events", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
+        for (String table : new String[] {"job_leases", "shop_events", "admin_events", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
                 "appointments", "walk_in_access", "salon_pauses", "notification_jobs", "push_subscriptions",
                 "staff_hours_aud", "staff_services_aud", "salon_staff_aud",
                 "salon_services_aud", "salon_settings_aud", "shop_members_aud", "shops_aud", "revinfo", "staff_hours",

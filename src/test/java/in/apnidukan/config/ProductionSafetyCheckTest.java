@@ -52,6 +52,27 @@ class ProductionSafetyCheckTest {
     }
 
     @Test
+    void productionWithGmailOnlyWarns() {
+        assertThatCode(() -> ProductionSafetyCheck.check(true, realSms,
+                new in.apnidukan.auth.notify.SmtpEmailSender(
+                        org.mockito.Mockito.mock(org.springframework.mail.javamail.JavaMailSender.class),
+                        "shop@gmail.com", "app-password", ""),
+                "https://shop.example.in", true, realPush)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void productionRefusesResendsTestSender() {
+        assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms,
+                new in.apnidukan.auth.notify.ResendEmailSender("re_key", "Apni Dukan <onboarding@resend.dev>",
+                        in.apnidukan.auth.notify.ResendEmailSender.RESEND),
+                "https://shop.example.in", true, realPush)).hasMessageContaining("EMAIL_FROM");
+        assertThatCode(() -> ProductionSafetyCheck.check(true, realSms,
+                new in.apnidukan.auth.notify.ResendEmailSender("re_key", "Apni Dukan <no-reply@apnidukan.in>",
+                        in.apnidukan.auth.notify.ResendEmailSender.RESEND),
+                "https://shop.example.in", true, realPush)).doesNotThrowAnyException();
+    }
+
+    @Test
     void productionRefusesLocalhostOrAnyOriginInCors() {
         assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "http://localhost:5173", true, realPush))
                 .hasMessageContaining("CORS_ALLOWED_ORIGINS");

@@ -19,6 +19,8 @@ public class CapturingSenders {
 
     public static final Map<String, String> LAST_SMS = new ConcurrentHashMap<>();
     public static final Map<String, String> LAST_EMAIL = new ConcurrentHashMap<>();
+    /** Set to make the email provider refuse (as Resend or SMTP do when down): tests reset it. */
+    public static volatile boolean emailDown;
 
     @Bean
     @Primary
@@ -39,7 +41,13 @@ public class CapturingSenders {
     @Bean
     @Primary
     EmailSender capturingEmail() {
-        return (to, subject, body) -> LAST_EMAIL.put(to, body);
+        return (to, subject, body) -> {
+            if (emailDown) {
+                throw new in.apnidukan.common.error.ApiException(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                        "EMAIL_FAILED", "We couldn't send the email. Please try again in a minute.");
+            }
+            LAST_EMAIL.put(to, body);
+        };
     }
 
     /** The last message to this recipient; waits up to 3 s, because some messages are sent in the background. */
