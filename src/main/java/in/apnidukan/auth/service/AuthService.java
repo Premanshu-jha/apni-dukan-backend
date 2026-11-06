@@ -23,7 +23,6 @@ import in.apnidukan.common.text.TextCleaner;
 import in.apnidukan.common.text.TextCleaner.TextField;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -54,9 +53,7 @@ public class AuthService {
 
     private static final Logger log = LoggerFactory.getLogger(AuthService.class);
 
-    /** Per caller network: codes requested (SMS or email) and codes tried, per hour. Stops one machine spraying. */
-    static final int IP_SENDS_PER_HOUR = 10;
-    static final int IP_VERIFIES_PER_HOUR = 30;
+    /** Per caller network (see SignInLimits): codes requested and codes tried are counted per hour. */
     static final Duration HOUR = Duration.ofHours(1);
     /** Email codes one account may request per day (each goes out through our mail account). */
     static final int EMAIL_SENDS_PER_ACCOUNT_PER_DAY = 10;
@@ -85,7 +82,7 @@ public class AuthService {
     private final HumanCheck humans;
     private final List<AccountDeletionListener> deletionListeners;
     private final List<SignOutEverywhereListener> signOutListeners;
-    private final int smsDailyLimit;
+    private final SignInLimits signInLimits;
     private final TestModeService testMode;
     private final SecureRandom random = new SecureRandom();
 
@@ -95,7 +92,7 @@ public class AuthService {
                        PlatformTransactionManager transactions, ShopMemberships memberships, HumanCheck humans,
                        List<AccountDeletionListener> deletionListeners,
                        List<SignOutEverywhereListener> signOutListeners,
-                       @Value("${app.sms.daily-limit:500}") int smsDailyLimit, TestModeService testMode) {
+                       SignInLimits signInLimits, TestModeService testMode) {
         this.testMode = testMode;
         this.memberships = memberships;
         this.signOutListeners = signOutListeners;
@@ -113,7 +110,7 @@ public class AuthService {
         this.revocations = revocations;
         this.background = background;
         this.tx = new TransactionTemplate(transactions);
-        this.smsDailyLimit = smsDailyLimit;
+        this.signInLimits = signInLimits;
     }
 
     // ---------------- phone OTP sign-in ----------------
@@ -227,11 +224,12 @@ public class AuthService {
             refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
             throw unauthorized("TEST_MODE_OFF", "Test mode is off. Sign in again.");
         }
-        if (refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.ROTATED) == 0) {
+        UUID successor = UUID.randomUUID();
+        if (refreshTokens.rotateIfActive(stored.getId(), successor, now) == 0) {
             // Another request with this same token swapped it a moment ago (we waited for its lock): a retry
             throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");
         }
-        return issueTokens(user, device != null ? device : stored.getDevice(), false);
+        return issueTokens(user, device != null ? device : stored.getDevice(), false, successor);
     }
 
     /** Ends this device's session. Always succeeds, even for an unknown token. */
@@ -516,6 +514,11 @@ public class AuthService {
     // ---------------- helpers ----------------
 
     private AuthTokens issueTokens(User user, String device, boolean newUser) {
+        return issueTokens(user, device, newUser, UUID.randomUUID());
+    }
+
+    /** @param refreshId the new refresh token's id (on a refresh, already written as the old one's replaced_by) */
+    private AuthTokens issueTokens(User user, String device, boolean newUser, UUID refreshId) {
         Instant now = Instant.now(clock);
         // The shop the person works in, and their role there, go into the token (looked up fresh every time)
         ShopMemberships.Membership membership = memberships.find(user.getId()).orElse(null);
@@ -527,21 +530,23 @@ public class AuthService {
         random.nextBytes(raw);
         String refresh = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
         Instant refreshExpires = now.plus(refreshValidity);
-        refreshTokens.save(new RefreshToken(UUID.randomUUID(), user.getId(), Hashing.sha256Hex(refresh),
+        refreshTokens.save(new RefreshToken(refreshId, user.getId(), Hashing.sha256Hex(refresh),
                 trimDevice(device), now, refreshExpires));
         return new AuthTokens(access.token(), access.expiresAt(), refresh, refreshExpires, user, newUser);
     }
 
     private void limitSends(String ip) {
-        String key = "ip-send:" + ClientIp.limitKey(ip);
-        if (!limits.tryHit(key, IP_SENDS_PER_HOUR, HOUR)) {
+        String network = ClientIp.limitKey(ip);
+        String key = "ip-send:" + network;
+        if (!limits.tryHit(key, signInLimits.sendsPerHour(network), HOUR)) {
             throw tooManyRequests(limits.secondsLeft(key));
         }
     }
 
     private void limitVerifies(String ip) {
-        String key = "ip-verify:" + ClientIp.limitKey(ip);
-        if (!limits.tryHit(key, IP_VERIFIES_PER_HOUR, HOUR)) {
+        String network = ClientIp.limitKey(ip);
+        String key = "ip-verify:" + network;
+        if (!limits.tryHit(key, signInLimits.verifiesPerHour(network), HOUR)) {
             throw tooManyRequests(limits.secondsLeft(key));
         }
     }
@@ -549,7 +554,7 @@ public class AuthService {
     /** Every code SMS goes through here: a hard daily cap protects the SMS bill even if all other limits are dodged. */
     /** SMS_PAUSED before anything is issued: a refused send must not break a code the person already has. */
     private void requireSmsNotPaused() {
-        if (limits.current("sms-day") >= smsDailyLimit) {
+        if (limits.current("sms-day") >= signInLimits.smsDailyLimit()) {
             throw smsPaused();
         }
     }
@@ -560,10 +565,12 @@ public class AuthService {
     }
 
     private void sendSms(Runnable send) {
+        int smsDailyLimit = signInLimits.smsDailyLimit();
         long sentToday = limits.hit("sms-day", Duration.ofHours(24));
-        if (sentToday == smsDailyLimit * 8L / 10) {
-            // Once, at 80%: time to look before sign-in codes stop for everyone
-            log.error("80% of the daily SMS limit used ({} of {}). Check for abuse now; at {} sign-in codes stop.",
+        if (sentToday == SignInLimits.warnAt(smsDailyLimit)) {
+            // Once a day (the counter passes each number once per 24 hours), at 80%: time to look before sign-in
+            // codes stop for everyone. Point an alert at this line.
+            log.warn("80% of the daily SMS limit used ({} of {}). Check for abuse now; at {} sign-in codes stop.",
                     sentToday, smsDailyLimit, smsDailyLimit);
         }
         if (sentToday > smsDailyLimit) {

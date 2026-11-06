@@ -20,16 +20,22 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
             + "WHERE t.id = :id AND t.revokedAt IS NULL")
     int revokeIfActive(UUID id, Instant now, RevokeReason reason);
 
+    /**
+     * Swaps a token for its successor (rotation), only if it is still active: marks it ROTATED and remembers which
+     * token replaced it, so the cleanup knows when it can no longer raise the "copied token" alarm. Returns 1 if this
+     * call rotated it, 0 if it had already ended.
+     */
+    @Modifying
+    @Query("UPDATE RefreshToken t SET t.revokedAt = :now, "
+            + "t.revokeReason = in.apnidukan.auth.domain.RevokeReason.ROTATED, t.replacedBy = :successor "
+            + "WHERE t.id = :id AND t.revokedAt IS NULL")
+    int rotateIfActive(UUID id, UUID successor, Instant now);
+
     /** A rotated token came back: marks it so that it can trigger "signed out everywhere" only this once. */
     @Modifying
     @Query("UPDATE RefreshToken t SET t.revokeReason = in.apnidukan.auth.domain.RevokeReason.REUSE_DETECTED "
             + "WHERE t.id = :id AND t.revokeReason = in.apnidukan.auth.domain.RevokeReason.ROTATED")
     int markReuseDetected(UUID id);
-
-    /** Deletes sign-ins that ended (expired or signed out) before this moment; returns how many. */
-    @Modifying
-    @Query("DELETE FROM RefreshToken t WHERE t.expiresAt < :before OR (t.revokedAt IS NOT NULL AND t.revokedAt < :before)")
-    int deleteEndedBefore(Instant before);
 
     /** Forgets the device labels of a person's sign-ins (their account was deleted). */
     @Modifying

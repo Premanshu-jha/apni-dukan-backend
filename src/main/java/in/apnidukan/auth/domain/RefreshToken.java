@@ -40,6 +40,10 @@ public class RefreshToken {
     @Column(name = "revoke_reason", length = 30)
     private RevokeReason revokeReason;
 
+    /** ROTATED only: the token that replaced this one (kept while that one is in use, see SignInCleanupJob). */
+    @Column(name = "replaced_by")
+    private UUID replacedBy;
+
     protected RefreshToken() {
         // for JPA
     }
@@ -61,4 +65,5 @@ public class RefreshToken {
     public Instant getExpiresAt() { return expiresAt; }
     public Instant getRevokedAt() { return revokedAt; }
     public RevokeReason getRevokeReason() { return revokeReason; }
+    public UUID getReplacedBy() { return replacedBy; }
 }
