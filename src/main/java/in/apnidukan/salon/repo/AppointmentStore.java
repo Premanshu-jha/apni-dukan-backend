@@ -41,7 +41,10 @@ public class AppointmentStore {
      * the no-overlap index (ex_appointments_no_overlap: staff_id, time_range) answers it from the few rows around
      * that time, not from each barber's whole history.
      */
-    private static final String HOLDING_SQL = "SELECT " + prefixed("a.") + " FROM unnest(?::uuid[]) AS b(id) "
+    private static final String HOLDING_SQL = "SELECT a.id, a.shop_id, a.staff_id, a.kind, a.block_type, "
+            + "a.closure_id, a.customer_id, a.booking_no, a.guest_name, a.start_code, a.starts_at, a.ends_at, a.status, "
+            + "a.started_at, a.started_with_code, a.cancel_reason, a.created_by, a.client_request_id, a.created_at, "
+            + "a.updated_at FROM unnest(?::uuid[]) AS b(id) "
             + "JOIN appointments a ON a.staff_id = b.id AND a.time_range && tstzrange(?, ?, '[)') "
             + "WHERE a." + HOLDING + " AND a.id <> ? ORDER BY a.starts_at";
     /** Upcoming: still open (CONFIRMED or IN_SERVICE) and not over yet. Past: everything else. */
@@ -58,11 +61,6 @@ public class AppointmentStore {
             + "AND NOT (status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ?) ORDER BY starts_at DESC, id LIMIT ?";
 
     private final JdbcTemplate jdbc;
-
-    /** COLUMNS with a table alias in front of each, for queries that join. */
-    private static String prefixed(String alias) {
-        return alias + COLUMNS.replace(", ", ", " + alias);
-    }
 
     public AppointmentStore(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
