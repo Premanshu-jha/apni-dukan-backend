@@ -218,8 +218,7 @@ public class AppointmentStore {
         return count == null ? 0 : count;
     }
 
-    /** Appends to the appointment's history. by is null for the system (the automatic end). */
-    /** The same history row for many appointments, in one statement. */
+    /** The same history row for many appointments, in one statement (see event()). */
     public void eventAll(java.util.Collection<UUID> appointmentIds, Instant at, UUID by, String event, String detail) {
         if (appointmentIds.isEmpty()) {
             return;
@@ -234,6 +233,7 @@ public class AppointmentStore {
                 });
     }
 
+    /** Appends to the appointment's history. by is null for the system (the automatic end). */
     public void event(UUID appointmentId, Instant at, UUID by, String event, String detail) {
         jdbc.update("INSERT INTO appointment_events (appointment_id, happened_at, by_user, event, detail) "
                         + "VALUES (?, ?, ?, ?, ?)",
