@@ -5,8 +5,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -14,16 +17,30 @@ import java.util.UUID;
  * session generation number in Redis, and every access token carries the generation it was issued in.
  * Ending all sessions (account recovery, a copied refresh token) adds 1: older tokens are refused on their next
  * call, while tokens issued afterwards carry the new number and keep working.
+ *
+ * Each key (session-gen:{user}) expires {@link #ttl} after its last change, so keys of people who signed out
+ * everywhere once don't stay in Redis forever (lakhs of people). Only access tokens carry the number, and they live
+ * 15 minutes, so the key only has to outlive them; it is kept for the refresh lifetime plus a day anyway, a wide
+ * margin. When it expires the number starts again from 0, which no token still alive was issued under.
  */
 @Component
 public class SessionRevocations {
 
     private static final Logger log = LoggerFactory.getLogger(SessionRevocations.class);
 
-    private final StringRedisTemplate redis;
+    /** INCR and (re)start the expiry in one step, so a key is never left without a timer. */
+    private static final DefaultRedisScript<Long> INCREMENT_AND_EXPIRE = new DefaultRedisScript<>("""
+            local n = redis.call('INCR', KEYS[1])
+            redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            return n
+            """, Long.class);
 
-    public SessionRevocations(StringRedisTemplate redis) {
+    private final StringRedisTemplate redis;
+    private final Duration ttl;
+
+    public SessionRevocations(StringRedisTemplate redis, JwtProperties jwt) {
         this.redis = redis;
+        this.ttl = Duration.ofDays(jwt.refreshDays() + 1L);
     }
 
     public long currentGeneration(UUID userId) {
@@ -47,7 +64,12 @@ public class SessionRevocations {
     }
 
     public void revokeAll(UUID userId) {
-        redis.opsForValue().increment(key(userId));
+        redis.execute(INCREMENT_AND_EXPIRE, List.of(key(userId)), Long.toString(ttl.toMillis()));
+    }
+
+    /** How long a session number is kept after its last change (the refresh lifetime plus a day). */
+    public Duration ttl() {
+        return ttl;
     }
 
     /**

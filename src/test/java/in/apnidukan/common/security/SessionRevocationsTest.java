@@ -18,7 +18,13 @@ class SessionRevocationsTest {
     @SuppressWarnings("unchecked")
     private final ValueOperations<String, String> values = mock(ValueOperations.class);
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
-    private final SessionRevocations revocations = new SessionRevocations(redis);
+    private final SessionRevocations revocations = new SessionRevocations(redis,
+            new JwtProperties("test-only-secret-0123456789-abcdefghijklmnopqrstuvwxyz", 15, 30));
+
+    @Test
+    void theSessionNumberOutlivesEveryRefreshToken() {
+        assertThat(revocations.ttl()).isEqualTo(java.time.Duration.ofDays(31));
+    }
 
     @Test
     void anOlderGenerationIsRevoked() {
