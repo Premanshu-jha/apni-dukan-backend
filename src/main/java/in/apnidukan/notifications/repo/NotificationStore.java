@@ -216,6 +216,15 @@ public class NotificationStore {
                 + "AND next_try_at = ?", at(newLease), id, at(lease)) == 1;
     }
 
+    /**
+     * Gives a claimed message back without trying it (its batch ran out of time, or the server is stopping): the
+     * attempt counted at claim is taken back and it is due again at {@code dueAt}. Only while still ours.
+     */
+    public boolean release(UUID id, Instant lease, Instant dueAt) {
+        return jdbc.update("UPDATE notification_jobs SET attempts = attempts - 1, next_try_at = ? WHERE id = ? "
+                + "AND status = 'PENDING' AND next_try_at = ?", at(dueAt), id, at(lease)) == 1;
+    }
+
     /** Final outcome; only while still PENDING and still ours (lease). A cancel in between wins. */
     public void finish(UUID id, JobStatus status, Instant now, Instant lease) {
         jdbc.update(FINISH, status.name(), at(now), id, at(lease));

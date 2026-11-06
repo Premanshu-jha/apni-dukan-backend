@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.env.Environment;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -37,6 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * email verification, recovery, limits and CORS.
  */
 @EnabledIf("in.apnidukan.support.TestContainers#dockerAvailable")
+@org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(CapturingSenders.class)
 class AuthIntegrationTest {
@@ -467,44 +469,62 @@ class AuthIntegrationTest {
         String userId = (String) ((Map<?, ?>) phone.body().get("user")).get("id");
         assertThat(post("/auth/logout-all", Map.of(), (String) phone.body().get("accessToken")).status())
                 .isEqualTo(204);
-        assertThat(redis.opsForValue().get("session-gen:" + userId)).isEqualTo("1");
+        assertThat(Long.parseLong(redis.opsForValue().get("session-gen:" + userId)))
+                .isGreaterThan(System.currentTimeMillis() - 60_000);   // Redis's clock, in milliseconds
         assertThat(redis.getExpire("session-gen:" + userId))
                 .isBetween(java.time.Duration.ofDays(30).toSeconds(), java.time.Duration.ofDays(31).toSeconds());
     }
 
     @Test
-    void rotatedSignInsStayWhileTheirSuccessorIsInUseSoACopyIsStillCaught() {
+    void aSessionNumberThatExpiredNeverLetsAnOlderTokenSurviveTheNextSignOutEverywhere() {
+        Reply first = signIn(PHONE);
+        String userId = (String) ((Map<?, ?>) first.body().get("user")).get("id");
+        redis.opsForValue().set("session-gen:" + userId, "5");
+        String issuedAt5 = (String) signIn(PHONE).body().get("accessToken");
+        redis.delete("session-gen:" + userId);   // the key expired (31 days without a change)
+
+        // A sign-out everywhere afterwards must still end the token issued at 5 (a counter restarting at 0
+        // would only reach 1)
+        assertThat(post("/auth/logout-all", Map.of(), (String) first.body().get("accessToken")).status())
+                .isEqualTo(204);
+        Reply me = get("/auth/me", issuedAt5);
+        assertThat(me.status()).isEqualTo(401);
+        assertThat(me.body().get("code")).isEqualTo("SIGNED_OUT");
+    }
+
+    @Test
+    void theEightyPercentSmsWarningIsLoggedOnceADay(CapturedOutput output) {
+        redis.opsForValue().set("rl:sms-day", "398", java.time.Duration.ofHours(20));   // the cap here is 500
+        for (String phone : List.of("9000000301", "9000000302", "9000000303")) {   // 399, 400, 401
+            assertThat(post("/auth/otp/send", Map.of("phone", phone), null).status()).isEqualTo(202);
+        }
+        assertThat(output.getAll().split("80% of the daily SMS limit used", -1)).hasSize(2);
+    }
+
+    @Test
+    void aCopiedTokenRefreshedAlongAChainIsStillCaughtAfterTheNightlyCleanup() {
         Map<?, ?> first = signIn(PHONE).body();
         java.util.UUID userId = java.util.UUID.fromString((String) ((Map<?, ?>) first.get("user")).get("id"));
         String r1 = (String) first.get("refreshToken");
+        // A thief copied r1 and refreshes first, then keeps refreshing: r1 → r2 → r3
         String r2 = (String) post("/auth/refresh", Map.of("refreshToken", r1), null).body().get("refreshToken");
         String r3 = (String) post("/auth/refresh", Map.of("refreshToken", r2), null).body().get("refreshToken");
-        // Each swapped token names the one that replaced it
-        assertThat(jdbc.queryForObject("SELECT replaced_by FROM refresh_tokens WHERE token_hash = ?",
-                java.util.UUID.class, hash(r2)))
-                .isEqualTo(jdbc.queryForObject("SELECT id FROM refresh_tokens WHERE token_hash = ?",
-                        java.util.UUID.class, hash(r3)));
-
-        // Three days on: past the 2 days a swapped token is kept
         jdbc.update("UPDATE refresh_tokens SET revoked_at = revoked_at - interval '3 days' "
                 + "WHERE revoke_reason = 'ROTATED'");
-        // Older rows: a token swapped before replaced_by existed (keeps the 30-day rule), five sign-outs and an
-        // expiry from over 30 days ago (deleted two at a time)
-        token(userId, "now() + interval '27 days'", "now() - interval '3 days'", "ROTATED");
+        // Rows ended over 30 days ago (deleted two at a time): a swapped one, five sign-outs, an expiry
+        token(userId, "now() - interval '1 day'", "now() - interval '31 days'", "ROTATED");
         for (int i = 0; i < 5; i++) {
             token(userId, "now() - interval '1 day'", "now() - interval '31 days'", "SIGNED_OUT");
         }
         token(userId, "now() - interval '31 days'", null, null);
 
-        // r1 goes (its successor r2 has ended too); r2 stays, because r3 is still in use
+        // Day 3: the cleanup runs; the chain's swapped tokens stay (30 days)
         assertThat(signInCleanup.runOnce()).isEqualTo(1 + 5 + 1);
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM refresh_tokens WHERE token_hash = ?", Integer.class,
-                hash(r1))).isZero();
         assertThat(jdbc.queryForObject("SELECT count(*) FROM refresh_tokens", Integer.class)).isEqualTo(3);
 
-        // So if r2 was copied and comes back now, every session still ends
-        Reply reused = post("/auth/refresh", Map.of("refreshToken", r2), null);
-        assertThat(reused.body().get("code")).isEqualTo("REFRESH_TOKEN_REUSED");
+        // The owner's phone comes back with r1: the copy is caught and the thief's r3 stops too
+        Reply owner = post("/auth/refresh", Map.of("refreshToken", r1), null);
+        assertThat(owner.body().get("code")).isEqualTo("REFRESH_TOKEN_REUSED");
         assertThat(post("/auth/refresh", Map.of("refreshToken", r3), null).status()).isEqualTo(401);
     }
 
@@ -701,10 +721,6 @@ class AuthIntegrationTest {
     }
 
     // ---------- helpers ----------
-
-    private static String hash(String refreshToken) {
-        return in.apnidukan.auth.service.Hashing.sha256Hex(refreshToken);
-    }
 
     /** A refresh token row with these SQL expressions for its expiry and end. */
     private void token(java.util.UUID userId, String expiresAt, String revokedAt, String reason) {

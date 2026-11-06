@@ -22,6 +22,10 @@ class ResendEmailSenderTest {
 
     private final Map<String, String> seen = new ConcurrentHashMap<>();
     private volatile int answer = 200;
+    /** Answers to give first, before {@code answer} (one per request). */
+    private final java.util.Deque<Integer> firstAnswers = new java.util.concurrent.ConcurrentLinkedDeque<>();
+    private final java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile String errorBody = "";
     private HttpServer fake;
 
     private URI start() throws IOException {
@@ -31,7 +35,17 @@ class ResendEmailSenderTest {
             seen.put("auth", String.valueOf(exchange.getRequestHeaders().getFirst("Authorization")));
             seen.put("type", String.valueOf(exchange.getRequestHeaders().getFirst("Content-Type")));
             seen.put("body", new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-            exchange.sendResponseHeaders(answer, -1);
+            requests.incrementAndGet();
+            Integer first = firstAnswers.poll();
+            int status = first != null ? first : answer;
+            if (status == 429) {
+                exchange.getResponseHeaders().add("Retry-After", "1");
+            }
+            byte[] out = (status >= 400 ? errorBody : "").getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status, out.length == 0 ? -1 : out.length);
+            if (out.length > 0) {
+                exchange.getResponseBody().write(out);
+            }
             exchange.close();
         });
         fake.start();
@@ -58,8 +72,51 @@ class ResendEmailSenderTest {
     }
 
     @Test
-    void aRefusalTellsTheAppToTryAgain() throws IOException {
+    void tooManyAtOnceIsTriedOnceMoreAfterRetryAfter() throws IOException {
+        firstAnswers.add(429);
+        new ResendEmailSender("re_test_key", "a@apnidukan.in", start())
+                .send("owner@gmail.com", "Your code", "Your code is 123456");
+        assertThat(requests.get()).isEqualTo(2);
+    }
+
+    @Test
+    void stillTooManyAfterTheRetryTellsTheAppToTryAgain() throws IOException {
+        answer = 429;
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
+                .satisfies(e -> assertThat(((ApiException) e).getCode()).isEqualTo("EMAIL_FAILED"));
+        assertThat(requests.get()).isEqualTo(2);
+    }
+
+    @Test
+    void anAddressResendCantSendToIsTheUsersToFix() throws IOException {
         answer = 422;
+        errorBody = "{\"statusCode\":422,\"name\":\"validation_error\",\"message\":\"Invalid `to` field\"}";
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        assertThatThrownBy(() -> resend.send("owner@gmail", "Your code", "Your code is 123456"))
+                .satisfies(e -> {
+                    assertThat(((ApiException) e).getCode()).isEqualTo("INVALID_EMAIL");
+                    assertThat(((ApiException) e).getStatus().value()).isEqualTo(400);
+                });
+        assertThat(requests.get()).isEqualTo(1);
+        assertThat(ResendEmailSender.errorName(errorBody)).isEqualTo("validation_error");
+        assertThat(ResendEmailSender.errorName("not json")).isEmpty();
+    }
+
+    @Test
+    void aBadKeyIsNotTheUsersFault() throws IOException {
+        answer = 401;
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
+                .satisfies(e -> {
+                    assertThat(((ApiException) e).getCode()).isEqualTo("EMAIL_FAILED");
+                    assertThat(((ApiException) e).getStatus().value()).isEqualTo(503);
+                });
+    }
+
+    @Test
+    void aRefusalTellsTheAppToTryAgain() throws IOException {
+        answer = 500;
         ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
         assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
                 .isInstanceOf(ApiException.class)

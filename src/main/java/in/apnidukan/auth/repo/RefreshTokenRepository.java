@@ -20,17 +20,6 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
             + "WHERE t.id = :id AND t.revokedAt IS NULL")
     int revokeIfActive(UUID id, Instant now, RevokeReason reason);
 
-    /**
-     * Swaps a token for its successor (rotation), only if it is still active: marks it ROTATED and remembers which
-     * token replaced it, so the cleanup knows when it can no longer raise the "copied token" alarm. Returns 1 if this
-     * call rotated it, 0 if it had already ended.
-     */
-    @Modifying
-    @Query("UPDATE RefreshToken t SET t.revokedAt = :now, "
-            + "t.revokeReason = in.apnidukan.auth.domain.RevokeReason.ROTATED, t.replacedBy = :successor "
-            + "WHERE t.id = :id AND t.revokedAt IS NULL")
-    int rotateIfActive(UUID id, UUID successor, Instant now);
-
     /** A rotated token came back: marks it so that it can trigger "signed out everywhere" only this once. */
     @Modifying
     @Query("UPDATE RefreshToken t SET t.revokeReason = in.apnidukan.auth.domain.RevokeReason.REUSE_DETECTED "

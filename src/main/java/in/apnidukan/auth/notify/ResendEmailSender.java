@@ -20,8 +20,10 @@ import java.time.Duration;
  *
  * Sends while the request waits, with short timeouts (3 s to connect, 5 s for the answer): a code email is sent
  * before the app is told 202, so the person can expect it within seconds, and if Resend refuses or doesn't answer,
- * the app is told to try again (503 EMAIL_FAILED) instead of waiting for a code that never comes. Never logs the
- * email's text or the API key (only the subject and Resend's HTTP status).
+ * the app is told what happened instead of waiting for a code that never comes: 429 (too many at once) is tried once
+ * more after Resend's Retry-After (at most 2 s); 422 (Resend can't send to that address) answers 400 INVALID_EMAIL;
+ * other 4xx (our key or domain) and 5xx or timeouts answer 503 EMAIL_FAILED. Never logs the email's address or
+ * text or the API key (only the subject, Resend's HTTP status and its error name).
  */
 public class ResendEmailSender implements EmailSender {
 
@@ -29,6 +31,10 @@ public class ResendEmailSender implements EmailSender {
     public static final URI RESEND = URI.create("https://api.resend.com/emails");
     static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
     static final Duration ANSWER_TIMEOUT = Duration.ofSeconds(5);
+    /** Longest wait before the one retry after a 429. */
+    static final Duration MAX_RETRY_WAIT = Duration.ofSeconds(2);
+    private static final java.util.regex.Pattern ERROR_NAME =
+            java.util.regex.Pattern.compile("\"name\"\\s*:\\s*\"([A-Za-z_]{1,40})\"");
 
     private final String apiKey;
     private final String from;
@@ -69,9 +75,34 @@ public class ResendEmailSender implements EmailSender {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
                 .build();
-        int status;
+        HttpResponse<String> answer = post(request, subject);
+        if (answer.statusCode() == 429) {
+            // Over Resend's rate limit: wait as told (at most MAX_RETRY_WAIT, so the person isn't kept waiting) and
+            // try once more
+            sleep(retryAfter(answer));
+            answer = post(request, subject);
+        }
+        int status = answer.statusCode();
+        if (status >= 200 && status < 300) {
+            return;
+        }
+        // Only the status and Resend's error name are logged: never the key, the address or the text we sent
+        log.error("Resend refused the email ({}): HTTP {} {}", subject, status, errorName(answer.body()));
+        if (status == 422) {
+            // Resend's validation error: the address it was given can't receive email
+            throw ApiException.badRequest("INVALID_EMAIL", "We couldn't send to this address. Check the email.");
+        }
+        if (status >= 400 && status < 500 && status != 429) {
+            // Our side (a wrong or revoked key, an unverified sending domain): nothing the person can fix
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "EMAIL_FAILED",
+                    "We couldn't send the code by email right now. Please try again later.");
+        }
+        throw failed();   // 5xx, or still over the rate limit
+    }
+
+    private HttpResponse<String> post(HttpRequest request, String subject) {
         try {
-            status = http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
+            return http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         } catch (IOException e) {   // includes the timeouts
             log.error("Could not send email ({}): {}", subject, e.getClass().getSimpleName());
             throw failed();
@@ -79,10 +110,31 @@ public class ResendEmailSender implements EmailSender {
             Thread.currentThread().interrupt();
             throw failed();
         }
-        if (status < 200 || status >= 300) {
-            log.error("Resend refused the email ({}): HTTP {}", subject, status);
+    }
+
+    /** Resend's Retry-After in seconds, capped at MAX_RETRY_WAIT; 1 s if missing or unreadable. */
+    static Duration retryAfter(HttpResponse<?> answer) {
+        try {
+            long seconds = Long.parseLong(answer.headers().firstValue("Retry-After").orElse("1").strip());
+            return seconds < 0 || seconds > MAX_RETRY_WAIT.toSeconds() ? MAX_RETRY_WAIT : Duration.ofSeconds(seconds);
+        } catch (NumberFormatException e) {
+            return Duration.ofSeconds(1);
+        }
+    }
+
+    private static void sleep(Duration wait) {
+        try {
+            Thread.sleep(wait.toMillis());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             throw failed();
         }
+    }
+
+    /** The "name" of Resend's error answer (e.g. validation_error), or "" — never its message, which can quote input. */
+    static String errorName(String answer) {
+        java.util.regex.Matcher m = ERROR_NAME.matcher(answer == null ? "" : answer);
+        return m.find() ? m.group(1) : "";
     }
 
     private static ApiException failed() {

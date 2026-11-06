@@ -31,4 +31,24 @@ class BackgroundTasksTest {
         })).isTrue();
         tasks.stop();
     }
+
+    @Test
+    void aSecurityNoticeIsNeverDroppedTheCallerRunsItWhenTheLineIsFull() throws InterruptedException {
+        BackgroundTasks tasks = new BackgroundTasks(1, 1);
+        CountDownLatch release = new CountDownLatch(1);
+        tasks.run("busy", () -> {
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        tasks.run("waiting", () -> { });
+        Thread caller = Thread.currentThread();
+        java.util.concurrent.atomic.AtomicReference<Thread> ranOn = new java.util.concurrent.atomic.AtomicReference<>();
+        tasks.runAlways("account-moved notice", () -> ranOn.set(Thread.currentThread()));
+        assertThat(ranOn.get()).isSameAs(caller);
+        release.countDown();
+        tasks.stop();
+    }
 }

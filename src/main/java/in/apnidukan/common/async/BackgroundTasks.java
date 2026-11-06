@@ -17,9 +17,18 @@ import java.util.concurrent.TimeUnit;
  * whether or not the email has an account), the "your email was changed" and "your account moved" notices.
  * Failures are logged, never thrown.
  *
- * Best effort: jobs are kept in memory only, so a job still waiting when the server stops is lost (none of them
- * carries anything the person can't ask for again). The waiting line is bounded (app.background.queue): if a slow
- * mail service lets it fill up, further jobs are dropped with a warning instead of the server running out of memory.
+ * The waiting line is bounded (app.background.queue), so a flood can't make the server run out of memory. What
+ * happens when it is full depends on the job:
+ * <ul>
+ *   <li>{@link #run}: dropped with a warning. For what the person can simply ask for again (a recovery code).</li>
+ *   <li>{@link #runAlways}: run right away on the caller's thread instead, so it is never dropped; that request
+ *       just takes longer. For security notices ("your account moved", "your email was changed"): they tell a real
+ *       owner that someone else may have taken the account, and must go out even during a flood.</li>
+ * </ul>
+ * Jobs live in memory: on a normal stop, those already queued still run (stop() waits for them); only a crash in
+ * the second between the reply and the send loses one. A durable queue (rows in notification_jobs) would survive
+ * that too, but would keep phone numbers, emails and the notices' text in Postgres for a seconds-long window and
+ * tie sign-in to the notifications module; the caller-runs fallback closes the realistic gap (a full queue).
  */
 @Component
 public class BackgroundTasks {
@@ -40,18 +49,36 @@ public class BackgroundTasks {
 
     /** Queues the job; false if the line is full (the job is dropped and a warning logged). */
     public boolean run(String what, Runnable job) {
+        return run(what, job, true);
+    }
+
+    private boolean run(String what, Runnable job, boolean warnWhenDropped) {
         try {
-            pool.execute(() -> {
-                try {
-                    job.run();
-                } catch (RuntimeException e) {
-                    log.warn("Background task '{}' failed: {}", what, e.getClass().getSimpleName());
-                }
-            });
+            pool.execute(safely(what, job));
             return true;
         } catch (RejectedExecutionException full) {
-            log.warn("Background task '{}' dropped: {} waiting already", what, pool.getQueue().size());
+            if (warnWhenDropped) {
+                log.warn("Background task '{}' dropped: {} waiting already", what, pool.getQueue().size());
+            }
             return false;
+        }
+    }
+
+    private static Runnable safely(String what, Runnable job) {
+        return () -> {
+            try {
+                job.run();
+            } catch (RuntimeException e) {
+                log.warn("Background task '{}' failed: {}", what, e.getClass().getSimpleName());
+            }
+        };
+    }
+
+    /** Like {@link #run}, but never dropped: with the line full, the caller runs it now (see the class comment). */
+    public void runAlways(String what, Runnable job) {
+        if (!run(what, job, false)) {
+            log.warn("Background line full: running '{}' on the caller's thread", what);
+            safely(what, job).run();
         }
     }
 

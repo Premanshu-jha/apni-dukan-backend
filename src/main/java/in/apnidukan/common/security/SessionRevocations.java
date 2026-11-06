@@ -19,19 +19,28 @@ import java.util.UUID;
  * call, while tokens issued afterwards carry the new number and keep working.
  *
  * Each key (session-gen:{user}) expires {@link #ttl} after its last change, so keys of people who signed out
- * everywhere once don't stay in Redis forever (lakhs of people). Only access tokens carry the number, and they live
- * 15 minutes, so the key only has to outlive them; it is kept for the refresh lifetime plus a day anyway, a wide
- * margin. When it expires the number starts again from 0, which no token still alive was issued under.
+ * everywhere once don't stay in Redis forever (lakhs of people).
+ *
+ * The number never goes back, even across that expiry: ending all sessions sets it to the larger of "current + 1"
+ * and Redis's own clock in milliseconds. A plain counter would restart at 0 after expiry, and a token issued at,
+ * say, 5 just before would survive the next sign-out everywhere (which would only reach 1). With the clock, the
+ * next number is always above anything issued before, while the key is missing a token carries 0 (older than
+ * anything set later), and the servers' own clocks don't matter.
  */
 @Component
 public class SessionRevocations {
 
     private static final Logger log = LoggerFactory.getLogger(SessionRevocations.class);
 
-    /** INCR and (re)start the expiry in one step, so a key is never left without a timer. */
-    private static final DefaultRedisScript<Long> INCREMENT_AND_EXPIRE = new DefaultRedisScript<>("""
-            local n = redis.call('INCR', KEYS[1])
-            redis.call('PEXPIRE', KEYS[1], ARGV[1])
+    /**
+     * Raise to max(current + 1, Redis time in ms) and (re)start the expiry, in one step: never lower than before,
+     * and never left without a timer.
+     */
+    private static final DefaultRedisScript<Long> RAISE_AND_EXPIRE = new DefaultRedisScript<>("""
+            local t = redis.call('TIME')
+            local ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+            local n = math.max(tonumber(redis.call('GET', KEYS[1]) or '0') + 1, ms)
+            redis.call('SET', KEYS[1], string.format('%d', n), 'PX', ARGV[1])
             return n
             """, Long.class);
 
@@ -64,7 +73,7 @@ public class SessionRevocations {
     }
 
     public void revokeAll(UUID userId) {
-        redis.execute(INCREMENT_AND_EXPIRE, List.of(key(userId)), Long.toString(ttl.toMillis()));
+        redis.execute(RAISE_AND_EXPIRE, List.of(key(userId)), Long.toString(ttl.toMillis()));
     }
 
     /** How long a session number is kept after its last change (the refresh lifetime plus a day). */

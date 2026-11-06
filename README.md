@@ -150,7 +150,7 @@ flowchart TD
 | Tries per code | 5 (the 5th wrong one destroys the code). Every try is counted before checking, so parallel guesses don't get extra tries |
 | Codes per phone or email, per network | 3 per 10 minutes, 10 per day (20 per day from all networks together) |
 | Wrong codes per phone or email, per network | 10 per day (50 from all networks together), then `429 LOCKED_FOR_TODAY` |
-| Per network (IP; IPv6 counted per /64) | IPv4 address: 200 code requests and 600 code checks per hour (`IP_SENDS_PER_HOUR`, `IP_VERIFIES_PER_HOUR`); high, because mobile operators put thousands of phones behind one IPv4 address. IPv6 /64 (one phone or home): 20 and 60 (`IPV6_SENDS_PER_HOUR`, `IPV6_VERIFIES_PER_HOUR`). The IP is the caller's real one, from the header set in `CLIENT_IP_HEADER` (see the checklist) |
+| Per network (IP; IPv6 counted per /64) | IPv4 address: 200 code requests and 600 code checks per hour (`IP_SENDS_PER_HOUR`, `IP_VERIFIES_PER_HOUR`); high, because mobile operators put thousands of phones behind one IPv4 address. IPv6 /64 (one phone or home): 20 and 60 (`IPV6_SENDS_PER_HOUR`, `IPV6_VERIFIES_PER_HOUR`). The IP is the caller's real one, from the header set in `CLIENT_IP_HEADER` (see the checklist); a header value that is not an IP address is ignored and the connection's own address used |
 | Robot check | Sign-in and recovery codes need a Cloudflare Turnstile token (`captchaToken`) once `TURNSTILE_SECRET_KEY` is set (400 `CAPTCHA_REQUIRED` / `CAPTCHA_FAILED`). If Cloudflare doesn't answer, the code is sent anyway; the limits still hold |
 | Email codes per account | 10 per day |
 | All SMS together | `SMS_DAILY_LIMIT` per day (default 50,000), then `503 SMS_PAUSED`. At 80% a WARN "80% of the daily SMS limit used" is logged once a day, so an alert can fire before codes stop |
@@ -162,10 +162,11 @@ themselves. Every 429 carries a `Retry-After` header (seconds to wait).
 "Signed out everywhere" (recovery, or a copied refresh token) takes effect at once: every access token carries a
 session number, and older numbers are refused on their next call. A swapped refresh token coming back within
 60 seconds counts as the app retrying (a reply lost on a weak network); later than that it counts as copied.
-A swapped token remembers which token replaced it (`replaced_by`) and is kept as long as that one is in use, so a
-copy is caught however long the owner's phone stays idle (see Housekeeping). Session numbers in Redis
-(`session-gen:{user}`) expire 31 days after their last change (the refresh lifetime plus a day; they only have to
-outlive the 15-minute access tokens), so Redis doesn't keep one key per person forever.
+Swapped tokens are kept 30 days (the refresh lifetime), so a copy is caught even if a thief kept refreshing along a
+chain of tokens and the owner's phone comes back days later (see Housekeeping). Session numbers in Redis
+(`session-gen:{user}`) expire 31 days after their last change, so Redis doesn't keep one key per person forever.
+They never go back: ending all sessions sets the number to the larger of "current + 1" and Redis's clock in
+milliseconds, so a key that expired and starts again can't leave an older token alive.
 Only a refresh token that was already swapped
 coming back counts as copied; an old device retrying a signed-out token just gets "sign in again".
 
@@ -535,10 +536,12 @@ whose text is rewritten (the salon moved) is unread again. Messages that name a 
 below, then set its id on the server (Railway) and restart. From then on every new message of that type also goes
 out as one SMS to the customer's phone (its own row, retried on its own). Remove the setting again to switch that
 type's SMS off. Each variable is at most 30 characters (DLT's limit). Spending guards: at most 10 booking SMS per
-person per day and `SMS_BOOKING_DAILY_LIMIT` (default 100,000) in total per day, counted separately from sign-in
-codes; over a limit the SMS is dropped (the Web Push still goes out) and logged (the total limit once a day). At 80%
-of the total a WARN "80% of the daily booking-SMS limit used" is logged once a day. Sends running in parallel can
-pass a limit by up to `NOTIFY_SEND_CONCURRENCY`. Both limits
+customer per day; for salon owners and barbers (the `SALON_*`/`SHOP_*` messages, one per booking) a separate
+`SMS_STAFF_PER_PERSON_DAILY_LIMIT` (default 1000) per person per day; and `SMS_BOOKING_DAILY_LIMIT` (default 100,000)
+in total per day, counted separately from sign-in codes. Over a limit the SMS is dropped (the Web Push still goes
+out) and logged (the total limit once a day). At 80% of the total a WARN "80% of the daily booking-SMS limit used" is
+logged once a day. The limits are checked for a whole batch before it is sent, counting the batch's own SMS, so
+parallel sends can't pass them together (two servers at the same moment still can, by a few). The limits
 run for 24 hours from the first SMS counted. They guard spending, they aren't exact counts: in rare cases (MSG91
 accepts but its answer times out, or Redis fails right after a send) one SMS can go out twice.
 
@@ -572,8 +575,13 @@ Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sig
 - **Redis Cloud:** set the eviction policy to `noeviction`, so limits and session numbers are never dropped
   under memory pressure. If Redis stops answering, signed-in calls keep working; sign-in codes and start codes
   answer 503 `SERVICE_BUSY` until it is back (`Retry-After: 5`).
-- `APP_PRODUCTION=true`, own DLT templates, `SMS_ACCOUNT_MOVED_ENABLED=true`, Resend with `EMAIL_FROM` on your own
-  verified domain (the real server refuses Resend's test address).
+- `APP_PRODUCTION=true`, own DLT templates, `SMS_ACCOUNT_MOVED_ENABLED=true`.
+- **Email:** Resend recommended (`RESEND_API_KEY`); with Gmail the real server starts but logs a WARN, since Gmail
+  carries a few hundred emails a day. With Resend, `EMAIL_FROM` must be set to an address on your verified domain
+  (the real server refuses Resend's test address).
+- **Database extensions:** the migrations create `postgis` (V12) and `pg_trgm` (V13), which needs the CREATE
+  privilege on the database. On Neon the default owner role (the one in `DB_USER`) has it; a restricted role must have
+  them created by the owner first.
 - **Alerts:** on the log lines "80% of the daily SMS limit used" and "80% of the daily booking-SMS limit used".
 - **Web Push keys:** run `npx web-push generate-vapid-keys` once and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (and
   `VAPID_SUBJECT`, e.g. `mailto:` your support address) on Railway. The real server refuses to start without them.
@@ -593,10 +601,9 @@ Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sig
   open). Set it as Railway's Healthcheck Path. It checks the database only: the app keeps serving while Redis is down.
 - **Cleanup, every night (India time)**, in slices of 10,000 rows (each its own short transaction), on one server at
   a time (`job_leases`):
-  - 03:30, sign-ins: expired or signed out more than 30 days ago; swapped (rotated) refresh tokens 2 days after the
-    swap (`ROTATED_TOKENS_KEEP_DAYS`), but only once the token that replaced them is no longer in use. Until then a
-    swapped token is what catches a copy: if a thief refreshed first, the owner's phone later presents the old token
-    and every session ends. Tokens swapped before V15 (no `replaced_by`) keep the 30-day rule.
+  - 03:30, sign-ins that ended (expired, signed out, swapped) more than 30 days ago. Swapped (rotated) tokens stay
+    the whole 30 days on purpose: if a thief copied a token and keeps refreshing (r1 → r2 → r3), only the owner's
+    phone presenting r1, maybe days later, reveals it and ends every session.
   - 03:40, messages: SMS rows 7 days after they finished (`SMS_MESSAGES_KEEP_DAYS`), every other row after 90 days.
   - Bookings, strikes, events and the `*_aud` history stay.
 
@@ -628,13 +635,20 @@ Written for tens of thousands of shops, lakhs of customers and several copies of
   short transaction until none are left, skipping rows another server or request holds (`FOR UPDATE SKIP LOCKED`).
   Each round takes a lease in `job_leases` (V14), so with several servers only one does it; a server that dies
   frees it when the lease runs out.
-- **Sending messages.** Every 2 s a round claims 500 due messages (`FOR UPDATE SKIP LOCKED`) and keeps claiming
-  while batches come back full, so a burst of reminders goes out in one round. A batch is sent 32 at a time on
-  virtual threads; every device of the batch is read in one query (`= ANY(?)`), every phone in one, and the outcomes
-  are written as one JDBC batch. This job takes no lease: every server runs it, SKIP LOCKED gives each different
-  messages, so more servers send more. A message is still sent once: its lease is renewed just before sending only
-  if it is still this server's, and its outcome only counts under that lease. A batch that takes over 3 minutes
-  stops waiting; what wasn't sent is due again when its lease runs out.
+- **Sending messages.** Every 2 s a round claims up to 500 due messages (`FOR UPDATE SKIP LOCKED`; no more than fit
+  in 80% of the 3-minute batch deadline at the expected 1 s each) and keeps claiming while batches come back full,
+  so a burst of reminders goes out in one round. A batch is sent 8 at a time on virtual threads
+  (`NOTIFY_SEND_CONCURRENCY`, kept at most half of `DB_POOL_SIZE`, lowered with a WARN otherwise); every device of
+  the batch is read in one query (`= ANY(?)`), every phone in one. A send holds a database connection only for two
+  single statements (renewing its lease, recording its outcome), never while waiting on the push service or MSG91,
+  so web requests always find connections. Each outcome is recorded the moment it is known, so a crash or redeploy
+  mid-batch doesn't forget what was sent. This job takes no lease: every server runs it, SKIP LOCKED gives each
+  different messages, so more servers send more. A send that started is never interrupted (it is bounded: at most
+  10 devices, no new device after 60 s, each call with its own timeouts); messages not started by the deadline, or
+  when the server is stopping, are given back untried (their attempt isn't counted) and the round ends. Duplicates:
+  a message's lease is renewed just before sending only if it is still this server's, and its outcome only counts
+  under that lease, so normally it goes out once; a server dying in the instant between the provider accepting it
+  and the outcome being written can send that one message twice.
 - **Batch picks are `MATERIALIZED` CTEs** (`WITH pick AS MATERIALIZED (SELECT id … LIMIT n) UPDATE/DELETE … WHERE id IN
   (SELECT id FROM pick)`): as a plain `IN (SELECT … LIMIT n)` Postgres may run the sub-select again and touch more
   than n rows.
@@ -665,18 +679,22 @@ Codes (email verification, account recovery) and notices (email changed, account
 (resend.com) once `RESEND_API_KEY` is set; until then through Gmail SMTP as before, so nothing breaks before the
 account exists. A code email is sent while the request waits (3 s to connect, 5 s for Resend's answer, usually well
 under a second): `send-code` answers 202 only after Resend accepted it, so the code arrives within seconds, and
-`503 EMAIL_FAILED` if Resend refused or didn't answer, so the app asks the person to try again. Codes are never
-written to the database or the log (a queue in Postgres would keep live codes in plain text in every backup). The
-recovery email and the notices go out just after the reply (in memory, best effort: one queued in the second
-before a restart is lost; the person can ask again).
+`503 EMAIL_FAILED` if Resend didn't answer or failed (5xx, our key or domain refused), so the app asks the person to
+try again. Too many at once (429) is tried once more after Resend's `Retry-After` (at most 2 s). An address Resend
+can't send to (422) answers `400 INVALID_EMAIL`. Only the HTTP status and Resend's error name are logged, never the
+address, the text or the key. Codes are never written to the database or the log (a queue in Postgres would keep
+live codes in plain text in every backup). The recovery code email goes out just after the reply (so the reply
+doesn't reveal whether the email has an account); if the in-memory line is full it is dropped (the person asks
+again). The security notices (email changed, account moved: SMS and email) are never dropped: with the line full,
+the request sends them itself. Queued jobs still run on a normal stop; only a crash in that second loses one.
 
 Setting up Resend:
 1. Create an account at resend.com and an API key (Sending access is enough).
 2. For testing, send from `onboarding@resend.dev` (the default `EMAIL_FROM`): it only delivers to the email address
    of your own Resend account. For real customers, add your domain under Domains, put the DNS records Resend shows
    (SPF, DKIM) at your DNS provider, wait until it says Verified, and set `EMAIL_FROM`, e.g.
-   `Apni Dukan <no-reply@apnidukan.in>`. The real server (`APP_PRODUCTION=true`) refuses to start with the test
-   address.
+   `Apni Dukan <no-reply@apnidukan.in>`. Production must set `EMAIL_FROM`: the real server (`APP_PRODUCTION=true`)
+   refuses to start with the test address.
 3. On Railway: Variables → add `RESEND_API_KEY` (the key, starting `re_`) and `EMAIL_FROM`, then redeploy. The Gmail
    variables can be removed afterwards. Never commit the key.
 
@@ -694,9 +712,9 @@ All optional (environment variables on Railway; defaults in `application.propert
 | `SMS_BOOKING_DAILY_LIMIT` | 100000 | Booking SMS per day, everyone together |
 | `IP_SENDS_PER_HOUR` / `IPV6_SENDS_PER_HOUR` | 200 / 20 | Codes requested per hour per IPv4 address / IPv6 /64 |
 | `IP_VERIFIES_PER_HOUR` / `IPV6_VERIFIES_PER_HOUR` | 600 / 60 | Codes tried per hour per IPv4 address / IPv6 /64 |
-| `NOTIFY_BATCH_SIZE` / `NOTIFY_SEND_CONCURRENCY` / `NOTIFY_SEND_DELAY_MS` | 500 / 32 / 2000 | Message sender |
+| `SMS_STAFF_PER_PERSON_DAILY_LIMIT` | 1000 | Booking SMS per salon owner or barber per day (customers: 10) |
+| `NOTIFY_BATCH_SIZE` / `NOTIFY_SEND_CONCURRENCY` / `NOTIFY_SEND_DELAY_MS` | 500 / 8 / 2000 | Message sender (concurrency at most `DB_POOL_SIZE` / 2) |
 | `SMS_MESSAGES_KEEP_DAYS` | 7 | Finished SMS rows kept |
-| `ROTATED_TOKENS_KEEP_DAYS` | 2 | Swapped refresh tokens kept (longer while their successor is in use) |
 
 ## Database changes
 

@@ -22,6 +22,8 @@ import org.junit.jupiter.api.condition.EnabledIf;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
@@ -57,6 +59,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * count stops at 100; jobs run under a lease, one copy at a time.
  */
 @EnabledIf("in.apnidukan.support.TestContainers#dockerAvailable")
+@org.junit.jupiter.api.extension.ExtendWith(OutputCaptureExtension.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import({CapturingSenders.class, MessagesAtScaleIntegrationTest.Fakes.class})
 class MessagesAtScaleIntegrationTest {
@@ -66,6 +69,7 @@ class MessagesAtScaleIntegrationTest {
     static final List<String> PUSHED = new CopyOnWriteArrayList<>();
     static final List<String> TEXTED = new CopyOnWriteArrayList<>();
     static volatile PushSender.Result pushResult = PushSender.Result.SENT;
+    static volatile long pushMillis = 40;
     static final AtomicInteger IN_FLIGHT = new AtomicInteger();
     static final AtomicInteger MOST_IN_FLIGHT = new AtomicInteger();
     static final AtomicInteger DEVICE_LOOKUPS = new AtomicInteger();
@@ -86,7 +90,7 @@ class MessagesAtScaleIntegrationTest {
             return (PushSubscription device, String payload) -> {
                 MOST_IN_FLIGHT.accumulateAndGet(IN_FLIGHT.incrementAndGet(), Math::max);
                 try {
-                    Thread.sleep(40);
+                    Thread.sleep(pushMillis);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } finally {
@@ -170,6 +174,10 @@ class MessagesAtScaleIntegrationTest {
         registry.add("app.cleanup.batch", () -> "3");
         registry.add("app.sms.booking-daily-limit", () -> "4");   // configurable (default 100,000)
         registry.add("app.sms.template.booking-cancelled-by-salon", () -> "tpl-salon-cancel");
+        registry.add("app.sms.template.salon-new-booking", () -> "tpl-salon-new");
+        registry.add("app.sms.staff-per-person-daily-limit", () -> "12");
+        registry.add("app.notifications.batch-deadline-ms", () -> "1000");
+        registry.add("app.notifications.expected-send-ms", () -> "50");
     }
 
     @Autowired Environment environment;
@@ -192,6 +200,7 @@ class MessagesAtScaleIntegrationTest {
         PUSHED.clear();
         TEXTED.clear();
         pushResult = PushSender.Result.SENT;
+        pushMillis = 40;
         MOST_IN_FLIGHT.set(0);
         DEVICE_LOOKUPS.set(0);
         PHONE_LOOKUPS.set(0);
@@ -235,7 +244,57 @@ class MessagesAtScaleIntegrationTest {
     }
 
     @Test
-    void smsOfABatchShareOnePhoneLookupAndStopAtTheConfiguredDailyLimit() {
+    void sendsStillRunningAtTheDeadlineFinishAndRecordAndTheRestAreGivenBackUntried() {
+        for (int i = 0; i < 5; i++) {
+            UUID person = person(i);
+            device(person, i);
+            due(person, "PUSH", "BOOKING_CONFIRMED");
+        }
+        pushMillis = 1200;   // longer than the 1 s batch deadline here
+        // 4 sends start at once (concurrency 4) and are never interrupted; the 5th would start after the deadline
+        assertThat(sender.runOnce()).isEqualTo(4);
+        assertThat(PUSHED).hasSize(4);
+        assertThat(jdbc.queryForList("SELECT status || ':' || attempts FROM notification_jobs ORDER BY 1",
+                String.class)).containsExactly("PENDING:0", "SENT:1", "SENT:1", "SENT:1", "SENT:1");
+
+        // Given back due now, its attempt not counted: the next round sends it, once
+        pushMillis = 40;
+        assertThat(sender.runOnce()).isEqualTo(1);
+        assertThat(PUSHED).hasSize(5);
+        assertThat(jdbc.queryForList("SELECT DISTINCT status || ':' || attempts FROM notification_jobs",
+                String.class)).containsExactly("SENT:1");
+    }
+
+    @Test
+    void oneBatchNeverPassesACustomersDailySmsCapEvenWhenSentInParallel() {
+        UUID customer = person(1);
+        redis.opsForValue().set("rl:sms-booking-person:" + customer, "8", Duration.ofHours(1));   // cap is 10
+        for (int i = 0; i < 3; i++) {
+            due(customer, "SMS", "BOOKING_CANCELLED_BY_SALON");
+        }
+        sender.runOnce();
+        assertThat(TEXTED).hasSize(2);
+        assertThat(jdbc.queryForList("SELECT status FROM notification_jobs ORDER BY status", String.class))
+                .containsExactly("FAILED", "SENT", "SENT");
+    }
+
+    @Test
+    void salonStaffHaveTheirOwnHigherSmsCap() {
+        UUID owner = person(1);
+        // Over the customers' 10 (as a customer), but salon messages count against the staff cap (12 here)
+        redis.opsForValue().set("rl:sms-booking-person:" + owner, "10", Duration.ofHours(1));
+        redis.opsForValue().set("rl:sms-staff-person:" + owner, "11", Duration.ofHours(1));
+        due(owner, "SMS", "SALON_NEW_BOOKING");
+        due(owner, "SMS", "SALON_NEW_BOOKING");
+        sender.runOnce();
+        assertThat(TEXTED).hasSize(1);
+        assertThat(redis.opsForValue().get("rl:sms-staff-person:" + owner)).isEqualTo("12");
+        assertThat(jdbc.queryForList("SELECT status FROM notification_jobs ORDER BY status", String.class))
+                .containsExactly("FAILED", "SENT");
+    }
+
+    @Test
+    void smsOfABatchShareOnePhoneLookupAndStopAtTheConfiguredDailyLimit(CapturedOutput output) {
         for (int i = 0; i < 6; i++) {
             due(person(i), "SMS", "BOOKING_CANCELLED_BY_SALON");
         }
@@ -244,6 +303,8 @@ class MessagesAtScaleIntegrationTest {
         assertThat(TEXTED).hasSize(4);   // the booking-SMS limit here is 4 a day
         assertThat(jdbc.queryForList("SELECT status FROM notification_jobs ORDER BY status", String.class))
                 .containsExactly("FAILED", "FAILED", "SENT", "SENT", "SENT", "SENT");
+        // At 80% of the day's 4 (the 3rd SMS), one warning; the 4th doesn't repeat it
+        assertThat(output.getAll().split("80% of the daily booking-SMS limit used", -1)).hasSize(2);
     }
 
     @Test

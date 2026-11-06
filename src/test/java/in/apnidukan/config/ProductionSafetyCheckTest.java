@@ -52,6 +52,15 @@ class ProductionSafetyCheckTest {
     }
 
     @Test
+    void productionWithGmailOnlyWarns() {
+        assertThatCode(() -> ProductionSafetyCheck.check(true, realSms,
+                new in.apnidukan.auth.notify.SmtpEmailSender(
+                        org.mockito.Mockito.mock(org.springframework.mail.javamail.JavaMailSender.class),
+                        "shop@gmail.com", "app-password", ""),
+                "https://shop.example.in", true, realPush)).doesNotThrowAnyException();
+    }
+
+    @Test
     void productionRefusesResendsTestSender() {
         assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms,
                 new in.apnidukan.auth.notify.ResendEmailSender("re_key", "Apni Dukan <onboarding@resend.dev>",

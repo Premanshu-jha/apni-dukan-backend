@@ -224,12 +224,11 @@ public class AuthService {
             refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
             throw unauthorized("TEST_MODE_OFF", "Test mode is off. Sign in again.");
         }
-        UUID successor = UUID.randomUUID();
-        if (refreshTokens.rotateIfActive(stored.getId(), successor, now) == 0) {
+        if (refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.ROTATED) == 0) {
             // Another request with this same token swapped it a moment ago (we waited for its lock): a retry
             throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");
         }
-        return issueTokens(user, device != null ? device : stored.getDevice(), false, successor);
+        return issueTokens(user, device != null ? device : stored.getDevice(), false);
     }
 
     /** Ends this device's session. Always succeeds, even for an unknown token. */
@@ -328,7 +327,7 @@ public class AuthService {
         });
         if (previous[0] != null) {
             String old = previous[0];
-            background.run("email-changed notice", () -> email.send(old, "Your Apni Dukan email was changed",
+            background.runAlways("email-changed notice", () -> email.send(old, "Your Apni Dukan email was changed",
                     "The recovery email of your Apni Dukan account was changed to " + mask(address) + ".\n\n"
                             + "If this wasn't you, contact Apni Dukan support immediately."));
         }
@@ -405,9 +404,9 @@ public class AuthService {
         String previousPhone = oldPhone[0];
         if (!previousPhone.equals(newPhone)) {
             // Not under the daily SMS cap: this warning must get out even if someone used up the cap
-            background.run("account-moved SMS", () -> sms.sendAccountMoved(previousPhone, ending));
+            background.runAlways("account-moved SMS", () -> sms.sendAccountMoved(previousPhone, ending));
         }
-        background.run("account-moved email", () -> email.send(address, "Your Apni Dukan account moved to a new phone",
+        background.runAlways("account-moved email", () -> email.send(address, "Your Apni Dukan account moved to a new phone",
                 "Your account now uses the phone number ending " + ending + ". Every other device was signed out."
                         + "\n\nIf this wasn't you, contact Apni Dukan support immediately."));
         return tokens;
@@ -514,11 +513,6 @@ public class AuthService {
     // ---------------- helpers ----------------
 
     private AuthTokens issueTokens(User user, String device, boolean newUser) {
-        return issueTokens(user, device, newUser, UUID.randomUUID());
-    }
-
-    /** @param refreshId the new refresh token's id (on a refresh, already written as the old one's replaced_by) */
-    private AuthTokens issueTokens(User user, String device, boolean newUser, UUID refreshId) {
         Instant now = Instant.now(clock);
         // The shop the person works in, and their role there, go into the token (looked up fresh every time)
         ShopMemberships.Membership membership = memberships.find(user.getId()).orElse(null);
@@ -530,7 +524,7 @@ public class AuthService {
         random.nextBytes(raw);
         String refresh = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
         Instant refreshExpires = now.plus(refreshValidity);
-        refreshTokens.save(new RefreshToken(refreshId, user.getId(), Hashing.sha256Hex(refresh),
+        refreshTokens.save(new RefreshToken(UUID.randomUUID(), user.getId(), Hashing.sha256Hex(refresh),
                 trimDevice(device), now, refreshExpires));
         return new AuthTokens(access.token(), access.expiresAt(), refresh, refreshExpires, user, newUser);
     }

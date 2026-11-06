@@ -13,6 +13,9 @@ import org.springframework.stereotype.Component;
  *   <li>Any other header (CF-Connecting-IP behind Cloudflare): its value as the proxy wrote it.</li>
  *   <li>Not set (your laptop, tests of other modules): the connection's own address.</li>
  * </ul>
+ * A value that isn't an IP address (a misconfigured proxy, or a caller writing the header itself where no proxy
+ * replaces it) is ignored: the connection's own address is used, so junk can't become a key of its own.
+ *
  * Production refuses to start without it (ProductionSafetyCheck): otherwise every caller would share the proxy's
  * IP and one person could use up everyone's limit.
  */
@@ -38,10 +41,31 @@ public class ClientAddress {
         for (int i = parts.length - 1; i >= 0; i--) {
             String part = parts[i].strip();
             if (!part.isEmpty()) {
-                return part;
+                return isIp(part) ? part : request.getRemoteAddr();
             }
         }
         return request.getRemoteAddr();
+    }
+
+    private static final String OCTET = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+    private static final java.util.regex.Pattern IPV4 =
+            java.util.regex.Pattern.compile("(" + OCTET + "\\.){3}" + OCTET);
+    private static final java.util.regex.Pattern IPV6 = java.util.regex.Pattern.compile("\\[?[0-9a-fA-F:.]{2,45}]?");
+
+    /** An IPv4 or IPv6 literal (checked by its characters first, so no name is ever looked up). */
+    static boolean isIp(String value) {
+        if (IPV4.matcher(value).matches()) {
+            return true;
+        }
+        if (value.indexOf(':') < 0 || !IPV6.matcher(value).matches()) {
+            return false;
+        }
+        String bare = value.startsWith("[") ? value.substring(1, value.length() - 1) : value;
+        try {
+            return java.net.InetAddress.getByName(bare).getAddress().length == 16;
+        } catch (java.net.UnknownHostException e) {
+            return false;
+        }
     }
 
     public boolean configured() {
