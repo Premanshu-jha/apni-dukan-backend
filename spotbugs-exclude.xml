@@ -32,7 +32,8 @@
         <Class name="in.apnidukan.common.security.SecurityConfig"/>
     </Match>
     <!-- These constructors refuse to start the app when a required setting is missing or too weak (fail fast, on
-         purpose): no SMS/mail settings, production misconfiguration, or a JWT_SECRET too short to sign safely. -->
+         purpose): no SMS/mail settings, production misconfiguration, a JWT_SECRET too short to sign safely, or a job's batch
+         size, concurrency or retention below 1. -->
     <Match>
         <Bug pattern="CT_CONSTRUCTOR_THROW"/>
         <Or>
@@ -40,6 +41,11 @@
             <Class name="in.apnidukan.auth.notify.SmtpEmailSender"/>
             <Class name="in.apnidukan.config.ProductionSafetyCheck"/>
             <Class name="in.apnidukan.common.security.JwtService"/>
+            <Class name="in.apnidukan.auth.notify.ResendEmailSender"/>
+            <Class name="in.apnidukan.auth.service.SignInCleanupJob"/>
+            <Class name="in.apnidukan.notifications.service.MessageCleanupJob"/>
+            <Class name="in.apnidukan.notifications.service.NotificationSendJob"/>
+            <Class name="in.apnidukan.salon.service.AutoEndJob"/>
         </Or>
     </Match>
 </FindBugsFilter>
