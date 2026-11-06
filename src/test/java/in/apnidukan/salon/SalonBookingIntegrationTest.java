@@ -114,6 +114,7 @@ class SalonBookingIntegrationTest {
     @Autowired JwtService jwt;
     @Autowired SessionRevocations sessions;
     @Autowired AutoEndJob autoEnd;
+    @Autowired in.apnidukan.salon.repo.AppointmentStore store_;
     @Autowired NotificationSendJob sender;
     @Autowired in.apnidukan.notifications.service.MessageCleanupJob messageCleanup;
     @Autowired in.apnidukan.notifications.repo.NotificationStore store;
@@ -162,6 +163,64 @@ class SalonBookingIntegrationTest {
     }
 
     // ---------- booking ----------
+
+    @Test
+    void salonsWithin2KmComeNearestFirst30APageAndPausedOrFarOnesNeverCutAPageShort() {
+        // 34 more salons around the customer, 30 m apart going north from the existing one (~150 m away)
+        java.util.Set<String> expected = new java.util.HashSet<>(List.of(salon.toString()));
+        for (int i = 0; i < 34; i++) {
+            UUID id = UUID.randomUUID();
+            TestData.salon(jdbc, id, person("97000000" + String.format("%02d", i)));
+            jdbc.update("UPDATE shops SET status = 'APPROVED', name = ?, latitude = ? WHERE id = ?", "Salon " + i,
+                    new java.math.BigDecimal("17.467000").add(new java.math.BigDecimal("0.000300")
+                            .multiply(java.math.BigDecimal.valueOf(i))), id);
+            expected.add(id.toString());
+        }
+        UUID paused = UUID.randomUUID();
+        TestData.salon(jdbc, paused, person("9700000099"));
+        jdbc.update("UPDATE shops SET status = 'APPROVED' WHERE id = ?", paused);
+        jdbc.update("INSERT INTO salon_pauses (shop_id, paused_until, updated_by, updated_at) VALUES (?, ?, ?, ?)",
+                paused, java.sql.Timestamp.from(TUESDAY_10_00.plusSeconds(3600)), owner,
+                java.sql.Timestamp.from(TUESDAY_10_00));
+        UUID far = UUID.randomUUID();   // about 3.3 km north: outside 2 km
+        TestData.salon(jdbc, far, person("9700000098"));
+        jdbc.update("UPDATE shops SET status = 'APPROVED', latitude = 17.496000 WHERE id = ?", far);
+        UUID kirana = UUID.randomUUID();   // near, but not a salon
+        TestData.shop(jdbc, kirana, person("9700000097"));
+        jdbc.update("UPDATE shops SET status = 'APPROVED' WHERE id = ?", kirana);
+
+        List<?> first = (List<?>) get("/salons?lat=17.466&lng=78.365", customer).body();
+        assertThat(first).hasSize(30);
+        Object last = first.get(29);
+        List<?> second = (List<?>) get("/salons?lat=17.466&lng=78.365&afterDistance="
+                + field(last, "distanceMetres") + "&afterId=" + field(last, "id"), customer).body();
+        assertThat(second).hasSize(5);   // 35 in all: the last page is shorter than 30
+        List<Object> all = new java.util.ArrayList<>(first);
+        all.addAll(second);
+        assertThat(all).extracting(x -> (String) field(x, "id")).containsExactlyInAnyOrderElementsOf(expected);
+        List<Double> metres = all.stream().map(x -> ((Number) field(x, "distanceMetres")).doubleValue()).toList();
+        assertThat(metres).isSorted();
+        assertThat(metres.get(metres.size() - 1)).isLessThanOrEqualTo(2000.0);
+        assertThat(((Number) field(first.get(0), "distanceKm")).doubleValue()).isEqualTo(0.1);   // ~146 m
+        assertThat(get("/salons?lat=17.466&lng=78.365&afterDistance=10", customer).status()).isEqualTo(400);
+    }
+
+    @Test
+    void theNoShowRoundWorksInBatchesAndTheDayQueryReadsOnlyThatDay() {
+        UUID first = id(book(customer, at("10:30"), List.of(beard), UUID.randomUUID()));
+        UUID second = id(book(customer2, at("10:30"), List.of(haircut), UUID.randomUUID()));
+        CLOCK.set(at("10:46"));
+        // Two waiting bookings, a batch of one: one at a time, oldest first, each only once
+        assertThat(store_.markNoShows(at("10:31"), at("10:46"), 1)).hasSize(1);
+        assertThat(store_.markNoShows(at("10:31"), at("10:46"), 1)).hasSize(1);
+        assertThat(store_.markNoShows(at("10:31"), at("10:46"), 1)).isEmpty();
+        assertThat(List.of(status(first), status(second))).containsOnly("NO_SHOW");
+        // The day view finds what overlaps the day through time_range, including one that started the day before
+        assertThat(store_.forDay(salon, at("10:00"), at("11:00"))).extracting(a -> a.id())
+                .contains(first, second);
+        assertThat(store_.forDay(salon, at("11:00"), at("12:00"))).extracting(a -> a.id())
+                .doesNotContain(first, second);
+    }
 
     @Test
     void aCustomerFindsTheSalonSeesFreeTimesAndBooks() {

@@ -21,19 +21,28 @@ public interface ShopDirectory {
     Optional<ShopCard> findForBooking(UUID shopId);
 
     /**
-     * APPROVED shops of this type within radiusKm of the point, nearest first, at most limit.
-     * @param type KIRANA or SALON
+     * APPROVED shops of this type within radiusMetres of the point, nearest first, at most limit, after `after`
+     * (the last card of the previous page; null for the first page). Found by the database's map index (PostGIS),
+     * so it reads only shops near the point, however many there are.
+     * @param type                KIRANA or SALON
+     * @param skipPausedSalons    leave out salons that paused online bookings (salon_pauses) right now
      */
-    List<ShopCard> nearby(String type, BigDecimal latitude, BigDecimal longitude, double radiusKm, int limit);
+    List<ShopCard> nearby(String type, BigDecimal latitude, BigDecimal longitude, int radiusMetres, int limit,
+                          Cursor after, boolean skipPausedSalons);
+
+    /** Where a page of nearby shops ended: the last card's exact distance and id. */
+    record Cursor(double distanceMetres, UUID id) {
+    }
 
     /**
      * @param status     DRAFT, PENDING_VISIT, APPROVED or SUSPENDED
      * @param type       KIRANA or SALON
      * @param shopPhotoFileId the shop's photo, or null
-     * @param distanceKm from the point asked about in nearby(); null from find()
+     * @param distanceKm     from the point asked about in nearby(), rounded to 0.1 km; null from find()
+     * @param distanceMetres the exact distance, for the next page's Cursor; null from find()
      */
     record ShopCard(UUID id, String name, String addressLine, String area, String city, String pincode,
                     BigDecimal latitude, BigDecimal longitude, String status, String type, UUID shopPhotoFileId,
-                    Double distanceKm) {
+                    Double distanceKm, Double distanceMetres) {
     }
 }

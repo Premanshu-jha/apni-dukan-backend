@@ -4,7 +4,7 @@
 
 -- Bookings still waiting to start, by start time: the every-minute no-show job reads only these
 CREATE INDEX ix_appointments_confirmed_start ON appointments (starts_at)
-    WHERE status = 'CONFIRMED' AND kind = 'BOOKING';
+    WHERE status = 'CONFIRMED';
 
 -- A salon's day or week: appointments of one salon overlapping a time range, without reading its whole history
 CREATE INDEX ix_appointments_shop_range ON appointments USING gist (shop_id, time_range)
@@ -12,7 +12,7 @@ CREATE INDEX ix_appointments_shop_range ON appointments USING gist (shop_id, tim
 
 -- A salon's upcoming online bookings, in start order
 CREATE INDEX ix_appointments_shop_confirmed ON appointments (shop_id, starts_at)
-    WHERE status = 'CONFIRMED' AND kind = 'BOOKING';
+    WHERE status = 'CONFIRMED';
 
 -- Message cleanup (finished messages older than the retention) and account deletion (all of a person's messages)
 CREATE INDEX ix_notification_jobs_finished ON notification_jobs (finished_at) WHERE status <> 'PENDING';

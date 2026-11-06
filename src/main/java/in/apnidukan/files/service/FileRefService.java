@@ -40,4 +40,18 @@ public class FileRefService implements FileRefs {
         StoredFile file = repository.findById(fileId).orElseThrow();
         return storage.signedLink(file.getStorageKey(), linkValidity, null);
     }
+
+    @Override
+    @Transactional(readOnly = true)
+    public java.util.Map<UUID, String> links(java.util.Collection<UUID> fileIds) {
+        java.util.Map<UUID, String> out = new java.util.HashMap<>();
+        if (fileIds.isEmpty()) {
+            return out;
+        }
+        // Signing is done in memory (no call to R2), so only the database read needs batching
+        for (StoredFile f : repository.findAllById(new java.util.HashSet<>(fileIds))) {
+            out.put(f.getId(), storage.signedLink(f.getStorageKey(), linkValidity, null));
+        }
+        return out;
+    }
 }

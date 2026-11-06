@@ -1,6 +1,8 @@
 package in.apnidukan.salon.api;
 
 import in.apnidukan.common.context.CurrentUserProvider;
+import in.apnidukan.common.context.ShopDirectory;
+import in.apnidukan.common.error.ApiException;
 import in.apnidukan.salon.api.BookingRequests.Book;
 import in.apnidukan.salon.api.BookingRequests.Reschedule;
 import in.apnidukan.salon.api.BookingResponses.BookingView;
@@ -26,6 +28,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /** The customer app: find a salon, see free times, book, and manage my bookings. Sign-in needed. */
@@ -40,10 +43,21 @@ public class BookingController {
         this.currentUser = currentUser;
     }
 
-    /** Approved salons within 5 km of the point, nearest first. */
+    /**
+     * Approved salons within 2 km of the point, nearest first, 30 at a time. For the next page send the last
+     * salon's `distanceMetres` and `id` as `afterDistance` and `afterId` (both, or neither); a page shorter than 30
+     * is the last one.
+     */
     @GetMapping("/api/v1/salons")
-    public List<SalonSummary> salons(@RequestParam BigDecimal lat, @RequestParam BigDecimal lng) {
-        return bookings.salonsNear(lat, lng);
+    public List<SalonSummary> salons(@RequestParam BigDecimal lat, @RequestParam BigDecimal lng,
+                                     @RequestParam(required = false) Double afterDistance,
+                                     @RequestParam(required = false) UUID afterId) {
+        if ((afterDistance == null) != (afterId == null)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("afterId", "send afterDistance and afterId together"));
+        }
+        ShopDirectory.Cursor after = afterId == null ? null : new ShopDirectory.Cursor(afterDistance, afterId);
+        return bookings.salonsNear(lat, lng, after);
     }
 
     @GetMapping("/api/v1/salons/{id}")
