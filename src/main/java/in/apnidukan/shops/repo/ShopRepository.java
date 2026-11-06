@@ -8,7 +8,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 
-import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -19,15 +18,6 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     @Query(value = "SELECT nextval('shop_code_seq')", nativeQuery = true)
     long nextShopCode();
 
-    /**
-     * Shops of this type and status whose pin lies inside a box around the customer. The box is a cheap first cut;
-     * the exact distance is worked out afterwards (ShopDirectoryService), which drops the box's corners.
-     */
-    @Query("SELECT s FROM Shop s WHERE s.type = :type AND s.status = :status"
-            + " AND s.latitude BETWEEN :minLat AND :maxLat AND s.longitude BETWEEN :minLng AND :maxLng")
-    List<Shop> findInBox(ShopType type, ShopStatus status, BigDecimal minLat, BigDecimal maxLat,
-                         BigDecimal minLng, BigDecimal maxLng);
-
     /** The shop, its row held in shared mode (FOR SHARE) until the transaction ends. */
     @Lock(LockModeType.PESSIMISTIC_READ)
     @Query("SELECT s FROM Shop s WHERE s.id = :id")
@@ -37,5 +27,6 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     boolean existsByOwnerPhotoFileIdOrShopPhotoFileId(UUID ownerPhotoFileId, UUID shopPhotoFileId);
 
     /** For the field team: shops waiting for approval (or in any other status), oldest first. */
-    List<Shop> findByStatusOrderByCreatedAtAsc(ShopStatus status);
+    /** The older list form (?status=): the 50 oldest; the field team's lists page through groups instead. */
+    List<Shop> findTop50ByStatusOrderByCreatedAtAsc(ShopStatus status);
 }
