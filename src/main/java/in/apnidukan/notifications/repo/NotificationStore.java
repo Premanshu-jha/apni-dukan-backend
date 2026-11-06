@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -84,9 +85,19 @@ public class NotificationStore {
                 (rs, i) -> inboxItem(rs), userId, at(now), groups(audience), at(beforeAt), beforeId, limit);
     }
 
+    /**
+     * The bell's number stops counting here: a busy salon can have thousands of unread messages, and counting them
+     * all on every app open would read all those rows. The apps show "99+" from 100 on.
+     */
+    public static final int UNREAD_CAP = 100;
+
+    /**
+     * How many of this app's messages are unread, counted up to {@link #UNREAD_CAP}: the exact number below it,
+     * {@code UNREAD_CAP} for that many or more. Still a plain number for the apps, so their contract is unchanged.
+     */
     public long unreadCount(UUID userId, Audience audience, Instant now) {
-        Long n = jdbc.queryForObject("SELECT count(*)" + INBOX + " AND read_at IS NULL", Long.class,
-                userId, at(now), groups(audience));
+        Long n = jdbc.queryForObject("SELECT count(*) FROM (SELECT 1" + INBOX + " AND read_at IS NULL LIMIT ?) AS unread",
+                Long.class, userId, at(now), groups(audience), UNREAD_CAP);
         return n == null ? 0 : n;
     }
 
@@ -106,9 +117,23 @@ public class NotificationStore {
                 + " AND read_at IS NULL)", at(now), userId, at(now), groups(audience));
     }
 
-    /** Deletes messages finished (sent, failed, cancelled, no device) before this moment; returns how many. */
-    public int deleteFinishedBefore(Instant before) {
-        return jdbc.update("DELETE FROM notification_jobs WHERE status <> 'PENDING' AND finished_at < ?", at(before));
+    /**
+     * Deletes up to {@code max} messages that finished (sent, failed, cancelled, no device) before this moment;
+     * returns how many. One short statement (Postgres has no DELETE … LIMIT, hence the MATERIALIZED CTE: picked
+     * once, so never more than {@code max} rows), found through ix_notification_jobs_finished; the caller repeats it
+     * while slices come back full.
+     */
+    public int deleteFinishedBefore(Instant before, int max) {
+        return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs "
+                + "WHERE status <> 'PENDING' AND finished_at < ? LIMIT ?) "
+                + "DELETE FROM notification_jobs WHERE id IN (SELECT id FROM slice)", at(before), max);
+    }
+
+    /** Like deleteFinishedBefore, SMS rows only (ix_notification_jobs_sms_finished): they are kept a shorter time. */
+    public int deleteFinishedSmsBefore(Instant before, int max) {
+        return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs "
+                + "WHERE status <> 'PENDING' AND channel = 'SMS' AND finished_at < ? LIMIT ?) "
+                + "DELETE FROM notification_jobs WHERE id IN (SELECT id FROM slice)", at(before), max);
     }
 
     /**
@@ -152,20 +177,24 @@ public class NotificationStore {
      * Takes up to {@code max} due messages for this server. Each one's next try is pushed back by {@code lease}
      * and its attempt counted in the same statement, so another server (or the next run) won't take it while it is
      * being sent; if this server dies mid-send, the message becomes due again when the lease runs out.
-     * SKIP LOCKED: two servers claiming at once each get different rows, never the same one.
+     * SKIP LOCKED: two servers claiming at once each get different rows, never the same one. The chosen ids are
+     * a MATERIALIZED CTE, so they are picked exactly once: as a plain IN (sub-select), Postgres may run the
+     * sub-select again and change more than {@code max} rows.
      */
     public List<NotificationJob> claimDue(Instant now, int max, Duration lease, int maxAttempts) {
         return jdbc.query("""
+                        WITH due AS MATERIALIZED (
+                            SELECT id FROM notification_jobs
+                            WHERE status = 'PENDING' AND next_try_at <= ? AND attempts < ?
+                            ORDER BY next_try_at LIMIT ? FOR UPDATE SKIP LOCKED)
                         UPDATE notification_jobs SET next_try_at = ?, attempts = attempts + 1
-                        WHERE id IN (SELECT id FROM notification_jobs
-                                     WHERE status = 'PENDING' AND next_try_at <= ? AND attempts < ?
-                                     ORDER BY next_try_at LIMIT ? FOR UPDATE SKIP LOCKED)
+                        WHERE id IN (SELECT id FROM due)
                         RETURNING id, user_id, channel, type, title, body, url, sms_variables, attempts""",
                 (rs, i) -> new NotificationJob(rs.getObject("id", UUID.class), rs.getObject("user_id", UUID.class),
                         Channel.valueOf(rs.getString("channel")), rs.getString("type"), rs.getString("title"),
                         rs.getString("body"), rs.getString("url"), decode(rs.getString("sms_variables")),
                         rs.getInt("attempts")),
-                at(now.plus(lease)), at(now), maxAttempts, max);
+                at(now), maxAttempts, max, at(now.plus(lease)));
     }
 
     /**
@@ -189,14 +218,56 @@ public class NotificationStore {
 
     /** Final outcome; only while still PENDING and still ours (lease). A cancel in between wins. */
     public void finish(UUID id, JobStatus status, Instant now, Instant lease) {
-        jdbc.update("UPDATE notification_jobs SET status = ?, finished_at = ? WHERE id = ? AND status = 'PENDING' "
-                + "AND next_try_at = ?", status.name(), at(now), id, at(lease));
+        jdbc.update(FINISH, status.name(), at(now), id, at(lease));
     }
 
     /** Try again later; only while still PENDING and still ours. */
     public void retryAt(UUID id, Instant when, Instant lease) {
-        jdbc.update("UPDATE notification_jobs SET next_try_at = ? WHERE id = ? AND status = 'PENDING' "
-                + "AND next_try_at = ?", at(when), id, at(lease));
+        jdbc.update(RETRY, at(when), id, at(lease));
+    }
+
+    private static final String FINISH = "UPDATE notification_jobs SET status = ?, finished_at = ? WHERE id = ? "
+            + "AND status = 'PENDING' AND next_try_at = ?";
+    private static final String RETRY = "UPDATE notification_jobs SET next_try_at = ? WHERE id = ? "
+            + "AND status = 'PENDING' AND next_try_at = ?";
+
+    /**
+     * The outcomes of a whole batch, as two JDBC batches (one round trip each) instead of one statement per message.
+     * Each row is changed only while still PENDING and still ours, exactly as {@link #finish} and {@link #retryAt}.
+     */
+    public void record(List<Outcome> outcomes) {
+        List<Object[]> finished = new ArrayList<>();
+        List<Object[]> retries = new ArrayList<>();
+        for (Outcome o : outcomes) {
+            if (o.status() == null) {
+                retries.add(new Object[] {at(o.at()), o.id(), at(o.lease())});
+            } else {
+                finished.add(new Object[] {o.status().name(), at(o.at()), o.id(), at(o.lease())});
+            }
+        }
+        if (!finished.isEmpty()) {
+            jdbc.batchUpdate(FINISH, finished);
+        }
+        if (!retries.isEmpty()) {
+            jdbc.batchUpdate(RETRY, retries);
+        }
+    }
+
+    /**
+     * What happened to one claimed message.
+     * @param status the final status, or null to try again at {@code at}
+     * @param at     when it finished, or (status null) when to try again
+     * @param lease  the lease it was sent under (it must still be ours)
+     */
+    public record Outcome(UUID id, JobStatus status, Instant at, Instant lease) {
+
+        public static Outcome finished(UUID id, JobStatus status, Instant at, Instant lease) {
+            return new Outcome(id, status, at, lease);
+        }
+
+        public static Outcome retry(UUID id, Instant at, Instant lease) {
+            return new Outcome(id, null, at, lease);
+        }
     }
 
     /** SMS variables as a query string (SALON=Sharma%20Hair&TIME=6%3A30%20PM), kept in one text column. */
