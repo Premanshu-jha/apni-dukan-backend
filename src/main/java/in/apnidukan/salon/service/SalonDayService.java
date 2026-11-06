@@ -58,6 +58,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -473,22 +474,23 @@ public class SalonDayService {
      * after its start becomes NO_SHOW, which frees the barber's time. Start needs the customer's code (or the
      * owner's "without code"), so a customer being served is always started by then. An online booking gives the
      * customer a strike, dated at its start, and a message saying so. Safe on two servers at once: each row is
-     * changed by one UPDATE only.
-     * @return how many became no-shows
+     * changed by one UPDATE only. One batch of at most `batch` bookings per call, in its own transaction (the job
+     * calls again while a batch comes back full), so a busy minute never makes one huge transaction.
+     * @return how many became no-shows in this batch
      */
     @Transactional
-    public int markNoShows(Instant now) {
-        List<Appointment> missed = appointments.markNoShows(now.minus(LATE_ALLOWANCE), now);
+    public int markNoShows(Instant now, int batch) {
+        List<Appointment> missed = appointments.markNoShows(now.minus(LATE_ALLOWANCE), now, batch);
         Instant recent = now.minus(Duration.ofDays(1));
-        for (Appointment a : missed) {
-            appointments.event(a.id(), now, null, "NO_SHOW", "automatic");
-            // A booking from more than a day ago (left from before the automatic no-show existed, or the job was
-            // stopped for a day) is closed quietly: no strike or message that late
-            if (a.isBooking() && a.startsAt().isAfter(recent)) {
-                strikes.add(a.customerId(), a.id(), StrikeKind.NO_SHOW, a.startsAt());
-                notices.noShow(a, salonCard(a.shopId()), now);
-            }
-        }
+        // The whole batch in a few statements: history rows, strikes and messages each written together
+        appointments.eventAll(missed.stream().map(Appointment::id).toList(), now, null, "NO_SHOW", "automatic");
+        // A booking from more than a day ago (left from before the automatic no-show existed, or the job was
+        // stopped for a day) is closed quietly: no strike or message that late
+        List<Appointment> struck = missed.stream().filter(a -> a.isBooking() && a.startsAt().isAfter(recent))
+                .toList();
+        strikes.addAll(struck, StrikeKind.NO_SHOW);
+        Map<UUID, ShopCard> salons = new HashMap<>();   // once per salon in the batch
+        notices.noShows(struck, shopId -> salons.computeIfAbsent(shopId, this::salonCard), now);
         return missed.size();
     }
 

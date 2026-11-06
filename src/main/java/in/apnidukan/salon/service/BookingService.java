@@ -79,8 +79,9 @@ import static in.apnidukan.common.error.DatabaseErrors.hasSqlState;
 public class BookingService {
 
     /** Salons are listed within this distance of the customer. */
-    static final double RADIUS_KM = 5.0;
-    static final int MAX_SALONS = 50;
+    static final int RADIUS_METRES = 2_000;
+    /** Salons per page of the list; the app asks for the next page with the last card's distance and id. */
+    static final int SALONS_PAGE = 30;
     /** Bookings a customer may hold at once (CONFIRMED, not yet started). */
     static final int MAX_ACTIVE_BOOKINGS = 2;
     /** Cancelling closer to the start than this counts as a late cancel (a strike). */
@@ -141,17 +142,23 @@ public class BookingService {
 
     // ---------- finding a salon ----------
 
-    /** Approved salons within 5 km, nearest first, leaving out those that paused online bookings. */
+    /**
+     * Approved salons within 2 km, nearest first, leaving out those that paused online bookings, one page at a time:
+     * `after` is the last salon of the previous page (null for the first). Two database reads per page however
+     * many salons there are: the page (PostGIS), and the photos' links.
+     */
     @Transactional(readOnly = true)
-    public List<SalonSummary> salonsNear(BigDecimal latitude, BigDecimal longitude) {
+    public List<SalonSummary> salonsNear(BigDecimal latitude, BigDecimal longitude, ShopDirectory.Cursor after) {
         if (latitude.doubleValue() < 6 || latitude.doubleValue() > 37.6
                 || longitude.doubleValue() < 68 || longitude.doubleValue() > 97.5) {
             throw SalonCalendar.invalid("lat", "the point must be in India");
         }
-        Instant now = now();
-        return shops.nearby("SALON", latitude, longitude, RADIUS_KM, MAX_SALONS).stream()
-                .filter(card -> !paused(card.id(), now))
-                .map(card -> SalonSummary.from(card, photo(card)))
+        List<ShopCard> page = shops.nearby("SALON", latitude, longitude, RADIUS_METRES, SALONS_PAGE, after, true);
+        Map<UUID, String> photos = files.links(page.stream().map(ShopCard::shopPhotoFileId)
+                .filter(java.util.Objects::nonNull).toList());
+        return page.stream()
+                .map(card -> SalonSummary.from(card, card.shopPhotoFileId() == null ? null
+                        : photos.get(card.shopPhotoFileId())))
                 .toList();
     }
 
@@ -576,15 +583,18 @@ public class BookingService {
 
     private List<BookingView> views(List<Appointment> list, Instant now) {
         Map<UUID, List<BookedService>> booked = appointments.services(list.stream().map(Appointment::id).toList());
+        // Once per salon, not per booking (a customer's list holds a few salons, many bookings)
         Map<UUID, ShopCard> salons = new LinkedHashMap<>();
+        Map<UUID, Boolean> pausedNow = new HashMap<>();
         for (Appointment a : list) {
             salons.computeIfAbsent(a.shopId(), id -> shops.find(id).orElseThrow());
+            pausedNow.computeIfAbsent(a.shopId(), id -> paused(id, now));
         }
         return list.stream().map(a -> {
             ShopCard s = salons.get(a.shopId());
             List<BookedService> lines = booked.getOrDefault(a.id(), List.of());
             boolean changeable = a.status() == AppointmentStatus.CONFIRMED && now.isBefore(a.startsAt());
-            boolean movable = changeable && "APPROVED".equals(s.status()) && !paused(s.id(), now)
+            boolean movable = changeable && "APPROVED".equals(s.status()) && !pausedNow.get(s.id())
                     && Duration.between(now, a.startsAt()).compareTo(LATE_CANCEL) >= 0;
             return new BookingView(a.id(), a.bookingNo(), s.id(), s.name(),
                     s.addressLine() + ", " + s.area() + ", " + s.city() + " " + s.pincode(), SalonNotices.mapLink(s),

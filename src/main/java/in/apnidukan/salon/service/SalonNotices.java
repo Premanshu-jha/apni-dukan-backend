@@ -137,20 +137,35 @@ public class SalonNotices {
 
     /** The salon cancelled, with its reason. */
     public void cancelledBySalon(Appointment a, ShopCard salon, String reason, Instant now) {
-        notifications.cancelPending(a.id());
-        notifications.queue(new Notice(a.customerId(), "BOOKING_CANCELLED_BY_SALON", a.id(), now,
-                "Cancelled by the salon",
-                salon.name() + " cancelled your booking on " + DAY_TIME.format(a.startsAt()) + ": " + reason,
-                url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()), "REASON", reason)));
+        cancelledBySalon(List.of(a), salon, reason, now);
     }
 
-    /** The booking became a no-show by itself (not started 15 minutes after its start): the customer is told. */
+    /** cancelledBySalon() for many bookings of one salon (it was suspended), written together. */
+    public void cancelledBySalon(List<Appointment> bookings, ShopCard salon, String reason, Instant now) {
+        notifications.cancelPendingAll(bookings.stream().map(Appointment::id).toList());
+        notifications.queueAll(bookings.stream().map(a -> new Notice(a.customerId(), "BOOKING_CANCELLED_BY_SALON",
+                a.id(), now, "Cancelled by the salon",
+                salon.name() + " cancelled your booking on " + DAY_TIME.format(a.startsAt()) + ": " + reason,
+                url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()), "REASON", reason)))
+                .toList());
+    }
+
+    /** The booking became a no-show (not started 15 minutes after its start): the customer is told. */
     public void noShow(Appointment a, ShopCard salon, Instant now) {
-        notifications.cancelPending(a.id());
-        notifications.queue(new Notice(a.customerId(), "BOOKING_NO_SHOW", a.id(), now, "Missed booking",
-                "You didn't come to " + salon.name() + " at " + TIME.format(a.startsAt()) + ". It counts as a "
-                        + "no-show; 3 within 60 days pause online booking for 30 days.",
-                url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()))));
+        noShows(List.of(a), shopId -> salon, now);
+    }
+
+    /** noShow() for a whole batch of the automatic no-show round, written together. */
+    public void noShows(List<Appointment> bookings, java.util.function.Function<UUID, ShopCard> salonOf,
+                        Instant now) {
+        notifications.cancelPendingAll(bookings.stream().map(Appointment::id).toList());
+        notifications.queueAll(bookings.stream().map(a -> {
+            ShopCard salon = salonOf.apply(a.shopId());
+            return new Notice(a.customerId(), "BOOKING_NO_SHOW", a.id(), now, "Missed booking",
+                    "You didn't come to " + salon.name() + " at " + TIME.format(a.startsAt()) + ". It counts as a "
+                            + "no-show; 3 within 60 days pause online booking for 30 days.",
+                    url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt())));
+        }).toList());
     }
 
     /** A no-show undone by the salon: the customer's "Missed booking" no longer counts. No SMS. */
@@ -226,9 +241,8 @@ public class SalonNotices {
      * address and map link (bookings whose reminder already went out, or never had one, are left alone).
      */
     public void locationChanged(List<Appointment> upcoming, ShopCard salon) {
-        for (Appointment a : upcoming) {
-            notifications.replacePending(reminder(a, salon));   // only channels still waiting are rewritten
-        }
+        // Only channels still waiting are rewritten; all the salon's bookings in batched statements
+        notifications.replacePendingAll(upcoming.stream().map(a -> reminder(a, salon)).toList());
     }
 
     /**
