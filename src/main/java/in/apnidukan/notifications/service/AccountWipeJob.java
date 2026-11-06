@@ -77,8 +77,9 @@ public class AccountWipeJob {
             if (!done) {
                 break;   // this minute's share is used; this person continues next minute, from `after`
             }
-            jobs.wipeDone(person);
-            finished++;
+            if (jobs.wipeDone(person)) {
+                finished++;
+            }
         }
         if (finished > 0) {
             log.info("Emptied the messages of {} deleted accounts", finished);

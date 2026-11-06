@@ -232,8 +232,19 @@ public class NotificationStore {
         return last.stream().findFirst();
     }
 
-    public void wipeDone(UUID userId) {
-        jdbc.update("DELETE FROM account_wipes WHERE user_id = ?", userId);
+    /**
+     * Ends the wipe if none of their messages holds text any more, and returns true. Otherwise (a message added while
+     * the wipe ran, with an id below where it had got: ids are random) it starts over from the first id and returns
+     * false. Reads all their rows once, only at the end.
+     */
+    public boolean wipeDone(UUID userId) {
+        int ended = jdbc.update("DELETE FROM account_wipes WHERE user_id = ? AND NOT EXISTS (SELECT 1 FROM "
+                + "notification_jobs WHERE user_id = ? AND NOT (title = '' AND body = '' AND url IS NULL "
+                + "AND sms_variables IS NULL))", userId, userId);
+        if (ended == 0) {
+            wipeProgress(userId, new UUID(0, 0));
+        }
+        return ended == 1;
     }
 
     /**

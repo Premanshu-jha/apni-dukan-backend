@@ -40,6 +40,9 @@ CREATE TRIGGER tr_shops_follow_timeline AFTER INSERT ON shop_events
 -- after the last (status_since, id). Waiting shops split by first visit / re-check, so they have their own index.
 CREATE INDEX ix_shops_review_list ON shops (type, status, status_since, id);
 CREATE INDEX ix_shops_review_waiting ON shops (type, ever_approved, status_since, id) WHERE status = 'PENDING_VISIT';
+-- Sent back: drafts with a reason only (registrations never submitted are drafts too, and can be many)
+CREATE INDEX ix_shops_review_sent_back ON shops (type, status_since, id)
+    WHERE status = 'DRAFT' AND status_reason IS NOT NULL;
 
 -- People whose deleted account still has message texts to empty: the request that deletes the account only queues
 -- them, and MessageCleanupJob empties their messages a slice at a time (a busy salon owner can have lakhs)

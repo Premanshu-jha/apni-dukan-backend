@@ -1168,6 +1168,11 @@ class SalonBookingIntegrationTest {
         if (own > 4) {   // more than one run's share: it remembers how far it got and carries on from there
             assertThat(count("account_wipes WHERE after_id <> '00000000-0000-0000-0000-000000000000'")).isEqualTo(1);
         }
+        // A message added for them after the wipe started, with an id below where it got (ids are random): the
+        // wipe's end check finds it and goes round once more
+        jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, title, body, send_at, status, attempts, "
+                + "next_try_at, created_at) VALUES ('00000000-0000-0000-0000-000000000001', ?, 'PUSH', 'BOOKING_X', "
+                + "'Late', 'Late text', now(), 'CANCELLED', 0, now(), now())", customer);
         int runs = 0;
         while (count("account_wipes") > 0 && runs < 20) {
             wipes.runOnce();
