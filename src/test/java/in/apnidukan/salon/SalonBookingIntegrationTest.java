@@ -1168,11 +1168,6 @@ class SalonBookingIntegrationTest {
         if (own > 4) {   // more than one run's share: it remembers how far it got and carries on from there
             assertThat(count("account_wipes WHERE after_id <> '00000000-0000-0000-0000-000000000000'")).isEqualTo(1);
         }
-        // A message added for them after the wipe started, with an id below where it got (ids are random): the
-        // wipe's end check finds it and goes round once more
-        jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, title, body, send_at, status, attempts, "
-                + "next_try_at, created_at) VALUES ('00000000-0000-0000-0000-000000000001', ?, 'PUSH', 'BOOKING_X', "
-                + "'Late', 'Late text', now(), 'CANCELLED', 0, now(), now())", customer);
         int runs = 0;
         while (count("account_wipes") > 0 && runs < 20) {
             wipes.runOnce();
@@ -1183,6 +1178,22 @@ class SalonBookingIntegrationTest {
                 + "OR url IS NOT NULL OR sms_variables IS NOT NULL)")).isZero();
         assertThat(count("notification_jobs WHERE user_id <> '" + customer + "' AND title = ''")).isEqualTo(
                 count("notification_jobs WHERE about_user_id = '" + customer + "'"));   // nobody else's emptied
+    }
+
+    @Test
+    void aMessageAddedBehindAWipeThatGotFarIsStillEmptied() {
+        // The wipe had got past every id (ids are random), then a message with a low id was added for the person:
+        // the end check finds it and the wipe goes round once more instead of ending
+        jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, title, body, send_at, status, attempts, "
+                + "next_try_at, created_at) VALUES ('00000000-0000-0000-0000-000000000001', ?, 'PUSH', 'BOOKING_X', "
+                + "'Late', 'Late text', now(), 'CANCELLED', 0, now(), now())", customer);
+        jdbc.update("INSERT INTO account_wipes (user_id, queued_at, after_id) VALUES (?, now(), "
+                + "'ffffffff-ffff-ffff-ffff-ffffffffffff')", customer);
+        assertThat(wipes.runOnce()).isZero();   // nothing past the end, but not done: back to the first id
+        assertThat(count("account_wipes WHERE after_id = '00000000-0000-0000-0000-000000000000'")).isEqualTo(1);
+        assertThat(wipes.runOnce()).isEqualTo(1);
+        assertThat(count("notification_jobs WHERE title = 'Late'")).isZero();
+        assertThat(count("account_wipes")).isZero();
     }
 
     @Test
