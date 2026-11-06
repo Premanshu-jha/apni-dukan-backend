@@ -6,6 +6,7 @@ import in.apnidukan.common.web.ClientAddress;
 import in.apnidukan.auth.notify.EmailSender;
 import in.apnidukan.auth.notify.LoggingEmailSender;
 import in.apnidukan.auth.notify.LoggingSmsSender;
+import in.apnidukan.auth.notify.ResendEmailSender;
 import in.apnidukan.auth.notify.SmsSender;
 import in.apnidukan.notifications.service.LoggingPushSender;
 import in.apnidukan.notifications.service.PushSender;
@@ -60,7 +61,11 @@ public class ProductionSafetyCheck {
         }
         if (email instanceof LoggingEmailSender) {
             throw new IllegalStateException("APP_PRODUCTION=true but MAIL_ENABLED=false: email codes would be "
-                    + "printed in the log. Configure SMTP.");
+                    + "printed in the log. Configure Resend (RESEND_API_KEY) or SMTP.");
+        }
+        if (email instanceof ResendEmailSender resend && resend.usesTestSender()) {
+            throw new IllegalStateException("APP_PRODUCTION=true but EMAIL_FROM is Resend's test address: it only "
+                    + "reaches the Resend account's own inbox. Verify the app's domain in Resend and send from it.");
         }
         if (!accountMovedSms) {
             throw new IllegalStateException("APP_PRODUCTION=true but SMS_ACCOUNT_MOVED_ENABLED=false: the old phone "

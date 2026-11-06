@@ -52,6 +52,18 @@ class ProductionSafetyCheckTest {
     }
 
     @Test
+    void productionRefusesResendsTestSender() {
+        assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms,
+                new in.apnidukan.auth.notify.ResendEmailSender("re_key", "Apni Dukan <onboarding@resend.dev>",
+                        in.apnidukan.auth.notify.ResendEmailSender.RESEND),
+                "https://shop.example.in", true, realPush)).hasMessageContaining("EMAIL_FROM");
+        assertThatCode(() -> ProductionSafetyCheck.check(true, realSms,
+                new in.apnidukan.auth.notify.ResendEmailSender("re_key", "Apni Dukan <no-reply@apnidukan.in>",
+                        in.apnidukan.auth.notify.ResendEmailSender.RESEND),
+                "https://shop.example.in", true, realPush)).doesNotThrowAnyException();
+    }
+
+    @Test
     void productionRefusesLocalhostOrAnyOriginInCors() {
         assertThatThrownBy(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "http://localhost:5173", true, realPush))
                 .hasMessageContaining("CORS_ALLOWED_ORIGINS");
