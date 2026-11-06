@@ -378,19 +378,18 @@ class MessagesAtScaleIntegrationTest {
     @Test
     void cleanupRunsOnOneCopyAtATime() {
         finished(person(1), "PUSH", Duration.ofDays(91));
-        // Another copy holds the lease
+        // Another copy holds the lease (leases run on the database's clock)
         jdbc.update("INSERT INTO job_leases (name, locked_until, locked_by, locked_at) VALUES "
-                + "('message-cleanup', ?, 'other-copy', ?)", Timestamp.from(NOW.plus(Duration.ofMinutes(30))),
-                Timestamp.from(NOW));
+                + "('message-cleanup', now() + interval '30 minutes', 'other-copy', now())");
         assertThat(cleanup.runUnderLease()).isFalse();
         assertThat(jdbc.queryForObject("SELECT count(*) FROM notification_jobs", Integer.class)).isEqualTo(1);
 
         // Its lease ran out (it died mid-round): this copy takes over, and gives the lease back afterwards
-        CLOCK.advance(Duration.ofMinutes(31));
+        jdbc.update("UPDATE job_leases SET locked_until = now() - interval '1 second' WHERE name = 'message-cleanup'");
         assertThat(cleanup.runUnderLease()).isTrue();
         assertThat(jdbc.queryForObject("SELECT count(*) FROM notification_jobs", Integer.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT locked_until <= ? FROM job_leases WHERE name = 'message-cleanup'",
-                Boolean.class, Timestamp.from(CLOCK.instant()))).isTrue();
+        assertThat(jdbc.queryForObject("SELECT locked_until <= now() FROM job_leases WHERE name = 'message-cleanup'",
+                Boolean.class)).isTrue();
     }
 
     @Test
