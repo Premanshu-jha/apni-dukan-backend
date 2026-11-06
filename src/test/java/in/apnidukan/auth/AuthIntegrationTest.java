@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.env.Environment;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -37,6 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * email verification, recovery, limits and CORS.
  */
 @EnabledIf("in.apnidukan.support.TestContainers#dockerAvailable")
+@org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(CapturingSenders.class)
 class AuthIntegrationTest {
@@ -46,6 +48,8 @@ class AuthIntegrationTest {
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
         TestContainers.register(registry);
+        registry.add("app.auth.ipv6-sends-per-hour", () -> "3");   // configurable, and separate from IPv4's
+        registry.add("app.cleanup.batch", () -> "2");   // the cleanup deletes in slices
     }
 
     @Autowired Environment environment;
@@ -69,6 +73,7 @@ class AuthIntegrationTest {
         });
         LAST_SMS.clear();
         LAST_EMAIL.clear();
+        CapturingSenders.emailDown = false;
     }
 
     @Test
@@ -427,6 +432,103 @@ class AuthIntegrationTest {
     }
 
     @Test
+    void ipv6CallersAreCountedPerSlash64WithTheirOwnLimit() {
+        for (int i = 0; i < 3; i++) {
+            assertThat(postFrom("2001:db8:1:2::" + (i + 1), "/auth/otp/send",
+                    Map.of("phone", "90000002" + String.format("%02d", i))).status()).isEqualTo(202);
+        }
+        // Another address in the same /64 (one phone or home picking a new address): the same counter
+        Reply fourth = postFrom("2001:db8:1:2::99", "/auth/otp/send", Map.of("phone", "9000000299"));
+        assertThat(fourth.status()).isEqualTo(429);
+        assertThat(fourth.body().get("code")).isEqualTo("TOO_MANY_REQUESTS");
+        // Another /64 and IPv4 callers have their own
+        assertThat(postFrom("2001:db8:1:3::1", "/auth/otp/send", Map.of("phone", "9000000298")).status())
+                .isEqualTo(202);
+        assertThat(postFrom("203.0.113.9", "/auth/otp/send", Map.of("phone", "9000000297")).status())
+                .isEqualTo(202);
+    }
+
+    @Test
+    void anEmailCodeThatCantBeSentTellsTheAppToTryAgainAndASentOneAnswers202() {
+        String access = (String) signIn(PHONE).body().get("accessToken");
+        CapturingSenders.emailDown = true;   // Resend (or Gmail) refuses or doesn't answer in time
+        Reply refused = post("/auth/email/send-code", Map.of("email", "shop@gmail.com"), access);
+        assertThat(refused.status()).isEqualTo(503);
+        assertThat(refused.body().get("code")).isEqualTo("EMAIL_FAILED");
+        assertThat(LAST_EMAIL).isEmpty();
+
+        CapturingSenders.emailDown = false;
+        assertThat(post("/auth/email/send-code", Map.of("email", "shop@gmail.com"), access).status()).isEqualTo(202);
+        // Sent before the 202: it is there already, no waiting
+        assertThat(LAST_EMAIL.get("shop@gmail.com")).containsPattern("\\d{6}");
+    }
+
+    @Test
+    void sessionNumbersInRedisExpireAfterTheRefreshLifetime() {
+        Reply phone = signIn(PHONE);
+        String userId = (String) ((Map<?, ?>) phone.body().get("user")).get("id");
+        assertThat(post("/auth/logout-all", Map.of(), (String) phone.body().get("accessToken")).status())
+                .isEqualTo(204);
+        assertThat(Long.parseLong(redis.opsForValue().get("session-gen:" + userId)))
+                .isGreaterThan(System.currentTimeMillis() - 60_000);   // Redis's clock, in milliseconds
+        assertThat(redis.getExpire("session-gen:" + userId))
+                .isBetween(java.time.Duration.ofDays(30).toSeconds(), java.time.Duration.ofDays(31).toSeconds());
+    }
+
+    @Test
+    void aSessionNumberThatExpiredNeverLetsAnOlderTokenSurviveTheNextSignOutEverywhere() {
+        Reply first = signIn(PHONE);
+        String userId = (String) ((Map<?, ?>) first.body().get("user")).get("id");
+        redis.opsForValue().set("session-gen:" + userId, "5");
+        String issuedAt5 = (String) signIn(PHONE).body().get("accessToken");
+        redis.delete("session-gen:" + userId);   // the key expired (31 days without a change)
+
+        // A sign-out everywhere afterwards must still end the token issued at 5 (a counter restarting at 0
+        // would only reach 1)
+        assertThat(post("/auth/logout-all", Map.of(), (String) first.body().get("accessToken")).status())
+                .isEqualTo(204);
+        Reply me = get("/auth/me", issuedAt5);
+        assertThat(me.status()).isEqualTo(401);
+        assertThat(me.body().get("code")).isEqualTo("SIGNED_OUT");
+    }
+
+    @Test
+    void theEightyPercentSmsWarningIsLoggedOnceADay(CapturedOutput output) {
+        redis.opsForValue().set("rl:sms-day", "398", java.time.Duration.ofHours(20));   // the cap here is 500
+        for (String phone : List.of("9000000301", "9000000302", "9000000303")) {   // 399, 400, 401
+            assertThat(post("/auth/otp/send", Map.of("phone", phone), null).status()).isEqualTo(202);
+        }
+        assertThat(output.getAll().split("80% of the daily SMS limit used", -1)).hasSize(2);
+    }
+
+    @Test
+    void aCopiedTokenRefreshedAlongAChainIsStillCaughtAfterTheNightlyCleanup() {
+        Map<?, ?> first = signIn(PHONE).body();
+        java.util.UUID userId = java.util.UUID.fromString((String) ((Map<?, ?>) first.get("user")).get("id"));
+        String r1 = (String) first.get("refreshToken");
+        // A thief copied r1 and refreshes first, then keeps refreshing: r1 → r2 → r3
+        String r2 = (String) post("/auth/refresh", Map.of("refreshToken", r1), null).body().get("refreshToken");
+        String r3 = (String) post("/auth/refresh", Map.of("refreshToken", r2), null).body().get("refreshToken");
+        jdbc.update("UPDATE refresh_tokens SET revoked_at = revoked_at - interval '3 days' "
+                + "WHERE revoke_reason = 'ROTATED'");
+        // Rows ended over 30 days ago (deleted two at a time): a swapped one, five sign-outs, an expiry
+        token(userId, "now() - interval '1 day'", "now() - interval '31 days'", "ROTATED");
+        for (int i = 0; i < 5; i++) {
+            token(userId, "now() - interval '1 day'", "now() - interval '31 days'", "SIGNED_OUT");
+        }
+        token(userId, "now() - interval '31 days'", null, null);
+
+        // Day 3: the cleanup runs; the chain's swapped tokens stay (30 days)
+        assertThat(signInCleanup.runOnce()).isEqualTo(1 + 5 + 1);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM refresh_tokens", Integer.class)).isEqualTo(3);
+
+        // The owner's phone comes back with r1: the copy is caught and the thief's r3 stops too
+        Reply owner = post("/auth/refresh", Map.of("refreshToken", r1), null);
+        assertThat(owner.body().get("code")).isEqualTo("REFRESH_TOKEN_REUSED");
+        assertThat(post("/auth/refresh", Map.of("refreshToken", r3), null).status()).isEqualTo(401);
+    }
+
+    @Test
     void aDeletedAccountCantSignInAgainButItsPhoneStartsANewOne() {
         Reply first = signIn(PHONE);
         String access = (String) first.body().get("accessToken");
@@ -619,6 +721,14 @@ class AuthIntegrationTest {
     }
 
     // ---------- helpers ----------
+
+    /** A refresh token row with these SQL expressions for its expiry and end. */
+    private void token(java.util.UUID userId, String expiresAt, String revokedAt, String reason) {
+        jdbc.update("INSERT INTO refresh_tokens (id, user_id, token_hash, created_at, expires_at, revoked_at, "
+                        + "revoke_reason) VALUES (?, ?, ?, now() - interval '40 days', " + expiresAt + ", "
+                        + (revokedAt == null ? "NULL" : revokedAt) + ", ?)",
+                java.util.UUID.randomUUID(), userId, java.util.UUID.randomUUID().toString(), reason);
+    }
 
     private Reply signIn(String phone) {
         post("/auth/otp/send", Map.of("phone", phone), null);

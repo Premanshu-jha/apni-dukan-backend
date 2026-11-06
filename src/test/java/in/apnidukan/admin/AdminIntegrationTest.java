@@ -431,6 +431,81 @@ class AdminIntegrationTest {
         assertThat(count("shop_events WHERE event = 'REINSTATED' AND note = 'Owner says open again'")).isEqualTo(1);
     }
 
+    @Test
+    void aLongListComesFiftyAPageInOrderWithNothingTwiceOrLeftOut() {
+        java.util.List<String> all = new java.util.ArrayList<>();
+        for (int i = 0; i < 55; i++) {
+            UUID s = shop("SALON", "PENDING_VISIT", "Queue " + i, "93000000" + String.format("%02d", i));
+            submittedAt(s, NOW.plusSeconds(i / 2));   // pairs at the same moment: only the id orders them
+            all.add(s.toString());
+        }
+        List<?> first = search("FIRST_VISIT", null);
+        assertThat(first).hasSize(50);
+        Object last = first.get(49);
+        Reply next = get("/admin/shops?type=SALON&group=FIRST_VISIT&afterSince=" + field(last, "statusSince")
+                + "&afterId=" + field(last, "id"), admin);
+        assertThat(next.status()).as(next.text()).isEqualTo(200);
+        List<Object> both = new java.util.ArrayList<>(first);
+        both.addAll((List<?>) next.body());
+        assertThat(both).extracting(x -> (String) field(x, "id")).containsExactlyInAnyOrderElementsOf(all);
+        // Longest waiting first, across the page edge too
+        List<String> since = both.stream().map(x -> (String) field(x, "statusSince")).toList();
+        assertThat(since).isSortedAccordingTo(java.util.Comparator.comparing(Instant::parse));
+
+        assertThat(get("/admin/shops?type=SALON&group=FIRST_VISIT&afterId=" + UUID.randomUUID(), admin).status())
+                .isEqualTo(400);
+        assertThat(get("/admin/shops?type=SALON&group=FIRST_VISIT&afterSince=yesterday&afterId="
+                + UUID.randomUUID(), admin).status()).isEqualTo(400);
+        // The older form answers the 50 oldest
+        assertThat((List<?>) get("/admin/shops?status=PENDING_VISIT", admin).body()).hasSize(50);
+    }
+
+    @Test
+    void anyTimelineEntryKeepsTheListColumnsEvenFromCodeThatDoesntKnowThem() {
+        // As a copy of the backend on the previous version would write it, straight into the timeline
+        UUID shop = shop("KIRANA", "APPROVED", "Old Code Store", "9300000098");
+        Instant later = NOW.plusSeconds(3600);
+        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, true, "
+                + "'APPROVED')", UUID.randomUUID(), shop, Timestamp.from(later), admin);
+        assertThat(jdbc.queryForObject("SELECT ever_approved FROM shops WHERE id = ?", Boolean.class, shop)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status_since FROM shops WHERE id = ?", Timestamp.class, shop)
+                .toInstant()).isEqualTo(later);
+        // A note moves nothing; an earlier entry never moves it back
+        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event, note) VALUES (?, ?, ?, ?, "
+                + "true, 'NOTE', 'x')", UUID.randomUUID(), shop, Timestamp.from(later.plusSeconds(60)), admin);
+        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, true, "
+                + "'SUSPENDED')", UUID.randomUUID(), shop, Timestamp.from(NOW), admin);
+        assertThat(jdbc.queryForObject("SELECT status_since FROM shops WHERE id = ?", Timestamp.class, shop)
+                .toInstant()).isEqualTo(later);
+    }
+
+    @Test
+    void anUnchangedAnswerIsA304WithNoBodyAndAChangeGivesANewOne() {
+        UUID shop = shop("SALON", "PENDING_VISIT", "Etag Salon", "9300000099");
+        String path = base + "/admin/dashboard";
+        var first = http.get().uri(path).headers(h -> h.setBearerAuth(token(admin)))
+                .exchange((rq, res) -> java.util.Map.entry(res.getStatusCode().value(),
+                        String.valueOf(res.getHeaders().getETag())));
+        assertThat(first.getKey()).isEqualTo(200);
+        String etag = first.getValue();
+        assertThat(etag).startsWith("\"");
+        var same = http.get().uri(path).headers(h -> {
+            h.setBearerAuth(token(admin));
+            h.setIfNoneMatch(etag);
+        }).exchange((rq, res) -> java.util.Map.entry(res.getStatusCode().value(), res.getBody().readAllBytes().length));
+        assertThat(same.getKey()).isEqualTo(304);
+        assertThat(same.getValue()).isZero();
+
+        approve(shop);
+        var changed = http.get().uri(path).headers(h -> {
+            h.setBearerAuth(token(admin));
+            h.setIfNoneMatch(etag);
+        }).exchange((rq, res) -> java.util.Map.entry(res.getStatusCode().value(),
+                String.valueOf(res.getHeaders().getETag())));
+        assertThat(changed.getKey()).isEqualTo(200);
+        assertThat(changed.getValue()).isNotEqualTo(etag);
+    }
+
     // ---------------- helpers ----------------
 
     private UUID person(String phone) {
@@ -477,6 +552,8 @@ class AdminIntegrationTest {
     private void submittedAt(UUID shop, Instant at) {
         jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, false, "
                 + "'SUBMITTED')", UUID.randomUUID(), shop, Timestamp.from(at), ownerOf(shop));
+        // As ShopReviewStore.addEvent keeps it: when the shop entered its status is its latest such entry
+        jdbc.update("UPDATE shops SET status_since = ? WHERE id = ?", Timestamp.from(at), shop);
     }
 
     /** A salon list, with the search text encoded exactly as a browser would send it. */

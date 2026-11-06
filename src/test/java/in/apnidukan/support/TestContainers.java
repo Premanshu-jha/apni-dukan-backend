@@ -53,7 +53,7 @@ public final class TestContainers {
 
     public static synchronized GenericContainer<?> postgres() {
         if (postgres == null) {
-            postgres = new GenericContainer<>("postgres:16-alpine")
+            postgres = new GenericContainer<>("postgis/postgis:16-3.4-alpine")
                     .withEnv("POSTGRES_DB", DB_NAME)
                     .withEnv("POSTGRES_USER", DB_USER)
                     .withEnv("POSTGRES_PASSWORD", DB_PASSWORD)
@@ -121,6 +121,11 @@ public final class TestContainers {
         registry.add("JWT_SECRET", () -> JWT_SECRET);
         registry.add("app.jobs.enabled", () -> "false"); // tests run the background jobs themselves
         registry.add("app.client-ip.header", () -> "X-Forwarded-For"); // as on Railway: the last entry counts
+        // The limit tests were written against these small limits (the defaults are far higher, for real traffic)
+        registry.add("app.sms.daily-limit", () -> "500");
+        registry.add("app.sms.booking-daily-limit", () -> "300");
+        registry.add("app.auth.ip-sends-per-hour", () -> "10");
+        registry.add("app.auth.ip-verifies-per-hour", () -> "30");
     }
 
     /** A plain S3 client for the test itself, to look inside the bucket. */
