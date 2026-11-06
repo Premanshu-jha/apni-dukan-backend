@@ -1,51 +1,88 @@
 package in.apnidukan.auth.service;
 
-import in.apnidukan.auth.repo.RefreshTokenRepository;
+import in.apnidukan.auth.repo.SignInCleanupStore;
+import in.apnidukan.common.jobs.JobLeases;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 
 /**
- * Once a day (03:30 in India): deletes sign-ins that ended more than 30 days ago. Every refresh adds a row and
- * ends the old one, so this table grows fastest of all. 30 days still covers the "a swapped token came back"
- * check, which only ever looks at tokens from the last minutes.
+ * Once a day (03:30 in India): deletes sign-ins that ended (expired, signed out, rotated) more than {@code keepDays}
+ * (30) days ago. Every refresh ends one token (ROTATED) and adds a new one, so this table grows fastest of all: with
+ * lakhs of people refreshing several times a day, millions of rows a day.
+ *
+ * Rotated tokens are kept the whole 30 days (the refresh lifetime) on purpose: one coming back later than
+ * AuthService.RETRY_GRACE means it was copied, and every session ends. A thief who refreshed first can keep
+ * refreshing along a chain of tokens (r1 → r2 → r3 …); the owner's phone then presents r1, possibly days later, and
+ * only finding r1 raises the alarm. 30 days covers every chain a phone can still present (its token expires then).
+ *
+ * Deleted in slices of {@code batch} rows (SignInCleanupStore), each its own transaction, under a job lease
+ * (JobLeases) so only one copy of the backend runs it.
  */
 @Component
 public class SignInCleanupJob {
 
     private static final Logger log = LoggerFactory.getLogger(SignInCleanupJob.class);
-    static final Duration KEEP = Duration.ofDays(30);
+    static final String JOB = "sign-in-cleanup";
+    /** Longest a round may hold the lease; another copy can take over after this if this one died mid-round. */
+    static final Duration MAX_RUN = Duration.ofHours(2);
 
-    private final RefreshTokenRepository tokens;
+    private final SignInCleanupStore store;
+    private final JobLeases leases;
     private final Clock clock;
+    private final Duration keep;
+    private final int batch;
     private final boolean enabled;
 
-    public SignInCleanupJob(RefreshTokenRepository tokens, Clock clock,
+    public SignInCleanupJob(SignInCleanupStore store, JobLeases leases, Clock clock,
+                            @Value("${app.auth.ended-sign-ins-keep-days:30}") int keepDays,
+                            @Value("${app.cleanup.batch:10000}") int batch,
                             @Value("${app.jobs.enabled:true}") boolean enabled) {
-        this.tokens = tokens;
+        if (keepDays < 1 || batch < 1) {
+            throw new IllegalStateException("app.auth.ended-sign-ins-keep-days and app.cleanup.batch must be at "
+                    + "least 1");
+        }
+        this.store = store;
+        this.leases = leases;
         this.clock = clock;
+        this.keep = Duration.ofDays(keepDays);
+        this.batch = batch;
         this.enabled = enabled;
     }
 
     @Scheduled(cron = "0 30 3 * * *", zone = "Asia/Kolkata")
     public void scheduled() {
         if (enabled) {
-            runOnce();
+            runUnderLease();
         }
     }
 
+    /** One round if no other copy is running one; false if it was skipped. */
+    public boolean runUnderLease() {
+        return leases.runExclusively(JOB, MAX_RUN, this::runOnce);
+    }
+
     /** Called by tests too; returns how many rows went. */
-    @Transactional
     public int runOnce() {
-        int gone = tokens.deleteEndedBefore(Instant.now(clock).minus(KEEP));
-        log.info("Deleted {} sign-ins that ended more than {} days ago", gone, KEEP.toDays());
-        return gone;
+        Instant before = Instant.now(clock).minus(keep);
+        int expired = 0;
+        int n;
+        do {   // a full slice means there may be more
+            n = store.deleteExpired(before, batch);
+            expired += n;
+        } while (n == batch);
+        int revoked = 0;
+        do {
+            n = store.deleteRevoked(before, batch);
+            revoked += n;
+        } while (n == batch);
+        log.info("Deleted {} expired and {} ended sign-ins (more than {} days ago)", expired, revoked, keep.toDays());
+        return expired + revoked;
     }
 }
