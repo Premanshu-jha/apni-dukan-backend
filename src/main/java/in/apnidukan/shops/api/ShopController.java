@@ -1,12 +1,21 @@
 package in.apnidukan.shops.api;
 
 import in.apnidukan.common.context.CurrentUserProvider;
+import in.apnidukan.common.error.ApiException;
+import in.apnidukan.shops.api.ShopRequests.Close;
 import in.apnidukan.shops.api.ShopRequests.CreateShop;
+import in.apnidukan.shops.api.ShopRequests.Handover;
 import in.apnidukan.shops.api.ShopRequests.SetPhotos;
 import in.apnidukan.shops.api.ShopRequests.Submit;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
+import in.apnidukan.shops.service.ShopInvitesService;
+import in.apnidukan.shops.service.ShopInvitesService.InviteResult;
+import in.apnidukan.shops.service.ShopInvitesService.InviteView;
 import in.apnidukan.shops.service.ShopMembersService;
 import in.apnidukan.shops.service.ShopMembersService.MemberView;
+import in.apnidukan.shops.service.ShopOwnershipService;
+import in.apnidukan.shops.service.ShopOwnershipService.HandoverRequested;
+import in.apnidukan.shops.service.ShopOwnershipService.HandoverView;
 import in.apnidukan.shops.service.ShopService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -33,11 +42,50 @@ public class ShopController {
     private final ShopService shops;
     private final CurrentUserProvider currentUser;
     private final ShopMembersService people;
+    private final ShopOwnershipService ownership;
+    private final ShopInvitesService invites;
 
-    public ShopController(ShopService shops, CurrentUserProvider currentUser, ShopMembersService people) {
+    public ShopController(ShopService shops, CurrentUserProvider currentUser, ShopMembersService people,
+                          ShopOwnershipService ownership, ShopInvitesService invites) {
+        this.invites = invites;
         this.shops = shops;
         this.currentUser = currentUser;
         this.people = people;
+        this.ownership = ownership;
+    }
+
+    /**
+     * Close my shop for good (owner): CLOSED at once, a salon's upcoming bookings cancelled in the background within
+     * seconds (customers told), everyone's membership ended, mine too. Asking again after it worked answers the same. Then call POST /auth/refresh.
+     */
+    @PostMapping("/me/close")
+    public ShopResponse close(@Valid @RequestBody Close body) {
+        return ownership.close(currentUser.get().userId(), body.version(), body.reason());
+    }
+
+    /**
+     * Ask the person with this phone to take my shop over (owner). 202 with the same answer whether or not the
+     * number has an account. 409 HANDOVER_PENDING while one waits; 429 after 5 a day.
+     */
+    @PostMapping("/me/handover")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public HandoverRequested requestHandover(@Valid @RequestBody Handover body) {
+        return ownership.requestHandover(currentUser.get().userId(), body.phone(), body.version());
+    }
+
+    /** My shop's waiting hand-over request (owner); 404 NO_HANDOVER if none. */
+    @GetMapping("/me/handover")
+    public HandoverView myHandover() {
+        return ownership.myHandover(currentUser.get().userId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "NO_HANDOVER",
+                        "No hand-over request is waiting."));
+    }
+
+    /** Cancel my shop's waiting hand-over request (owner). 204, also when none was waiting. */
+    @DeleteMapping("/me/handover")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void cancelHandover() {
+        ownership.cancelHandover(currentUser.get().userId());
     }
 
     /** Everyone in my shop with name, phone and role (owner only). */
@@ -46,10 +94,28 @@ public class ShopController {
         return people.members(currentUser.get().userId());
     }
 
-    /** Add a helper by phone (owner only). 409 ALREADY_IN_A_SHOP if that person works in a shop. */
+    /**
+     * Invite a helper by phone (owner only). 202 with the same answer whether or not the number has an account; the
+     * person joins when they accept (GET /me/invites). 409 TOO_MANY_HELPERS (helpers and waiting invitations),
+     * 409 ALREADY_A_MEMBER (already in this shop), 429 after 20 invitations a day.
+     */
     @PostMapping("/me/helpers")
-    public List<MemberView> addHelper(@Valid @RequestBody AddHelper body) {
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public InviteResult addHelper(@Valid @RequestBody AddHelper body) {
         return people.addHelper(currentUser.get().userId(), body.phone());
+    }
+
+    /** My shop's invitations still waiting (helpers and barbers), by the phone typed (owner only). */
+    @GetMapping("/me/invites")
+    public List<InviteView> invites() {
+        return invites.waiting(currentUser.get().userId());
+    }
+
+    /** Cancel one of my shop's waiting invitations (owner only). 204; 404 INVITE_NOT_FOUND for another shop's. */
+    @DeleteMapping("/me/invites/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void cancelInvite(@PathVariable UUID id) {
+        invites.cancel(currentUser.get().userId(), id);
     }
 
     /** Remove a helper (owner only); their sessions end at once. */
@@ -65,7 +131,7 @@ public class ShopController {
         people.leave(currentUser.get().userId());
     }
 
-    /** @param phone the helper's 10-digit mobile number; they sign in with it as usual */
+    /** @param phone the helper's 10-digit mobile number; they sign in with it as usual and accept */
     public record AddHelper(@NotBlank @Size(max = 20) String phone) {
     }
 

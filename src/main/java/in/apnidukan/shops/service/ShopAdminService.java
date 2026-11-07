@@ -202,6 +202,7 @@ public class ShopAdminService {
         if (!shops.existsById(shopId)) {
             throw ApiException.notFound("Shop");
         }
+        requireNotOwnShop(adminId, shopId);
         String note = TextCleaner.clean(NOTE, noteInput);
         Instant now = now();
         review.addEvent(shopId, now, adminId, true, ShopEventType.NOTE, null, note, List.of());
@@ -288,6 +289,7 @@ public class ShopAdminService {
     private Shop checked(UUID adminId, UUID shopId, long version, String what, ShopStatus... allowed) {
         requireAdmin(adminId);
         Shop shop = shops.findById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
+        requireNotOwnShop(adminId, shopId);
         // Status first: when another admin decided meanwhile, say so (not "the owner changed it")
         if (!java.util.Arrays.asList(allowed).contains(shop.getStatus())) {
             throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
@@ -371,6 +373,17 @@ public class ShopAdminService {
 
     private static String link(Map<UUID, String> links, UUID fileId) {
         return fileId == null ? null : links.get(fileId);
+    }
+
+    /**
+     * 403 OWN_SHOP when the admin works in this shop (owner, helper or barber): nobody decides on, or writes the
+     * field team's notes about, their own shop. The super admin too: another admin decides.
+     */
+    private void requireNotOwnShop(UUID adminId, UUID shopId) {
+        if (members.findByShopIdAndUserId(shopId, adminId).isPresent()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "OWN_SHOP",
+                    "You can't decide on a shop you belong to. Ask another admin.");
+        }
     }
 
     /**

@@ -11,5 +11,9 @@ public enum ShopEventType {
     SUSPENDED,
     REINSTATED,
     /** A note from an admin, with no decision. */
-    NOTE
+    NOTE,
+    /** The owner closed the shop for good (reason: theirs, if they gave one). */
+    CLOSED,
+    /** Another person took the shop over (the owner asked, they accepted). Not a change of status. */
+    HANDED_OVER
 }

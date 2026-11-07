@@ -11,8 +11,6 @@ import in.apnidukan.shops.repo.ShopMemberRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Instant;
 import java.util.List;
@@ -20,7 +18,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Who works in a shop, for its owner: list everyone, add a helper by phone, remove a helper. Anyone but the owner
+ * Who works in a shop, for its owner: list everyone, invite a helper by phone (ShopInvitesService), remove a helper. Anyone but the owner
  * can also leave the shop themselves (so a phone added without asking is never stuck: that person signs in and
  * leaves). A barber's sign-in is linked from the salon's barber screen instead (SalonSetupService), because it
  * belongs to his barber profile; removing it there, or him leaving here, unlinks it.
@@ -39,9 +37,12 @@ public class ShopMembersService {
     private final UserDirectory users;
     private final List<ShopChangeListener> listeners;
     private final SessionRevocations sessions;
+    private final ShopInvitesService invites;
 
     public ShopMembersService(ShopMemberRepository members, ShopService shops, UserDirectory users,
-                              List<ShopChangeListener> listeners, SessionRevocations sessions) {
+                              List<ShopChangeListener> listeners, SessionRevocations sessions,
+                              ShopInvitesService invites) {
+        this.invites = invites;
         this.members = members;
         this.shops = shops;
         this.users = users;
@@ -68,23 +69,11 @@ public class ShopMembersService {
     }
 
     /**
-     * Adds a helper by phone (owner only). A phone nobody has signed in with yet gets an account; the helper signs
-     * in with the usual OTP and finds the shop. 409 ALREADY_IN_A_SHOP if that person works in a shop already.
+     * Invites a helper by phone (owner only): see ShopInvitesService. The answer is the same whether or not the
+     * number has an account; the person joins only when they accept.
      */
-    @Transactional
-    public List<MemberView> addHelper(UUID ownerId, String phone) {
-        ShopMember owner = owner(ownerId);
-        // Two adds at the same moment are counted one after the other
-        members.lockMembers(owner.getShopId());
-        long helpers = members.findByShopIdOrderByCreatedAtAscIdAsc(owner.getShopId()).stream()
-                .filter(m -> m.getRole() == ShopRole.HELPER).count();
-        if (helpers >= MAX_HELPERS) {
-            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_HELPERS",
-                    "A shop can have up to " + MAX_HELPERS + " helpers. Remove one first.");
-        }
-        UUID helper = users.findOrCreateByPhone(phone);
-        shops.addMember(owner.getShopId(), helper, ShopRole.HELPER.name());
-        return members(ownerId);
+    public ShopInvitesService.InviteResult addHelper(UUID ownerId, String phone) {
+        return invites.inviteHelper(ownerId, phone);
     }
 
     /** Removes a helper (owner only). 404 for anyone who isn't a helper of my shop. */
@@ -114,12 +103,9 @@ public class ShopMembersService {
     private void remove(UUID shopId, UUID userId) {
         shops.removeMember(shopId, userId);
         listeners.forEach(l -> l.memberRemoved(shopId, userId));
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                sessions.revokeAll(userId);   // tokens naming the shop stop working now
-            }
-        });
+        // Tokens naming the shop stop working now (if Redis doesn't answer: within 15 minutes, never a 500 after the
+        // removal was saved)
+        sessions.revokeAllAfterCommit(userId, "Left or removed from the shop");
     }
 
     private ShopMember owner(UUID userId) {

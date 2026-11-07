@@ -71,9 +71,12 @@ public class ShopService implements ShopMemberships {
     private final UserDirectory users;
     private final ShopReviewStore review;
     private final Clock clock;
+    private final ShopInvitesService invites;
 
     public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files, UserDirectory users,
-                       List<ShopChangeListener> listeners, ShopReviewStore review, Clock clock) {
+                       List<ShopChangeListener> listeners, ShopReviewStore review, Clock clock,
+                       ShopInvitesService invites) {
+        this.invites = invites;
         this.review = review;
         this.users = users;
         this.shops = shops;
@@ -276,8 +279,9 @@ public class ShopService implements ShopMemberships {
     @Override
     @Transactional(readOnly = true)
     public Optional<Membership> find(UUID userId) {
-        return members.findByUserId(userId).map(m -> new Membership(m.getShopId(), m.getRole().name(),
-                shops.findById(m.getShopId()).orElseThrow().getType().name()));
+        // One query for the membership and the shop's type (it runs on every sign-in, refresh and salon screen)
+        return members.findMembershipWithType(userId).stream().findFirst()
+                .map(row -> new Membership((UUID) row[0], ((ShopRole) row[1]).name(), ((ShopType) row[2]).name()));
     }
 
     @Override
@@ -291,31 +295,36 @@ public class ShopService implements ShopMemberships {
 
     @Override
     @Transactional
-    public void addMember(UUID shopId, UUID userId, String role) {
-        ShopRole r = ShopRole.valueOf(role);
-        if (r == ShopRole.OWNER) {
-            throw new IllegalArgumentException("A shop has exactly one owner; it can't be added as a member");
-        }
-        if (members.existsByUserId(userId)) {
-            throw alreadyInAShop();
-        }
-        try {
-            members.saveAndFlush(new ShopMember(shopId, userId, r, now()));
-        } catch (DataIntegrityViolationException e) {
-            if (violated(e, ONE_SHOP_PER_PERSON)) {   // added to two shops at the same moment
-                throw alreadyInAShop();
-            }
-            throw e;
-        }
+    public String inviteBarber(UUID shopId, UUID ownerId, UUID staffId, String phone) {
+        return invites.inviteBarber(shopId, ownerId, staffId, phone).phone();
+    }
+
+    @Override
+    @Transactional
+    public void cancelBarberInvite(UUID shopId, UUID staffId, UUID by) {
+        invites.cancelBarber(shopId, staffId, by);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Map<UUID, String> waitingBarberInvites(UUID shopId) {
+        return invites.waitingBarbers(shopId);
     }
 
     @Override
     @Transactional
     public void removeMember(UUID shopId, UUID userId) {
+        // The role under the row's lock: a helper who accepted a hand-over a moment ago is the owner now, and the
+        // shop must never be left without one (their account deletion or leaving is then refused)
+        Optional<String> role = members.lockRole(shopId, userId);
+        if (role.isEmpty()) {
+            return;
+        }
+        if (ShopRole.OWNER.name().equals(role.get())) {
+            throw new ApiException(HttpStatus.CONFLICT, "SHOP_OWNER",
+                    "You own this shop now. Close it or hand it over first.");
+        }
         members.findByShopIdAndUserId(shopId, userId).ifPresent(m -> {
-            if (m.getRole() == ShopRole.OWNER) {
-                throw new IllegalStateException("The owner can't be removed from the shop");
-            }
             members.delete(m);
             members.flush();
         });
@@ -405,11 +414,6 @@ public class ShopService implements ShopMemberships {
     private static ApiException invalid(String field, String problem) {
         return new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                 Map.of(field, problem));
-    }
-
-    private static ApiException alreadyInAShop() {
-        return new ApiException(HttpStatus.CONFLICT, "ALREADY_IN_A_SHOP",
-                "This person already works in a shop. One person can work in one shop only.");
     }
 
     private static ApiException alreadyHasShop() {
