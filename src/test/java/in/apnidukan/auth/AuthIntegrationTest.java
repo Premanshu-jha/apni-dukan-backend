@@ -56,6 +56,8 @@ class AuthIntegrationTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired StringRedisTemplate redis;
     @Autowired in.apnidukan.auth.service.SignInCleanupJob signInCleanup;
+    @Autowired in.apnidukan.auth.service.AuthService authService;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
 
     RestClient http;
     String base;
@@ -175,11 +177,14 @@ class AuthIntegrationTest {
         assertThat(rotated.status()).isEqualTo(200);
         String refresh2 = (String) rotated.body().get("refreshToken");
         assertThat(refresh2).isNotEqualTo(refresh1);
+        jdbc.update("UPDATE refresh_tokens SET revoked_at = revoked_at - interval '5 seconds' "
+                + "WHERE revoke_reason = 'ROTATED'");   // a moment later, as a reload would come
 
-        // Coming back right away is treated as the app retrying (reply lost on a weak network): no alarm
+        // Coming back right away, before the new one was used, is the app that reloaded mid-refresh: a new pair
         Reply retry = post("/auth/refresh", Map.of("refreshToken", refresh1), null);
-        assertThat(retry.body().get("code")).isEqualTo("INVALID_REFRESH_TOKEN");
+        assertThat(retry.status()).isEqualTo(200);
         assertThat(get("/auth/me", (String) rotated.body().get("accessToken")).status()).isEqualTo(200);
+        refresh2 = (String) retry.body().get("refreshToken");
 
         // Coming back minutes later means it was copied: refused, and the new one stops working too
         jdbc.update("UPDATE refresh_tokens SET revoked_at = revoked_at - interval '2 minutes' WHERE revoke_reason = 'ROTATED'");
@@ -204,6 +209,179 @@ class AuthIntegrationTest {
         assertThat(get("/auth/me", (String) fresh.get("accessToken")).status()).isEqualTo(200);
         assertThat(post("/auth/refresh", Map.of("refreshToken", fresh.get("refreshToken")), null).status())
                 .isEqualTo(200);
+    }
+
+    // ---------- the refresh grace ----------
+
+    /** Signs in and swaps the first refresh token once: [old token, its successor]. */
+    private String[] swappedOnce() {
+        String r1 = (String) signIn(PHONE).body().get("refreshToken");
+        Reply swapped = post("/auth/refresh", Map.of("refreshToken", r1), null);
+        assertThat(swapped.status()).isEqualTo(200);
+        return new String[] {r1, (String) swapped.body().get("refreshToken")};
+    }
+
+    /** Moves the swap of every swapped token this far into the past. */
+    private void swappedAgo(int seconds) {
+        jdbc.update("UPDATE refresh_tokens SET revoked_at = revoked_at - make_interval(secs => ?) "
+                + "WHERE revoke_reason = 'ROTATED'", seconds);
+    }
+
+    @Test
+    void anAppThatReloadedMidRefreshGetsANewPairAndTheUnusedSuccessorStops() {
+        String[] t = swappedOnce();
+        swappedAgo(5);
+        Reply again = post("/auth/refresh", Map.of("refreshToken", t[0]), null);
+        assertThat(again.status()).isEqualTo(200);
+        String r3 = (String) again.body().get("refreshToken");
+        // The successor the app never saved no longer works, and is no alarm (just "sign in again")
+        Reply lost = post("/auth/refresh", Map.of("refreshToken", t[1]), null);
+        assertThat(lost.body().get("code")).isEqualTo("INVALID_REFRESH_TOKEN");
+        assertThat(post("/auth/refresh", Map.of("refreshToken", r3), null).status()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM refresh_tokens WHERE revoked_at IS NULL", Integer.class))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void aThiefUsingTheGraceIsCaughtWhenTheRealPhoneShowsTheReplacedToken() {
+        String[] t = swappedOnce();   // the real phone holds t[1]
+        swappedAgo(5);
+        Reply thief = post("/auth/refresh", Map.of("refreshToken", t[0]), null);   // a copy of the old token
+        assertThat(thief.status()).isEqualTo(200);
+        String stolen = (String) thief.body().get("refreshToken");
+        assertThat(jdbc.queryForObject("SELECT revoke_reason FROM refresh_tokens WHERE token_hash = ?", String.class,
+                in.apnidukan.auth.service.Hashing.sha256Hex(t[1]))).isEqualTo("GRACE_REPLACED");
+        // Within the grace the replaced token is only "sign in again"
+        assertThat(post("/auth/refresh", Map.of("refreshToken", t[1]), null).body().get("code"))
+                .isEqualTo("INVALID_REFRESH_TOKEN");
+        // After it, the real phone sending it means someone else had the old token: everything is signed out
+        jdbc.update("UPDATE refresh_tokens SET revoked_at = revoked_at - interval '31 seconds' "
+                + "WHERE revoke_reason = 'GRACE_REPLACED'");
+        assertThat(post("/auth/refresh", Map.of("refreshToken", t[1]), null).body().get("code"))
+                .isEqualTo("REFRESH_TOKEN_REUSED");
+        assertThat(post("/auth/refresh", Map.of("refreshToken", stolen), null).status()).isEqualTo(401);
+        // Only once: it can't be used to keep signing the owner out
+        assertThat(post("/auth/refresh", Map.of("refreshToken", t[1]), null).body().get("code"))
+                .isEqualTo("INVALID_REFRESH_TOKEN");
+    }
+
+    @Test
+    void theGraceGivesNoPairToAnExpiredTokenOrATestAccountOutOfTestMode() {
+        String[] t = swappedOnce();
+        swappedAgo(5);
+        jdbc.update("UPDATE refresh_tokens SET expires_at = now() - interval '1 second' WHERE revoke_reason = 'ROTATED'");
+        assertThat(post("/auth/refresh", Map.of("refreshToken", t[0]), null).body().get("code"))
+                .isEqualTo("REFRESH_TOKEN_EXPIRED");
+        assertThat(post("/auth/refresh", Map.of("refreshToken", t[1]), null).status()).isEqualTo(200);   // untouched
+
+        String[] u = swappedOnce();
+        swappedAgo(5);
+        jdbc.update("UPDATE refresh_tokens SET expires_at = now() + interval '1 day' WHERE revoke_reason = 'ROTATED'");
+        jdbc.update("UPDATE users SET test_account = true WHERE phone = ?", PHONE);   // test mode is off
+        assertThat(post("/auth/refresh", Map.of("refreshToken", u[0]), null).body().get("code"))
+                .isEqualTo("TEST_MODE_OFF");
+    }
+
+    @Test
+    void swapTimesAreTheDatabasesClock() {
+        java.time.OffsetDateTime before = jdbc.queryForObject("SELECT clock_timestamp()", java.time.OffsetDateTime.class);
+        String[] t = swappedOnce();
+        java.time.OffsetDateTime after = jdbc.queryForObject("SELECT clock_timestamp()", java.time.OffsetDateTime.class);
+        java.time.OffsetDateTime swapped = jdbc.queryForObject("SELECT revoked_at FROM refresh_tokens "
+                + "WHERE token_hash = ?", java.time.OffsetDateTime.class, in.apnidukan.auth.service.Hashing.sha256Hex(t[0]));
+        assertThat(swapped).isBetween(before, after);
+    }
+
+    @Test
+    void anOldTokenWithin60SecondsAfterItsSuccessorWasUsedOnlyGetsSignInAgain() {
+        String[] t = swappedOnce();
+        String r3 = (String) post("/auth/refresh", Map.of("refreshToken", t[1]), null).body().get("refreshToken");
+        swappedAgo(5);
+        Reply old = post("/auth/refresh", Map.of("refreshToken", t[0]), null);
+        assertThat(old.status()).isEqualTo(401);
+        assertThat(old.body().get("code")).isEqualTo("INVALID_REFRESH_TOKEN");
+        assertThat(post("/auth/refresh", Map.of("refreshToken", r3), null).status()).isEqualTo(200);   // intact
+    }
+
+    @Test
+    void anOldTokenBetween30And60SecondsOnlyGetsSignInAgainAndLaterIsACopy() {
+        String[] t = swappedOnce();
+        swappedAgo(31);
+        Reply late = post("/auth/refresh", Map.of("refreshToken", t[0]), null);
+        assertThat(late.body().get("code")).isEqualTo("INVALID_REFRESH_TOKEN");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM refresh_tokens WHERE revoked_at IS NULL", Integer.class))
+                .isEqualTo(1);   // the successor still works
+        swappedAgo(30);   // 61 s
+        assertThat(post("/auth/refresh", Map.of("refreshToken", t[0]), null).body().get("code"))
+                .isEqualTo("REFRESH_TOKEN_REUSED");
+        assertThat(post("/auth/refresh", Map.of("refreshToken", t[1]), null).status()).isEqualTo(401);
+    }
+
+    @Test
+    void withNoGraceASwappedTokenGetsNoNewPair() throws Exception {
+        Object service = org.springframework.test.util.AopTestUtils.getTargetObject(authService);
+        Object grace = org.springframework.test.util.ReflectionTestUtils.getField(service, "refreshGrace");
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "refreshGrace", java.time.Duration.ZERO);
+        try {
+            String[] t = swappedOnce();
+            swappedAgo(1);   // no grace: just "sign in again" (the 60 s retry rule), no new pair
+            assertThat(post("/auth/refresh", Map.of("refreshToken", t[0]), null).body().get("code"))
+                    .isEqualTo("INVALID_REFRESH_TOKEN");
+            swappedAgo(60);
+            assertThat(post("/auth/refresh", Map.of("refreshToken", t[0]), null).body().get("code"))
+                    .isEqualTo("REFRESH_TOKEN_REUSED");
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(service, "refreshGrace", grace);
+        }
+    }
+
+    @Test
+    void twoRefreshesWithTheSameTokenAtOnceNeverForkTheChain() throws Exception {
+        Map<?, ?> session = signIn(PHONE).body();
+        String r1 = (String) session.get("refreshToken");
+        String userId = (String) ((Map<?, ?>) session.get("user")).get("id");
+        var tx = new org.springframework.transaction.support.TransactionTemplate(transactions);
+        java.util.concurrent.CountDownLatch holding = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        ExecutorService threads = Executors.newFixedThreadPool(3);
+        try {
+            // Both arrive while the person's row is held (as by a refresh in progress), then run one after the other
+            Future<?> holder = threads.submit(() -> tx.executeWithoutResult(s -> {
+                jdbc.queryForList("SELECT id FROM users WHERE id = ?::uuid FOR UPDATE", userId);
+                holding.countDown();
+                try {
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+            assertThat(holding.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            Future<Reply> a = threads.submit(() -> post("/auth/refresh", Map.of("refreshToken", r1), null));
+            Future<Reply> b = threads.submit(() -> post("/auth/refresh", Map.of("refreshToken", r1), null));
+            for (int i = 0; i < 100 && waitingForLocks() < 2; i++) {
+                Thread.sleep(50);
+            }
+            assertThat(waitingForLocks()).isEqualTo(2);
+            release.countDown();
+            holder.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            List<Reply> both = List.of(a.get(30, java.util.concurrent.TimeUnit.SECONDS),
+                    b.get(30, java.util.concurrent.TimeUnit.SECONDS));
+            assertThat(both).extracting(Reply::status).containsExactlyInAnyOrder(200, 409);
+            assertThat(both.stream().filter(r -> r.status() == 409).findFirst().orElseThrow().body().get("code"))
+                    .isEqualTo("TRY_AGAIN");
+        } finally {
+            release.countDown();
+            threads.shutdown();
+        }
+        // One live token: the chain didn't fork
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM refresh_tokens WHERE revoked_at IS NULL", Integer.class))
+                .isEqualTo(1);
+    }
+
+    private int waitingForLocks() {
+        Integer n = jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                + "AND query ILIKE '%from users%update%'", Integer.class);
+        return n == null ? 0 : n;
     }
 
     @Test

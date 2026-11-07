@@ -54,4 +54,17 @@ class ConfigurationDefaultsTest {
         assertThat(number(r, "app.notifications.send-concurrency") * 2)
                 .isLessThanOrEqualTo(number(r, "spring.datasource.hikari.maximum-pool-size"));
     }
+
+    @Test
+    void storageAndDatabaseCallsAreBoundedAndMigrationsAreNot() throws IOException {
+        PropertySourcesPropertyResolver r = defaults();
+        assertThat(r.getProperty("app.r2.attempt-timeout")).isEqualTo("5s");
+        assertThat(r.getProperty("app.r2.call-timeout")).isEqualTo("15s");
+        assertThat(r.getProperty("app.r2.upload-timeout")).isEqualTo("60s");
+        assertThat(r.getProperty("spring.datasource.hikari.connection-init-sql"))
+                .isEqualTo("SET statement_timeout = '5s'");
+        assertThat(r.getProperty("app.db.job-statement-timeout")).isEqualTo("60s");
+        // Flyway's own connection has no limit, whatever the database role's default is
+        assertThat(r.getProperty("spring.flyway.init-sqls")).isEqualTo("SET statement_timeout = 0");
+    }
 }

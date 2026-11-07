@@ -40,7 +40,39 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @EnabledIf("in.apnidukan.support.TestContainers#dockerAvailable")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@org.springframework.context.annotation.Import(FilesIntegrationTest.FlakyR2.class)
 class FilesIntegrationTest {
+
+    /** While true, every delete in R2 fails, as when R2 is down or doesn't answer. */
+    static volatile boolean r2DeletesFail;
+
+    /** The real storage (S3Mock), with deletes that can be made to fail. */
+    @org.springframework.boot.test.context.TestConfiguration
+    static class FlakyR2 {
+        @org.springframework.context.annotation.Bean
+        @org.springframework.context.annotation.Primary
+        in.apnidukan.files.storage.FileStorage flakyStorage(in.apnidukan.files.storage.R2FileStorage real) {
+            return new in.apnidukan.files.storage.FileStorage() {
+                @Override
+                public void put(String key, java.io.InputStream content, long sizeBytes, String contentType) {
+                    real.put(key, content, sizeBytes, contentType);
+                }
+
+                @Override
+                public String signedLink(String key, java.time.Duration validFor, String downloadName) {
+                    return real.signedLink(key, validFor, downloadName);
+                }
+
+                @Override
+                public void delete(String key) {
+                    if (r2DeletesFail) {
+                        throw new IllegalStateException("R2 is down");
+                    }
+                    real.delete(key);
+                }
+            };
+        }
+    }
 
     private static final String SHOP_A = "11111111-1111-1111-1111-111111111111";
     private static final String SHOP_B = "33333333-3333-3333-3333-333333333333";
@@ -55,6 +87,7 @@ class FilesIntegrationTest {
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
     @Autowired JwtService jwt;
+    @Autowired in.apnidukan.files.service.FileDeletionJob deletionJob;
 
     RestClient http;
 
@@ -71,6 +104,41 @@ class FilesIntegrationTest {
         TestData.user(jdbc, UUID.fromString(OTHER_OWNER), "9000000102");
         TestData.shop(jdbc, UUID.fromString(SHOP_A), UUID.fromString(USER));
         TestData.shop(jdbc, UUID.fromString(SHOP_B), UUID.fromString(OTHER_OWNER));
+        jdbc.update("DELETE FROM file_deletions");
+        r2DeletesFail = false;
+    }
+
+    @Test
+    void aDeleteR2RefusesIsQueuedAndTheJobDeletesTheObjectLater() {
+        Reply up = upload(SHOP_A, fakeJpeg(), "late.jpg", "BILL");
+        String id = (String) up.body().get("id");
+        String key = jdbc.queryForObject("SELECT storage_key FROM files WHERE id = ?::uuid", String.class, id);
+
+        r2DeletesFail = true;
+        assertThat(delete(SHOP_A, "/files/" + id).status()).isEqualTo(204);   // gone for the shop
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM file_deletions WHERE storage_key = ?", Integer.class,
+                key)).isEqualTo(1);
+        try (S3Client s3 = TestContainers.s3Client()) {
+            s3.headObject(b -> b.bucket(TestContainers.BUCKET).key(key));   // still there
+        }
+        // Still down: tried, counted, and put off (1 minute after the first failure)
+        assertThat(deletionJob.runOnce()).isZero();
+        assertThat(jdbc.queryForObject("SELECT attempts FROM file_deletions WHERE storage_key = ?", Integer.class,
+                key)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT next_try_at > now() FROM file_deletions WHERE storage_key = ?",
+                Boolean.class, key)).isTrue();
+
+        // R2 is back: not before its time, then deleted and off the queue
+        r2DeletesFail = false;
+        assertThat(deletionJob.runOnce()).isZero();
+        jdbc.update("UPDATE file_deletions SET next_try_at = now() - interval '1 second'");
+        assertThat(deletionJob.runOnce()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM file_deletions", Integer.class)).isZero();
+        try (S3Client s3 = TestContainers.s3Client()) {
+            assertThatThrownBy(() -> s3.headObject(b -> b.bucket(TestContainers.BUCKET).key(key)))
+                    .isInstanceOf(NoSuchKeyException.class);
+        }
     }
 
     @Test
@@ -137,6 +205,7 @@ class FilesIntegrationTest {
         // Delete: 204, row gone, bytes gone
         assertThat(delete(SHOP_A, "/files/" + id).status()).isEqualTo(204);
         assertThat(jdbc.queryForObject("SELECT count(*) FROM files", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM file_deletions", Integer.class)).isZero();
         try (S3Client s3 = TestContainers.s3Client()) {
             assertThatThrownBy(() -> s3.headObject(b -> b.bucket(TestContainers.BUCKET).key(key)))
                     .isInstanceOf(NoSuchKeyException.class);

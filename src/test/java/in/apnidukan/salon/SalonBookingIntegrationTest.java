@@ -970,7 +970,7 @@ class SalonBookingIntegrationTest {
         assertThat(field(submitted.body(), "status")).as(submitted.text()).isEqualTo("PENDING_VISIT");
 
         assertThat(get("/admin/shops", customer).status()).isEqualTo(403);   // not the field team
-        List<?> waiting = (List<?>) get("/admin/shops", admin).body();
+        List<?> waiting = (List<?>) get("/admin/shops?type=SALON&group=FIRST_VISIT", admin).body();
         assertThat(waiting).hasSize(1);
         assertThat((String) field(waiting.get(0), "ownerPhotoUrl")).isNotBlank();
         assertThat((String) field(waiting.get(0), "shopPhotoUrl")).isNotBlank();
