@@ -23,8 +23,10 @@ class NotificationAccountDeletion implements AccountDeletionListener {
 
     private final NotificationStore jobs;
     private final PushSubscriptionStore devices;
+    private final InboxVersions versions;
 
-    NotificationAccountDeletion(NotificationStore jobs, PushSubscriptionStore devices) {
+    NotificationAccountDeletion(NotificationStore jobs, PushSubscriptionStore devices, InboxVersions versions) {
+        this.versions = versions;
         this.jobs = jobs;
         this.devices = devices;
     }
@@ -33,7 +35,7 @@ class NotificationAccountDeletion implements AccountDeletionListener {
     @Transactional(propagation = Propagation.MANDATORY)
     public void accountDeleted(UUID userId, Instant now) {
         jobs.cancelPendingForUser(userId, now);
-        jobs.blankAbout(userId);
+        versions.bumpAfterCommit(jobs.blankAbout(userId));   // others' lists changed
         jobs.queueWipe(userId, now);   // their own messages: emptied by AccountWipeJob within a minute
         devices.deleteAll(userId);
     }

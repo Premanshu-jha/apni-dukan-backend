@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -34,10 +35,12 @@ public class NotificationService implements Notifications {
     private final SmsTemplates smsTemplates;
     private final Clock clock;
     private final String vapidPublicKey;
+    private final InboxVersions versions;
 
     public NotificationService(NotificationStore jobs, PushSubscriptionStore devices, SmsTemplates smsTemplates,
-                               Clock clock,
+                               Clock clock, InboxVersions versions,
                                @Value("${app.push.vapid-public-key:}") String vapidPublicKey) {
+        this.versions = versions;
         this.jobs = jobs;
         this.devices = devices;
         this.smsTemplates = smsTemplates;
@@ -57,6 +60,7 @@ public class NotificationService implements Notifications {
         if (!cleaned.smsVariables().isEmpty() && smsTemplates.forType(notice.type()).isPresent()) {
             jobs.insert(cleaned, Channel.SMS, clock.instant());
         }
+        versions.bumpAfterCommit(List.of(notice.userId()));   // their bell's answer changes
     }
 
     @Override
@@ -71,6 +75,7 @@ public class NotificationService implements Notifications {
             }
         }
         jobs.insertAll(rows, clock.instant());
+        versions.bumpAfterCommit(notices.stream().map(Notice::userId).toList());
     }
 
     @Override
@@ -83,6 +88,7 @@ public class NotificationService implements Notifications {
     @Transactional(propagation = Propagation.MANDATORY)
     public void replacePendingAll(List<Notice> notices) {
         jobs.rewritePendingAll(notices.stream().map(NotificationService::clean).toList());
+        versions.bumpAfterCommit(notices.stream().map(Notice::userId).toList());   // one already due shows new text
     }
 
     /** Title, body and SMS variables cut to what the columns and DLT allow. */
@@ -104,12 +110,30 @@ public class NotificationService implements Notifications {
     @Transactional(propagation = Propagation.MANDATORY)
     public void replacePending(Notice notice) {
         jobs.rewritePending(clean(notice));
+        versions.bumpAfterCommit(List.of(notice.userId()));
     }
 
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public void forgetSalonMessages(UUID userId) {
-        jobs.deleteSalonMessages(userId);
+        forgetSalonMessages(List.of(userId));
+    }
+
+    /**
+     * Hidden from their lists at once and deleted by SalonMessagePurgeJob a slice at a time (a salon owner can have
+     * lakhs: one DELETE here would run past the request's 5 s and fail the close or hand-over for good). The ones still
+     * waiting are cancelled now (few rows), so nothing more of that salon reaches them.
+     */
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void forgetSalonMessages(Collection<UUID> userIds) {
+        if (userIds.isEmpty()) {
+            return;
+        }
+        Instant now = clock.instant();
+        jobs.cancelPendingSalon(userIds, now);
+        jobs.queueSalonPurges(userIds, now);
+        versions.bumpAfterCommit(userIds);
     }
 
     /**
