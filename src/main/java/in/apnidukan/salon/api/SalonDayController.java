@@ -69,12 +69,18 @@ public class SalonDayController {
     /**
      * The day screen: a column per barber with his hours and appointments. date = India date, default today.
      * The app asks every 30 seconds with the ETag it got as If-None-Match: when nothing changed, 304 after one
-     * primary-key read (SalonEtags).
+     * primary-key read (SalonEtags). With since = the seq of an earlier answer: only what changed after it (see
+     * SalonDayService.dayChanges).
      */
     @GetMapping("/day")
     public ResponseEntity<DayView> day(@RequestParam(required = false) @DateTimeFormat(iso = ISO.DATE) LocalDate date,
+                                       @RequestParam(required = false) String since,
                                        HttpServletRequest request) {
         CurrentUser me = currentUser.get();
+        if (since != null) {
+            // Only what changed after the answer that gave this seq (or the whole day, full: true): no ETag of ours
+            return ResponseEntity.ok(day.dayChanges(me, date, since));
+        }
         Optional<String> same = etags.unchanged(me, SalonEtags.DAY, SalonDayService.dayParams(date), sent(request));
         if (same.isPresent()) {
             return notModified(request, same.get());
@@ -98,14 +104,20 @@ public class SalonDayController {
     /**
      * Upcoming bookings across the coming days, soonest first, 100 a page: the owner's "what's coming" list. A
      * barber without walk-in access sees only his own. The next page: afterStart and afterId = the last item's
-     * startsAt and id (both or neither); fewer than 100 is the last page. ETag and 304 as for the day screen.
+     * startsAt and id (both or neither); fewer than 100 is the last page. ETag and 304 as for the day screen. With
+     * since: only what changed (SalonDayService.upcomingChanges).
      */
     @GetMapping("/upcoming")
-    public ResponseEntity<List<AppointmentView>> upcoming(@RequestParam(required = false) Instant afterStart,
-                                                          @RequestParam(required = false) UUID afterId,
-                                                          HttpServletRequest request) {
-        AppointmentCursor after = AppointmentCursor.of(afterStart, afterId);
+    public ResponseEntity<?> upcoming(@RequestParam(required = false) Instant afterStart,
+                                      @RequestParam(required = false) UUID afterId,
+                                      @RequestParam(required = false) String since,
+                                      HttpServletRequest request) {
         CurrentUser me = currentUser.get();
+        if (since != null) {
+            // Only what changed after the answer that gave this seq (an object; full: true = load the pages again)
+            return ResponseEntity.ok(day.upcomingChanges(me, since));
+        }
+        AppointmentCursor after = AppointmentCursor.of(afterStart, afterId);
         Optional<String> same = etags.unchanged(me, SalonEtags.UPCOMING, SalonDayService.upcomingParams(after),
                 sent(request));
         if (same.isPresent()) {

@@ -247,10 +247,11 @@ class SalonScaleIntegrationTest {
                 .status()).isEqualTo(200), true);
         // Who works there and what they may do
         UUID helper = person("9000000301");
-        changes("a helper added", () -> assertThat(post("/shops/me/helpers", Map.of("phone", "9000000301"), owner)
-                .status()).isBetween(200, 201), false);
+        // (These count as setup since V21: they decide which columns and buttons each person's board has)
+        // Invited and accepted (the invitation alone changes nobody's board)
+        changes("a helper added", () -> addHelper("9000000301"), true);
         changes("walk-in access", () -> assertThat(put("/salon/members/" + helper + "/walk-in-access",
-                Map.of("allowed", true), owner).status()).isEqualTo(200), false);
+                Map.of("allowed", true), owner).status()).isEqualTo(200), true);
         changes("a pause", () -> assertThat(post("/salon/pause", Map.of(), owner).status()).isEqualTo(200), false);
         // A customer's name shows on the board
         changes("a customer renamed", () -> assertThat(patch("/auth/me", Map.of("name", "Ravi Kumar"), customer)
@@ -276,7 +277,7 @@ class SalonScaleIntegrationTest {
     @Test
     void aBarberAndTheOwnerGetDifferentTagsAndOneCantUseTheOther() {
         id(book(customer, at("12:00")));
-        put("/salon/staff/" + raju + "/login", Map.of("phone", "9000000201"), owner);
+        linkBarber(raju, "9000000201");
         UUID rajuUser = userWithPhone("9000000201");
         Reply his = get("/salon/day", rajuUser);
         Reply mine = get("/salon/day", owner);
@@ -333,45 +334,84 @@ class SalonScaleIntegrationTest {
     }
 
     @Test
-    void aRenameTakesTheSalonsCountersBeforeThePersonsRowSoItCanOnlyWaitNeverDeadlock() throws Exception {
-        id(book(customer, at("12:00")));
+    void twoWritesInOneSalonNoLongerWaitForEachOtherOnTheCounterWhichMovesAtEachCommit() throws Exception {
         long before = versions()[0];
         TransactionTemplate tx = new TransactionTemplate(transactions);
-        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch written = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        ExecutorService threads = Executors.newFixedThreadPool(2);
+        long[] seenInside = new long[1];
+        ExecutorService thread = Executors.newSingleThreadExecutor();
+        long afterSecond;
         try {
-            // A salon change in progress holds the counter (as a cancel does, before its message checks the person)
-            Future<?> salonChange = threads.submit(() -> tx.executeWithoutResult(s -> {
-                jdbc.queryForList("SELECT version FROM salon_versions WHERE shop_id = ? FOR UPDATE", salon);
-                holding.countDown();
+            // A write in the salon still in progress (a break for Raju): it holds no counter until it commits
+            Future<?> first = thread.submit(() -> tx.executeWithoutResult(st -> {
+                insertBlock(raju, at("15:00"), at("15:30"));
+                seenInside[0] = versions()[0];
+                written.countDown();
                 try {
                     release.await(30, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
             }));
-            assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
-            Future<Reply> rename = threads.submit(() -> patch("/auth/me", Map.of("name", "Ravi Kumar"), customer));
-            for (int i = 0; i < 100 && count("pg_stat_activity WHERE wait_event_type = 'Lock' "
-                    + "AND query LIKE '%salon_versions_bump%'") == 0; i++) {
-                Thread.sleep(50);
-            }
-            assertThat(count("pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%salon_versions_bump%'"))
-                    .isEqualTo(1);   // the rename waits for the counter...
-            // ...and doesn't hold the person's row meanwhile: the salon change could still take it
-            org.springframework.transaction.support.TransactionCallback<List<Map<String, Object>>> keyShare =
-                    s -> jdbc.queryForList("SELECT id FROM users WHERE id = ? FOR KEY SHARE NOWAIT", customer);
-            List<Map<String, Object>> taken = tx.execute(keyShare);
-            assertThat(taken).hasSize(1);
+            assertThat(written.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(seenInside[0]).isEqualTo(before);   // not moved in the middle of the transaction
+            // Another write in the same salon goes through at once (it used to wait for the first to commit)
+            long started = System.nanoTime();
+            Reply walkIn = walkIn(sunil);
+            assertThat(walkIn.status()).as(walkIn.text()).isEqualTo(201);
+            assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(3));
+            afterSecond = versions()[0];
+            assertThat(afterSecond).isGreaterThan(before);   // moved at its commit
             release.countDown();
-            salonChange.get(30, TimeUnit.SECONDS);
-            assertThat(rename.get(30, TimeUnit.SECONDS).status()).isEqualTo(200);
+            first.get(30, TimeUnit.SECONDS);
         } finally {
             release.countDown();
-            threads.shutdown();
+            thread.shutdown();
         }
-        assertThat(versions()[0]).isNotEqualTo(before);
+        assertThat(versions()[0]).isGreaterThan(afterSecond);   // and again at the first one's commit
+        // Once per transaction, however many rows: three writes of one statement each moved it three times
+        long[] counted = versions();
+        jdbc.update("UPDATE appointments SET updated_at = updated_at WHERE shop_id = ?", salon);
+        assertThat(versions()[0]).isGreaterThan(counted[0]);
+        assertThat(versions()[1]).isEqualTo(counted[1]);
+    }
+
+    @Test
+    void aRenameWritesTheCustomersRowsAgainSoTheBoardsShowItAndWaitsForNoOtherSalonWrite() throws Exception {
+        UUID b = id(book(customer, at("12:00")));
+        long seqBefore = jdbc.queryForObject("SELECT change_seq FROM appointments WHERE id = ?", Long.class, b);
+        String seq = (String) field(get("/salon/day", owner).body(), "seq");
+        TransactionTemplate tx = new TransactionTemplate(transactions);
+        CountDownLatch written = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService thread = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> salonWrite = thread.submit(() -> tx.executeWithoutResult(st -> {
+                insertBlock(arif, at("17:00"), at("17:30"));
+                written.countDown();
+                try {
+                    release.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+            assertThat(written.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(patch("/auth/me", Map.of("name", "Ravi Kumar"), customer).status()).isEqualTo(200);
+            release.countDown();
+            salonWrite.get(30, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            thread.shutdown();
+        }
+        assertThat(jdbc.queryForObject("SELECT change_seq FROM appointments WHERE id = ?", Long.class, b))
+                .isGreaterThan(seqBefore);
+        Object delta = get("/salon/day?since=" + seq, owner).body();
+        assertThat(field(delta, "full")).isEqualTo(false);
+        assertThat((List<?>) field(delta, "changed")).anySatisfy(a -> {
+            assertThat(field(a, "id")).isEqualTo(b.toString());
+            assertThat(field(a, "customerName")).isEqualTo("Ravi Kumar");
+        });
     }
 
     @Test
@@ -476,6 +516,539 @@ class SalonScaleIntegrationTest {
         assertThat(versions()).isEqualTo(before);   // the same name: nothing to tell
     }
 
+    // ---------- day board deltas ----------
+
+    @Test
+    void aDeltaCarriesOnlyWhatChangedInWriteOrderAndWhatLeftTheDay() {
+        Object full = get("/salon/day", owner).body();
+        assertThat(field(full, "full")).isEqualTo(true);
+        assertThat((List<?>) field(full, "barbers")).hasSize(3);
+        String seq = (String) field(full, "seq");
+        assertThat(seq).startsWith("d3.2026-11-10.");
+
+        UUID booked = id(book(customer, at("12:00")));
+        UUID walkIn = id(walkIn(raju));
+        UUID brk = insertBlock(sunil, at("16:00"), at("16:30"));
+        Object delta = get("/salon/day?since=" + seq, owner).body();
+        assertThat(field(delta, "full")).isEqualTo(false);
+        assertThat(field(delta, "barbers")).isNull();
+        assertThat((List<?>) field(delta, "changed")).extracting(a -> field(a, "id"))
+                .containsExactly(booked.toString(), walkIn.toString(), brk.toString());   // in the order written
+        assertThat((List<?>) field(delta, "removed")).isEmpty();
+        assertThat(field(delta, "setupVersion")).isEqualTo(field(full, "setupVersion"));
+
+        // Nothing since: an empty delta from the counters alone (who is asking, then the counters)
+        seq = (String) field(delta, "seq");
+        String token = token(owner);
+        STATEMENTS.set(0);
+        Object quiet = call(HttpMethod.GET, "/salon/day?since=" + seq, null, token, null).body();
+        assertThat((List<?>) field(quiet, "changed")).isEmpty();
+        assertThat((List<?>) field(quiet, "removed")).isEmpty();
+        assertThat(field(quiet, "full")).isEqualTo(false);
+        assertThat(STATEMENTS.get()).isEqualTo(2);
+
+        // Moved to tomorrow: gone from today's board, on tomorrow's
+        String tomorrow = (String) field(get("/salon/day?date=2026-11-11", owner).body(), "seq");
+        assertThat(post("/bookings/" + booked + "/reschedule", Map.of("startAt",
+                at("12:00").plus(Duration.ofDays(1)).toString()), customer).status()).isEqualTo(200);
+        Object today = get("/salon/day?since=" + seq, owner).body();
+        assertThat(ids(field(today, "removed"))).containsExactly(booked.toString());
+        assertThat((List<?>) field(today, "changed")).isEmpty();
+        assertThat((List<?>) field(get("/salon/day?date=2026-11-11&since=" + tomorrow, owner).body(), "changed"))
+                .extracting(a -> field(a, "id")).containsExactly(booked.toString());
+
+        // A cancel shows as its new status; a removed break leaves the board
+        seq = (String) field(today, "seq");
+        UUID other = id(book(person("9000000102"), at("13:00")));
+        assertThat(post("/salon/appointments/" + other + "/cancel", Map.of("reason", "Closing early"), owner)
+                .status()).isEqualTo(200);
+        assertThat(call(HttpMethod.DELETE, "/salon/staff/" + sunil + "/blocks/" + brk, null, token(owner), null)
+                .status()).isEqualTo(204);
+        Object after = get("/salon/day?since=" + seq, owner).body();
+        assertThat((List<?>) field(after, "changed")).singleElement().satisfies(a -> {
+            assertThat(field(a, "id")).isEqualTo(other.toString());
+            assertThat(field(a, "status")).isEqualTo("CANCELLED_BY_SALON");
+        });
+        assertThat(ids(field(after, "removed"))).containsExactly(brk.toString());
+    }
+
+    @Test
+    void aRowWrittenByATransactionStillOpenWhenTheBoardWasReadComesInTheNextDelta() throws Exception {
+        TransactionTemplate tx = new TransactionTemplate(transactions);
+        CountDownLatch written = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        UUID[] slow = new UUID[1];
+        ExecutorService thread = Executors.newSingleThreadExecutor();
+        String seq;
+        UUID quick;
+        try {
+            // A slow transaction writes first (its row's number is the lower one) and commits last
+            Future<?> slowWrite = thread.submit(() -> tx.executeWithoutResult(st -> {
+                slow[0] = insertBlock(raju, at("15:00"), at("15:30"));
+                written.countDown();
+                try {
+                    release.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+            assertThat(written.await(10, TimeUnit.SECONDS)).isTrue();
+            quick = insertBlock(sunil, at("15:00"), at("15:30"));   // committed at once
+            Object full = get("/salon/day", owner).body();
+            assertThat(full.toString()).contains(quick.toString()).doesNotContain(slow[0].toString());
+            seq = (String) field(full, "seq");
+            release.countDown();
+            slowWrite.get(30, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            thread.shutdown();
+        }
+        // The board saw the later write but not the earlier one: the delta still brings it
+        Object delta = get("/salon/day?since=" + seq, owner).body();
+        assertThat((List<?>) field(delta, "changed")).extracting(a -> field(a, "id")).contains(slow[0].toString());
+    }
+
+    @Test
+    void theWholeDayComesBackWhenTheSetupChangedOrTheCursorIsUnknownOldOrFromYesterday() {
+        String seq = (String) field(get("/salon/day", owner).body(), "seq");
+        assertThat(field(get("/salon/day?since=" + seq, owner).body(), "full")).isEqualTo(false);
+        // A barber's hours: the columns may differ
+        assertThat(put("/salon/staff/" + arif + "/hours", Map.of("version", staffVersion(arif), "hours",
+                List.of(Map.of("weekday", 2, "start", "10:00", "end", "20:00"))), owner).status()).isEqualTo(200);
+        Object full = get("/salon/day?since=" + seq, owner).body();
+        assertThat(field(full, "full")).isEqualTo(true);
+        assertThat((List<?>) field(full, "barbers")).hasSize(3);
+        seq = (String) field(full, "seq");
+        // Someone given walk-in access (what they see changes)
+        UUID helper = person("9000000301");
+        addHelper("9000000301");
+        assertThat(field(get("/salon/day?since=" + seq, owner).body(), "full")).isEqualTo(true);
+        assertThat(helper).isNotNull();
+        // Another date's cursor: that board isn't this one
+        String other = (String) field(get("/salon/day?date=2026-11-11", owner).body(), "seq");
+        Object wrongDay = get("/salon/day?date=2026-11-12&since=" + other, owner).body();
+        assertThat(field(wrongDay, "full")).isEqualTo(true);
+        assertThat(field(wrongDay, "date")).isEqualTo("2026-11-12");
+        assertThat(field(get("/salon/day?date=2026-11-11&since=" + other, owner).body(), "full")).isEqualTo(false);
+        // Not a cursor of ours, or a made-up one ahead of the database
+        for (String bad : List.of("hello", "d1.1.2.3.4", "d2.2026-11-10.x.2.3.4",
+                "d2.2026-11-10.99999999999.0.0.1")) {
+            assertThat(field(get("/salon/day?since=" + bad, owner).body(), "full")).as(bad).isEqualTo(true);
+        }
+        // Older than an hour
+        seq = (String) field(get("/salon/day", owner).body(), "seq");
+        CLOCK.advance(Duration.ofMinutes(61));
+        assertThat(field(get("/salon/day?since=" + seq, owner).body(), "full")).isEqualTo(true);
+        // "Today" after midnight: yesterday's cursor gives the new day whole
+        CLOCK.set(at("23:59"));
+        seq = (String) field(get("/salon/day", owner).body(), "seq");
+        CLOCK.set(at("00:01").plus(Duration.ofDays(1)));
+        Object nextDay = get("/salon/day?since=" + seq, owner).body();
+        assertThat(field(nextDay, "full")).isEqualTo(true);
+        assertThat(field(nextDay, "date")).isEqualTo("2026-11-11");
+    }
+
+    @Test
+    void timeAloneBringsBookingsThatAreNowNotStartedAndABarberSeesOnlyHisOwnChanges() {
+        UUID b = id(book(customer, at("11:00")));   // with Raju (the least booked, added first)
+        assertThat(jdbc.queryForObject("SELECT staff_id FROM appointments WHERE id = ?", UUID.class, b))
+                .isEqualTo(raju);
+        CLOCK.set(at("10:58"));
+        String seq = (String) field(get("/salon/day", owner).body(), "seq");
+        CLOCK.set(at("11:01"));
+        Object delta = get("/salon/day?since=" + seq, owner).body();
+        assertThat((List<?>) field(delta, "changed")).singleElement().satisfies(a -> {
+            assertThat(field(a, "id")).isEqualTo(b.toString());
+            assertThat(field(a, "notStarted")).isEqualTo(true);
+        });
+
+        // Sunil with his own sign-in sees his own column: Raju's rows aren't his, and one given to him arrives
+        linkBarber(sunil, "9000000202");
+        UUID sunilUser = userWithPhone("9000000202");
+        Object his = get("/salon/day", sunilUser).body();
+        assertThat((List<?>) field(his, "barbers")).hasSize(1);
+        seq = (String) field(his, "seq");
+        insertBlock(raju, at("18:00"), at("18:30"));
+        UUID later = id(book(person("9000000103"), at("19:00")));
+        assertThat(post("/salon/appointments/" + later + "/reassign", Map.of("staffId", sunil.toString()), owner)
+                .status()).isEqualTo(200);
+        Object mine = get("/salon/day?since=" + seq, sunilUser).body();
+        assertThat(field(mine, "full")).isEqualTo(false);
+        assertThat((List<?>) field(mine, "changed")).extracting(a -> field(a, "id"))
+                .containsExactly(later.toString());
+        assertThat((List<?>) field(mine, "removed")).isEmpty();   // Raju's new break: none of his business
+        // Given back to Raju: it leaves his board
+        seq = (String) field(mine, "seq");
+        assertThat(post("/salon/appointments/" + later + "/reassign", Map.of("staffId", raju.toString()), owner)
+                .status()).isEqualTo(200);
+        assertThat(ids(field(get("/salon/day?since=" + seq, sunilUser).body(), "removed")))
+                .containsExactly(later.toString());
+    }
+
+    @Test
+    void aCustomerMovingTheirBookingToAnotherBarberLeavesTheOldBarbersOwnListsAndOtherBarbersEndsNeverShow() {
+        linkBarber(sunil, "9000000202");
+        UUID sunilUser = userWithPhone("9000000202");
+        UUID b = id(book(customer, at("18:00")));
+        if (!sunil.equals(staffOf(b))) {
+            assertThat(post("/salon/appointments/" + b + "/reassign", Map.of("staffId", sunil.toString()), owner)
+                    .status()).isEqualTo(200);
+        }
+        UUID others = id(book(person("9000000104"), at("10:30")));
+        if (sunil.equals(staffOf(others))) {
+            assertThat(post("/salon/appointments/" + others + "/reassign", Map.of("staffId", raju.toString()), owner)
+                    .status()).isEqualTo(200);
+        }
+        String daySeq = (String) field(get("/salon/day", sunilUser).body(), "seq");
+        String upSeq = (String) field(get("/salon/upcoming?since=start", sunilUser).body(), "seq");
+        // The two lists' cursors aren't interchangeable
+        assertThat(field(get("/salon/day?since=" + upSeq, sunilUser).body(), "full")).isEqualTo(true);
+        assertThat(field(get("/salon/upcoming?since=" + daySeq, sunilUser).body(), "full")).isEqualTo(true);
+
+        insertBlock(sunil, at("19:00"), at("19:30"));   // Sunil is busy at the new time: it goes to another barber
+        assertThat(post("/bookings/" + b + "/reschedule", Map.of("startAt", at("19:00").toString()), customer)
+                .status()).isEqualTo(200);
+        assertThat(staffOf(b)).isNotEqualTo(sunil);
+        assertThat(ids(field(get("/salon/day?since=" + daySeq, sunilUser).body(), "removed"))).contains(b.toString());
+        Object up = get("/salon/upcoming?since=" + upSeq, sunilUser).body();
+        assertThat(field(up, "full")).isEqualTo(false);
+        assertThat(ids(field(up, "removed"))).contains(b.toString());
+
+        // Another barber's booking ending is none of his business
+        CLOCK.set(at("10:45"));
+        String before = (String) field(get("/salon/upcoming?since=" + field(up, "seq"), sunilUser).body(), "seq");
+        CLOCK.set(at("11:01"));
+        Object after = get("/salon/upcoming?since=" + before, sunilUser).body();
+        assertThat(field(after, "full")).isEqualTo(false);
+        assertThat(ids(field(after, "removed"))).doesNotContain(others.toString());
+        // The owner, who sees everything, is told it left the list
+        assertThat(ids(field(get("/salon/upcoming?since=" + before, owner).body(), "removed")))
+                .contains(others.toString());
+    }
+
+    private UUID staffOf(UUID appointment) {
+        return jdbc.queryForObject("SELECT staff_id FROM appointments WHERE id = ?", UUID.class, appointment);
+    }
+
+    @Test
+    void aDeltaReadsAtMost301RowsHoweverOldItsCursorAndMoreThan300GiveTheWholeDay() {
+        String seq = (String) field(get("/salon/day", owner).body(), "seq");
+        for (int i = 0; i < 301; i++) {
+            insertBlock(raju, at("11:00").plus(Duration.ofMinutes(2L * i)), at("11:01").plus(Duration.ofMinutes(2L * i)));
+        }
+        Object answer = get("/salon/day?since=" + seq, owner).body();
+        assertThat(field(answer, "full")).isEqualTo(true);
+        // The read itself stops at 301 rows, in the index's order, however many were written
+        String plan = String.join("\n", jdbc.queryForList("EXPLAIN SELECT id FROM (SELECT id, change_seq FROM "
+                + "appointments WHERE shop_id = '" + salon + "' AND change_xid >= 1 ORDER BY change_xid LIMIT 301) c "
+                + "ORDER BY change_seq", String.class));
+        assertThat(plan).contains("Limit");
+    }
+
+    @Test
+    void aTransactionOpenTooLongIsReportedWithItsProcess() throws Exception {
+        in.apnidukan.common.jobs.OldSnapshotWatch watch = new in.apnidukan.common.jobs.OldSnapshotWatch(jdbc,
+                Duration.ofSeconds(1), false);
+        assertThat(watch.check()).isEmpty();
+        TransactionTemplate tx = new TransactionTemplate(transactions);
+        CountDownLatch written = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService thread = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> stuck = thread.submit(() -> tx.executeWithoutResult(st -> {
+                insertBlock(raju, at("15:00"), at("15:30"));
+                written.countDown();
+                try {
+                    release.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+            assertThat(written.await(10, TimeUnit.SECONDS)).isTrue();
+            Thread.sleep(1500);
+            assertThat(watch.check()).hasValueSatisfying(o -> assertThat(o.open()).isPositive());
+            release.countDown();
+            stuck.get(30, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            thread.shutdown();
+        }
+        assertThat(watch.check()).isEmpty();
+    }
+
+    @Test
+    void theUpcomingListAlsoComesAsADeltaWithTheSameRules() {
+        UUID early = id(book(customer, at("12:00")));
+        // The first seq: any since gives full: true (load the pages, then go on from it)
+        Object start = get("/salon/upcoming?since=start", owner).body();
+        assertThat(field(start, "full")).isEqualTo(true);
+        assertThat(field(start, "changed")).isNull();
+        String seq = (String) field(start, "seq");
+        assertThat((List<?>) get("/salon/upcoming", owner).body()).hasSize(1);   // the page, as before
+
+        UUID nextWeek = id(book(person("9000000102"), at("12:00").plus(Duration.ofDays(6))));
+        assertThat(post("/bookings/" + early + "/cancel", Map.of(), customer).status()).isEqualTo(200);
+        insertBlock(raju, at("16:00"), at("16:30"));   // blocks are never on the list
+        Object delta = get("/salon/upcoming?since=" + seq, owner).body();
+        assertThat(field(delta, "full")).isEqualTo(false);
+        assertThat((List<?>) field(delta, "changed")).extracting(a -> field(a, "id"))
+                .containsExactly(nextWeek.toString());
+        assertThat(ids(field(delta, "removed"))).contains(early.toString());
+
+        // Time: its start passes ("not started"), then its end (off the list)
+        seq = (String) field(delta, "seq");
+        UUID soon = id(book(person("9000000103"), at("10:30")));
+        String afterBooking = (String) field(get("/salon/upcoming?since=" + seq, owner).body(), "seq");
+        CLOCK.set(at("10:31"));
+        Object started = get("/salon/upcoming?since=" + afterBooking, owner).body();
+        assertThat((List<?>) field(started, "changed")).singleElement().satisfies(a -> {
+            assertThat(field(a, "id")).isEqualTo(soon.toString());
+            assertThat(field(a, "notStarted")).isEqualTo(true);
+        });
+        String beforeEnd = (String) field(started, "seq");
+        CLOCK.set(at("11:01"));
+        assertThat(ids(field(get("/salon/upcoming?since=" + beforeEnd, owner).body(), "removed")))
+                .containsExactly(soon.toString());
+
+        // A setup change, an old cursor or one from another day: load the pages again
+        String fresh = (String) field(get("/salon/upcoming?since=x", owner).body(), "seq");
+        assertThat(put("/salon/staff/" + arif + "/hours", Map.of("version", staffVersion(arif), "hours",
+                List.of(Map.of("weekday", 2, "start", "10:00", "end", "20:00"))), owner).status()).isEqualTo(200);
+        assertThat(field(get("/salon/upcoming?since=" + fresh, owner).body(), "full")).isEqualTo(true);
+        fresh = (String) field(get("/salon/upcoming?since=x", owner).body(), "seq");
+        CLOCK.set(at("00:01").plus(Duration.ofDays(1)));
+        assertThat(field(get("/salon/upcoming?since=" + fresh, owner).body(), "full")).isEqualTo(true);
+    }
+
+    @Test
+    void aFreeTimeCheckIsTheSalonItsCountersWithThePauseAndThatDaysBusyTime() {
+        String path = "/salons/" + salon + "/availability?services=" + haircut + "&date=2026-11-10";
+        assertThat(get(path, customer).status()).isEqualTo(200);   // the setup is read once and kept
+        String token = token(customer);
+        STATEMENTS.set(0);
+        assertThat(call(HttpMethod.GET, path, null, token, null).status()).isEqualTo(200);
+        assertThat(STATEMENTS.get()).isLessThanOrEqualTo(3);
+        // A pause is seen at once (it is read with the counters, not kept)
+        assertThat(post("/salon/pause", Map.of(), owner).status()).isEqualTo(200);
+        assertThat(field(get(path, customer).body(), "code")).isEqualTo("SALON_NOT_BOOKABLE");
+        // The booking settings come from the kept setup too, and a change is seen at once
+        assertThat(post("/salon/resume", null, owner).status()).isEqualTo(200);
+        assertThat(patch("/salon/settings", Map.of("minLeadMinutes", 120), owner).status()).isEqualTo(200);
+        List<?> starts = (List<?>) field(get(path, customer).body(), "starts");
+        assertThat(field(starts.get(0), "time")).isEqualTo("12:00");
+    }
+
+    // ---------- cheap answers when nothing changed ----------
+
+    @Test
+    void aQuietDeltaIsTwoReadsForTheOwnerThreeForABarberAndTheUpcomingListToo() {
+        id(book(customer, at("12:00")));   // Raju's
+        CLOCK.set(at("11:30"));   // a cursor read within the hour before the start
+        UUID rajuUser = linkBarber(raju, "9000000201");
+        String daySeq = (String) field(get("/salon/day", owner).body(), "seq");
+        String hisSeq = (String) field(get("/salon/day", rajuUser).body(), "seq");
+        String upSeq = (String) field(get("/salon/upcoming?since=x", owner).body(), "seq");
+        String owners = token(owner);
+        String his = token(rajuUser);
+        STATEMENTS.set(0);
+        Object quiet = call(HttpMethod.GET, "/salon/day?since=" + daySeq, null, owners, null).body();
+        assertThat(STATEMENTS.get()).isEqualTo(2);   // the membership with the shop's type, the counters
+        assertThat((List<?>) field(quiet, "changed")).isEmpty();
+        STATEMENTS.set(0);
+        Object hisQuiet = call(HttpMethod.GET, "/salon/day?since=" + hisSeq, null, his, null).body();
+        assertThat(STATEMENTS.get()).isEqualTo(3);   // + his barber profile and walk-in access, in one
+        assertThat(field(hisQuiet, "myStaffId")).isEqualTo(raju.toString());
+        STATEMENTS.set(0);
+        Object upQuiet = call(HttpMethod.GET, "/salon/upcoming?since=" + upSeq, null, owners, null).body();
+        assertThat(STATEMENTS.get()).isEqualTo(2);
+        assertThat(field(upQuiet, "full")).isEqualTo(false);
+        assertThat((List<?>) field(upQuiet, "changed")).isEmpty();
+        // Once the booking's start comes, the same cursor is no longer quiet: it is read and sent
+        CLOCK.set(at("12:01"));
+        Object started = get("/salon/day?since=" + daySeq, owner).body();
+        assertThat(ids(field(started, "changed"))).hasSize(1);
+        Object upStarted = get("/salon/upcoming?since=" + upSeq, owner).body();
+        assertThat(ids(field(upStarted, "changed"))).hasSize(1);
+    }
+
+    @Test
+    void aSecondFreeTimeCheckReadsNoBusyTimeUntilTheSalonChanges() {
+        String path = "/salons/" + salon + "/availability?services=" + haircut + "&date=2026-11-10";
+        assertThat(starts(get(path, customer))).contains("12:00");
+        String token = token(customer);
+        STATEMENTS.set(0);
+        assertThat(call(HttpMethod.GET, path, null, token, null).status()).isEqualTo(200);
+        assertThat(STATEMENTS.get()).isEqualTo(2);   // the salon, and its counters with the pause
+        // All three barbers booked at 12:00: the counter moved, the busy time is read again, 12:00 is gone
+        id(book(customer, at("12:00")));
+        id(book(person("9000000102"), at("12:00")));
+        id(book(person("9000000103"), at("12:00")));
+        STATEMENTS.set(0);
+        assertThat(starts(call(HttpMethod.GET, path, null, token, null))).doesNotContain("12:00").contains("12:30");
+        assertThat(STATEMENTS.get()).isEqualTo(3);
+    }
+
+    @Test
+    void aRefreshIsSixRoundTrips() {
+        call(HttpMethod.POST, "/auth/otp/send", Map.of("phone", "9000000001"), null, null);
+        Reply in = call(HttpMethod.POST, "/auth/otp/verify", Map.of("phone", "9000000001", "code",
+                CapturingSenders.codeSentTo(CapturingSenders.LAST_SMS, "9000000001")), null, null);
+        String refresh = (String) field(in.body(), "refreshToken");
+        STATEMENTS.set(0);
+        Reply renewed = call(HttpMethod.POST, "/auth/refresh", Map.of("refreshToken", refresh), null, null);
+        assertThat(renewed.status()).as(renewed.text()).isEqualTo(200);
+        // owner + clock, the person's lock, the token + clock, the swap, the membership, the new token
+        assertThat(STATEMENTS.get()).isEqualTo(6);
+    }
+
+    @Test
+    void theBellIsA304WithoutTheDatabaseUntilAMessageIsQueuedReadOrComesDue() {
+        id(book(customer, at("12:00")));   // a confirmation now, and a reminder due at 11:00
+        String token = token(customer);
+        Reply count = call(HttpMethod.GET, "/me/notifications/unread-count", null, token, null);
+        String tag = etag(count);
+        assertThat(tag).startsWith("\"n1-");
+        assertThat(field(count.body(), "unread")).isEqualTo(1);
+        STATEMENTS.set(0);
+        Reply same = getWithTag("/me/notifications/unread-count", token, tag);
+        assertThat(same.status()).isEqualTo(304);
+        assertThat(same.etag()).isEqualTo(tag);
+        assertThat(STATEMENTS.get()).isZero();
+        // The list's first page too
+        String listTag = etag(call(HttpMethod.GET, "/me/notifications", null, token, null));
+        STATEMENTS.set(0);
+        assertThat(getWithTag("/me/notifications", token, listTag).status()).isEqualTo(304);
+        assertThat(STATEMENTS.get()).isZero();
+        // Another app's tag isn't this one's
+        assertThat(getWithTag("/me/notifications/unread-count?app=partner", token, tag).status()).isEqualTo(200);
+        // Read: the version moved
+        assertThat(call(HttpMethod.POST, "/me/notifications/read", Map.of(), token, null).status()).isEqualTo(204);
+        Reply afterRead = getWithTag("/me/notifications/unread-count", token, tag);
+        assertThat(afterRead.status()).isEqualTo(200);
+        assertThat(field(afterRead.body(), "unread")).isEqualTo(0);
+        // A new message: moved again
+        String readTag = afterRead.etag();
+        assertThat(getWithTag("/me/notifications/unread-count", token, readTag).status()).isEqualTo(304);
+        assertThat(post("/bookings/" + jdbc.queryForObject("SELECT id FROM appointments LIMIT 1", UUID.class)
+                + "/cancel", Map.of(), customer).status()).isEqualTo(200);
+        assertThat(getWithTag("/me/notifications/unread-count", token, readTag).status()).isEqualTo(200);
+        // Time alone: the tag stands at most 15 minutes (or until a waiting message's time)
+        String fresh = getWithTag("/me/notifications/unread-count", token, readTag).etag();
+        CLOCK.advance(Duration.ofMinutes(16));   // (a new access token: the old one ran out with its 15 minutes)
+        assertThat(getWithTag("/me/notifications/unread-count", token(customer), fresh).status()).isEqualTo(200);
+    }
+
+    @Test
+    void aBellTagFromBeforeRedisLostItsDataNeverMatchesAgain() {
+        id(book(customer, at("12:00")));
+        String token = token(customer);
+        String tag = etag(call(HttpMethod.GET, "/me/notifications/unread-count", null, token, null));
+        assertThat(getWithTag("/me/notifications/unread-count", token, tag).status()).isEqualTo(304);
+        // A failover or eviction: every version is gone (they would all read 0 again), the epoch too
+        redis.delete(redis.keys("inbox-*"));
+        assertThat(getWithTag("/me/notifications/unread-count", token, tag).status()).isEqualTo(200);
+    }
+
+    // ---------- races with the setup ----------
+
+    @Test
+    void aBookingWaitingForABarbersLockSeesHoursSavedMeanwhileAndGoesToAnotherBarber() throws Exception {
+        String path = "/salons/" + salon + "/availability?services=" + haircut + "&date=2026-11-10";
+        assertThat(get(path, customer).status()).isEqualTo(200);   // the setup with Raju's hours is in memory
+        Reply booked = whileHoursAreBeingRemoved(raju, () -> book(customer, at("12:00")));
+        assertThat(booked.status()).as(booked.text()).isEqualTo(201);
+        assertThat(staffOf(id(booked))).isNotEqualTo(raju);   // Raju doesn't work any more: never outside his hours
+    }
+
+    @Test
+    void aMoveWaitingForItsOwnBarbersLockSeesHoursSavedMeanwhileAndGoesToAnotherBarber() throws Exception {
+        UUID b = id(book(customer, at("12:00")));
+        assertThat(staffOf(b)).isEqualTo(raju);   // the first barber added, all free
+        Reply moved = whileHoursAreBeingRemoved(raju, () -> post("/bookings/" + b + "/reschedule",
+                Map.of("startAt", at("13:00").toString()), customer));
+        assertThat(moved.status()).as(moved.text()).isEqualTo(200);
+        assertThat(staffOf(b)).isNotEqualTo(raju);
+    }
+
+    @Test
+    void aPauseWaitsForABookingInProgressSoTheBookingFinishedBeforeItOrSeesIt() throws Exception {
+        org.springframework.transaction.support.TransactionTemplate tx =
+                new org.springframework.transaction.support.TransactionTemplate(transactions);
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        try {
+            // A booking in progress holds the shop's row in shared mode (ShopDirectory.findForBooking)
+            Future<?> booking = threads.submit(() -> tx.executeWithoutResult(s -> {
+                jdbc.queryForList("SELECT id FROM shops WHERE id = ? FOR SHARE", salon);
+                holding.countDown();
+                await(release);
+            }));
+            assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
+            Future<Reply> pause = threads.submit(() -> post("/salon/pause", Map.of(), owner));
+            waitForLock("%FROM shops WHERE id = $1 FOR NO KEY UPDATE%");
+            assertThat(pause.isDone()).isFalse();   // it waits for the booking
+            release.countDown();
+            booking.get(10, TimeUnit.SECONDS);
+            assertThat(pause.get(10, TimeUnit.SECONDS).status()).isEqualTo(200);
+        } finally {
+            release.countDown();
+            threads.shutdown();
+        }
+        assertThat(field(book(customer, at("12:00")).body(), "code")).isEqualTo("SALON_NOT_BOOKABLE");
+    }
+
+    /**
+     * Runs {@code request} while another transaction holds this barber's row and removes all his hours (as the
+     * owner's "set hours" does), committing only once the request waits for that row.
+     */
+    private Reply whileHoursAreBeingRemoved(UUID barber, java.util.concurrent.Callable<Reply> request)
+            throws Exception {
+        org.springframework.transaction.support.TransactionTemplate tx =
+                new org.springframework.transaction.support.TransactionTemplate(transactions);
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> owners = threads.submit(() -> tx.executeWithoutResult(s -> {
+                jdbc.queryForList("SELECT id FROM salon_staff WHERE id = ? FOR UPDATE", barber);
+                jdbc.update("DELETE FROM staff_hours WHERE staff_id = ?", barber);
+                jdbc.update("UPDATE salon_staff SET version = version + 1 WHERE id = ?", barber);
+                holding.countDown();
+                await(release);
+            }));
+            assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
+            Future<Reply> reply = threads.submit(request);
+            waitForLock("%FROM salon_staff WHERE id = $1 FOR SHARE%");
+            release.countDown();
+            owners.get(10, TimeUnit.SECONDS);
+            return reply.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            threads.shutdown();
+        }
+    }
+
+    /** Waits (polling, at most 5 s) until a statement like this one is waiting for a lock. */
+    private void waitForLock(String like) {
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20))
+                .until(() -> count("pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '" + like + "'")
+                        == 1);
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await(30, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static List<String> starts(Reply r) {
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        return ((List<?>) field(r.body(), "starts")).stream().map(x -> (String) field(x, "time")).toList();
+    }
+
     // ---------- pages ----------
 
     @Test
@@ -552,7 +1125,13 @@ class SalonScaleIntegrationTest {
         List<Integer> sizes = new ArrayList<>();
         while (true) {
             assertThat(page.status()).as(page.text()).isEqualTo(200);
-            assertThat(field(page.body(), "counts")).isEqualTo(Map.of("COMPLETED", 205));   // every page
+            if (sizes.isEmpty()) {
+                assertThat(field(page.body(), "counts")).isEqualTo(Map.of("COMPLETED", 205));   // the whole range
+                assertThat(((Number) field(page.body(), "completedPaise")).longValue()).isZero();   // no services
+            } else {
+                assertThat(field(page.body(), "counts")).isNull();   // first page only: the app keeps those
+                assertThat(field(page.body(), "completedPaise")).isNull();
+            }
             List<?> items = (List<?>) field(page.body(), "appointments");
             sizes.add(items.size());
             seen.addAll(items);
@@ -791,19 +1370,22 @@ class SalonScaleIntegrationTest {
 
     @Test
     void aRequestStatementPast5SecondsIsStoppedAndAnswers503WhileJobsMayTakeLonger() throws Exception {
-        // Something holds the salon's counter row: the pause's write waits for it, longer than the request limit
+        // Another pause of the salon is being written and not committed: this pause's write waits for it, longer
+        // than the request limit (and the other one is then rolled back)
         TransactionTemplate tx = new TransactionTemplate(transactions);
         CountDownLatch holding = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ExecutorService holder = Executors.newSingleThreadExecutor();
         Future<?> held = holder.submit(() -> tx.executeWithoutResult(s -> {
-            jdbc.queryForList("SELECT version FROM salon_versions WHERE shop_id = ? FOR UPDATE", salon);
+            jdbc.update("INSERT INTO salon_pauses (shop_id, paused_until, updated_by, updated_at) VALUES (?, ?, ?, ?)",
+                    salon, Timestamp.from(TUESDAY_10_00.plusSeconds(3600)), owner, Timestamp.from(TUESDAY_10_00));
             holding.countDown();
             try {
                 release.await(30, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            s.setRollbackOnly();
         }));
         try {
             assertThat(holding.await(10, TimeUnit.SECONDS)).isTrue();
@@ -875,6 +1457,38 @@ class SalonScaleIntegrationTest {
     private long[] versions() {
         return jdbc.query("SELECT version, setup_version FROM salon_versions WHERE shop_id = ?",
                 rs -> rs.next() ? new long[] {rs.getLong(1), rs.getLong(2)} : new long[] {0, 0}, salon);
+    }
+
+    /**
+     * The owner gives this barber profile a sign-in: an invitation to the phone, which its holder (made here, as a
+     * bare sign-in, if nobody signed in with it yet) accepts. Returns the holder.
+     */
+    private UUID linkBarber(UUID staffId, String phone) {
+        Reply invited = put("/salon/staff/" + staffId + "/login", Map.of("phone", phone), owner);
+        assertThat(invited.status()).as(invited.text()).isEqualTo(200);
+        return acceptInvite(phone);
+    }
+
+    /** The owner invites a helper by phone; its holder (made if needed) accepts. Returns the holder. */
+    private UUID addHelper(String phone) {
+        Reply invited = post("/shops/me/helpers", Map.of("phone", phone), owner);
+        assertThat(invited.status()).as(invited.text()).isEqualTo(202);
+        return acceptInvite(phone);
+    }
+
+    /** The person with this phone (a bare sign-in if nobody has one) accepts the invitation waiting for it. */
+    private UUID acceptInvite(String phone) {
+        UUID who = jdbc.query("SELECT id FROM users WHERE phone = ?", (rs, i) -> rs.getObject(1, UUID.class), phone)
+                .stream().findFirst().orElseGet(() -> {
+                    UUID id = UUID.randomUUID();
+                    TestData.bareUser(jdbc, id, phone);
+                    return id;
+                });
+        UUID invite = jdbc.queryForObject("SELECT id FROM shop_invites WHERE to_phone = ? AND status = 'PENDING'",
+                UUID.class, phone);
+        Reply accepted = post("/me/invites/" + invite + "/accept", Map.of(), who);
+        assertThat(accepted.status()).as(accepted.text()).isEqualTo(200);
+        return who;
     }
 
     private UUID person(String phone) {
@@ -1034,6 +1648,11 @@ class SalonScaleIntegrationTest {
     }
 
     private static final tools.jackson.databind.ObjectMapper JSON = new tools.jackson.databind.ObjectMapper();
+
+    /** A JSON list of ids as strings. */
+    private static List<String> ids(Object jsonList) {
+        return ((List<?>) jsonList).stream().map(String::valueOf).toList();
+    }
 
     private static Object field(Object json, String name) {
         return ((Map<?, ?>) json).get(name);

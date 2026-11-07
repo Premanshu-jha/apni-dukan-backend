@@ -57,6 +57,19 @@ public class SalonAccessStore {
                 (rs, i) -> rs.getObject(1, UUID.class), shopId));
     }
 
+    /**
+     * Where a helper or barber stands in the salon, in one query: his active barber profile here (null if none) and
+     * whether he may add walk-ins.
+     */
+    public record Seat(UUID staffId, boolean walkIns) {
+    }
+
+    public Seat seat(UUID shopId, UUID userId) {
+        return jdbc.queryForObject("SELECT (SELECT id FROM salon_staff WHERE user_id = ? AND shop_id = ? AND active), "
+                        + "EXISTS (SELECT 1 FROM walk_in_access WHERE shop_id = ? AND user_id = ?)",
+                (rs, i) -> new Seat(rs.getObject(1, UUID.class), rs.getBoolean(2)), userId, shopId, shopId, userId);
+    }
+
     public boolean hasWalkInAccess(UUID shopId, UUID userId) {
         Integer n = jdbc.queryForObject("SELECT count(*) FROM walk_in_access WHERE shop_id = ? AND user_id = ?",
                 Integer.class, shopId, userId);
@@ -70,6 +83,14 @@ public class SalonAccessStore {
 
     public void revokeWalkIns(UUID shopId, UUID userId) {
         jdbc.update("DELETE FROM walk_in_access WHERE shop_id = ? AND user_id = ?", shopId, userId);
+    }
+
+    /** revokeWalkIns for several people at once (the salon closed), in one statement. */
+    public void revokeWalkIns(UUID shopId, java.util.Collection<UUID> userIds) {
+        jdbc.update("DELETE FROM walk_in_access WHERE shop_id = ? AND user_id = ANY (?)", ps -> {
+            ps.setObject(1, shopId);
+            ps.setArray(2, ps.getConnection().createArrayOf("uuid", userIds.toArray()));
+        });
     }
 
     /** Takes walk-in access away from this person in every salon (their account was deleted). */

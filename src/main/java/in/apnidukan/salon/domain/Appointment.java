@@ -29,4 +29,11 @@ public record Appointment(UUID id, UUID shopId, UUID staffId, AppointmentKind ki
     public boolean isBooking() {
         return kind == AppointmentKind.BOOKING;
     }
+
+    /** The same booking with another booking number (its first one was already taken). */
+    public Appointment withBookingNo(String number) {
+        return new Appointment(id, shopId, staffId, kind, blockType, closureId, customerId, number, guestName,
+                startCode, startsAt, endsAt, status, startedAt, startedWithCode, cancelReason, createdBy,
+                clientRequestId, createdAt, updatedAt);
+    }
 }

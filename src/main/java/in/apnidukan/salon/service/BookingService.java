@@ -23,8 +23,6 @@ import in.apnidukan.salon.domain.Availability;
 import in.apnidukan.salon.domain.Availability.BarberDay;
 import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.Interval;
-import in.apnidukan.salon.domain.SalonSettings;
-import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.domain.Shift;
 import in.apnidukan.salon.domain.StrikeKind;
@@ -43,7 +41,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -80,6 +77,11 @@ public class BookingService {
     static final int MAX_ACTIVE_BOOKINGS = 2;
     /** Cancelling closer to the start than this counts as a late cancel (a strike). */
     static final Duration LATE_CANCEL = Duration.ofHours(1);
+    /**
+     * A cancel this soon after booking never counts as late, whatever the start: someone who booked for 40 minutes
+     * from now and at once sees the wrong time or salon must not get a strike for putting it right.
+     */
+    static final Duration FREE_CANCEL_AFTER_BOOKING = Duration.ofMinutes(10);
     /** 3 strikes within 60 days stop online booking until 30 days after the latest of them. */
     static final int STRIKES_TO_BLOCK = 3;
     static final Duration STRIKE_WINDOW = Duration.ofDays(60);
@@ -93,8 +95,11 @@ public class BookingService {
      * book-and-cancel loop would otherwise use up the salon's and everyone's SMS budget.
      */
     static final int CHANGES_PER_DAY = 10;
-    /** Booking numbers: no 0/O, 1/I/L, so they can be read out over the phone. */
-    private static final String BOOKING_NO_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    /**
+     * Booking numbers tried for one booking when the random one is already taken (each try is a fresh random number;
+     * with 31^7 numbers a clash is already rare, five in a row never happens).
+     */
+    static final int BOOKING_NO_TRIES = 5;
 
     private final ShopDirectory shops;
     private final SalonCalendar calendar;
@@ -108,18 +113,19 @@ public class BookingService {
     private final Clock clock;
     private final RateLimiter limits;
     private final SalonSetups setups;
+    private final BookingNumbers numbers;
     private final int readsPerMinute;
 
     private static final Logger log = LoggerFactory.getLogger(BookingService.class);
-    private final SecureRandom random = new SecureRandom();
 
     public BookingService(ShopDirectory shops, SalonCalendar calendar, AppointmentStore appointments,
                           StrikeStore strikes, SalonAccessStore salonAccess,
                           StartCodes codes, SalonNotices notices, FileRefs files, UserDirectory users, Clock clock,
-                          RateLimiter limits, SalonSetups setups,
+                          RateLimiter limits, SalonSetups setups, BookingNumbers numbers,
                           @Value("${app.salon.reads-per-minute:60}") int readsPerMinute) {
         this.limits = limits;
         this.setups = setups;
+        this.numbers = numbers;
         this.readsPerMinute = readsPerMinute;
         this.shops = shops;
         this.calendar = calendar;
@@ -156,15 +162,16 @@ public class BookingService {
     }
 
     /**
-     * A salon's page: address, map link and opening hours (from its barbers' weekly hours, from the setup kept in
-     * memory: SalonSetups).
+     * A salon's page: address, map link, opening hours (from its barbers' weekly hours, from the setup kept in
+     * memory: SalonSetups, read with the pause) and how many days ahead it takes bookings (the app's day chips).
      */
     @Transactional(readOnly = true)
     public SalonDetails salon(UUID customerId, UUID salonId) {
         requireReadsLeft(customerId);
         ShopCard card = visible(salonId);
+        SalonSetups.Current current = setups.current(salonId);
         Map<Integer, int[]> byDay = new HashMap<>();
-        for (SalonSetups.Barber b : setups.of(salonId).barbers()) {
+        for (SalonSetups.Barber b : current.setup().barbers()) {
             for (Shift sh : b.week()) {
                 byDay.merge(sh.weekday(), new int[] {sh.startMin(), sh.endMin()},
                         (x, y) -> new int[] {Math.min(x[0], y[0]), Math.max(x[1], y[1])});
@@ -177,7 +184,7 @@ public class BookingService {
         Instant now = now();
         return new SalonDetails(card.id(), card.name(), card.addressLine(), card.area(), card.city(), card.pincode(),
                 card.latitude(), card.longitude(), SalonNotices.mapLink(card), hours,
-                salonAccess.pausedUntil(salonId).filter(u -> u.isAfter(now)).orElse(null), photo(card));
+                current.pausedAt(now) ? current.pausedUntil() : null, photo(card), current.setup().maxDaysAhead());
     }
 
     /** The salon's active services that at least one active barber does, in the salon's order. */
@@ -204,19 +211,24 @@ public class BookingService {
     public Slots availability(UUID customerId, UUID salonId, List<UUID> serviceIds, LocalDate date, UUID moving) {
         requireReadsLeft(customerId);
         UUID except = moving == null ? null : mine(customerId, appointments.find(moving)).id();
-        bookable(salonId);
+        // Three reads: the salon, its counters with its pause, and that day's busy time. The barbers, what they do,
+        // their weeks and the booking settings come from memory while the salon's setup is unchanged
+        visible(salonId);
+        SalonSetups.Current current = setups.current(salonId);
         Instant now = now();
-        // The barbers, what they do and their weeks from memory while the salon's setup is unchanged; only that
-        // day's busy time is read
-        SalonSetups.Setup setup = setups.of(salonId);
+        requireNotPaused(current, now);
+        SalonSetups.Setup setup = current.setup();
         List<BookedService> chosen = calendar.chosenServices(setup, serviceIds);
         Duration length = SalonCalendar.length(chosen);
         List<SalonSetups.Barber> barbers = calendar.barbersFor(setup, SalonDayService.ids(chosen));
-        Interval window = calendar.window(calendar.settings(salonId, now), now);
+        Interval window = calendar.window(setup, now);
         Interval day = dayInWindow(date, window, now);
+        // The busy time from memory while the salon is unchanged (a booking being moved: read fresh, without it)
         List<Instant> starts = day == null ? List.of()
-                : Availability.starts(calendar.setupDays(barbers, date, except), length, day.start(), day.end());
-        return new Slots(date, (int) length.toMinutes(), starts.stream().map(Slot::of).toList());
+                : Availability.starts(except == null ? calendar.setupDays(current, barbers, date)
+                        : calendar.setupDays(barbers, date, except), length, day.start(), day.end());
+        return new Slots(date, (int) length.toMinutes(), (int) FREE_CANCEL_AFTER_BOOKING.toMinutes(),
+                starts.stream().map(t -> Slot.of(t, t.minus(LATE_CANCEL))).toList());
     }
 
     /**
@@ -264,29 +276,40 @@ public class BookingService {
                     "You already have " + MAX_ACTIVE_BOOKINGS + " upcoming bookings. Cancel one to book another.");
         }
         requireChangesLeft(customerId);
-        ShopCard salon = bookable(in.salonId(), true);
-        List<BookedService> chosen = calendar.chosenServices(salon.id(), in.serviceIds());
+        // The shop's row held until the booking is saved (see ShopDirectory.findForBooking); the setup from memory
+        ShopCard salon = visibleSalon(shops.findForBooking(in.salonId()));
+        SalonSetups.Current current = setups.current(salon.id());
+        requireNotPaused(current, now);
+        SalonSetups.Setup setup = current.setup();
+        List<BookedService> chosen = calendar.chosenServices(setup, in.serviceIds());
         Duration length = SalonCalendar.length(chosen);
-        List<SalonStaff> barbers = calendar.barbersFor(salon.id(), SalonDayService.ids(chosen));
-        Interval window = calendar.window(calendar.settings(salon.id(), now), now);
+        List<SalonSetups.Barber> barbers = calendar.barbersFor(setup, SalonDayService.ids(chosen));
+        Interval window = calendar.window(setup, now);
         Instant start = in.startAt();
         requireInWindow(start, window);
         Interval slot = Interval.of(start, length);
         requireNoOverlap(customerId, slot, null);
         LocalDate date = LocalDate.ofInstant(start, SalonTime.ZONE);
-        List<BarberDay> days = calendar.days(barbers, date, null);
+        List<BarberDay> days = calendar.setupDays(current, barbers, date);
+        List<UUID> serviceIds = SalonDayService.ids(chosen);
         for (UUID barberId : Availability.barbersFor(days, slot)) {
-            if (!appointments.lockActiveBarber(barberId)) {
-                continue;   // switched off a moment ago
+            if (!appointments.lockActiveBarber(barberId)
+                    || !calendar.stillFits(salon.id(), setup.version(), barberId, serviceIds, slot)) {
+                // Switched off, or new hours or services saved for him a moment ago (the setup in memory is checked
+                // against the database here, under his lock): the next barber
+                continue;
             }
-            Appointment a = new Appointment(UUID.randomUUID(), salon.id(), barberId, AppointmentKind.BOOKING, null,
-                    null, customerId, bookingNo(), null, codes.newCode(), slot.start(), slot.end(),
+            Appointment fresh = new Appointment(UUID.randomUUID(), salon.id(), barberId, AppointmentKind.BOOKING,
+                    null, null, customerId, numbers.next(), null, codes.newCode(), slot.start(), slot.end(),
                     AppointmentStatus.CONFIRMED, null, null, null, customerId, requestId, now, now);
-            if (appointments.insertIfFree(a)) {
+            // A booking number already taken is tried again with a new one (BOOKING_NO_TRIES), never a 500
+            Optional<Appointment> saved = appointments.insertBookingIfFree(fresh, numbers::next, BOOKING_NO_TRIES);
+            if (saved.isPresent()) {
+                Appointment a = saved.get();
                 countChange(customerId);
                 appointments.insertServices(a.id(), chosen);
                 appointments.event(a.id(), now, customerId, "BOOKED", null);
-                notices.booked(a, salon, chosen, now);
+                notices.booked(a, salon, chosen, setup, now);
                 return view(a, now);
             }
         }
@@ -315,7 +338,7 @@ public class BookingService {
 
     /**
      * Cancels my booking, any time before its start. Less than 1 hour before counts as a late cancel (a strike),
-     * which the reply says.
+     * which the reply says, except within 10 minutes of booking (see lateCancelFrom).
      */
     @Transactional
     public CancelResult cancel(UUID customerId, UUID bookingId) {
@@ -323,7 +346,7 @@ public class BookingService {
         Appointment a = lockMine(customerId, bookingId);
         Instant now = now();
         requireChangeable(a, now);
-        boolean late = Duration.between(now, a.startsAt()).compareTo(LATE_CANCEL) < 0;
+        boolean late = now.isAfter(lateCancelFrom(a));
         if (!appointments.close(a.id(), AppointmentStatus.CANCELLED_BY_CUSTOMER, null, now)) {
             throw SalonDayService.wrongStatus("It was changed in the meantime. Reload.");
         }
@@ -355,7 +378,8 @@ public class BookingService {
             throw new ApiException(HttpStatus.CONFLICT, "TOO_LATE_TO_MOVE",
                     "Less than 1 hour to go: this booking can't be moved any more. You can still cancel it.");
         }
-        if (!"APPROVED".equals(salon.status()) || paused(salon.id(), now)) {
+        SalonSetups.Current current = setups.current(a.shopId());
+        if (!"APPROVED".equals(salon.status()) || current.pausedAt(now)) {
             throw new ApiException(HttpStatus.CONFLICT, "SALON_NOT_BOOKABLE",
                     "The salon isn't taking online changes right now (paused, or its details are being checked "
                             + "again). Your booking stays; you can still cancel it.");
@@ -366,21 +390,23 @@ public class BookingService {
         requireChangesLeft(customerId);
         List<BookedService> booked = appointments.services(List.of(a.id())).getOrDefault(a.id(), List.of());
         Duration length = SalonCalendar.length(booked);
-        List<SalonStaff> barbers = calendar.barbersFor(a.shopId(), SalonDayService.ids(booked));
-        Interval window = calendar.window(calendar.settings(a.shopId(), now), now);
+        List<SalonSetups.Barber> barbers = calendar.barbersFor(current.setup(), SalonDayService.ids(booked));
+        Interval window = calendar.window(current.setup(), now);
         requireInWindow(newStart, window);
         Interval slot = Interval.of(newStart, length);
         requireNoOverlap(customerId, slot, a.id());
         LocalDate date = LocalDate.ofInstant(newStart, SalonTime.ZONE);
-        List<BarberDay> days = calendar.days(barbers, date, a.id());
+        List<BarberDay> days = calendar.setupDays(barbers, date, a.id());
         List<UUID> candidates = new ArrayList<>(Availability.barbersFor(days, slot));
         if (candidates.remove(a.staffId())) {
             candidates.add(0, a.staffId());   // keep the same barber when he is free
         }
-        // Lock only the barber it goes to: the first one who is still active (his own barber needs no lock, since
-        // a barber with upcoming bookings can't be switched off)
-        while (!candidates.isEmpty() && !candidates.get(0).equals(a.staffId())
-                && !appointments.lockActiveBarber(candidates.get(0))) {
+        // Lock the barber it goes to, his own one too: new hours or services saved for a barber take his row's lock,
+        // so once we hold it, a change made meanwhile is seen (stillFits) and the move can't land outside them. The
+        // first one still active who still fits under the setup as it is now.
+        List<UUID> serviceIds = SalonDayService.ids(booked);
+        while (!candidates.isEmpty() && (!appointments.lockActiveBarber(candidates.get(0))
+                || !calendar.stillFits(a.shopId(), current.setup().version(), candidates.get(0), serviceIds, slot))) {
             candidates.remove(0);
         }
         if (candidates.isEmpty()) {
@@ -400,6 +426,10 @@ public class BookingService {
         }
         Appointment moved = appointments.find(a.id()).orElseThrow();
         appointments.event(a.id(), now, customerId, "RESCHEDULED", a.startsAt() + " -> " + newStart);
+        if (!moved.staffId().equals(a.staffId())) {
+            // Another barber now: his own-only screens drop it (AppointmentStore.reassignedFrom), and he can't act on it
+            appointments.event(a.id(), now, customerId, "BARBER_CHANGED", a.staffId() + " -> " + moved.staffId());
+        }
         countChange(customerId);
         notices.rescheduled(a, moved, salon, now);
         return view(moved, now);
@@ -470,6 +500,16 @@ public class BookingService {
                 });
     }
 
+    /**
+     * From when cancelling this booking counts as late (a strike): 1 hour before its start, but never within 10
+     * minutes of it being made. Cancelling exactly at this moment is still on time.
+     */
+    static Instant lateCancelFrom(Appointment a) {
+        Instant beforeStart = a.startsAt().minus(LATE_CANCEL);
+        Instant afterBooking = a.createdAt().plus(FREE_CANCEL_AFTER_BOOKING);
+        return beforeStart.isAfter(afterBooking) ? beforeStart : afterBooking;
+    }
+
     /** @param strikesLatestFirst the customer's strikes in the last 90 days, latest first */
     static Optional<Instant> blockedUntil(List<Instant> strikesLatestFirst, Instant now) {
         for (int i = 0; i + STRIKES_TO_BLOCK - 1 < strikesLatestFirst.size(); i++) {
@@ -483,19 +523,12 @@ public class BookingService {
         return Optional.empty();
     }
 
-    /** The salon, if customers can book it now: approved, a salon, not paused. 409 SALON_NOT_BOOKABLE otherwise. */
-    private ShopCard bookable(UUID salonId) {
-        return bookable(salonId, false);
-    }
-
-    /** @param forBooking hold the shop's row until the booking is saved (see ShopDirectory.findForBooking) */
-    private ShopCard bookable(UUID salonId, boolean forBooking) {
-        ShopCard card = forBooking ? visibleSalon(shops.findForBooking(salonId)) : visible(salonId);
-        if (paused(salonId, now())) {
+    /** 409 SALON_NOT_BOOKABLE while the salon has paused online bookings (read with its counters: SalonSetups). */
+    private static void requireNotPaused(SalonSetups.Current current, Instant now) {
+        if (current.pausedAt(now)) {
             throw new ApiException(HttpStatus.CONFLICT, "SALON_NOT_BOOKABLE",
                     "This salon isn't taking online bookings right now. Try again later.");
         }
-        return card;
     }
 
     /** An approved salon; anything else (including other shop types and unknown ids) is 404. */
@@ -511,10 +544,6 @@ public class BookingService {
 
     private String photo(ShopCard card) {
         return card.shopPhotoFileId() == null ? null : files.link(card.shopPhotoFileId());
-    }
-
-    private boolean paused(UUID salonId, Instant now) {
-        return salonAccess.pausedUntil(salonId).map(u -> u.isAfter(now)).orElse(false);
     }
 
     /** On the quarter-hour grid and inside the booking window, else 400 OUTSIDE_WINDOW. */
@@ -586,14 +615,6 @@ public class BookingService {
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "No such booking."));
     }
 
-    private String bookingNo() {
-        StringBuilder sb = new StringBuilder("S");
-        for (int i = 0; i < 7; i++) {
-            sb.append(BOOKING_NO_CHARS.charAt(random.nextInt(BOOKING_NO_CHARS.length())));
-        }
-        return sb.toString();
-    }
-
     // ---------- views ----------
 
     private BookingView view(Appointment a, Instant now) {
@@ -626,7 +647,7 @@ public class BookingService {
                     lines.stream().anyMatch(BookedService::priceIsFrom), a.startsAt(), a.endsAt(),
                     a.startsAt().plus(SalonDayService.LATE_ALLOWANCE), a.status(),
                     a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null,
-                    a.cancelReason(), changeable, movable, a.createdAt());
+                    a.cancelReason(), changeable, movable, a.createdAt(), lateCancelFrom(a));
         }).toList();
     }
 

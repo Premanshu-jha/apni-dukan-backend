@@ -36,6 +36,9 @@ public interface SalonStaffRepository extends JpaRepository<SalonStaff, UUID> {
     /** The barber this sign-in belongs to (a BARBER member), if any. */
     Optional<SalonStaff> findByUserId(UUID userId);
 
+    /** The salon's barbers whose sign-ins are among these people (several left at once). */
+    List<SalonStaff> findByShopIdAndUserIdIn(UUID shopId, java.util.Collection<UUID> userIds);
+
     /** Switched-off barbers (who left) don't count towards the salon's limit. */
     long countByShopIdAndActiveTrue(UUID shopId);
 }
