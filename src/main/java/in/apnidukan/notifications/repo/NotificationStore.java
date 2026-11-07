@@ -1,5 +1,6 @@
 package in.apnidukan.notifications.repo;
 
+import in.apnidukan.common.notify.MessageText;
 import in.apnidukan.common.notify.Notifications.Notice;
 import in.apnidukan.notifications.domain.Audience;
 import in.apnidukan.notifications.domain.Channel;
@@ -10,7 +11,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.net.URLDecoder;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -21,7 +21,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.TreeMap;
 import java.util.UUID;
 
 /** The notification_jobs table (plain SQL: the claim below needs FOR UPDATE SKIP LOCKED and RETURNING). */
@@ -142,10 +141,15 @@ public class NotificationStore {
                 + "AND read_at IS NULL AND id = ANY (string_to_array(?, ',')::uuid[])", at(now), userId, joined);
     }
 
-    /** Marks everything in this app's list read, up to now. */
-    public int markAllRead(UUID userId, Audience audience, Instant now) {
-        return jdbc.update("UPDATE notification_jobs SET read_at = ? WHERE id IN (SELECT id" + INBOX
-                + " AND read_at IS NULL)", at(now), userId, at(now), groups(audience));
+    /**
+     * Marks up to {@code max} unread messages of this app's list read, up to now; returns how many. One short
+     * statement (picked once: MATERIALIZED), found through ix_notification_jobs_unread; the caller repeats it while
+     * slices come back full, so a salon owner with lakhs of unread messages never makes one huge update.
+     */
+    public int markAllReadSlice(UUID userId, Audience audience, Instant now, int max) {
+        return jdbc.update("WITH pick AS MATERIALIZED (SELECT id" + INBOX + " AND read_at IS NULL LIMIT ?) "
+                + "UPDATE notification_jobs SET read_at = ? WHERE id IN (SELECT id FROM pick) AND read_at IS NULL",
+                userId, at(now), groups(audience), max, at(now));
     }
 
     /**
@@ -377,17 +381,9 @@ public class NotificationStore {
         }
     }
 
-    /** SMS variables as a query string (SALON=Sharma%20Hair&TIME=6%3A30%20PM), kept in one text column. */
+    /** SMS variables as a query string (SALON=Sharma+Hair&TIME=6%3A30+PM), kept in one text column (MessageText). */
     static String encode(Map<String, String> variables) {
-        StringBuilder sb = new StringBuilder();
-        new TreeMap<>(variables).forEach((k, v) -> {
-            if (sb.length() > 0) {
-                sb.append('&');
-            }
-            sb.append(URLEncoder.encode(k, StandardCharsets.UTF_8)).append('=')
-                    .append(URLEncoder.encode(v, StandardCharsets.UTF_8));
-        });
-        return sb.toString();
+        return MessageText.smsQuery(variables);
     }
 
     static Map<String, String> decode(String encoded) {

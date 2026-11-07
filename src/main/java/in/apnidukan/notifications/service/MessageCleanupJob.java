@@ -1,6 +1,7 @@
 package in.apnidukan.notifications.service;
 
 import in.apnidukan.common.jobs.JobLeases;
+import in.apnidukan.common.jobs.LongStatements;
 import in.apnidukan.notifications.repo.NotificationStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,13 +36,14 @@ public class MessageCleanupJob {
 
     private final NotificationStore jobs;
     private final JobLeases leases;
+    private final LongStatements statements;
     private final Clock clock;
     private final Duration keep;
     private final Duration smsKeep;
     private final int batch;
     private final boolean enabled;
 
-    public MessageCleanupJob(NotificationStore jobs, JobLeases leases, Clock clock,
+    public MessageCleanupJob(NotificationStore jobs, JobLeases leases, LongStatements statements, Clock clock,
                              @Value("${app.notifications.keep-days:90}") int keepDays,
                              @Value("${app.notifications.sms-keep-days:7}") int smsKeepDays,
                              @Value("${app.cleanup.batch:10000}") int batch,
@@ -52,6 +54,7 @@ public class MessageCleanupJob {
         }
         this.jobs = jobs;
         this.leases = leases;
+        this.statements = statements;
         this.clock = clock;
         this.keep = Duration.ofDays(keepDays);
         this.smsKeep = Duration.ofDays(smsKeepDays);
@@ -77,12 +80,12 @@ public class MessageCleanupJob {
         int sms = 0;
         int n;
         do {   // a full slice means there may be more
-            n = jobs.deleteFinishedSmsBefore(now.minus(smsKeep), batch);
+            n = statements.run(() -> jobs.deleteFinishedSmsBefore(now.minus(smsKeep), batch));   // up to 60 s
             sms += n;
         } while (n == batch);
         int other = 0;
         do {
-            n = jobs.deleteFinishedBefore(now.minus(keep), batch);
+            n = statements.run(() -> jobs.deleteFinishedBefore(now.minus(keep), batch));
             other += n;
         } while (n == batch);
         log.info("Deleted {} SMS rows finished more than {} days ago and {} messages finished more than {} days ago",
