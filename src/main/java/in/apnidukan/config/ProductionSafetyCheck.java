@@ -108,7 +108,8 @@ public class ProductionSafetyCheck {
         }
         if (corsOrigins.contains("localhost") || corsOrigins.contains("127.0.0.1") || corsOrigins.contains("*")) {
             throw new IllegalStateException("APP_PRODUCTION=true but CORS_ALLOWED_ORIGINS allows " + corsOrigins
-                    + ". Set it to the shop app's real address.");
+                    + ". Set it to the real addresses of all three apps, separated by commas: the partner (shop) app, "
+                    + "the customer app and the admin website.");
         }
     }
 }

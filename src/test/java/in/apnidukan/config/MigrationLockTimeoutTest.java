@@ -27,10 +27,20 @@ class MigrationLockTimeoutTest {
             if (!m.matches() || Integer.parseInt(m.group(1)) < 17) {
                 continue;
             }
-            String firstStatement = new String(r.getInputStream().readAllBytes(), StandardCharsets.UTF_8).lines()
+            String text = new String(r.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            String firstStatement = text.lines()
                     .filter(line -> !line.isBlank() && !line.startsWith("--"))
                     .findFirst().orElse("");
-            assertThat(firstStatement).as(r.getFilename()).isEqualTo("SET LOCAL lock_timeout = '3s';");
+            // A file building indexes CONCURRENTLY runs outside a transaction, where SET LOCAL would do nothing; it waits
+            // without a limit (it blocks nobody, and a timeout there leaves a failed migration that stops every start),
+            // and must build nothing any other way (a plain CREATE INDEX there would block writes for its build)
+            boolean concurrently = text.lines().anyMatch(l -> !l.startsWith("--") && l.contains("CONCURRENTLY"));
+            assertThat(firstStatement).as(r.getFilename())
+                    .isEqualTo(concurrently ? "SET lock_timeout = 0;" : "SET LOCAL lock_timeout = '3s';");
+            if (concurrently) {
+                assertThat(text.lines().filter(l -> l.startsWith("CREATE") && l.contains("INDEX")))
+                        .as(r.getFilename()).allMatch(l -> l.contains("INDEX CONCURRENTLY"));
+            }
             checked++;
         }
         assertThat(checked).isGreaterThanOrEqualTo(3);
