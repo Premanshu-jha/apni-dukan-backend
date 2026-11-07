@@ -16,32 +16,27 @@ import in.apnidukan.salon.api.BookingResponses.ServiceLine;
 import in.apnidukan.salon.api.BookingResponses.Slot;
 import in.apnidukan.salon.api.BookingResponses.Slots;
 import in.apnidukan.salon.domain.Appointment;
+import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.domain.AppointmentKind;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.domain.Availability;
 import in.apnidukan.salon.domain.Availability.BarberDay;
 import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.Interval;
-import in.apnidukan.salon.domain.SalonServiceItem;
 import in.apnidukan.salon.domain.SalonSettings;
 import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.domain.Shift;
-import in.apnidukan.salon.domain.StaffShift;
-import in.apnidukan.salon.domain.StaffSkill;
 import in.apnidukan.salon.domain.StrikeKind;
 import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.salon.repo.SalonAccessStore;
-import in.apnidukan.salon.repo.SalonServiceItemRepository;
-import in.apnidukan.salon.repo.SalonStaffRepository;
-import in.apnidukan.salon.repo.StaffShiftRepository;
-import in.apnidukan.salon.repo.StaffSkillRepository;
 import in.apnidukan.salon.repo.StrikeStore;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import in.apnidukan.common.security.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -56,7 +51,6 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -90,7 +84,10 @@ public class BookingService {
     static final int STRIKES_TO_BLOCK = 3;
     static final Duration STRIKE_WINDOW = Duration.ofDays(60);
     static final Duration BLOCK_FOR = Duration.ofDays(30);
+    /** Upcoming bookings are at most a few (2 waiting, plus any in the chair): one list, at most this many. */
     static final int MY_BOOKINGS_LIMIT = 50;
+    /** Past bookings per page (the next page with the last one's startsAt and id). */
+    public static final int PAST_PAGE = 30;
     /**
      * New bookings and moves per customer per day. Each one messages the salon (push, and SMS when set up), so a
      * book-and-cancel loop would otherwise use up the salon's and everyone's SMS budget.
@@ -104,35 +101,31 @@ public class BookingService {
     private final AppointmentStore appointments;
     private final StrikeStore strikes;
     private final SalonAccessStore salonAccess;
-    private final SalonServiceItemRepository services;
-    private final SalonStaffRepository staff;
-    private final StaffSkillRepository skills;
-    private final StaffShiftRepository shifts;
     private final StartCodes codes;
     private final SalonNotices notices;
     private final FileRefs files;
     private final UserDirectory users;
     private final Clock clock;
     private final RateLimiter limits;
+    private final SalonSetups setups;
+    private final int readsPerMinute;
 
     private static final Logger log = LoggerFactory.getLogger(BookingService.class);
     private final SecureRandom random = new SecureRandom();
 
     public BookingService(ShopDirectory shops, SalonCalendar calendar, AppointmentStore appointments,
-                          StrikeStore strikes, SalonAccessStore salonAccess, SalonServiceItemRepository services,
-                          SalonStaffRepository staff, StaffSkillRepository skills, StaffShiftRepository shifts,
+                          StrikeStore strikes, SalonAccessStore salonAccess,
                           StartCodes codes, SalonNotices notices, FileRefs files, UserDirectory users, Clock clock,
-                          RateLimiter limits) {
+                          RateLimiter limits, SalonSetups setups,
+                          @Value("${app.salon.reads-per-minute:60}") int readsPerMinute) {
         this.limits = limits;
+        this.setups = setups;
+        this.readsPerMinute = readsPerMinute;
         this.shops = shops;
         this.calendar = calendar;
         this.appointments = appointments;
         this.strikes = strikes;
         this.salonAccess = salonAccess;
-        this.services = services;
-        this.staff = staff;
-        this.skills = skills;
-        this.shifts = shifts;
         this.codes = codes;
         this.notices = notices;
         this.files = files;
@@ -162,17 +155,20 @@ public class BookingService {
                 .toList();
     }
 
-    /** A salon's page: address, map link and opening hours (from its barbers' weekly hours). */
+    /**
+     * A salon's page: address, map link and opening hours (from its barbers' weekly hours, from the setup kept in
+     * memory: SalonSetups).
+     */
     @Transactional(readOnly = true)
-    public SalonDetails salon(UUID salonId) {
+    public SalonDetails salon(UUID customerId, UUID salonId) {
+        requireReadsLeft(customerId);
         ShopCard card = visible(salonId);
-        List<UUID> barbers = staff.findByShopIdOrderByCreatedAtAscIdAsc(salonId).stream()
-                .filter(SalonStaff::isActive).map(SalonStaff::getId).toList();
         Map<Integer, int[]> byDay = new HashMap<>();
-        for (StaffShift s : shifts.findByStaffIdIn(barbers)) {
-            Shift sh = s.shift();
-            byDay.merge(sh.weekday(), new int[] {sh.startMin(), sh.endMin()},
-                    (a, b) -> new int[] {Math.min(a[0], b[0]), Math.max(a[1], b[1])});
+        for (SalonSetups.Barber b : setups.of(salonId).barbers()) {
+            for (Shift sh : b.week()) {
+                byDay.merge(sh.weekday(), new int[] {sh.startMin(), sh.endMin()},
+                        (x, y) -> new int[] {Math.min(x[0], y[0]), Math.max(x[1], y[1])});
+            }
         }
         List<DayHours> hours = byDay.entrySet().stream()
                 .sorted(Map.Entry.comparingByKey())
@@ -186,44 +182,60 @@ public class BookingService {
 
     /** The salon's active services that at least one active barber does, in the salon's order. */
     @Transactional(readOnly = true)
-    public List<SalonService> salonServices(UUID salonId) {
+    public List<SalonService> salonServices(UUID customerId, UUID salonId) {
+        requireReadsLeft(customerId);
         visible(salonId);
-        List<UUID> barbers = staff.findByShopIdOrderByCreatedAtAscIdAsc(salonId).stream()
-                .filter(SalonStaff::isActive).map(SalonStaff::getId).toList();
-        Set<UUID> offered = skills.findByStaffIdIn(barbers).stream().map(StaffSkill::getServiceId)
+        SalonSetups.Setup setup = setups.of(salonId);
+        Set<UUID> offered = setup.barbers().stream().flatMap(b -> b.serviceIds().stream())
                 .collect(Collectors.toSet());
-        return services.findByShopIdOrderBySortOrderAscNameAsc(salonId).stream()
-                .filter(s -> s.isActive() && offered.contains(s.getId()))
-                .map(BookingService::serviceView)
+        return setup.services().stream()
+                .filter(s -> offered.contains(s.serviceId()))
+                .map(s -> new SalonService(s.serviceId(), s.name(), s.durationMin(), s.pricePaise(), s.priceIsFrom()))
                 .toList();
     }
 
     /**
      * The start times free for these services on this date (India), each on a quarter hour, inside the salon's
      * booking window. 409 NO_BARBER_FOR_SERVICES if no single barber does them all.
-     */
-    @Transactional(readOnly = true)
-    public Slots availability(UUID salonId, List<UUID> serviceIds, LocalDate date) {
-        return availability(null, salonId, serviceIds, date, null);
-    }
-
-    /**
      * @param moving one of the customer's own bookings being moved (or null): its own time counts as free, so a
      *               move by a few minutes onto it is offered. 404 if it isn't theirs.
      */
     @Transactional(readOnly = true)
     public Slots availability(UUID customerId, UUID salonId, List<UUID> serviceIds, LocalDate date, UUID moving) {
+        requireReadsLeft(customerId);
         UUID except = moving == null ? null : mine(customerId, appointments.find(moving)).id();
         bookable(salonId);
         Instant now = now();
-        List<BookedService> chosen = calendar.chosenServices(salonId, serviceIds);
+        // The barbers, what they do and their weeks from memory while the salon's setup is unchanged; only that
+        // day's busy time is read
+        SalonSetups.Setup setup = setups.of(salonId);
+        List<BookedService> chosen = calendar.chosenServices(setup, serviceIds);
         Duration length = SalonCalendar.length(chosen);
-        List<SalonStaff> barbers = calendar.barbersFor(salonId, SalonDayService.ids(chosen));
+        List<SalonSetups.Barber> barbers = calendar.barbersFor(setup, SalonDayService.ids(chosen));
         Interval window = calendar.window(calendar.settings(salonId, now), now);
         Interval day = dayInWindow(date, window, now);
         List<Instant> starts = day == null ? List.of()
-                : Availability.starts(calendar.days(barbers, date, except), length, day.start(), day.end());
+                : Availability.starts(calendar.setupDays(barbers, date, except), length, day.start(), day.end());
         return new Slots(date, (int) length.toMinutes(), starts.stream().map(Slot::of).toList());
+    }
+
+    /**
+     * 429 TOO_MANY_REQUESTS (with Retry-After) after app.salon.reads-per-minute salon pages, service lists and
+     * free-time checks by one person in a minute: each check reads every barber's day, and nobody browsing needs that
+     * many. If Redis doesn't answer, the read goes ahead.
+     */
+    private void requireReadsLeft(UUID customerId) {
+        String key = "salon-reads:" + customerId;
+        try {
+            if (!limits.tryHit(key, readsPerMinute, Duration.ofMinutes(1))) {
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS",
+                        "Too many salon pages at once. Wait a few seconds and try again.")
+                        .retryAfter(limits.secondsLeft(key));
+            }
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer the salon-read count ({}); letting it through",
+                    redisDown.getClass().getSimpleName());
+        }
     }
 
     // ---------- booking ----------
@@ -281,11 +293,18 @@ public class BookingService {
         throw slotTaken(days, length, start, window, date, now);
     }
 
-    /** My bookings: upcoming (soonest first) or past (latest first), up to 50. */
+    /**
+     * My bookings: upcoming (soonest first, up to 50: there are only a few), or past (latest first, PAST_PAGE a page
+     * after the cursor; null: the first page).
+     */
     @Transactional(readOnly = true)
-    public List<BookingView> myBookings(UUID customerId, boolean upcoming) {
+    public List<BookingView> myBookings(UUID customerId, boolean upcoming, AppointmentCursor after) {
+        if (upcoming && after != null) {
+            throw SalonCalendar.invalid("afterStart", "pages are only for when=past");
+        }
         Instant now = now();
-        return views(appointments.forCustomer(customerId, upcoming, now, MY_BOOKINGS_LIMIT), now);
+        return views(appointments.forCustomer(customerId, upcoming, now, after,
+                upcoming ? MY_BOOKINGS_LIMIT : PAST_PAGE), now);
     }
 
     /** One of my bookings; 404 for anyone else's. */
@@ -583,12 +602,17 @@ public class BookingService {
 
     private List<BookingView> views(List<Appointment> list, Instant now) {
         Map<UUID, List<BookedService>> booked = appointments.services(list.stream().map(Appointment::id).toList());
-        // Once per salon, not per booking (a customer's list holds a few salons, many bookings)
-        Map<UUID, ShopCard> salons = new LinkedHashMap<>();
+        // Every salon of the page and its pause in one query each (a customer's list holds a few salons, many bookings)
+        Set<UUID> shopIds = list.stream().map(Appointment::shopId).collect(Collectors.toSet());
+        Map<UUID, ShopCard> salons = shops.findAll(shopIds);
+        Map<UUID, Instant> pauses = salonAccess.pausedUntil(shopIds);
         Map<UUID, Boolean> pausedNow = new HashMap<>();
-        for (Appointment a : list) {
-            salons.computeIfAbsent(a.shopId(), id -> shops.find(id).orElseThrow());
-            pausedNow.computeIfAbsent(a.shopId(), id -> paused(id, now));
+        for (UUID id : shopIds) {
+            if (!salons.containsKey(id)) {
+                throw new IllegalStateException("A booking's salon is missing: " + id);
+            }
+            Instant until = pauses.get(id);
+            pausedNow.put(id, until != null && until.isAfter(now));
         }
         return list.stream().map(a -> {
             ShopCard s = salons.get(a.shopId());
@@ -604,11 +628,6 @@ public class BookingService {
                     a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null,
                     a.cancelReason(), changeable, movable, a.createdAt());
         }).toList();
-    }
-
-    private static SalonService serviceView(SalonServiceItem s) {
-        return new SalonService(s.getId(), s.details().name(), s.details().durationMin(), s.details().pricePaise(),
-                s.details().priceIsFrom());
     }
 
     private static ApiException outsideWindow(String message) {

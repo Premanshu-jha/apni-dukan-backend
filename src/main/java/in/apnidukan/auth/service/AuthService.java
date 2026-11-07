@@ -10,6 +10,7 @@ import in.apnidukan.auth.repo.RefreshTokenRepository;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.async.BackgroundTasks;
 import in.apnidukan.common.context.AccountDeletionListener;
+import in.apnidukan.common.context.PersonDetailsListener;
 import in.apnidukan.common.context.SignOutEverywhereListener;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.error.ApiException;
@@ -25,6 +26,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -39,6 +41,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -59,8 +62,9 @@ public class AuthService {
     static final int EMAIL_SENDS_PER_ACCOUNT_PER_DAY = 10;
     /**
      * A swapped refresh token coming back within this time is treated as the app retrying (a reply lost on a weak
-     * mobile network, or two calls at once), not as a copy: it just gets "sign in again" without signing out
-     * every device. Later than this, it means the token was copied.
+     * mobile network, or two calls at once), not as a copy: it gets a new pair under the refresh grace (see
+     * refresh()), otherwise just "sign in again" without signing out every device. Later than this, it means the
+     * token was copied.
      */
     static final Duration RETRY_GRACE = Duration.ofSeconds(60);
     /** A person's name: 2 to 60 characters after cleaning (the column allows 100). */
@@ -81,6 +85,9 @@ public class AuthService {
     private final ShopMemberships memberships;
     private final HumanCheck humans;
     private final List<AccountDeletionListener> deletionListeners;
+    private final List<PersonDetailsListener> detailsListeners;
+    /** See refresh(): how long a swapped token may come back for a new pair while its successor is unused. */
+    private final Duration refreshGrace;
     private final List<SignOutEverywhereListener> signOutListeners;
     private final SignInLimits signInLimits;
     private final TestModeService testMode;
@@ -92,8 +99,16 @@ public class AuthService {
                        PlatformTransactionManager transactions, ShopMemberships memberships, HumanCheck humans,
                        List<AccountDeletionListener> deletionListeners,
                        List<SignOutEverywhereListener> signOutListeners,
-                       SignInLimits signInLimits, TestModeService testMode) {
+                       SignInLimits signInLimits, TestModeService testMode,
+                       List<PersonDetailsListener> detailsListeners,
+                       @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds) {
+        if (refreshGraceSeconds < 0 || refreshGraceSeconds > RETRY_GRACE.toSeconds()) {
+            // Longer than the retry time would let an old token get new pairs after it should raise the alarm
+            throw new IllegalStateException("app.auth.refresh-grace-seconds must be 0 to " + RETRY_GRACE.toSeconds());
+        }
+        this.refreshGrace = Duration.ofSeconds(refreshGraceSeconds);
         this.testMode = testMode;
+        this.detailsListeners = detailsListeners;
         this.memberships = memberships;
         this.signOutListeners = signOutListeners;
         this.humans = humans;
@@ -189,24 +204,62 @@ public class AuthService {
     // ---------------- refresh and sign-out ----------------
 
     /**
-     * Swaps a refresh token for a new pair (rotation). Each refresh token works once.
-     * A swapped token coming back later than {@link #RETRY_GRACE} means it was copied: every session of that
-     * person ends, once per copied token (so whoever holds it can't keep signing the owner out).
-     * An expired, signed-out or recovered token, or a retry within the grace time, just gets "sign in again".
-     * The person's row is locked for the whole call, so this can't race with "sign out everywhere".
+     * Swaps a refresh token for a new pair (rotation). Each refresh token works once, with one exception, the grace
+     * ({@code app.auth.refresh-grace-seconds}, 30; 0 = none): a swapped token coming back within that time of its
+     * swap, while the token it was swapped for has never been used, gets a new pair, and that unused token stops
+     * working. That is the app reloaded (or lost the reply) while its refresh was on the way and never saved the
+     * new pair. Otherwise a swapped token coming back within {@link #RETRY_GRACE} (60 s) just gets "sign in again" on
+     * that device; later than that it means it was copied: every session of that person ends, once per copied token
+     * (so whoever holds it can't keep signing the owner out).
+     * A token swapped by another request that was still running when this one came in (two at once with the same
+     * token) gets 409 TRY_AGAIN: the other request's pair is the live one, and the app reads its saved token again.
+     * An expired, signed-out or recovered token just gets "sign in again".
+     * The person's row is locked for the whole call, so refreshes of one person run one after the other (no two can
+     * fork the chain) and none races with "sign out everywhere".
      */
     @Transactional(noRollbackFor = ApiException.class)
     public AuthTokens refresh(String refreshToken, String device) {
-        Instant now = Instant.now(clock);
-        RefreshToken stored = refreshTokens.findByTokenHash(Hashing.sha256Hex(nullToEmpty(refreshToken)))
+        // Swap times are written and compared on the database's clock, the one all copies of the backend share
+        Instant arrived = databaseNow();   // before waiting for any lock
+        String hash = Hashing.sha256Hex(nullToEmpty(refreshToken));
+        UUID owner = refreshTokens.findUserIdByTokenHash(hash)
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
-        User user = users.lockById(stored.getUserId()).filter(u -> !u.isDeleted())
+        User user = users.lockById(owner).filter(u -> !u.isDeleted())
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
+        // Read now, under the person's lock: a refresh of the same token that held the lock first is seen
+        RefreshToken stored = refreshTokens.findByTokenHash(hash)
+                .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
+        Instant now = databaseNow();
 
         if (stored.getRevokedAt() != null) {
-            boolean swappedLongAgo = stored.getRevokeReason() == RevokeReason.ROTATED
-                    && stored.getRevokedAt().plus(RETRY_GRACE).isBefore(now);
-            if (swappedLongAgo && refreshTokens.markReuseDetected(stored.getId()) == 1) {
+            RevokeReason reason = stored.getRevokeReason();
+            boolean rotated = reason == RevokeReason.ROTATED;
+            if (rotated && !stored.getRevokedAt().isBefore(arrived)) {
+                // Swapped by a request that was running when this one came in (two at once with the same token)
+                throw new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN",
+                        "This sign-in was just renewed by another request. Use the newest one.");
+            }
+            boolean inGrace = !now.isAfter(stored.getRevokedAt().plus(refreshGrace));
+            if (rotated && inGrace) {
+                Optional<RefreshToken> successor = stored.getReplacedBy() == null ? Optional.empty()
+                        : refreshTokens.findById(stored.getReplacedBy());
+                if (successor.filter(t -> t.getRevokedAt() == null).isPresent()) {
+                    requireLive(stored, user, now);   // an expired token or a test account out of test mode: no pair
+                    // The new pair never reached the app (it reloaded): it gets another, the unused one ends. If
+                    // that one ever comes back after the grace, someone else had this token (see GRACE_REPLACED)
+                    refreshTokens.revokeIfActive(successor.get().getId(), now, RevokeReason.GRACE_REPLACED);
+                    UUID next = UUID.randomUUID();
+                    refreshTokens.replacedBy(stored.getId(), next);
+                    return issueTokens(user, device != null ? device : stored.getDevice(), false, next);
+                }
+            }
+            // A token replaced under the grace: the real phone presenting it after the grace means the old token was
+            // used by someone else. Within the grace it is "sign in again" only.
+            boolean copied = reason == RevokeReason.GRACE_REPLACED ? !inGrace
+                    // Within the retry time, a swap the grace doesn't cover (its successor was used, or 30 to 60 s)
+                    // is still the app retrying: "sign in again" on that device only. Later, it means a copy.
+                    : rotated && stored.getRevokedAt().plus(RETRY_GRACE).isBefore(now);
+            if (copied && refreshTokens.markReuseDetected(stored.getId()) == 1) {
                 refreshTokens.revokeAllForUser(user.getId(), now);
                 revocations.revokeAll(user.getId());
                 log.warn("Refresh token reused for user {}: all sessions ended", user.getId());
@@ -215,6 +268,17 @@ public class AuthService {
             }
             throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");
         }
+        requireLive(stored, user, now);
+        if (refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.ROTATED) == 0) {
+            throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");   // can't happen under the lock
+        }
+        UUID next = UUID.randomUUID();
+        refreshTokens.replacedBy(stored.getId(), next);
+        return issueTokens(user, device != null ? device : stored.getDevice(), false, next);
+    }
+
+    /** 401 for a token past its 30 days, or a test account whose test mode ended (an active one is ended too). */
+    private void requireLive(RefreshToken stored, User user, Instant now) {
         if (!stored.getExpiresAt().isAfter(now)) {
             refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
             throw unauthorized("REFRESH_TOKEN_EXPIRED", "Sign in again.");
@@ -224,11 +288,11 @@ public class AuthService {
             refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
             throw unauthorized("TEST_MODE_OFF", "Test mode is off. Sign in again.");
         }
-        if (refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.ROTATED) == 0) {
-            // Another request with this same token swapped it a moment ago (we waited for its lock): a retry
-            throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");
-        }
-        return issueTokens(user, device != null ? device : stored.getDevice(), false);
+    }
+
+    private Instant databaseNow() {
+        long micros = refreshTokens.databaseMicros();
+        return Instant.ofEpochSecond(Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1000L);
     }
 
     /** Ends this device's session. Always succeeds, even for an unknown token. */
@@ -377,9 +441,17 @@ public class AuthService {
         AuthTokens tokens = tx.execute(status -> {
             UUID userId = users.findIdByVerifiedEmail(address)
                     .orElseThrow(() -> ApiException.badRequest("RECOVERY_FAILED", "These details don't match an account"));
+            // Others' screens are told before the row lock (PersonDetailsListener), and only if the phone changes
+            boolean told = users.findPhoneById(userId).map(p -> !newPhone.equals(p)).orElse(true);
+            if (told) {
+                detailsListeners.forEach(l -> l.detailsChanging(userId));
+            }
             // Locked and read fresh: an account deleted a moment ago is never brought back by moving it
             User user = users.lockById(userId).filter(u -> !u.isDeleted())
                     .orElseThrow(() -> ApiException.badRequest("RECOVERY_FAILED", "These details don't match an account"));
+            if (!told && !newPhone.equals(user.getPhone())) {
+                throw tryAgain();   // moved by another request in between: start again, so the screens are told
+            }
             users.findByPhone(newPhone)
                     .filter(other -> !other.getId().equals(userId))
                     .ifPresent(other -> {
@@ -500,9 +572,17 @@ public class AuthService {
     @Transactional
     public User rename(UUID userId, String name) {
         // Locked: saving a copy read before a deletion committed would write the old phone and email back
+        String cleaned = TextCleaner.clean(NAME, name);
+        // Others' screens are told before the row lock (PersonDetailsListener), and only if the name changes
+        boolean told = users.findNameById(userId).map(n -> !cleaned.equals(n)).orElse(true);
+        if (told) {
+            detailsListeners.forEach(l -> l.detailsChanging(userId));
+        }
         User user = users.lockById(userId).filter(u -> !u.isDeleted())
                 .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
-        String cleaned = TextCleaner.clean(NAME, name);
+        if (!told && !cleaned.equals(user.getName())) {
+            throw tryAgain();   // renamed by another request in between: start again, so the screens are told
+        }
         if (!cleaned.equals(user.getName())) {
             user.rename(cleaned, Instant.now(clock));
             users.saveAndFlush(user);
@@ -513,6 +593,11 @@ public class AuthService {
     // ---------------- helpers ----------------
 
     private AuthTokens issueTokens(User user, String device, boolean newUser) {
+        return issueTokens(user, device, newUser, UUID.randomUUID());
+    }
+
+    /** @param refreshId the new refresh token's id (a swap records it on the token it replaces) */
+    private AuthTokens issueTokens(User user, String device, boolean newUser, UUID refreshId) {
         Instant now = Instant.now(clock);
         // The shop the person works in, and their role there, go into the token (looked up fresh every time)
         ShopMemberships.Membership membership = memberships.find(user.getId()).orElse(null);
@@ -524,7 +609,7 @@ public class AuthService {
         random.nextBytes(raw);
         String refresh = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
         Instant refreshExpires = now.plus(refreshValidity);
-        refreshTokens.save(new RefreshToken(UUID.randomUUID(), user.getId(), Hashing.sha256Hex(refresh),
+        refreshTokens.save(new RefreshToken(refreshId, user.getId(), Hashing.sha256Hex(refresh),
                 trimDevice(device), now, refreshExpires));
         return new AuthTokens(access.token(), access.expiresAt(), refresh, refreshExpires, user, newUser);
     }
@@ -607,5 +692,11 @@ public class AuthService {
             return null;
         }
         return device.length() > 100 ? device.substring(0, 100) : device;
+    }
+
+    /** Two requests changed the person at once; nothing was saved by this one, sending it again works. */
+    private static ApiException tryAgain() {
+        return new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN",
+                "Someone else changed the same thing at the same moment. Try again.");
     }
 }

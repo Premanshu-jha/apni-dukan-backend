@@ -1,5 +1,6 @@
 package in.apnidukan.salon.service;
 
+import in.apnidukan.common.context.CurrentUser;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
 import in.apnidukan.common.context.ShopMemberships;
@@ -24,6 +25,7 @@ import in.apnidukan.salon.api.BookingResponses.MemberView;
 import in.apnidukan.salon.api.BookingResponses.PauseView;
 import in.apnidukan.salon.api.BookingResponses.WalkInOption;
 import in.apnidukan.salon.domain.Appointment;
+import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.domain.AppointmentKind;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.domain.Availability;
@@ -100,11 +102,15 @@ public class SalonDayService {
     static final Duration MAX_PAUSE = Duration.ofDays(30);
     static final Duration MAX_CONFLICT_RANGE = Duration.ofDays(31);
     static final int CLOSURE_DAYS_AHEAD = 365;
-    /** The upcoming list covers the longest booking window a salon can set (30 days), at most this many rows. */
-    static final Duration UPCOMING_AHEAD = Duration.ofDays(31);
-    static final int UPCOMING_LIMIT = 200;
+    /**
+     * The upcoming list covers the longest booking window a salon can set (today and 30 days): it reads bookings
+     * starting before the end of the 31st day from today, a bound that moves only at midnight.
+     */
+    static final int UPCOMING_DAYS = 31;
+    /** Appointments per page of the upcoming list and of the history (the next page with afterStart and afterId). */
+    public static final int UPCOMING_PAGE = 100;
     static final int HISTORY_MAX_DAYS = 31;
-    static final int HISTORY_LIMIT = 500;
+    public static final int HISTORY_PAGE = 100;
     /** SQL state of an exclusion-rule violation (the no-overlap rule). */
     static final String OVERLAP = "23P01";
 
@@ -123,12 +129,14 @@ public class SalonDayService {
     private final ShopDirectory shops;
     private final ShopMemberships memberships;
     private final UserDirectory users;
+    private final SalonEtags etags;
     private final Clock clock;
 
     public SalonDayService(SalonAccess access, SalonCalendar calendar, AppointmentStore appointments,
                            StrikeStore strikes, SalonStaffRepository staff, StaffShiftRepository shifts,
                            SalonAccessStore salonAccess, StartCodes codes, SalonNotices notices, ShopDirectory shops,
-                           ShopMemberships memberships, UserDirectory users, Clock clock) {
+                           ShopMemberships memberships, UserDirectory users, SalonEtags etags, Clock clock) {
+        this.etags = etags;
         this.access = access;
         this.calendar = calendar;
         this.appointments = appointments;
@@ -149,22 +157,37 @@ public class SalonDayService {
     /**
      * One column per active barber with his hours and everything on his day (removed blocks left out). A barber
      * without walk-in access gets only his own column.
+     * With its ETag (null when the sign-in token doesn't name the salon: then the answer is
+     * fingerprinted by EtagConfig as before). The salon's change counter is read before anything else, so a change
+     * made while the answer is put together gives the next request a new tag, never an old answer.
      */
     @Transactional(readOnly = true)
-    public DayView day(UUID userId, LocalDate date) {
-        Caller c = access.caller(userId);
+    public Tagged<DayView> day(CurrentUser me, LocalDate date) {
+        Optional<SalonEtags.Version> version = etags.version(me);
+        Caller c = access.caller(me.userId());
         Instant now = now();
         LocalDate day = date != null ? date : today(now);
-        List<Appointment> onDay = appointments.forDay(c.shopId(), Availability.dayStart(day),
-                Availability.dayStart(day.plusDays(1)));
-        Set<UUID> busyThatDay = onDay.stream().map(Appointment::staffId).collect(Collectors.toSet());
-        // Active barbers, plus any switched-off barber who had appointments that day (history stays visible)
-        List<SalonStaff> barbers = staff.findByShopIdOrderByCreatedAtAscIdAsc(c.shopId()).stream()
-                .filter(b -> b.isActive() || busyThatDay.contains(b.getId()))
-                .filter(b -> c.seesAll() || b.getId().equals(c.staffId()))
-                .toList();
+        Instant from = Availability.dayStart(day);
+        Instant to = Availability.dayStart(day.plusDays(1));
+        List<Appointment> all;
+        List<SalonStaff> barbers;
+        if (c.seesAll()) {
+            all = appointments.forDay(c.shopId(), from, to);
+            // Active barbers, plus any switched-off barber who had appointments that day (history stays visible)
+            List<SalonStaff> active = staff.findByShopIdAndActiveTrueOrderByCreatedAtAscIdAsc(c.shopId());
+            Set<UUID> activeIds = active.stream().map(SalonStaff::getId).collect(Collectors.toSet());
+            Set<UUID> gone = all.stream().map(Appointment::staffId).filter(id -> !activeIds.contains(id))
+                    .collect(Collectors.toSet());
+            barbers = gone.isEmpty() ? active : java.util.stream.Stream.concat(active.stream(),
+                            staff.findAllById(gone).stream())
+                    .sorted(Comparator.comparing(SalonStaff::getCreatedAt).thenComparing(SalonStaff::getId))
+                    .toList();
+        } else {
+            // His own column only: the other barbers' rows are never read (SalonAccess: he is active)
+            all = appointments.forDay(c.shopId(), c.staffId(), from, to);
+            barbers = staff.findById(c.staffId()).stream().toList();
+        }
         Set<UUID> shown = barbers.stream().map(SalonStaff::getId).collect(Collectors.toSet());
-        List<Appointment> all = onDay.stream().filter(a -> shown.contains(a.staffId())).toList();
         Map<UUID, List<BookedService>> services = appointments.services(all.stream().map(Appointment::id).toList());
         Map<UUID, Person> customers = users.find(all.stream().map(Appointment::customerId)
                 .filter(java.util.Objects::nonNull).collect(Collectors.toSet()));
@@ -177,7 +200,41 @@ public class SalonDayService {
                         .map(a -> view(a, services.getOrDefault(a.id(), List.of()), customers, now, c))
                         .toList()))
                 .toList();
-        return new DayView(day, columns, c.staffId());
+        DayView view = new DayView(day, columns, c.staffId());
+        // The answer changes by itself only when a waiting appointment's start passes (notStarted) and, for "today",
+        // at midnight; until then the same tag stands
+        Instant validUntil = earliest(now, all.stream().filter(a -> a.status() == AppointmentStatus.CONFIRMED)
+                .map(Appointment::startsAt), date == null ? Availability.dayStart(day.plusDays(1)) : null);
+        return new Tagged<>(view, version.flatMap(v -> etags.tag(v, c, SalonEtags.DAY, dayParams(date), validUntil))
+                .orElse(null));
+    }
+
+    /** What the day screen's tag says about the request: the date asked for (none = today). */
+    public static String dayParams(LocalDate date) {
+        return "date=" + (date == null ? "" : date.toString());
+    }
+
+    /**
+     * An answer and its ETag (null: no tag of our own).
+     */
+    public record Tagged<T>(T body, String etag) {
+    }
+
+    /**
+     * The first moment after now that the answer changes by time alone: the earliest of these moments still to come
+     * (a start, an end, midnight), at most a day ahead.
+     */
+    private static Instant earliest(Instant now, java.util.stream.Stream<Instant> moments, Instant also) {
+        Instant first = now.plus(Duration.ofDays(1));
+        if (also != null && also.isAfter(now) && also.isBefore(first)) {
+            first = also;
+        }
+        for (Instant m : (Iterable<Instant>) moments::iterator) {
+            if (m.isAfter(now) && m.isBefore(first)) {
+                first = m;
+            }
+        }
+        return first;
     }
 
     // ---------- walk-ins ----------
@@ -269,22 +326,37 @@ public class SalonDayService {
     /**
      * Everything still to come, soonest first, across days: online bookings that are CONFIRMED and not over yet (so
      * a customer running late is still on it, until the automatic no-show). Owner and helpers see the whole
-     * salon; a barber sees his own unless he has walk-in access.
+     * salon; a barber sees his own unless he has walk-in access. One page of UPCOMING_PAGE after the cursor (null:
+     * the first page), with its ETag (see day()).
      */
     @Transactional(readOnly = true)
-    public List<AppointmentView> upcoming(UUID userId) {
-        Caller c = access.caller(userId);
+    public Tagged<List<AppointmentView>> upcoming(CurrentUser me, AppointmentCursor after) {
+        Optional<SalonEtags.Version> version = etags.version(me);
+        Caller c = access.caller(me.userId());
         Instant now = now();
-        return views(c, appointments.upcomingInSalon(c.shopId(), c.seesAll() ? null : c.staffId(), now,
-                now.plus(UPCOMING_AHEAD), UPCOMING_LIMIT));
+        Instant until = Availability.dayStart(today(now).plusDays(UPCOMING_DAYS + 1L));
+        List<Appointment> page = appointments.upcomingInSalon(c.shopId(), c.seesAll() ? null : c.staffId(), now,
+                until, after, UPCOMING_PAGE);
+        // It changes by time alone when one of these starts (notStarted) or ends (it leaves the list), and at
+        // midnight (the 31-day bound moves)
+        Instant validUntil = earliest(now, page.stream().flatMap(a -> java.util.stream.Stream.of(a.startsAt(),
+                a.endsAt())), Availability.dayStart(today(now).plusDays(1)));
+        return new Tagged<>(views(c, page), version.flatMap(v -> etags.tag(v, c, SalonEtags.UPCOMING,
+                upcomingParams(after), validUntil)).orElse(null));
+    }
+
+    /** What the upcoming list's tag says about the request: the page asked for. */
+    public static String upcomingParams(AppointmentCursor after) {
+        return after == null ? "" : "after=" + after.afterStart() + "/" + after.afterId();
     }
 
     /**
-     * The owner's history: bookings and walk-ins on the India dates from..to (at most 31 days), latest first, with
-     * how many ended in each status and what the completed ones were worth at list price. Owner or helper.
+     * The owner's history: bookings and walk-ins on the India dates from..to (at most 31 days), latest first, a page
+     * of HISTORY_PAGE after the cursor (null: the first page), with how many ended in each status and what the
+     * completed ones were worth at list price (over the whole range, on every page). Owner or helper.
      */
     @Transactional(readOnly = true)
-    public HistoryView history(UUID userId, LocalDate from, LocalDate to) {
+    public HistoryView history(UUID userId, LocalDate from, LocalDate to, AppointmentCursor after) {
         Caller c = access.ownerOrHelper(userId);
         if (to.isBefore(from)) {
             throw SalonCalendar.invalid("to", "must be on or after from");
@@ -294,12 +366,13 @@ public class SalonDayService {
         }
         Instant start = Availability.dayStart(from);
         Instant end = Availability.dayStart(to.plusDays(1));
-        List<Appointment> list = appointments.history(c.shopId(), start, end, HISTORY_LIMIT + 1);
-        boolean truncated = list.size() > HISTORY_LIMIT;
-        List<Appointment> shown = truncated ? list.subList(0, HISTORY_LIMIT) : list;
-        // Counts and the amount over the whole range, in the database: right even when the list is cut at 500
+        List<Appointment> list = appointments.history(c.shopId(), start, end, after, HISTORY_PAGE + 1);
+        boolean more = list.size() > HISTORY_PAGE;
+        List<Appointment> shown = more ? list.subList(0, HISTORY_PAGE) : list;
+        AppointmentCursor next = more ? AppointmentCursor.after(shown.get(HISTORY_PAGE - 1)) : null;
+        // Counts and the amount over the whole range, in the database: right whichever page this is
         return new HistoryView(from, to, appointments.historyCounts(c.shopId(), start, end),
-                appointments.completedPaise(c.shopId(), start, end), views(c, shown), truncated);
+                appointments.completedPaise(c.shopId(), start, end), views(c, shown), more, next);
     }
 
     // ---------- start, no-show, reassign, cancel ----------
@@ -712,9 +785,10 @@ public class SalonDayService {
     @Transactional(readOnly = true)
     public List<ClosureView> closures(UUID userId) {
         Caller c = access.caller(userId);
-        return appointments.closures(c.shopId(), now()).entrySet().stream()
-                .map(e -> new ClosureView(e.getKey(),
-                        LocalDate.ofInstant(e.getValue().get(0).startsAt(), SalonTime.ZONE), e.getValue().size()))
+        // Grouped in the database: one row per closed day, not one per barber
+        return appointments.closures(c.shopId(), now()).stream()
+                .map(d -> new ClosureView(d.closureId(), LocalDate.ofInstant(d.startsAt(), SalonTime.ZONE),
+                        d.barbers()))
                 .toList();
     }
 

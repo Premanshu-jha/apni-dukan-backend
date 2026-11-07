@@ -6,6 +6,7 @@ import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.AttachedFiles;
 import in.apnidukan.files.domain.FilePurpose;
 import in.apnidukan.files.domain.StoredFile;
+import in.apnidukan.files.repo.FileDeletionStore;
 import in.apnidukan.files.repo.StoredFileRepository;
 import in.apnidukan.files.storage.FileStorage;
 import org.slf4j.Logger;
@@ -14,7 +15,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionOperations;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -50,6 +51,8 @@ public class FileService {
     private final List<FileUsageChecker> usageCheckers;
     private final List<AttachedFiles> attachedElsewhere;
     private final PhotoCleaning photos;
+    private final TransactionOperations transactions;
+    private final FileDeletionStore deletions;
 
     public FileService(StoredFileRepository repository,
                        FileStorage storage,
@@ -58,8 +61,12 @@ public class FileService {
                        @Value("${app.files.link-minutes:5}") long linkMinutes,
                        List<FileUsageChecker> usageCheckers,
                        List<AttachedFiles> attachedElsewhere,
-                       PhotoCleaning photos) {
+                       PhotoCleaning photos,
+                       TransactionOperations transactions,
+                       FileDeletionStore deletions) {
         this.photos = photos;
+        this.transactions = transactions;
+        this.deletions = deletions;
         this.repository = repository;
         this.storage = storage;
         this.currentUser = currentUser;
@@ -153,12 +160,24 @@ public class FileService {
 
     /**
      * Deletes a file from both Neon (its row) and R2 (its bytes). Only files not attached to anything can be deleted.
-     * The row is deleted first, inside a transaction; if R2 then refuses, the transaction rolls back and the row stays,
-     * so the database never points to a file that is gone.
+     * In one transaction the row goes and its storage key is queued in file_deletions; the bytes are deleted only after
+     * that committed and the database connection went back to the pool, so no connection waits on R2 (and a rollback
+     * never leaves a row pointing at bytes already gone). If R2 fails then, the delete still succeeded for the person
+     * (the row is gone, nothing can link to the bytes); the key stays queued and FileDeletionJob deletes the object
+     * later, so no object is ever left behind for good.
      */
-    @Transactional
     public void delete(UUID fileId) {
         CurrentUser user = shopStaff();
+        String key = transactions.execute(status -> {
+            String gone = deleteRow(user, fileId);
+            deletions.queue(gone, Instant.now(clock));
+            return gone;
+        });
+        deleteQueued(key);
+    }
+
+    /** Removes the file's row if nothing uses it; returns its storage key. */
+    private String deleteRow(CurrentUser user, UUID fileId) {
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
         if (usageCheckers.stream().anyMatch(checker -> checker.isInUse(file))
@@ -178,7 +197,7 @@ public class FileService {
         if (deleted == 0) {
             throw ApiException.notFound("File");
         }
-        storage.delete(file.getStorageKey());
+        return file.getStorageKey();
     }
 
     /**
@@ -217,11 +236,33 @@ public class FileService {
         }
     }
 
+    /**
+     * Bytes stored for an upload whose row couldn't be saved: queued first (so the job deletes them if this server
+     * can't), then deleted now. If even the queue can't be written (the database is the problem), only the log keeps
+     * the key.
+     */
     private void deleteQuietly(String key) {
+        try {
+            deletions.queue(key, Instant.now(clock));
+        } catch (RuntimeException e) {
+            log.error("Could not queue orphan file {} for deletion; deleting it now", key, e);
+        }
+        deleteQueued(key);
+    }
+
+    /** Deletes a queued key's object now and takes it off the queue; on failure it stays for FileDeletionJob. */
+    private void deleteQueued(String key) {
         try {
             storage.delete(key);
         } catch (RuntimeException e) {
-            log.warn("Could not delete orphan file {} from storage", key, e);
+            log.warn("Could not delete {} from storage now; FileDeletionJob tries again", key, e);
+            return;
+        }
+        try {
+            deletions.done(key);
+        } catch (RuntimeException e) {
+            // Harmless: the job deletes the (already gone) key again and then takes it off the queue
+            log.warn("Could not take {} off the deletion queue", key, e);
         }
     }
 

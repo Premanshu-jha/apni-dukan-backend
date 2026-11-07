@@ -322,34 +322,42 @@ public class SalonSetupService {
      */
     private void joinClosedDays(Membership salon, SalonStaff barber, UUID by) {
         Instant now = now();
-        appointments.closures(salon.shopId(), now).forEach((closureId, rows) -> {
-            if (rows.stream().anyMatch(r -> r.staffId().equals(barber.getId()))) {
-                return;
+        // The closed days he isn't part of yet, and what of his is in any of them: two queries for all the days
+        List<AppointmentStore.Closure> days = appointments.closuresWithout(salon.shopId(), barber.getId(), now);
+        if (days.isEmpty()) {
+            return;
+        }
+        List<Instant[]> ranges = days.stream().map(d -> new Instant[] {d.startsAt(), d.endsAt()}).toList();
+        List<UUID> inside = new ArrayList<>();
+        for (AppointmentStore.Hit hit : appointments.holdingIn(barber.getId(), ranges)) {   // day by day, by start
+            AppointmentStore.Closure day = days.get(hit.range());
+            Appointment old = hit.appointment();
+            boolean within = !old.startsAt().isBefore(day.startsAt()) && !old.endsAt().isAfter(day.endsAt());
+            if (old.kind() != AppointmentKind.BLOCK || !within) {
+                // Blocks can't be edited and a switched-off barber can't get new ones: the owner removes this
+                // one, switches him on, then adds the leave again around the closed day
+                throw SalonDayService.blockConflicts(List.of(old));
             }
-            Appointment first = rows.get(0);
-            List<Appointment> inTheWay = appointments.holding(List.of(barber.getId()), first.startsAt(),
-                    first.endsAt(), null);
-            for (Appointment old : inTheWay) {
-                boolean inside = !old.startsAt().isBefore(first.startsAt()) && !old.endsAt().isAfter(first.endsAt());
-                if (old.kind() != AppointmentKind.BLOCK || !inside) {
-                    // Blocks can't be edited and a switched-off barber can't get new ones: the owner removes this
-                    // one, switches him on, then adds the leave again around the closed day
-                    throw SalonDayService.blockConflicts(List.of(old));
+            if (!inside.contains(old.id())) {
+                inside.add(old.id());
+            }
+        }
+        if (appointments.removeBlocks(inside, now) != inside.size()) {
+            throw SalonDayService.tryAgain();
+        }
+        appointments.eventAll(inside, now, by, "BLOCK_REMOVED", "the salon is closed that day");
+        List<UUID> ids = days.stream().map(d -> UUID.randomUUID()).toList();
+        List<UUID> saved = appointments.insertClosedDays(salon.shopId(), barber.getId(), days, ids, by, now);
+        if (saved.size() != days.size()) {
+            // Something of his was added in between: name the first day it is in the way of
+            for (int i = 0; i < days.size(); i++) {
+                if (!saved.contains(ids.get(i))) {
+                    throw SalonDayService.blockConflicts(appointments.holding(List.of(barber.getId()),
+                            days.get(i).startsAt(), days.get(i).endsAt(), null));
                 }
-                if (!appointments.removeBlock(old.id(), now)) {
-                    throw SalonDayService.tryAgain();
-                }
-                appointments.event(old.id(), now, by, "BLOCK_REMOVED", "the salon is closed that day");
             }
-            Appointment block = new Appointment(UUID.randomUUID(), salon.shopId(), barber.getId(),
-                    AppointmentKind.BLOCK, BlockType.CLOSED, closureId, null, null, null, null,
-                    first.startsAt(), first.endsAt(), AppointmentStatus.BLOCKED, null, null, null, by, null, now, now);
-            if (!appointments.insertIfFree(block)) {
-                throw SalonDayService.blockConflicts(appointments.holding(List.of(barber.getId()), first.startsAt(),
-                        first.endsAt(), null));
-            }
-            appointments.event(block.id(), now, by, "CLOSED_DAY_ADDED", "barber added or switched on");
-        });
+        }
+        appointments.eventAll(saved, now, by, "CLOSED_DAY_ADDED", "barber added or switched on");
     }
 
     private void link(Membership salon, SalonStaff barber, String phone) {

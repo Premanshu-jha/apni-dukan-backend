@@ -26,6 +26,20 @@ public class SalonAccessStore {
                 (rs, i) -> rs.getObject(1, OffsetDateTime.class).toInstant(), shopId).stream().findFirst();
     }
 
+    /** pausedUntil for many salons in one query (salons that never paused are left out). */
+    public java.util.Map<UUID, Instant> pausedUntil(java.util.Collection<UUID> shopIds) {
+        java.util.Map<UUID, Instant> out = new java.util.HashMap<>();
+        if (shopIds.isEmpty()) {
+            return out;
+        }
+        jdbc.query("SELECT shop_id, paused_until FROM salon_pauses WHERE shop_id = ANY (?)",
+                ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", shopIds.toArray())),
+                rs -> {
+                    out.put(rs.getObject(1, UUID.class), rs.getObject(2, OffsetDateTime.class).toInstant());
+                });
+        return out;
+    }
+
     /** Sets or replaces the pause (one row per salon; two taps at once just leave the last one). */
     public void pause(UUID shopId, Instant until, UUID by, Instant now) {
         jdbc.update("INSERT INTO salon_pauses (shop_id, paused_until, updated_by, updated_at) VALUES (?, ?, ?, ?) "

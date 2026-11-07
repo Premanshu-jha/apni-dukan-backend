@@ -16,8 +16,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Apni Dukan support (users.admin) helping a customer who says a strike was unfair: see the customer's strikes
@@ -68,7 +70,10 @@ public class SalonSupportService {
         UUID customer = users.findByPhone(phone).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,
                 "CUSTOMER_NOT_FOUND", "Nobody has an account with this phone."));
         Instant now = clock.instant();
-        List<StrikeView> list = strikes.forCustomer(customer).stream().map(this::view).toList();
+        List<Strike> found = strikes.forCustomer(customer);
+        // Every salon named in the list in one query
+        Map<UUID, ShopCard> salons = shops.findAll(found.stream().map(Strike::shopId).collect(Collectors.toSet()));
+        List<StrikeView> list = found.stream().map(s -> view(s, salons)).toList();
         Optional<Instant> until = BookingService.blockedUntil(list.stream().map(StrikeView::struckAt).toList(), now);
         return new CustomerStrikes(customer, until.orElse(null), list);
     }
@@ -84,8 +89,9 @@ public class SalonSupportService {
         appointments.event(appointmentId, clock.instant(), adminId, "STRIKE_REMOVED", reason);
     }
 
-    private StrikeView view(Strike s) {
-        String salon = shops.find(s.shopId()).map(ShopCard::name).orElse(null);
+    private static StrikeView view(Strike s, Map<UUID, ShopCard> salons) {
+        ShopCard card = salons.get(s.shopId());
+        String salon = card == null ? null : card.name();
         return new StrikeView(s.appointmentId(), s.bookingNo(), salon, s.kind().name(), s.struckAt());
     }
 

@@ -30,9 +30,29 @@ public class ProductionSafetyCheck {
     public ProductionSafetyCheck(@Value("${app.production:false}") boolean production, SmsSender sms,
                                  EmailSender email, @Value("${app.cors.allowed-origins}") String corsOrigins,
                                  @Value("${app.sms.account-moved.enabled:false}") boolean accountMovedSms,
-                                 PushSender push, ClientAddress client, HumanCheck humans) {
+                                 PushSender push, ClientAddress client, HumanCheck humans,
+                                 @Value("${spring.flyway.url:}") String migrationUrl,
+                                 @Value("${spring.datasource.url:}") String appUrl) {
         check(production, sms, email, corsOrigins, accountMovedSms, push);
         checkSignInAbuse(production, client.configured(), humans.enabled());
+        checkMigrationUrl(production, migrationUrl, appUrl);
+    }
+
+    /**
+     * Migrations need Neon's direct connection (DB_URL_DIRECT): through the pooler (PgBouncer) the "no statement
+     * limit" Flyway sets for itself may not stay with its connection, so the role's 5 s default (see the checklist)
+     * could cut a migration halfway, and a migration's locks would be held through a pooled connection.
+     */
+    static void checkMigrationUrl(boolean production, String migrationUrl, String appUrl) {
+        if (!production) {
+            return;
+        }
+        if (migrationUrl == null || migrationUrl.isBlank() || migrationUrl.equals(appUrl)
+                || migrationUrl.contains("-pooler")) {
+            throw new IllegalStateException("APP_PRODUCTION=true but DB_URL_DIRECT is not Neon's direct URL (it is "
+                    + "missing, the same as DB_URL, or a -pooler address): migrations must not run through the "
+                    + "pooler. Set DB_URL_DIRECT to the connection string without -pooler in the host.");
+        }
     }
 
     /**

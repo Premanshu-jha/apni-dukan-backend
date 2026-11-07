@@ -3,9 +3,10 @@ package in.apnidukan.shops.api;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.shops.api.AdminShopDetail.TimelineEntry;
+import in.apnidukan.shops.api.AdminShopDetail.TimelinePage;
 import in.apnidukan.shops.domain.ReviewGroup;
-import in.apnidukan.shops.domain.ShopStatus;
 import in.apnidukan.shops.domain.ShopType;
+import in.apnidukan.shops.domain.TimelineCursor;
 import in.apnidukan.shops.domain.VisitIssue;
 import in.apnidukan.shops.service.ShopAdminService;
 import jakarta.validation.Valid;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -50,32 +52,54 @@ public class ShopAdminController {
     }
 
     /**
-     * A group's shops, longest waiting first, 50 a page, with `type` and `group`; `q` searches the shop number,
-     * name, owner's name and owner's phone. The next page: `afterSince` and `afterId` = the last shop's statusSince
-     * and id (both or neither, else 400 VALIDATION_FAILED); fewer than 50 means it was the last page. The older form
-     * `?status=` (default PENDING_VISIT) still answers, with the 50 oldest.
+     * A group's shops, longest waiting first, 50 a page, with `type` and `group` (both required, else 400
+     * VALIDATION_FAILED naming the missing one); `q` searches the shop number, name, owner's name and owner's phone
+     * (at least 3 letters, unless it is a shop number: else 400 VALIDATION_FAILED). The next page: `afterSince` and
+     * `afterId` = the last shop's statusSince and id (both or neither, else 400 VALIDATION_FAILED); fewer than 50
+     * means it was the last page. The older form `?status=` is gone (no app used it).
      */
     @GetMapping("/shops")
     public List<AdminShopResponse> list(@RequestParam(required = false) ShopType type,
                                         @RequestParam(required = false) ReviewGroup group,
                                         @RequestParam(required = false) String q,
                                         @RequestParam(required = false) Instant afterSince,
-                                        @RequestParam(required = false) UUID afterId,
-                                        @RequestParam(defaultValue = "PENDING_VISIT") ShopStatus status) {
+                                        @RequestParam(required = false) UUID afterId) {
+        Map<String, Object> missing = new LinkedHashMap<>();
+        if (type == null) {
+            missing.put("type", "is required");
+        }
+        if (group == null) {
+            missing.put("group", "is required");
+        }
+        if (!missing.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid", missing);
+        }
         if ((afterSince == null) != (afterId == null)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                     Map.of("afterId", "send afterSince and afterId together"));
         }
-        if (type != null && group != null) {
-            return admin.list(caller(), type, group, q, afterSince, afterId);
-        }
-        return admin.list(caller(), status);
+        return admin.list(caller(), type, group, q, afterSince, afterId);
     }
 
-    /** One shop: what changed since it was last approved, a salon's size, photos and the timeline. */
+    /** One shop: what changed since it was last approved, a salon's size, photos and the first 50 timeline entries. */
     @GetMapping("/shops/{id}")
     public AdminShopDetail detail(@PathVariable UUID id) {
         return admin.detail(caller(), id);
+    }
+
+    /**
+     * A shop's timeline, 50 entries a page, newest first: without values the newest page (the same as the shop
+     * page's), with `afterAt` and `afterSeq` (from `timelineNext`, or this answer's `next`; both or neither, else 400
+     * VALIDATION_FAILED) the page after. `next` is null on the last page.
+     */
+    @GetMapping("/shops/{id}/timeline")
+    public TimelinePage timeline(@PathVariable UUID id, @RequestParam(required = false) Instant afterAt,
+                                 @RequestParam(required = false) Long afterSeq) {
+        if ((afterAt == null) != (afterSeq == null)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("afterSeq", "send afterAt and afterSeq together"));
+        }
+        return admin.timeline(caller(), id, afterAt == null ? null : new TimelineCursor(afterAt, afterSeq));
     }
 
     /**

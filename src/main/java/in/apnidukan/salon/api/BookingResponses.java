@@ -2,6 +2,7 @@ package in.apnidukan.salon.api;
 
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
 import in.apnidukan.salon.domain.Appointment;
+import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.domain.AppointmentKind;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.domain.BlockType;
@@ -131,13 +132,16 @@ public final class BookingResponses {
     }
 
     /**
-     * The owner's look back over a range of days.
-     * @param counts            how many appointments ended in each status (COMPLETED, NO_SHOW, ...)
-     * @param completedPaise    the list prices of everything COMPLETED ("from" prices count at their base)
-     * @param appointments      bookings and walk-ins in the range, latest first (at most 500; truncated says so)
+     * The owner's look back over a range of days, one page at a time.
+     * @param counts            how many appointments ended in each status (COMPLETED, NO_SHOW, ...), whole range
+     * @param completedPaise    the list prices of everything COMPLETED ("from" prices count at their base), whole range
+     * @param appointments      bookings and walk-ins in the range, latest first, at most 100 on this page
+     * @param truncated         true when there is another page (same as next != null; kept for apps that show a
+     *                          "pick fewer days" note instead of loading more)
+     * @param next              the next page's afterStart and afterId; null on the last page
      */
     public record HistoryView(LocalDate from, LocalDate to, Map<String, Long> counts, long completedPaise,
-                              List<AppointmentView> appointments, boolean truncated) {
+                              List<AppointmentView> appointments, boolean truncated, AppointmentCursor next) {
     }
 
     /** The day screen: one column per barber. */

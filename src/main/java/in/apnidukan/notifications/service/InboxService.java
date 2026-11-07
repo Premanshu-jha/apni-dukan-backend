@@ -5,6 +5,7 @@ import in.apnidukan.notifications.domain.Audience;
 import in.apnidukan.notifications.domain.InboxItem;
 import in.apnidukan.notifications.domain.InboxPage;
 import in.apnidukan.notifications.repo.NotificationStore;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -26,10 +27,17 @@ public class InboxService {
 
     private final NotificationStore store;
     private final Clock clock;
+    /** Messages marked read per statement by "mark all read" (app.notifications.mark-all-slice, default 5,000). */
+    private final int markAllSlice;
 
-    public InboxService(NotificationStore store, Clock clock) {
+    public InboxService(NotificationStore store, Clock clock,
+                        @Value("${app.notifications.mark-all-slice:5000}") int markAllSlice) {
+        if (markAllSlice < 1) {   // 0 would loop forever (every slice "full")
+            throw new IllegalStateException("app.notifications.mark-all-slice must be at least 1");
+        }
         this.store = store;
         this.clock = clock;
+        this.markAllSlice = markAllSlice;
     }
 
     @Transactional(readOnly = true)
@@ -58,12 +66,18 @@ public class InboxService {
         return store.unreadCount(userId, audience(app), clock.instant());
     }
 
-    /** Marks these messages read, or all of this app's list when ids is null or empty. */
-    @Transactional
+    /**
+     * Marks these messages read, or all of this app's list when ids is null or empty: then MARK_ALL_SLICE at a time,
+     * each slice its own short statement (no surrounding transaction: a slice done stays done), until none is left.
+     */
     public void markRead(UUID userId, String app, List<UUID> ids) {
         Audience audience = audience(app);
         if (ids == null || ids.isEmpty()) {
-            store.markAllRead(userId, audience, clock.instant());
+            Instant now = clock.instant();
+            int n;
+            do {   // a full slice means there may be more
+                n = store.markAllReadSlice(userId, audience, now, markAllSlice);
+            } while (n == markAllSlice);
             return;
         }
         if (ids.contains(null)) {

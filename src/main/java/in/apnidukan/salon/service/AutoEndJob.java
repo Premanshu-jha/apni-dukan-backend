@@ -2,6 +2,7 @@ package in.apnidukan.salon.service;
 
 import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.common.jobs.JobLeases;
+import in.apnidukan.common.jobs.LongStatements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -35,17 +36,19 @@ public class AutoEndJob {
     private final AppointmentStore appointments;
     private final SalonDayService day;
     private final JobLeases leases;
+    private final LongStatements statements;
     private final Clock clock;
     private final boolean enabled;
 
-    public AutoEndJob(AppointmentStore appointments, SalonDayService day, JobLeases leases, Clock clock,
-                      @Value("${app.jobs.enabled:true}") boolean enabled,
+    public AutoEndJob(AppointmentStore appointments, SalonDayService day, JobLeases leases, LongStatements statements,
+                      Clock clock, @Value("${app.jobs.enabled:true}") boolean enabled,
                       @Value("${app.jobs.auto-end-batch:500}") int batchSize) {
         if (batchSize < 1) {   // 0 would loop forever (every batch "full"), below 0 fail every minute
             throw new IllegalStateException("app.jobs.auto-end-batch must be at least 1");
         }
         this.batchSize = batchSize;
         this.leases = leases;
+        this.statements = statements;
         this.appointments = appointments;
         this.day = day;
         this.clock = clock;
@@ -69,12 +72,13 @@ public class AutoEndJob {
         int done = 0;
         int batch;
         do {
-            batch = appointments.completeEnded(now, batchSize);
+            // Each batch its own transaction, allowed the jobs' longer statement limit (LongStatements)
+            batch = statements.run(() -> appointments.completeEnded(now, batchSize));
             done += batch;
         } while (batch == batchSize);
         int missed = 0;
         do {
-            batch = day.markNoShows(now, batchSize);
+            batch = statements.run(() -> day.markNoShows(now, batchSize));
             missed += batch;
         } while (batch == batchSize);
         if (done + missed > 0) {

@@ -1,6 +1,7 @@
 package in.apnidukan.notifications.service;
 
 import in.apnidukan.common.jobs.JobLeases;
+import in.apnidukan.common.jobs.LongStatements;
 import in.apnidukan.notifications.repo.NotificationStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,11 +31,12 @@ public class AccountWipeJob {
 
     private final NotificationStore jobs;
     private final JobLeases leases;
+    private final LongStatements statements;
     private final int slice;
     private final int perRun;
     private final boolean enabled;
 
-    public AccountWipeJob(NotificationStore jobs, JobLeases leases,
+    public AccountWipeJob(NotificationStore jobs, JobLeases leases, LongStatements statements,
                           @Value("${app.jobs.account-wipe-slice:1000}") int slice,
                           @Value("${app.jobs.account-wipe-per-run:100000}") int perRun,
                           @Value("${app.jobs.enabled:true}") boolean enabled) {
@@ -44,6 +46,7 @@ public class AccountWipeJob {
         }
         this.jobs = jobs;
         this.leases = leases;
+        this.statements = statements;
         this.slice = slice;
         this.perRun = perRun;
         this.enabled = enabled;
@@ -65,7 +68,8 @@ public class AccountWipeJob {
             UUID after = wipe.afterId();
             boolean done = false;
             while (rows < perRun) {
-                Optional<UUID> last = jobs.wipeSlice(person, after, slice);
+                UUID from = after;
+                Optional<UUID> last = statements.run(() -> jobs.wipeSlice(person, from, slice));   // up to 60 s
                 rows += slice;
                 if (last.isEmpty()) {
                     done = true;
@@ -77,7 +81,7 @@ public class AccountWipeJob {
             if (!done) {
                 break;   // this minute's share is used; this person continues next minute, from `after`
             }
-            if (jobs.wipeDone(person)) {
+            if (statements.run(() -> jobs.wipeDone(person))) {   // reads all their rows once
                 finished++;
             }
         }

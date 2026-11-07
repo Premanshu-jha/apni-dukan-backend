@@ -97,4 +97,18 @@ class ProductionSafetyCheckTest {
         assertThatCode(() -> ProductionSafetyCheck.check(true, realSms, realEmail, "https://shop.example.in", true, realPush))
                 .doesNotThrowAnyException();
     }
+
+    @Test
+    void productionMigratesOnlyThroughNeonsDirectUrl() {
+        String pooled = "jdbc:postgresql://ep-x-pooler.ap-southeast-1.aws.neon.tech/db";
+        String direct = "jdbc:postgresql://ep-x.ap-southeast-1.aws.neon.tech/db";
+        for (String bad : new String[] {"", pooled}) {
+            assertThatThrownBy(() -> ProductionSafetyCheck.checkMigrationUrl(true, bad, pooled))
+                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("DB_URL_DIRECT");
+        }
+        assertThatThrownBy(() -> ProductionSafetyCheck.checkMigrationUrl(true, direct, direct))
+                .isInstanceOf(IllegalStateException.class);   // DB_URL_DIRECT not set: Flyway fell back to DB_URL
+        assertThatCode(() -> ProductionSafetyCheck.checkMigrationUrl(true, direct, pooled)).doesNotThrowAnyException();
+        assertThatCode(() -> ProductionSafetyCheck.checkMigrationUrl(false, "", pooled)).doesNotThrowAnyException();
+    }
 }

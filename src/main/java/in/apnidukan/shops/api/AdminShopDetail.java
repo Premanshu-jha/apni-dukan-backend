@@ -13,14 +13,29 @@ import java.util.List;
  * @param pinMovedMetres         how far the pin moved, when it did
  * @param previousOwnerPhotoUrl  the approved owner photo, only when it has been replaced since
  * @param previousShopPhotoUrl   the approved shop photo, only when it has been replaced since
- * @param timeline               newest first
+ * @param timeline               newest first, the first 50 entries
+ * @param timelineNext           where the next 50 start (GET /admin/shops/{id}/timeline with these); null when the
+ *                               timeline has no more
  */
 public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> changes, Long pinMovedMetres,
-                              String previousOwnerPhotoUrl, String previousShopPhotoUrl, List<TimelineEntry> timeline) {
+                              String previousOwnerPhotoUrl, String previousShopPhotoUrl, List<TimelineEntry> timeline,
+                              TimelineNext timelineNext) {
 
     public AdminShopDetail {
         changes = List.copyOf(changes);
         timeline = List.copyOf(timeline);
+    }
+
+    /** The next timeline page's query values: afterAt and afterSeq, exactly as given. */
+    public record TimelineNext(Instant afterAt, long afterSeq) {
+    }
+
+    /** A page of a shop's timeline, newest first; next is null on the last page. */
+    public record TimelinePage(List<TimelineEntry> items, TimelineNext next) {
+
+        public TimelinePage {
+            items = List.copyOf(items);
+        }
     }
 
     public record Salon(int barbers, int services) {

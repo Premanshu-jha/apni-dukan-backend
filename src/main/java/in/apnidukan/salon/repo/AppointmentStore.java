@@ -1,6 +1,7 @@
 package in.apnidukan.salon.repo;
 
 import in.apnidukan.salon.domain.Appointment;
+import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.domain.AppointmentKind;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.domain.BlockType;
@@ -21,7 +22,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 /**
  * The appointments, appointment_services and appointment_events tables, in plain SQL. Every status change is a
@@ -50,15 +50,36 @@ public class AppointmentStore {
     /** Upcoming: still open (CONFIRMED or IN_SERVICE) and not over yet. Past: everything else. */
     private static final String UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
             + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ? ORDER BY starts_at, id LIMIT ?";
+    /*
+     * Pages (keyset): soonest-first lists go on after the last (starts_at, id); latest-first lists are ordered
+     * starts_at DESC, id ASC (as they always were), so the next page is an earlier start, or the same start and a
+     * later id. Each page is one range of an index on (shop_id or customer_id, starts_at), however deep.
+     */
+    private static final String AFTER_SOONEST = " AND (starts_at, id) > (?, ?)";
+    private static final String AFTER_LATEST = " AND (starts_at < ? OR (starts_at = ? AND id > ?))";
     /** The salon's bookings still to come or still able to start (CONFIRMED, not over yet). */
-    private static final String SALON_UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
-            + "AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ? "
-            + "ORDER BY starts_at, id LIMIT ?";
-    private static final String BARBER_UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
-            + "AND staff_id = ? AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ? "
-            + "ORDER BY starts_at, id LIMIT ?";
-    private static final String PAST_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
-            + "AND NOT (status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ?) ORDER BY starts_at DESC, id LIMIT ?";
+    private static final String SALON_UPCOMING = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
+            + "AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ?";
+    private static final String BARBER_UPCOMING = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
+            + "AND staff_id = ? AND kind <> 'BLOCK' AND status = 'CONFIRMED' AND ends_at > ? AND starts_at < ?";
+    private static final String SOONEST = " ORDER BY starts_at, id LIMIT ?";
+    private static final String LATEST = " ORDER BY starts_at DESC, id LIMIT ?";
+    private static final String SALON_UPCOMING_SQL = SALON_UPCOMING + SOONEST;
+    private static final String SALON_UPCOMING_AFTER_SQL = SALON_UPCOMING + AFTER_SOONEST + SOONEST;
+    private static final String BARBER_UPCOMING_SQL = BARBER_UPCOMING + SOONEST;
+    private static final String BARBER_UPCOMING_AFTER_SQL = BARBER_UPCOMING + AFTER_SOONEST + SOONEST;
+    private static final String PAST = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
+            + "AND NOT (status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ?)";
+    private static final String PAST_SQL = PAST + LATEST;
+    private static final String PAST_AFTER_SQL = PAST + AFTER_LATEST + LATEST;
+    private static final String HISTORY = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
+            + "AND kind <> 'BLOCK' AND starts_at >= ? AND starts_at < ?";
+    private static final String HISTORY_SQL = HISTORY + LATEST;
+    private static final String HISTORY_AFTER_SQL = HISTORY + AFTER_LATEST + LATEST;
+    private static final String DAY = "SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? "
+            + "AND status <> 'REMOVED' AND time_range && tstzrange(?, ?, '[)')";
+    private static final String DAY_SQL = DAY + " ORDER BY starts_at, id";
+    private static final String BARBER_DAY_SQL = DAY + " AND staff_id = ? ORDER BY starts_at, id";
 
     private final JdbcTemplate jdbc;
 
@@ -250,6 +271,16 @@ public class AppointmentStore {
     }
 
     /**
+     * Locks this customer's open bookings (CONFIRMED or IN_SERVICE, not over yet), in id order, until the transaction
+     * ends. Taken before their salons' counters: a salon acting on one of them (cancel, reassign) locks the row first
+     * and moves the counter after, so the same order here means the two wait for each other, never deadlock.
+     */
+    public void lockOpenForCustomer(UUID customerId, Instant now) {
+        jdbc.query("SELECT id FROM appointments WHERE customer_id = ? AND status IN ('CONFIRMED', 'IN_SERVICE') "
+                + "AND ends_at > ? ORDER BY id FOR UPDATE", rs -> null, customerId, at(now));
+    }
+
+    /**
      * One salon's barber list and its closed days change one at a time: closing a day and adding (or switching on) a
      * barber take this lock, so neither can miss the other's new rows. Released at commit or rollback.
      * Always taken before any barber row lock, so it can't deadlock with them.
@@ -312,11 +343,15 @@ public class AppointmentStore {
         }, ROW);
     }
 
-    /** Bookings and walk-ins starting in [from, to), latest first, at most limit (the owner's history). */
-    public List<Appointment> history(UUID shopId, Instant from, Instant to, int limit) {
-        return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND kind <> 'BLOCK' "
-                + "AND starts_at >= ? AND starts_at < ? ORDER BY starts_at DESC, id LIMIT ?", ROW, shopId, at(from),
-                at(to), limit);
+    /**
+     * Bookings and walk-ins starting in [from, to), latest first, at most limit, after the cursor (null: from the
+     * latest) (the owner's history).
+     */
+    public List<Appointment> history(UUID shopId, Instant from, Instant to, AppointmentCursor after, int limit) {
+        return after == null
+                ? jdbc.query(HISTORY_SQL, ROW, shopId, at(from), at(to), limit)
+                : jdbc.query(HISTORY_AFTER_SQL, ROW, shopId, at(from), at(to), at(after.afterStart()),
+                        at(after.afterStart()), after.afterId(), limit);
     }
 
     /** How many bookings and walk-ins starting in [from, to) are in each status. */
@@ -341,16 +376,25 @@ public class AppointmentStore {
     /** Everything in the salon overlapping [from, to) except removed blocks, for the day screen. */
     public List<Appointment> forDay(UUID shopId, Instant from, Instant to) {
         // Overlap on time_range: answered by ix_appointments_shop_range (V13) from that day's rows only
-        return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND status <> 'REMOVED' "
-                + "AND time_range && tstzrange(?, ?, '[)') ORDER BY starts_at, id", ROW, shopId, at(from), at(to));
+        return jdbc.query(DAY_SQL, ROW, shopId, at(from), at(to));
+    }
+
+    /** forDay for one barber only (a barber who sees just his own column): the others' rows are never read. */
+    public List<Appointment> forDay(UUID shopId, UUID staffId, Instant from, Instant to) {
+        return jdbc.query(BARBER_DAY_SQL, ROW, shopId, at(from), at(to), staffId);
     }
 
     /**
      * A customer's bookings. Upcoming: still CONFIRMED or IN_SERVICE, soonest first. Past: everything else, latest
-     * first.
+     * first, after the cursor (null: from the latest; upcoming lists take none).
      */
-    public List<Appointment> forCustomer(UUID customerId, boolean upcoming, Instant now, int limit) {
-        return jdbc.query(upcoming ? UPCOMING_SQL : PAST_SQL, ROW, customerId, at(now), limit);
+    public List<Appointment> forCustomer(UUID customerId, boolean upcoming, Instant now, AppointmentCursor after,
+                                         int limit) {
+        if (upcoming || after == null) {
+            return jdbc.query(upcoming ? UPCOMING_SQL : PAST_SQL, ROW, customerId, at(now), limit);
+        }
+        return jdbc.query(PAST_AFTER_SQL, ROW, customerId, at(now), at(after.afterStart()), at(after.afterStart()),
+                after.afterId(), limit);
     }
 
     /**
@@ -373,21 +417,63 @@ public class AppointmentStore {
 
     /**
      * What's coming up in the salon, soonest first: CONFIRMED bookings and walk-ins not over yet that start before
-     * {@code until}; only this barber's when staffId is set.
+     * {@code until}; only this barber's when staffId is set; at most limit, after the cursor (null: the first page).
      */
-    public List<Appointment> upcomingInSalon(UUID shopId, UUID staffId, Instant now, Instant until, int limit) {
+    public List<Appointment> upcomingInSalon(UUID shopId, UUID staffId, Instant now, Instant until,
+                                             AppointmentCursor after, int limit) {
+        if (after == null) {
+            return staffId == null
+                    ? jdbc.query(SALON_UPCOMING_SQL, ROW, shopId, at(now), at(until), limit)
+                    : jdbc.query(BARBER_UPCOMING_SQL, ROW, shopId, staffId, at(now), at(until), limit);
+        }
         return staffId == null
-                ? jdbc.query(SALON_UPCOMING_SQL, ROW, shopId, at(now), at(until), limit)
-                : jdbc.query(BARBER_UPCOMING_SQL, ROW, shopId, staffId, at(now), at(until), limit);
+                ? jdbc.query(SALON_UPCOMING_AFTER_SQL, ROW, shopId, at(now), at(until), at(after.afterStart()),
+                        after.afterId(), limit)
+                : jdbc.query(BARBER_UPCOMING_AFTER_SQL, ROW, shopId, staffId, at(now), at(until),
+                        at(after.afterStart()), after.afterId(), limit);
     }
 
     /**
-     * The salon's online bookings still open that start after {@code since} (CONFIRMED). Pass now for those still to
-     * come, or a little earlier to include ones whose customer may still arrive (the 15 minutes they are held).
+     * The parts of a booking reminder that are the same for every booking of a salon (its name and address), as
+     * SalonNotices writes them, already fitted to the stored sizes. Times are "h:mm AM" (7 or 8 characters), so the
+     * text before {@code tails} is one of three lengths, and the body's cut at 500 characters (in the tail: the address
+     * comes last) is worked out in Java for each: tails[0] when both times are 7 characters, [1] for 15, [2] for 16.
      */
-    public List<Appointment> upcomingBookings(UUID shopId, Instant since) {
-        return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND kind = 'BOOKING' "
-                + "AND status = 'CONFIRMED' AND starts_at > ? ORDER BY starts_at", ROW, shopId, at(since));
+    public record ReminderText(String title, String afterTime, String afterCode, List<String> tails, String smsHead,
+                               String smsMiddle) {
+
+        public ReminderText {
+            tails = List.copyOf(tails);
+        }
+    }
+
+    /**
+     * Rewrites the pending reminders of every online booking of the salon still to come (CONFIRMED, starting after
+     * {@code since}) with the salon's new name and address, in one statement: each booking's own parts (its time,
+     * start code and held-until time, in India time) are put in by the database, so a salon with thousands of
+     * bookings ahead is never loaded into memory. Only reminders still waiting (PENDING) change; they become unread
+     * again, like any rewritten message. Returns how many rows changed.
+     * Found through ix_appointments_shop_confirmed and the pending messages' ref index (ix_notification_jobs_ref).
+     */
+    public int rewriteReminders(UUID shopId, Instant since, java.time.Duration heldFor, ReminderText t) {
+        return jdbc.update("""
+                        WITH due AS (
+                            SELECT id, start_code,
+                                to_char(starts_at AT TIME ZONE 'Asia/Kolkata', 'FMHH12:MI AM') AS t,
+                                to_char((starts_at + make_interval(mins => ?)) AT TIME ZONE 'Asia/Kolkata',
+                                        'FMHH12:MI AM') AS u
+                            FROM appointments
+                            WHERE shop_id = ? AND kind = 'BOOKING' AND status = 'CONFIRMED' AND starts_at > ?)
+                        UPDATE notification_jobs j SET title = ?, url = '/bookings/' || d.id, read_at = NULL,
+                            body = d.t || ? || d.start_code || ? || d.u
+                                || (ARRAY[?, ?, ?]::text[])[length(d.t) + length(d.u) - 13],
+                            sms_variables = CASE WHEN j.channel = 'SMS' THEN ? || d.start_code || ?
+                                || replace(replace(d.t, ':', '%3A'), ' ', '+') || '&UNTIL='
+                                || replace(replace(d.u, ':', '%3A'), ' ', '+') ELSE NULL END
+                        FROM due d
+                        WHERE j.ref_id = d.id AND j.type = 'BOOKING_REMINDER' AND j.status = 'PENDING'""",
+                (int) heldFor.toMinutes(), shopId, at(since), t.title(), t.afterTime(), t.afterCode(),
+                t.tails().get(0), t.tails().get(1), t.tails().get(2), t.smsHead(), t.smsMiddle());
     }
 
     /**
@@ -427,12 +513,102 @@ public class AppointmentStore {
         return out;
     }
 
-    /** Appointment ids by closure (for the closed-days list). */
-    public Map<UUID, List<Appointment>> closures(UUID shopId, Instant from) {
-        return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND closure_id IS NOT NULL "
-                        + "AND status = 'BLOCKED' AND ends_at > ? ORDER BY starts_at", ROW, shopId, at(from))
-                .stream()
-                .collect(Collectors.groupingBy(Appointment::closureId, LinkedHashMap::new, Collectors.toList()));
+    /**
+     * A closed day of the salon: its time (the same for every barber's row) and how many barbers' rows it has.
+     */
+    public record Closure(UUID closureId, Instant startsAt, Instant endsAt, int barbers) {
+    }
+
+    private static final String CLOSURES = "SELECT closure_id, min(starts_at) AS starts_at, min(ends_at) AS ends_at, "
+            + "count(*) AS barbers FROM appointments WHERE shop_id = ? AND closure_id IS NOT NULL AND status = 'BLOCKED' "
+            + "AND ends_at > ? GROUP BY closure_id";
+
+    private static Closure closure(ResultSet rs, int row) throws SQLException {
+        return new Closure(rs.getObject("closure_id", UUID.class), instant(rs, "starts_at"), instant(rs, "ends_at"),
+                rs.getInt("barbers"));
+    }
+
+    /**
+     * The salon's closed days not over yet, earliest first, grouped in the database (one row per day, not one per
+     * barber), through ix_appointments_shop_closures (V18).
+     */
+    public List<Closure> closures(UUID shopId, Instant from) {
+        return jdbc.query(CLOSURES + " ORDER BY 2, 1", AppointmentStore::closure, shopId, at(from));
+    }
+
+    /** closures() that this barber has no CLOSED row in yet (he is joining the salon's closed days). */
+    public List<Closure> closuresWithout(UUID shopId, UUID staffId, Instant from) {
+        return jdbc.query(CLOSURES + " HAVING bool_and(staff_id <> ?) ORDER BY 2, 1", AppointmentStore::closure,
+                shopId, at(from), staffId);
+    }
+
+    /** One time range (of a list) and what holds the barber's time in it. */
+    public record Hit(int range, Appointment appointment) {
+    }
+
+    /**
+     * What holds this barber's time in any of these ranges, in one query: each hit with the index of its range (one
+     * appointment overlapping two ranges comes once for each), in range order, then by start.
+     */
+    public List<Hit> holdingIn(UUID staffId, List<Instant[]> ranges) {
+        if (ranges.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.query("SELECT r.i, a.id, a.shop_id, a.staff_id, a.kind, a.block_type, a.closure_id, a.customer_id, "
+                        + "a.booking_no, a.guest_name, a.start_code, a.starts_at, a.ends_at, a.status, a.started_at, "
+                        + "a.started_with_code, a.cancel_reason, a.created_by, a.client_request_id, a.created_at, "
+                        + "a.updated_at FROM unnest(?::text[], ?::text[]) WITH ORDINALITY AS r(s, e, i) "
+                        + "JOIN appointments a ON a.staff_id = ? "
+                        + "AND a.time_range && tstzrange(r.s::timestamptz, r.e::timestamptz, '[)') "
+                        + "WHERE a." + HOLDING + " ORDER BY r.i, a.starts_at", ps -> {
+                    ps.setArray(1, ps.getConnection().createArrayOf("text",
+                            ranges.stream().map(r -> r[0].toString()).toArray()));
+                    ps.setArray(2, ps.getConnection().createArrayOf("text",
+                            ranges.stream().map(r -> r[1].toString()).toArray()));
+                    ps.setObject(3, staffId);
+                }, (rs, i) -> new Hit(rs.getInt("i") - 1, map(rs, i)));
+    }
+
+    /** BLOCKED → REMOVED for all of these, in one statement; returns how many changed. */
+    public int removeBlocks(Collection<UUID> ids, Instant now) {
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        return jdbc.update("UPDATE appointments SET status = 'REMOVED', updated_at = ? WHERE id = ANY (?) "
+                + "AND status = 'BLOCKED'", ps -> {
+                    ps.setObject(1, at(now));
+                    ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids.toArray()));
+                });
+    }
+
+    /**
+     * Inserts a CLOSED block for this barber in each closed day (closure id and time), in one statement, skipping any
+     * that would overlap something holding his time (like insertIfFree); returns the ids saved.
+     */
+    public List<UUID> insertClosedDays(UUID shopId, UUID staffId, List<Closure> days, List<UUID> ids, UUID by,
+                                       Instant now) {
+        if (days.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.query("INSERT INTO appointments (id, shop_id, staff_id, kind, block_type, closure_id, starts_at, "
+                        + "ends_at, status, created_by, created_at, updated_at) "
+                        + "SELECT r.id, ?, ?, 'BLOCK', 'CLOSED', r.closure_id, r.s::timestamptz, r.e::timestamptz, "
+                        + "'BLOCKED', ?, ?, ? FROM unnest(?::uuid[], ?::uuid[], ?::text[], ?::text[]) "
+                        + "AS r(id, closure_id, s, e) "
+                        + "ON CONFLICT ON CONSTRAINT ex_appointments_no_overlap DO NOTHING RETURNING id", ps -> {
+                    ps.setObject(1, shopId);
+                    ps.setObject(2, staffId);
+                    ps.setObject(3, by);
+                    ps.setObject(4, at(now));
+                    ps.setObject(5, at(now));
+                    ps.setArray(6, ps.getConnection().createArrayOf("uuid", ids.toArray()));
+                    ps.setArray(7, ps.getConnection().createArrayOf("uuid",
+                            days.stream().map(Closure::closureId).toArray()));
+                    ps.setArray(8, ps.getConnection().createArrayOf("text",
+                            days.stream().map(d -> d.startsAt().toString()).toArray()));
+                    ps.setArray(9, ps.getConnection().createArrayOf("text",
+                            days.stream().map(d -> d.endsAt().toString()).toArray()));
+                }, (rs, i) -> rs.getObject(1, UUID.class));
     }
 
     // ---------- mapping ----------

@@ -12,7 +12,7 @@ class AutoEndJobTest {
     void aBatchSizeBelowOneIsRefusedAtStartup() {
         // 0 would make every batch look full and loop forever
         for (int size : new int[] {0, -1}) {
-            assertThatThrownBy(() -> new AutoEndJob(null, null, null, Clock.systemUTC(), true, size))
+            assertThatThrownBy(() -> new AutoEndJob(null, null, null, null, Clock.systemUTC(), true, size))
                     .isInstanceOf(IllegalStateException.class).hasMessageContaining("auto-end-batch");
         }
     }

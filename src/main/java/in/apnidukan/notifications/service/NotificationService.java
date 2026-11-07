@@ -1,6 +1,7 @@
 package in.apnidukan.notifications.service;
 
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.common.notify.MessageText;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.notifications.domain.Channel;
 import in.apnidukan.notifications.repo.NotificationStore;
@@ -148,25 +149,14 @@ public class NotificationService implements Notifications {
         }
     }
 
-    /** Shortens to max characters without an ellipsis, never splitting an emoji in two. */
+    /** Shortens to max characters without an ellipsis, never splitting an emoji in two (see MessageText). */
     static String cutPlain(String text, int max) {
-        if (text.length() <= max) {
-            return text;
-        }
-        int end = Character.isHighSurrogate(text.charAt(max - 1)) ? max - 1 : max;
-        return text.substring(0, end);
+        return MessageText.cutPlain(text, max);
     }
 
-    /** Shortens to max characters, never splitting an emoji (a surrogate pair) in two. */
+    /** Shortens to max characters, never splitting an emoji (a surrogate pair) in two (see MessageText). */
     static String cut(String text, int max) {
-        if (text.length() <= max) {
-            return text;
-        }
-        int end = max - 1;
-        if (Character.isHighSurrogate(text.charAt(end - 1))) {
-            end--;
-        }
-        return text.substring(0, end) + "…";
+        return MessageText.cut(text, max);
     }
 
     private static ApiException invalid(String field, String problem) {

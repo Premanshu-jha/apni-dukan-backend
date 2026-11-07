@@ -59,12 +59,16 @@ class SalonShopChanges implements ShopChangeListener {
         });
     }
 
-    /** Runs inside the shop change's transaction: if that rolls back, the old reminders stay. */
+    /**
+     * Runs inside the shop change's transaction: if that rolls back, the old reminders stay. Every pending reminder of
+     * the salon's bookings still to come is written again with the new place, in one statement (the bookings are never
+     * loaded: a busy salon can have thousands ahead).
+     */
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public void locationChanged(UUID shopId) {
-        shops.find(shopId).ifPresent(card -> notices.locationChanged(
-                appointments.upcomingBookings(shopId, clock.instant()), card));
+        shops.find(shopId).ifPresent(card -> appointments.rewriteReminders(shopId, clock.instant(),
+                SalonDayService.LATE_ALLOWANCE, notices.reminderText(card)));
     }
 
     /**

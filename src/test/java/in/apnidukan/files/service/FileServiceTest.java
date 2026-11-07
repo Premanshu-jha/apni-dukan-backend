@@ -52,13 +52,27 @@ class FileServiceTest {
     @Mock CurrentUserProvider currentUser;
     @Mock FileUsageChecker usageChecker;
     @Mock AttachedFiles attachedElsewhere;
+    @Mock in.apnidukan.files.repo.FileDeletionStore deletions;
 
     FileService service;
+    /** Records whether the row was deleted inside a transaction that had ended before R2 was called. */
+    final java.util.List<String> steps = new java.util.ArrayList<>();
+    final org.springframework.transaction.support.TransactionOperations transactions =
+            new org.springframework.transaction.support.TransactionOperations() {
+                @Override
+                public <T> T execute(org.springframework.transaction.support.TransactionCallback<T> action) {
+                    steps.add("begin");
+                    T result = action.doInTransaction(null);
+                    steps.add("commit");
+                    return result;
+                }
+            };
 
     @BeforeEach
     void setUp() {
         service = new FileService(repository, storage, currentUser, Clock.fixed(NOW, ZoneOffset.UTC), 5,
-                List.of(usageChecker), List.of(attachedElsewhere), new PhotoCleaning(4));
+                List.of(usageChecker), List.of(attachedElsewhere), new PhotoCleaning(4), transactions,
+                deletions);
         lenient().when(currentUser.requireShop()).thenReturn(new CurrentUser(USER, SHOP));
     }
 
@@ -153,9 +167,45 @@ class FileServiceTest {
 
         service.delete(file.getId());
 
-        InOrder order = inOrder(repository, storage);
+        InOrder order = inOrder(repository, deletions, storage);
         order.verify(repository).deleteByIdAndShopId(file.getId(), SHOP);
+        order.verify(deletions).queue(file.getStorageKey(), NOW);   // in the same transaction as the row
         order.verify(storage).delete(file.getStorageKey());
+        order.verify(deletions).done(file.getStorageKey());   // off the queue once R2 confirmed
+        assertThat(steps).containsExactly("begin", "commit");   // R2 was called after the transaction ended
+    }
+
+    @Test
+    void r2RefusingTheDeleteAfterTheRowWentIsLoggedNotAnError() {
+        StoredFile file = billPhoto();
+        when(repository.findByIdAndShopId(file.getId(), SHOP)).thenReturn(Optional.of(file));
+        when(repository.deleteByIdAndShopId(file.getId(), SHOP)).thenReturn(1);
+        org.mockito.Mockito.doAnswer(inv -> {
+            assertThat(steps).containsExactly("begin", "commit");   // never inside the transaction
+            throw new IllegalStateException("R2 timed out");
+        }).when(storage).delete(file.getStorageKey());
+
+        service.delete(file.getId());   // no exception: the file is gone for the shop
+
+        verify(storage).delete(file.getStorageKey());
+        verify(deletions).queue(file.getStorageKey(), NOW);
+        verify(deletions, never()).done(anyString());   // stays queued for FileDeletionJob
+    }
+
+    @Test
+    void bytesStoredForAnUploadWhoseRowFailedAreQueuedBeforeTheyAreDeleted() {
+        MockMultipartFile upload = new MockMultipartFile("file", "KD-4471.jpg", "image/jpeg", JPEG);
+        when(repository.findByShopIdAndPurposeAndSha256(eq(SHOP), eq(FilePurpose.BILL), anyString()))
+                .thenReturn(Optional.empty());
+        when(repository.saveAndFlush(any(StoredFile.class))).thenThrow(new IllegalStateException("database down"));
+        org.mockito.Mockito.doThrow(new IllegalStateException("R2 down")).when(storage).delete(anyString());
+
+        assertThatThrownBy(() -> service.upload(upload, FilePurpose.BILL)).hasMessage("database down");
+
+        ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
+        verify(deletions).queue(key.capture(), eq(NOW));
+        verify(storage).delete(key.getValue());
+        verify(deletions, never()).done(anyString());
     }
 
     @Test

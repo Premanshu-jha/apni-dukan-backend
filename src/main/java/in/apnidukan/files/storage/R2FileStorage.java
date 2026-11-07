@@ -1,6 +1,7 @@
 package in.apnidukan.files.storage;
 
 import in.apnidukan.files.config.R2Properties;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -22,11 +23,19 @@ public class R2FileStorage implements FileStorage {
     private final S3Client s3;
     private final S3Presigner presigner;
     private final String bucket;
+    private final Duration uploadTimeout;
 
-    public R2FileStorage(S3Client s3, S3Presigner presigner, R2Properties props) {
+    /**
+     * @param uploadTimeout one try of an upload (app.r2.upload-timeout, 60 s): a 10 MB file needs far longer than the
+     *                      short limit every other call has (R2Config), so a put gets its own; the whole put with its
+     *                      retries may take twice that
+     */
+    public R2FileStorage(S3Client s3, S3Presigner presigner, R2Properties props,
+                         @Value("${app.r2.upload-timeout:60s}") Duration uploadTimeout) {
         this.s3 = s3;
         this.presigner = presigner;
         this.bucket = props.bucket();
+        this.uploadTimeout = uploadTimeout;
     }
 
     @Override
@@ -39,6 +48,8 @@ public class R2FileStorage implements FileStorage {
                 // as a link lasts; "private": only that phone's browser, never a shared cache
                 .cacheControl("private, max-age=3600")
                 .contentLength(sizeBytes)
+                .overrideConfiguration(o -> o.apiCallAttemptTimeout(uploadTimeout)
+                        .apiCallTimeout(uploadTimeout.multipliedBy(2)))
                 .build();
         s3.putObject(request, RequestBody.fromInputStream(content, sizeBytes));
     }

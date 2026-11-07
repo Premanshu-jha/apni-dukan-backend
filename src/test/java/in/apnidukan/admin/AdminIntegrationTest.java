@@ -305,8 +305,13 @@ class AdminIntegrationTest {
         long code = jdbc.queryForObject("SELECT shop_code FROM shops WHERE id = ?", Long.class, first);
         assertThat((List<?>) get("/admin/shops?type=SALON&group=FIRST_VISIT&q=" + code, admin).body()).hasSize(1);
         assertThat(get("/admin/dashboard", customer).status()).isEqualTo(403);
-        // The older form still answers
-        assertThat((List<?>) get("/admin/shops?status=PENDING_VISIT", admin).body()).hasSize(2);
+        // The older ?status= form is gone: type and group are required
+        Reply old = get("/admin/shops?status=PENDING_VISIT", admin);
+        assertThat(old.status()).isEqualTo(400);
+        assertThat(field(old.body(), "code")).isEqualTo("VALIDATION_FAILED");
+        assertThat(field(old.body(), "details")).isEqualTo(Map.of("type", "is required", "group", "is required"));
+        assertThat(field(get("/admin/shops?type=SALON", admin).body(), "details"))
+                .isEqualTo(Map.of("group", "is required"));
     }
 
     @Test
@@ -397,8 +402,8 @@ class AdminIntegrationTest {
         assertThat(search("RECHECK", "+91 92000 00002")).hasSize(1);
         assertThat(search("RECHECK", "+91 92000")).hasSize(1);
         assertThat(search("RECHECK", "09200000002")).hasSize(1);
-        assertThat(search("RECHECK", "_")).isEmpty();
-        assertThat(search("RECHECK", "%")).isEmpty();
+        assertThat(search("RECHECK", "x_y")).isEmpty();
+        assertThat(search("RECHECK", "%%%")).isEmpty();
 
         // Suspended and reinstated after being live: a re-check
         approve(salon);
@@ -456,8 +461,8 @@ class AdminIntegrationTest {
                 .isEqualTo(400);
         assertThat(get("/admin/shops?type=SALON&group=FIRST_VISIT&afterSince=yesterday&afterId="
                 + UUID.randomUUID(), admin).status()).isEqualTo(400);
-        // The older form answers the 50 oldest
-        assertThat((List<?>) get("/admin/shops?status=PENDING_VISIT", admin).body()).hasSize(50);
+        // The older ?status= form is gone
+        assertThat(get("/admin/shops?status=PENDING_VISIT", admin).status()).isEqualTo(400);
     }
 
     @Test
@@ -504,6 +509,89 @@ class AdminIntegrationTest {
                 String.valueOf(res.getHeaders().getETag())));
         assertThat(changed.getKey()).isEqualTo(200);
         assertThat(changed.getValue()).isNotEqualTo(etag);
+    }
+
+    @Test
+    void aLongTimelineComesFiftyAPageNewestFirstWithTiesAcrossTheEdge() {
+        UUID shop = shop("SALON", "PENDING_VISIT", "Busy Salon", "9300000201");
+        for (int i = 0; i < 55; i++) {   // three entries at each moment: only seq orders them
+            jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event, note) VALUES (?, ?, ?, ?, "
+                    + "true, 'NOTE', ?)", UUID.randomUUID(), shop, Timestamp.from(NOW.plusSeconds(i / 3)), admin,
+                    "note " + i);
+        }
+        Reply page = get("/admin/shops/" + shop, admin);
+        List<?> first = (List<?>) field(page.body(), "timeline");
+        assertThat(first).hasSize(50);
+        Object next = field(page.body(), "timelineNext");
+        assertThat(next).isNotNull();
+        assertThat(field(next, "afterAt")).isEqualTo(field(first.get(49), "at"));
+        // The same first page from the timeline call
+        Reply again = get("/admin/shops/" + shop + "/timeline", admin);
+        assertThat((List<?>) field(again.body(), "items")).isEqualTo(first);
+        assertThat(field(again.body(), "next")).isEqualTo(next);
+
+        Reply rest = get("/admin/shops/" + shop + "/timeline?afterAt=" + field(next, "afterAt") + "&afterSeq="
+                + field(next, "afterSeq"), admin);
+        assertThat(rest.status()).as(rest.text()).isEqualTo(200);
+        List<?> second = (List<?>) field(rest.body(), "items");
+        assertThat(second).hasSize(5);
+        assertThat(field(rest.body(), "next")).isNull();
+        List<Object> all = new java.util.ArrayList<>(first);
+        all.addAll(second);
+        // Newest first, the later of entries made at the same moment first: note 54, 53, ... 0, each once
+        assertThat(all).extracting(e -> field(e, "note"))
+                .containsExactlyElementsOf(java.util.stream.IntStream.iterate(54, i -> i - 1).limit(55)
+                        .mapToObj(i -> "note " + i).toList());
+
+        assertThat(field(get("/admin/shops/" + shop + "/timeline?afterSeq=3", admin).body(), "code"))
+                .isEqualTo("VALIDATION_FAILED");
+        assertThat(field(get("/admin/shops/" + shop + "/timeline?afterAt=" + NOW + "&afterSeq=x", admin).body(),
+                "code")).isEqualTo("BAD_REQUEST");
+        assertThat(get("/admin/shops/" + UUID.randomUUID() + "/timeline", admin).status()).isEqualTo(404);
+        assertThat(get("/admin/shops/" + shop + "/timeline", customer).status()).isEqualTo(403);
+    }
+
+    @Test
+    void aSearchNeedsThreeLettersButAShopNumberOrPhoneDigitsWorkAtAnyLength() {
+        UUID shop = shop("SALON", "PENDING_VISIT", "Raju Hair", "9200000001");
+        long code = jdbc.queryForObject("SELECT shop_code FROM shops WHERE id = ?", Long.class, shop);
+        for (String q : List.of("R", "Ra", " a ", "_")) {
+            Reply r = get("/admin/shops?type=SALON&group=FIRST_VISIT&q=" + q.strip(), admin);
+            assertThat(r.status()).as(q).isEqualTo(400);
+            assertThat(field(r.body(), "details")).isEqualTo(Map.of("q", "type at least 3 letters"));
+        }
+        assertThat(search("FIRST_VISIT", "Raj")).hasSize(1);
+        assertThat(search("FIRST_VISIT", "#" + code)).hasSize(1);
+        assertThat(search("FIRST_VISIT", Long.toString(code))).hasSize(1);
+        assertThat(search("FIRST_VISIT", "7")).isEmpty();   // a short shop number is allowed (none is 7)
+        assertThat(search("FIRST_VISIT", "  ")).hasSize(1);   // blank: no search at all
+    }
+
+    @Test
+    void theDashboardIsKept30SecondsInRedisAndADecisionClearsIt() {
+        UUID first = shop("SALON", "PENDING_VISIT", "First Salon", "9300000301");
+        Map<?, ?> counts = (Map<?, ?>) get("/admin/dashboard", admin).body();
+        assertThat(field(counts.get("SALON"), "FIRST_VISIT")).isEqualTo(1);
+        assertThat(redis.opsForValue().get("admin:dashboard:0")).contains("SALON.FIRST_VISIT=1");
+        // A shop arriving by itself shows within 30 seconds (the kept counts are served meanwhile)
+        shop("SALON", "PENDING_VISIT", "Second Salon", "9300000302");
+        assertThat(field(((Map<?, ?>) get("/admin/dashboard", admin).body()).get("SALON"), "FIRST_VISIT"))
+                .isEqualTo(1);
+        // A decision clears them: the admin sees the new counts at once
+        approve(first);
+        Map<?, ?> after = (Map<?, ?>) get("/admin/dashboard", admin).body();
+        assertThat(field(after.get("SALON"), "FIRST_VISIT")).isEqualTo(1);
+        assertThat(field(after.get("SALON"), "LIVE")).isEqualTo(1);
+        assertThat(redis.opsForValue().get("admin:dashboard:generation")).isEqualTo("1");
+        // A reader that counted before the decision committed and writes afterwards writes under the old generation:
+        // nobody reads that key any more
+        redis.opsForValue().set("admin:dashboard:0", "KIRANA.FIRST_VISIT=0;KIRANA.RECHECK=0;KIRANA.SENT_BACK=0;"
+                + "KIRANA.LIVE=0;KIRANA.SUSPENDED=0;SALON.FIRST_VISIT=2;SALON.RECHECK=0;SALON.SENT_BACK=0;"
+                + "SALON.LIVE=0;SALON.SUSPENDED=0");
+        assertThat(field(((Map<?, ?>) get("/admin/dashboard", admin).body()).get("SALON"), "LIVE")).isEqualTo(1);
+        // Redis losing the text (or a broken value) just counts again
+        redis.opsForValue().set("admin:dashboard:1", "garbage");
+        assertThat(field(((Map<?, ?>) get("/admin/dashboard", admin).body()).get("SALON"), "LIVE")).isEqualTo(1);
     }
 
     // ---------------- helpers ----------------

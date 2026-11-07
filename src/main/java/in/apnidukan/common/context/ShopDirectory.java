@@ -13,6 +13,9 @@ public interface ShopDirectory {
 
     Optional<ShopCard> find(UUID shopId);
 
+    /** find() for many shops in one query, by id (unknown ids are left out). */
+    java.util.Map<UUID, ShopCard> findAll(java.util.Collection<UUID> shopIds);
+
     /**
      * Like find, and holds the shop's row in shared mode until the transaction ends (SELECT ... FOR SHARE). A
      * booking takes this: a change to the shop (a new address sending it back for a check) then waits for bookings
