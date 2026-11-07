@@ -1,18 +1,19 @@
 package in.apnidukan.auth.service;
 
 import in.apnidukan.auth.domain.AdminRole;
-import in.apnidukan.auth.domain.RefreshToken;
 import in.apnidukan.auth.domain.RevokeReason;
 import in.apnidukan.auth.domain.User;
 import in.apnidukan.auth.notify.EmailSender;
 import in.apnidukan.auth.notify.SmsSender;
 import in.apnidukan.auth.repo.RefreshTokenRepository;
+import in.apnidukan.auth.repo.RefreshTokenStore;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.async.BackgroundTasks;
 import in.apnidukan.common.context.AccountDeletionListener;
 import in.apnidukan.common.context.PersonDetailsListener;
 import in.apnidukan.common.context.SignOutEverywhereListener;
 import in.apnidukan.common.context.ShopMemberships;
+import in.apnidukan.common.context.TestAccountShops;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.security.AuthPrincipal;
 import in.apnidukan.common.security.ClientIp;
@@ -41,7 +42,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -91,6 +91,9 @@ public class AuthService {
     private final List<SignOutEverywhereListener> signOutListeners;
     private final SignInLimits signInLimits;
     private final TestModeService testMode;
+    private final SmsBudget smsBudget;
+    private final RefreshTokenStore tokenStore;
+    private final TestAccountShops testAccountShops;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
@@ -100,7 +103,8 @@ public class AuthService {
                        List<AccountDeletionListener> deletionListeners,
                        List<SignOutEverywhereListener> signOutListeners,
                        SignInLimits signInLimits, TestModeService testMode,
-                       List<PersonDetailsListener> detailsListeners,
+                       List<PersonDetailsListener> detailsListeners, SmsBudget smsBudget,
+                       RefreshTokenStore tokenStore, TestAccountShops testAccountShops,
                        @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds) {
         if (refreshGraceSeconds < 0 || refreshGraceSeconds > RETRY_GRACE.toSeconds()) {
             // Longer than the retry time would let an old token get new pairs after it should raise the alarm
@@ -108,6 +112,9 @@ public class AuthService {
         }
         this.refreshGrace = Duration.ofSeconds(refreshGraceSeconds);
         this.testMode = testMode;
+        this.smsBudget = smsBudget;
+        this.tokenStore = tokenStore;
+        this.testAccountShops = testAccountShops;
         this.detailsListeners = detailsListeners;
         this.memberships = memberships;
         this.signOutListeners = signOutListeners;
@@ -145,9 +152,10 @@ public class AuthService {
         if (testMode.acceptsAnyCode(phone)) {
             return;   // OTP test mode: a test number signs in with any 6 digits, no SMS
         }
-        requireSmsNotPaused();   // before a new code replaces the one they already have
+        SmsBudget.To to = SmsBudget.To.signIn(phone);
+        smsBudget.requireRoom(to);   // before a new code replaces the one they already have
         String code = otp.issue(OtpPurpose.LOGIN, phone, ip);
-        sendSms(() -> sms.sendOtp(phone, code));
+        sendSms(to, () -> sms.sendOtp(phone, code));
     }
 
     /** Correct code: signs in, creating the account the first time this phone is used. */
@@ -187,18 +195,23 @@ public class AuthService {
         });
     }
 
-    /** A test account claimed with a real code: normal from now on, and nobody else stays signed in to it. */
+    /**
+     * A test account claimed with a real code: from now on it is the number's real holder's, normal, and nothing the
+     * testers left in it stays. Their email goes (it is the recovery address: a tester could otherwise take the
+     * account back through "lost phone"), and their name; a shop membership they made ends (a helper or barber leaves;
+     * a shop they registered is closed); everyone signed in to it is signed out. The holder starts with a bare
+     * account and adds their own email and name.
+     */
     private void becomeReal(User user) {
         Instant now = Instant.now(clock);
-        user.becomeRealAccount(now);
-        users.saveAndFlush(user);
+        // The shop first (its row, then the membership): the order every shop step takes them in, before this person's
+        testAccountShops.endFor(user.getId());
+        User claimed = users.lockById(user.getId()).orElseThrow();
+        claimed.claimByRealHolder(now);
+        users.saveAndFlush(claimed);
         refreshTokens.revokeAllForUser(user.getId(), now);
         // Before the new token is made (as recovery does), so the new one carries the new generation
-        try {
-            revocations.revokeAll(user.getId());
-        } catch (DataAccessException redisDown) {
-            log.warn("Redis didn't answer; testers' tokens on {} end within 15 minutes", user.getId());
-        }
+        revocations.revokeAllOrWarn(user.getId(), "Test account claimed by the number's holder");
     }
 
     // ---------------- refresh and sign-out ----------------
@@ -219,49 +232,48 @@ public class AuthService {
      */
     @Transactional(noRollbackFor = ApiException.class)
     public AuthTokens refresh(String refreshToken, String device) {
-        // Swap times are written and compared on the database's clock, the one all copies of the backend share
-        Instant arrived = databaseNow();   // before waiting for any lock
+        // Swap times are written and compared on the database's clock, the one all copies of the backend share.
+        // Six round trips in all: the owner with the arrival time (before waiting for any lock), the person's lock,
+        // the token with the time now, the swap, the membership (for the access token) and the new token.
         String hash = Hashing.sha256Hex(nullToEmpty(refreshToken));
-        UUID owner = refreshTokens.findUserIdByTokenHash(hash)
+        RefreshTokenStore.Arrival arrival = tokenStore.arrival(hash)
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
-        User user = users.lockById(owner).filter(u -> !u.isDeleted())
+        Instant arrived = arrival.at();
+        User user = users.lockById(arrival.userId()).filter(u -> !u.isDeleted())
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
         // Read now, under the person's lock: a refresh of the same token that held the lock first is seen
-        RefreshToken stored = refreshTokens.findByTokenHash(hash)
+        RefreshTokenStore.Stored stored = tokenStore.read(hash)
                 .orElseThrow(() -> unauthorized("INVALID_REFRESH_TOKEN", "Sign in again."));
-        Instant now = databaseNow();
+        Instant now = stored.now();
 
-        if (stored.getRevokedAt() != null) {
-            RevokeReason reason = stored.getRevokeReason();
+        if (stored.revokedAt() != null) {
+            RevokeReason reason = stored.revokeReason();
             boolean rotated = reason == RevokeReason.ROTATED;
-            if (rotated && !stored.getRevokedAt().isBefore(arrived)) {
+            if (rotated && !stored.revokedAt().isBefore(arrived)) {
                 // Swapped by a request that was running when this one came in (two at once with the same token)
                 throw new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN",
                         "This sign-in was just renewed by another request. Use the newest one.");
             }
-            boolean inGrace = !now.isAfter(stored.getRevokedAt().plus(refreshGrace));
-            if (rotated && inGrace) {
-                Optional<RefreshToken> successor = stored.getReplacedBy() == null ? Optional.empty()
-                        : refreshTokens.findById(stored.getReplacedBy());
-                if (successor.filter(t -> t.getRevokedAt() == null).isPresent()) {
-                    requireLive(stored, user, now);   // an expired token or a test account out of test mode: no pair
-                    // The new pair never reached the app (it reloaded): it gets another, the unused one ends. If
-                    // that one ever comes back after the grace, someone else had this token (see GRACE_REPLACED)
-                    refreshTokens.revokeIfActive(successor.get().getId(), now, RevokeReason.GRACE_REPLACED);
-                    UUID next = UUID.randomUUID();
-                    refreshTokens.replacedBy(stored.getId(), next);
-                    return issueTokens(user, device != null ? device : stored.getDevice(), false, next);
-                }
+            boolean inGrace = !now.isAfter(stored.revokedAt().plus(refreshGrace));
+            if (rotated && inGrace && stored.successorUnused()) {
+                requireLive(stored, user, now);   // an expired token or a test account out of test mode: no pair
+                // The new pair never reached the app (it reloaded): it gets another, the unused one ends. If
+                // that one ever comes back after the grace, someone else had this token (see GRACE_REPLACED)
+                refreshTokens.revokeIfActive(stored.replacedBy(), now, RevokeReason.GRACE_REPLACED);
+                UUID next = UUID.randomUUID();
+                refreshTokens.replacedBy(stored.id(), next);
+                return issueTokens(user, device != null ? device : stored.device(), false, next);
             }
             // A token replaced under the grace: the real phone presenting it after the grace means the old token was
             // used by someone else. Within the grace it is "sign in again" only.
             boolean copied = reason == RevokeReason.GRACE_REPLACED ? !inGrace
                     // Within the retry time, a swap the grace doesn't cover (its successor was used, or 30 to 60 s)
                     // is still the app retrying: "sign in again" on that device only. Later, it means a copy.
-                    : rotated && stored.getRevokedAt().plus(RETRY_GRACE).isBefore(now);
-            if (copied && refreshTokens.markReuseDetected(stored.getId()) == 1) {
+                    : rotated && stored.revokedAt().plus(RETRY_GRACE).isBefore(now);
+            if (copied && refreshTokens.markReuseDetected(stored.id()) == 1) {
                 refreshTokens.revokeAllForUser(user.getId(), now);
-                revocations.revokeAll(user.getId());
+                // The database's sign-out stands even if Redis doesn't answer (an error here would undo it)
+                revocations.revokeAllOrWarn(user.getId(), "A copied refresh token came back: signed out everywhere");
                 log.warn("Refresh token reused for user {}: all sessions ended", user.getId());
                 throw unauthorized("REFRESH_TOKEN_REUSED",
                         "For your safety you were signed out everywhere. Sign in again.");
@@ -269,30 +281,24 @@ public class AuthService {
             throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");
         }
         requireLive(stored, user, now);
-        if (refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.ROTATED) == 0) {
-            throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");   // can't happen under the lock
-        }
         UUID next = UUID.randomUUID();
-        refreshTokens.replacedBy(stored.getId(), next);
-        return issueTokens(user, device != null ? device : stored.getDevice(), false, next);
+        if (!tokenStore.rotate(stored.id(), now, next)) {
+            throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");   // a sign-out of this device just now
+        }
+        return issueTokens(user, device != null ? device : stored.device(), false, next);
     }
 
     /** 401 for a token past its 30 days, or a test account whose test mode ended (an active one is ended too). */
-    private void requireLive(RefreshToken stored, User user, Instant now) {
-        if (!stored.getExpiresAt().isAfter(now)) {
-            refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
+    private void requireLive(RefreshTokenStore.Stored stored, User user, Instant now) {
+        if (!stored.expiresAt().isAfter(now)) {
+            refreshTokens.revokeIfActive(stored.id(), now, RevokeReason.EXPIRED);
             throw unauthorized("REFRESH_TOKEN_EXPIRED", "Sign in again.");
         }
         if (user.isTestAccount() && !testMode.acceptsAnyCode(user.getPhone())) {
             // A test account lives only while OTP test mode is on for its number
-            refreshTokens.revokeIfActive(stored.getId(), now, RevokeReason.EXPIRED);
+            refreshTokens.revokeIfActive(stored.id(), now, RevokeReason.EXPIRED);
             throw unauthorized("TEST_MODE_OFF", "Test mode is off. Sign in again.");
         }
-    }
-
-    private Instant databaseNow() {
-        long micros = refreshTokens.databaseMicros();
-        return Instant.ofEpochSecond(Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1000L);
     }
 
     /** Ends this device's session. Always succeeds, even for an unknown token. */
@@ -332,9 +338,10 @@ public class AuthService {
     public void sendEmailChangePhoneCode(UUID userId, String ip) {
         User user = me(userId);
         limitSends(ip);
-        requireSmsNotPaused();   // before a new code replaces the one they already have
+        SmsBudget.To to = SmsBudget.To.signedIn(user.getPhone());
+        smsBudget.requireRoom(to);   // before a new code replaces the one they already have
         String code = otp.issue(OtpPurpose.CHANGE_EMAIL, user.getPhone(), ip);
-        sendSms(() -> sms.sendOtp(user.getPhone(), code));
+        sendSms(to, () -> sms.sendOtp(user.getPhone(), code));
     }
 
     /**
@@ -411,7 +418,8 @@ public class AuthService {
         limitSends(ip);
         humans.require(captchaToken, ip);
         boolean exists = users.findByVerifiedEmail(address).isPresent();
-        requireSmsNotPaused();   // before a new code replaces the one they already have
+        SmsBudget.To to = SmsBudget.To.recovery(newPhone);
+        smsBudget.requireRoom(to);   // before a new code replaces the one they already have
         String emailCode = otp.issue(OtpPurpose.RECOVER_EMAIL, address, ip);
         String phoneCode = otp.issue(OtpPurpose.RECOVER_PHONE, newPhone, ip);
         if (exists) {
@@ -419,7 +427,7 @@ public class AuthService {
                     "Your recovery code is " + emailCode + ".\n\nIt works for 10 minutes. "
                             + "If you didn't ask for this, ignore this email; your account stays as it is."));
         }
-        sendSms(() -> sms.sendOtp(newPhone, phoneCode));
+        sendSms(to, () -> sms.sendOtp(newPhone, phoneCode));
     }
 
     /**
@@ -501,9 +509,10 @@ public class AuthService {
         Instant at = Instant.now(clock);
         deletionListeners.forEach(l -> l.checkCanDelete(userId, at));   // e.g. a booking about to start
         limitSends(ip);
-        requireSmsNotPaused();   // before a new code replaces the one they already have
+        SmsBudget.To to = SmsBudget.To.signedIn(user.getPhone());
+        smsBudget.requireRoom(to);   // before a new code replaces the one they already have
         String code = otp.issue(OtpPurpose.DELETE_ACCOUNT, user.getPhone(), ip);
-        sendSms(() -> sms.sendOtp(user.getPhone(), code));
+        sendSms(to, () -> sms.sendOtp(user.getPhone(), code));
     }
 
     /**
@@ -609,8 +618,8 @@ public class AuthService {
         random.nextBytes(raw);
         String refresh = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
         Instant refreshExpires = now.plus(refreshValidity);
-        refreshTokens.save(new RefreshToken(refreshId, user.getId(), Hashing.sha256Hex(refresh),
-                trimDevice(device), now, refreshExpires));
+        tokenStore.insert(refreshId, user.getId(), Hashing.sha256Hex(refresh), trimDevice(device), now,
+                refreshExpires);
         return new AuthTokens(access.token(), access.expiresAt(), refresh, refreshExpires, user, newUser);
     }
 
@@ -630,33 +639,12 @@ public class AuthService {
         }
     }
 
-    /** Every code SMS goes through here: a hard daily cap protects the SMS bill even if all other limits are dodged. */
-    /** SMS_PAUSED before anything is issued: a refused send must not break a code the person already has. */
-    private void requireSmsNotPaused() {
-        if (limits.current("sms-day") >= signInLimits.smsDailyLimit()) {
-            throw smsPaused();
-        }
-    }
-
-    private ApiException smsPaused() {
-        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SMS_PAUSED",
-                "We can't send codes right now. Please try again later.").retryAfter(limits.secondsLeft("sms-day"));
-    }
-
-    private void sendSms(Runnable send) {
-        int smsDailyLimit = signInLimits.smsDailyLimit();
-        long sentToday = limits.hit("sms-day", Duration.ofHours(24));
-        if (sentToday == SignInLimits.warnAt(smsDailyLimit)) {
-            // Once a day (the counter passes each number once per 24 hours), at 80%: time to look before sign-in
-            // codes stop for everyone. Point an alert at this line.
-            log.warn("80% of the daily SMS limit used ({} of {}). Check for abuse now; at {} sign-in codes stop.",
-                    sentToday, smsDailyLimit, smsDailyLimit);
-        }
-        if (sentToday > smsDailyLimit) {
-            log.error("Daily SMS limit ({}) reached: SMS paused. Check for abuse before raising SMS_DAILY_LIMIT.",
-                    smsDailyLimit);
-            throw smsPaused();
-        }
+    /**
+     * Every code SMS goes through here: the SMS budget (SmsBudget: a daily budget, an hourly burst cap, and people who
+     * signed in recently first near the cap) protects the bill even if all other limits are dodged.
+     */
+    private void sendSms(SmsBudget.To to, Runnable send) {
+        smsBudget.spend(to);   // counted only: the room was checked before the code was made (requireRoom)
         send.run();
     }
 

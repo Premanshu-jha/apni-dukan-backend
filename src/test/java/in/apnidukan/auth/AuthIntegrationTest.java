@@ -584,6 +584,50 @@ class AuthIntegrationTest {
     }
 
     @Test
+    void pastTheDaysWrongCodesStrangersNetworksWaitInsteadOfLockingTheNumberAndTheOwnersNetworkNeverWaits() {
+        assertThat(signIn(PHONE).status()).isEqualTo(200);   // a right code from this network: it is known now
+        // 50 wrong codes from other networks today (more than one network can lock)
+        redis.opsForValue().set("rl:otp-fail-all:LOGIN:" + PHONE, "50", java.time.Duration.ofHours(20));
+        String stranger = "203.0.113.60";
+        assertThat(postFrom(stranger, "/auth/otp/send", Map.of("phone", PHONE)).status()).isEqualTo(202);
+        String wrong = codeSentTo(LAST_SMS, PHONE).equals("000000") ? "111111" : "000000";
+        // The 51st is still compared, and starts a 1-minute wait for networks that never gave a right code
+        assertThat(postFrom(stranger, "/auth/otp/verify", Map.of("phone", PHONE, "code", wrong)).body().get("code"))
+                .isEqualTo("WRONG_CODE");
+        Reply waits = postFrom("203.0.113.61", "/auth/otp/verify", Map.of("phone", PHONE, "code", wrong));
+        assertThat(waits.status()).isEqualTo(429);
+        assertThat(waits.body().get("code")).isEqualTo("TRY_LATER");
+        assertThat(Integer.parseInt(waits.retryAfter())).isBetween(1, 60);
+        assertThat(redis.getExpire("otp-wait:fail:LOGIN:" + PHONE)).isBetween(1L, 120L);   // restarted: 2 minutes
+        // No lock for the day: the owner, on their own network, signs in at once
+        assertThat(signIn(PHONE).status()).isEqualTo(200);
+        // And someone on a network never seen before (a new phone on mobile data), during the wait: a fresh network
+        // still gets a code, and the right code works at once; only wrong tries wait
+        String fresh = "203.0.113.80";
+        assertThat(postFrom(fresh, "/auth/otp/send", Map.of("phone", PHONE)).status()).isEqualTo(202);
+        assertThat(redis.getExpire("otp-wait:fail:LOGIN:" + PHONE)).isPositive();
+        assertThat(postFrom(fresh, "/auth/otp/verify", Map.of("phone", PHONE, "code", codeSentTo(LAST_SMS, PHONE)))
+                .status()).isEqualTo(200);
+        for (String key : redis.keys("otp-*")) {
+            assertThat(redis.getExpire(key)).as(key).isPositive();   // every one with a timer
+        }
+    }
+
+    @Test
+    void pastTheDaysCodesStrangersNetworksWaitBetweenSendsAndTheOwnersNetworkStillGetsOne() {
+        assertThat(signIn(PHONE).status()).isEqualTo(200);
+        redis.opsForValue().set("rl:otp-send-all:LOGIN:" + PHONE, "20", java.time.Duration.ofHours(20));
+        assertThat(postFrom("203.0.113.70", "/auth/otp/send", Map.of("phone", PHONE)).status()).isEqualTo(202);
+        // A network that already gave a wrong code waits; a fresh one still gets its first codes
+        redis.opsForValue().set("rl:otp-fail:LOGIN:" + PHONE + ":203.0.113.71", "1", java.time.Duration.ofHours(20));
+        Reply waits = postFrom("203.0.113.71", "/auth/otp/send", Map.of("phone", PHONE));
+        assertThat(waits.status()).isEqualTo(429);
+        assertThat(waits.body().get("code")).isEqualTo("TRY_LATER");
+        assertThat(postFrom("203.0.113.72", "/auth/otp/send", Map.of("phone", PHONE)).status()).isEqualTo(202);
+        assertThat(post("/auth/otp/send", Map.of("phone", PHONE), null).status()).isEqualTo(202);
+    }
+
+    @Test
     void oneNetworkCannotSprayCodesToManyNumbers() {
         for (int i = 0; i < 10; i++) {
             assertThat(post("/auth/otp/send", Map.of("phone", "90000000" + String.format("%02d", i)), null).status())
@@ -673,10 +717,47 @@ class AuthIntegrationTest {
     @Test
     void theEightyPercentSmsWarningIsLoggedOnceADay(CapturedOutput output) {
         redis.opsForValue().set("rl:sms-day", "398", java.time.Duration.ofHours(20));   // the cap here is 500
-        for (String phone : List.of("9000000301", "9000000302", "9000000303")) {   // 399, 400, 401
+        for (String phone : List.of("9000000301", "9000000302")) {   // 399, 400
             assertThat(post("/auth/otp/send", Map.of("phone", phone), null).status()).isEqualTo(202);
         }
+        // From 80%, a number that never signed in waits (see the next tests); the warning came once
+        assertThat(post("/auth/otp/send", Map.of("phone", "9000000303"), null).body().get("code"))
+                .isEqualTo("SMS_PAUSED");
         assertThat(output.getAll().split("80% of the daily SMS limit used", -1)).hasSize(2);
+    }
+
+    @Test
+    void nearTheDailyBudgetPeopleWhoSignedInRecentlyStillGetCodesAndNewNumbersWaitWithAnAlert(
+            CapturedOutput output) {
+        signIn(PHONE);   // a sign-in this month
+        LAST_SMS.clear();
+        redis.opsForValue().set("rl:sms-day", "450", java.time.Duration.ofHours(20));   // 90% of 500
+        Reply stranger = post("/auth/otp/send", Map.of("phone", "9000000401"), null);
+        assertThat(stranger.status()).isEqualTo(503);
+        assertThat(stranger.body().get("code")).isEqualTo("SMS_PAUSED");
+        assertThat(Long.parseLong(stranger.retryAfter())).isPositive();
+        assertThat(post("/auth/otp/send", Map.of("phone", PHONE), null).status()).isEqualTo(202);
+        assertThat(codeSentTo(LAST_SMS, PHONE)).hasSize(6);
+        // Refused ones used nothing up; the one sent did
+        assertThat(redis.opsForValue().get("rl:sms-day")).isEqualTo("451");
+        assertThat(output.getAll().split("SMS for new numbers paused", -1)).hasSize(2);   // once an hour
+        assertThat(post("/auth/otp/send", Map.of("phone", "9000000402"), null).status()).isEqualTo(503);
+        assertThat(output.getAll().split("SMS for new numbers paused", -1)).hasSize(2);
+        // A whole budget: everyone stops, with its own alert
+        redis.opsForValue().set("rl:sms-day", "500", java.time.Duration.ofHours(20));
+        assertThat(post("/auth/otp/send", Map.of("phone", PHONE), null).body().get("code")).isEqualTo("SMS_PAUSED");
+        assertThat(output.getAll()).contains("Daily SMS limit (500) reached");
+    }
+
+    @Test
+    void theHourlyCapHoldsOffNewNumbersOnlyAndASignedOutAccountOlderThan30DaysCountsAsNew() {
+        signIn(PHONE);
+        redis.opsForValue().set("rl:sms-hour", "10000", java.time.Duration.ofMinutes(40));   // the default cap
+        assertThat(post("/auth/otp/send", Map.of("phone", "9000000501"), null).status()).isEqualTo(503);
+        assertThat(post("/auth/otp/send", Map.of("phone", PHONE), null).status()).isEqualTo(202);
+        // Its sign-ins are all older than 30 days: like a new number
+        jdbc.update("UPDATE refresh_tokens SET created_at = now() - interval '31 days'");
+        assertThat(post("/auth/otp/send", Map.of("phone", PHONE), null).status()).isEqualTo(503);
     }
 
     @Test
