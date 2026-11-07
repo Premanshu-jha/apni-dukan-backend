@@ -11,6 +11,7 @@ import in.apnidukan.salon.api.BookingResponses.SalonDetails;
 import in.apnidukan.salon.api.BookingResponses.SalonService;
 import in.apnidukan.salon.api.BookingResponses.SalonSummary;
 import in.apnidukan.salon.api.BookingResponses.Slots;
+import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.service.BookingService;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -26,6 +27,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -64,14 +66,15 @@ public class BookingController {
         return bookings.salonsNear(lat, lng, after);
     }
 
+    /** A salon's page. Counts towards the person's salon reads (429 TOO_MANY_REQUESTS past 60 a minute). */
     @GetMapping("/api/v1/salons/{id}")
     public SalonDetails salon(@PathVariable UUID id) {
-        return bookings.salon(id);
+        return bookings.salon(me(), id);
     }
 
     @GetMapping("/api/v1/salons/{id}/services")
     public List<SalonService> services(@PathVariable UUID id) {
-        return bookings.salonServices(id);
+        return bookings.salonServices(me(), id);
     }
 
     /** Free start times for these services on this India date. */
@@ -90,10 +93,15 @@ public class BookingController {
         return bookings.book(me(), key, body);
     }
 
-    /** My bookings: when=upcoming (default) or past. */
+    /**
+     * My bookings: when=upcoming (default, all of them) or past (30 a page, latest first; the next page with the last
+     * one's startsAt and id as afterStart and afterId, both or neither; fewer than 30 is the last page).
+     */
     @GetMapping("/api/v1/me/bookings")
-    public List<BookingView> mine(@RequestParam(defaultValue = "upcoming") String when) {
-        return bookings.myBookings(me(), !"past".equalsIgnoreCase(when));
+    public List<BookingView> mine(@RequestParam(defaultValue = "upcoming") String when,
+                                  @RequestParam(required = false) Instant afterStart,
+                                  @RequestParam(required = false) UUID afterId) {
+        return bookings.myBookings(me(), !"past".equalsIgnoreCase(when), AppointmentCursor.of(afterStart, afterId));
     }
 
     @GetMapping("/api/v1/bookings/{id}")

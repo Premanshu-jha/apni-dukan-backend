@@ -98,9 +98,7 @@ public class SalonCalendar {
      * 409 NO_BARBER_FOR_SERVICES if none does them all (the app then suggests splitting the visit).
      */
     public List<SalonStaff> barbersFor(UUID shopId, Collection<UUID> serviceIds) {
-        List<SalonStaff> active = staff.findByShopIdOrderByCreatedAtAscIdAsc(shopId).stream()
-                .filter(SalonStaff::isActive)
-                .toList();
+        List<SalonStaff> active = staff.findByShopIdAndActiveTrueOrderByCreatedAtAscIdAsc(shopId);
         Map<UUID, Set<UUID>> doesServices = skills.findByStaffIdIn(active.stream().map(SalonStaff::getId).toList())
                 .stream()
                 .collect(Collectors.groupingBy(StaffSkill::getStaffId,
@@ -109,30 +107,74 @@ public class SalonCalendar {
                 .filter(b -> doesServices.getOrDefault(b.getId(), Set.of()).containsAll(serviceIds))
                 .toList();
         if (able.isEmpty()) {
-            throw new ApiException(HttpStatus.CONFLICT, "NO_BARBER_FOR_SERVICES",
-                    "No barber here does all of these services together. Try booking them separately.");
+            throw noBarberForServices();
         }
         return able;
     }
 
+    /** barbersFor() from the salon's setup kept in memory (SalonSetups): the same barbers, the same 409. */
+    public List<SalonSetups.Barber> barbersFor(SalonSetups.Setup setup, Collection<UUID> serviceIds) {
+        List<SalonSetups.Barber> able = setup.barbers().stream()
+                .filter(b -> b.serviceIds().containsAll(serviceIds))
+                .toList();
+        if (able.isEmpty()) {
+            throw noBarberForServices();
+        }
+        return able;
+    }
+
+    /** chosenServices() from the salon's setup kept in memory (SalonSetups): the same checks and 400s. */
+    public List<BookedService> chosenServices(SalonSetups.Setup setup, List<UUID> serviceIds) {
+        Set<UUID> ids = new LinkedHashSet<>(serviceIds);
+        if (ids.isEmpty() || ids.size() > MAX_SERVICES_PER_VISIT) {
+            throw invalid("serviceIds", "choose 1 to " + MAX_SERVICES_PER_VISIT + " services");
+        }
+        Map<UUID, BookedService> offered = setup.services().stream()
+                .collect(Collectors.toMap(BookedService::serviceId, Function.identity()));
+        List<BookedService> out = new ArrayList<>();
+        for (UUID id : ids) {
+            BookedService s = offered.get(id);
+            if (s == null) {
+                throw invalid("serviceIds", "has a service this salon doesn't offer (or switched off): " + id);
+            }
+            out.add(s);
+        }
+        return out;
+    }
+
+    private static ApiException noBarberForServices() {
+        return new ApiException(HttpStatus.CONFLICT, "NO_BARBER_FOR_SERVICES",
+                "No barber here does all of these services together. Try booking them separately.");
+    }
+
     /** Each barber's day on this date (busy time leaves out {@code except}, the appointment being moved). */
     public List<BarberDay> days(List<SalonStaff> barbers, LocalDate date, UUID except) {
-        Instant from = Availability.dayStart(date);
-        Instant to = Availability.dayStart(date.plusDays(1));
         List<UUID> ids = barbers.stream().map(SalonStaff::getId).toList();
         Map<UUID, List<Shift>> weeks = shifts.findByStaffIdIn(ids).stream()
                 .collect(Collectors.groupingBy(StaffShift::getStaffId,
                         Collectors.mapping(StaffShift::shift, Collectors.toList())));
+        return setupDays(barbers.stream().map(b -> new SalonSetups.Barber(b.getId(), b.getCreatedAt(), Set.of(),
+                weeks.getOrDefault(b.getId(), List.of()))).toList(), date, except);
+    }
+
+    /**
+     * days() for barbers of the setup kept in memory: their weeks are already there, only the busy time of that day
+     * is read.
+     */
+    public List<BarberDay> setupDays(List<SalonSetups.Barber> barbers, LocalDate date, UUID except) {
+        Instant from = Availability.dayStart(date);
+        Instant to = Availability.dayStart(date.plusDays(1));
+        List<UUID> ids = barbers.stream().map(SalonSetups.Barber::id).toList();
         Map<UUID, List<Appointment>> busy = appointments.holding(ids, from, to, except).stream()
                 .collect(Collectors.groupingBy(Appointment::staffId));
         return barbers.stream().map(b -> {
-            List<Appointment> mine = busy.getOrDefault(b.getId(), List.of());
+            List<Appointment> mine = busy.getOrDefault(b.id(), List.of());
             long booked = mine.stream()
                     .filter(a -> a.kind() != AppointmentKind.BLOCK)
                     .mapToLong(a -> a.time().length().toMinutes())
                     .sum();
-            return new BarberDay(b.getId(), Availability.working(weeks.getOrDefault(b.getId(), List.of()), date),
-                    mine.stream().map(Appointment::time).toList(), booked, b.getCreatedAt());
+            return new BarberDay(b.id(), Availability.working(b.week(), date),
+                    mine.stream().map(Appointment::time).toList(), booked, b.addedAt());
         }).toList();
     }
 

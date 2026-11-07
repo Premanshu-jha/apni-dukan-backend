@@ -7,6 +7,7 @@ import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.salon.repo.SalonAccessStore;
 import in.apnidukan.salon.repo.SalonStaffRepository;
+import in.apnidukan.salon.repo.SalonVersionStore;
 import in.apnidukan.salon.repo.StrikeStore;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.salon.domain.SalonTime;
@@ -49,13 +50,16 @@ class SalonAccountDeletion implements AccountDeletionListener {
     private final ShopMemberships memberships;
     private final SalonNotices notices;
     private final StrikeStore strikes;
+    private final SalonVersionStore versions;
 
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH)
             .withZone(SalonTime.ZONE);
 
     SalonAccountDeletion(AppointmentStore appointments, SalonStaffRepository staff, SalonAccessStore access,
-                         ShopMemberships memberships, SalonNotices notices, StrikeStore strikes) {
+                         ShopMemberships memberships, SalonNotices notices, StrikeStore strikes,
+                         SalonVersionStore versions) {
         this.strikes = strikes;
+        this.versions = versions;
         this.appointments = appointments;
         this.staff = staff;
         this.access = access;
@@ -72,7 +76,7 @@ class SalonAccountDeletion implements AccountDeletionListener {
                             "You can delete your account after your booking pause ends on " + DAY.format(until) + ".",
                             Map.of("until", until.toString()));
                 });
-        for (Appointment a : appointments.forCustomer(userId, true, now, PAGE)) {
+        for (Appointment a : appointments.forCustomer(userId, true, now, null, PAGE)) {
             boolean soon = a.status() == AppointmentStatus.CONFIRMED
                     && Duration.between(now, a.startsAt()).compareTo(BookingService.LATE_CANCEL) < 0;
             if (soon || a.status() == AppointmentStatus.IN_SERVICE) {
@@ -90,8 +94,14 @@ class SalonAccountDeletion implements AccountDeletionListener {
         // Waits for a booking or move of theirs in progress; one waiting behind this sees the account deleted
         // (BookingService checks that after taking the same lock) and is refused
         appointments.lockCustomer(userId);
+        // Locks in the order every other writer takes them: their open booking rows (a salon cancelling one holds the
+        // row, then its counter), then every salon's counter at once in shop id order (their name goes from those
+        // screens, and the cancellations below take no new counter one by one), then, in AuthService, the person's
+        // row (see PersonDetailsListener)
+        appointments.lockOpenForCustomer(userId, now);
+        versions.bumpForCustomer(userId);
         checkCanDelete(userId, now);   // again, under the lock: nothing changed since the code was sent
-        for (Appointment a : appointments.forCustomer(userId, true, now, PAGE)) {
+        for (Appointment a : appointments.forCustomer(userId, true, now, null, PAGE)) {
             if (a.status() == AppointmentStatus.CONFIRMED
                     && appointments.close(a.id(), AppointmentStatus.CANCELLED_BY_CUSTOMER, null, now)) {
                 appointments.event(a.id(), now, userId, "CANCELLED_BY_CUSTOMER", "account deleted");

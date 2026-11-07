@@ -12,6 +12,9 @@ public interface SalonServiceItemRepository extends JpaRepository<SalonServiceIt
     /** The salon's list as the app shows it: by the owner's order, then by name. */
     List<SalonServiceItem> findByShopIdOrderBySortOrderAscNameAsc(UUID shopId);
 
+    /** The salon's active services only, in the app's order. */
+    List<SalonServiceItem> findByShopIdAndActiveTrueOrderBySortOrderAscNameAsc(UUID shopId);
+
     /** Only finds it if it belongs to this salon, so one salon can never read or edit another's. */
     Optional<SalonServiceItem> findByIdAndShopId(UUID id, UUID shopId);
 

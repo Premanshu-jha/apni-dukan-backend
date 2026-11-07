@@ -15,6 +15,9 @@ public interface SalonStaffRepository extends JpaRepository<SalonStaff, UUID> {
     /** Oldest first; the id breaks ties so the order never changes between calls. */
     List<SalonStaff> findByShopIdOrderByCreatedAtAscIdAsc(UUID shopId);
 
+    /** The salon's active barbers only (switched-off ones are left out in the database), oldest first. */
+    List<SalonStaff> findByShopIdAndActiveTrueOrderByCreatedAtAscIdAsc(UUID shopId);
+
     /** Only finds the barber if he belongs to this salon. */
     Optional<SalonStaff> findByIdAndShopId(UUID id, UUID shopId);
 

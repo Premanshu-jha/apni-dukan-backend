@@ -4,12 +4,14 @@ import in.apnidukan.common.context.ShopDirectory.ShopCard;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.context.UserDirectory.Person;
+import in.apnidukan.common.notify.MessageText;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.common.notify.Notifications.Notice;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
+import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.salon.repo.SalonStaffRepository;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
@@ -18,6 +20,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -237,12 +240,26 @@ public class SalonNotices {
     }
 
     /**
-     * The salon's location changed: every booking's reminder that hasn't gone out yet is written again with the new
-     * address and map link (bookings whose reminder already went out, or never had one, are left alone).
+     * What every booking reminder of this salon shares (see AppointmentStore.rewriteReminders, which writes them all
+     * again in one statement when the salon moves): the same words as reminder(), fitted to the stored sizes exactly
+     * as the notifications module fits every message (MessageText).
      */
-    public void locationChanged(List<Appointment> upcoming, ShopCard salon) {
-        // Only channels still waiting are rewritten; all the salon's bookings in batched statements
-        notifications.replacePendingAll(upcoming.stream().map(a -> reminder(a, salon)).toList());
+    AppointmentStore.ReminderText reminderText(ShopCard salon) {
+        String afterTime = reminderAfterTime(salon);
+        String tail = reminderTail(salon);
+        List<String> tails = new ArrayList<>();
+        for (int times = 14; times <= 16; times++) {   // the two "h:mm AM" times: 7 + 7, 7 + 8 or 8 + 8 characters
+            // Everything before the tail, as long as it will be (its own characters don't matter: the cut at 500
+            // falls in the tail, after the name)
+            String head = "x".repeat(times + afterTime.length() + 4 + REMINDER_AFTER_CODE.length());
+            tails.add(MessageText.cut(head + tail, MessageText.MAX_BODY).substring(head.length()));
+        }
+        return new AppointmentStore.ReminderText(MessageText.cut(reminderTitle(salon), MessageText.MAX_TITLE),
+                afterTime, REMINDER_AFTER_CODE, tails,
+                MessageText.smsQuery(Map.of("AREA", MessageText.cutPlain(salon.area(), MessageText.MAX_SMS_VARIABLE)))
+                        + "&CODE=",
+                "&" + MessageText.smsQuery(Map.of("SALON",
+                        MessageText.cutPlain(salon.name(), MessageText.MAX_SMS_VARIABLE))) + "&TIME=");
     }
 
     /**
@@ -316,15 +333,30 @@ public class SalonNotices {
         notifications.queue(reminder(a, salon));
     }
 
-    private static Notice reminder(Appointment a, ShopCard salon) {
+    /** The reminder's words between its parts. Kept in one place: AppointmentStore.rewriteReminders uses them too. */
+    private static final String REMINDER_AFTER_CODE = ". Held until ";
+
+    private static String reminderTitle(ShopCard salon) {
+        return "In 1 hour at " + salon.name();
+    }
+
+    private static String reminderAfterTime(ShopCard salon) {
+        return " at " + salon.name() + ". Start code ";
+    }
+
+    private static String reminderTail(ShopCard salon) {
+        return ". Can't come? Cancel in the app. " + salon.addressLine() + ", " + salon.area() + ". Map: "
+                + mapLink(salon);
+    }
+
+    static Notice reminder(Appointment a, ShopCard salon) {
         Instant heldUntil = a.startsAt().plus(SalonDayService.LATE_ALLOWANCE);
         return new Notice(a.customerId(), "BOOKING_REMINDER", a.id(),
                 a.startsAt().minus(REMINDER_BEFORE),
-                "In 1 hour at " + salon.name(),
+                reminderTitle(salon),
                 // Code and held-until first: if a long name or address makes the text too long, only the end is cut
-                TIME.format(a.startsAt()) + " at " + salon.name() + ". Start code " + a.startCode() + ". Held until "
-                        + TIME.format(heldUntil) + ". Can't come? Cancel in the app. " + salon.addressLine() + ", "
-                        + salon.area() + ". Map: " + mapLink(salon),
+                TIME.format(a.startsAt()) + reminderAfterTime(salon) + a.startCode() + REMINDER_AFTER_CODE
+                        + TIME.format(heldUntil) + reminderTail(salon),
                 url(a), Map.of("SALON", salon.name(), "TIME", TIME.format(a.startsAt()), "AREA", salon.area(),
                         "CODE", a.startCode(), "UNTIL", TIME.format(heldUntil)));
     }

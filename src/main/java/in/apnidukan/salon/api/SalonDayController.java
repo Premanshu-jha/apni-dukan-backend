@@ -1,5 +1,6 @@
 package in.apnidukan.salon.api;
 
+import in.apnidukan.common.context.CurrentUser;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.salon.api.BookingRequests.AddBlock;
 import in.apnidukan.salon.api.BookingRequests.AddClosure;
@@ -16,11 +17,16 @@ import in.apnidukan.salon.api.BookingResponses.DayView;
 import in.apnidukan.salon.api.BookingResponses.MemberView;
 import in.apnidukan.salon.api.BookingResponses.PauseView;
 import in.apnidukan.salon.api.BookingResponses.WalkInOption;
+import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.service.SalonDayService;
+import in.apnidukan.salon.service.SalonEtags;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.format.annotation.DateTimeFormat.ISO;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -32,10 +38,13 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.filter.ShallowEtagHeaderFilter;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -48,36 +57,84 @@ import java.util.UUID;
 public class SalonDayController {
 
     private final SalonDayService day;
+    private final SalonEtags etags;
     private final CurrentUserProvider currentUser;
 
-    public SalonDayController(SalonDayService day, CurrentUserProvider currentUser) {
+    public SalonDayController(SalonDayService day, SalonEtags etags, CurrentUserProvider currentUser) {
         this.day = day;
+        this.etags = etags;
         this.currentUser = currentUser;
     }
 
-    /** The day screen: a column per barber with his hours and appointments. date = India date, default today. */
+    /**
+     * The day screen: a column per barber with his hours and appointments. date = India date, default today.
+     * The app asks every 30 seconds with the ETag it got as If-None-Match: when nothing changed, 304 after one
+     * primary-key read (SalonEtags).
+     */
     @GetMapping("/day")
-    public DayView day(@RequestParam(required = false) @DateTimeFormat(iso = ISO.DATE) LocalDate date) {
-        return day.day(me(), date);
+    public ResponseEntity<DayView> day(@RequestParam(required = false) @DateTimeFormat(iso = ISO.DATE) LocalDate date,
+                                       HttpServletRequest request) {
+        CurrentUser me = currentUser.get();
+        Optional<String> same = etags.unchanged(me, SalonEtags.DAY, SalonDayService.dayParams(date), sent(request));
+        if (same.isPresent()) {
+            return notModified(request, same.get());
+        }
+        return tagged(request, day.day(me, date));
     }
 
     /**
-     * The owner's history: bookings and walk-ins on the India dates from..to (at most 31 days), latest first, with
-     * a count per status and the completed amount at list price. Owner or helper.
+     * The owner's history: bookings and walk-ins on the India dates from..to (at most 31 days), latest first, 100 a
+     * page, with a count per status and the completed amount at list price. The next page: afterStart and afterId
+     * from `next` (both or neither). Owner or helper.
      */
     @GetMapping("/history")
     public HistoryView history(@RequestParam @DateTimeFormat(iso = ISO.DATE) LocalDate from,
-                               @RequestParam @DateTimeFormat(iso = ISO.DATE) LocalDate to) {
-        return day.history(me(), from, to);
+                               @RequestParam @DateTimeFormat(iso = ISO.DATE) LocalDate to,
+                               @RequestParam(required = false) Instant afterStart,
+                               @RequestParam(required = false) UUID afterId) {
+        return day.history(me(), from, to, AppointmentCursor.of(afterStart, afterId));
     }
 
     /**
-     * Upcoming bookings across the coming days, soonest first (up to 200): the owner's "what's coming" list. A
-     * barber without walk-in access sees only his own.
+     * Upcoming bookings across the coming days, soonest first, 100 a page: the owner's "what's coming" list. A
+     * barber without walk-in access sees only his own. The next page: afterStart and afterId = the last item's
+     * startsAt and id (both or neither); fewer than 100 is the last page. ETag and 304 as for the day screen.
      */
     @GetMapping("/upcoming")
-    public List<AppointmentView> upcoming() {
-        return day.upcoming(me());
+    public ResponseEntity<List<AppointmentView>> upcoming(@RequestParam(required = false) Instant afterStart,
+                                                          @RequestParam(required = false) UUID afterId,
+                                                          HttpServletRequest request) {
+        AppointmentCursor after = AppointmentCursor.of(afterStart, afterId);
+        CurrentUser me = currentUser.get();
+        Optional<String> same = etags.unchanged(me, SalonEtags.UPCOMING, SalonDayService.upcomingParams(after),
+                sent(request));
+        if (same.isPresent()) {
+            return notModified(request, same.get());
+        }
+        return tagged(request, day.upcoming(me, after));
+    }
+
+    /** The If-None-Match values the app sent. */
+    private static List<String> sent(HttpServletRequest request) {
+        return Collections.list(request.getHeaders(HttpHeaders.IF_NONE_MATCH));
+    }
+
+    /** 304 with the tag; EtagConfig's own fingerprint is skipped (there is no body to fingerprint). */
+    private static <T> ResponseEntity<T> notModified(HttpServletRequest request, String etag) {
+        ShallowEtagHeaderFilter.disableContentCaching(request);
+        return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(etag).build();
+    }
+
+    /**
+     * 200 with our own tag (EtagConfig doesn't fingerprint it again); without one (a token naming no salon),
+     * EtagConfig fingerprints the body as for every other GET.
+     */
+    private static <T> ResponseEntity<T> tagged(HttpServletRequest request, SalonDayService.Tagged<T> answer) {
+        if (answer.etag() == null) {
+            return ResponseEntity.ok(answer.body());
+        }
+        ShallowEtagHeaderFilter.disableContentCaching(request);
+        return ResponseEntity.ok().eTag(answer.etag()).body(answer.body());
     }
 
     /**
