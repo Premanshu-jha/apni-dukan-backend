@@ -15,14 +15,14 @@ import java.util.UUID;
  */
 public interface UserDirectory {
 
-    /**
-     * The person with this phone, creating the account if nobody has signed in with it yet (a salon inviting a
-     * barber by phone: he then signs in with the normal OTP and finds his salon). 400 if the phone isn't valid.
-     */
-    UUID findOrCreateByPhone(String phone);
-
-    /** The account with this phone, if any (for support looking a customer up). 400 if the phone isn't valid. */
+    /** The account with this phone, if any (support looking a customer up, an invitation's message). 400 if the phone isn't valid. */
     Optional<UUID> findByPhone(String phone);
+
+    /**
+     * The phone as accounts store it (10 digits; "+91" and a leading 0 dropped, spaces and dashes ignored). 400
+     * INVALID_PHONE if it isn't an Indian mobile number.
+     */
+    String normalizePhone(String phone);
 
     /** Name (null if not set) and phone of each person found; unknown ids are left out. */
     Map<UUID, Person> find(Collection<UUID> userIds);

@@ -37,4 +37,18 @@ public final class DatabaseErrors {
         }
         return false;
     }
+
+    /**
+     * Whether a plain-SQL write (JdbcTemplate) was refused by this named unique key (SQL state 23505). Postgres
+     * names the key in its message ("... violates unique constraint "name""); the name is set by the migration.
+     */
+    public static boolean violatedUnique(DataAccessException e, String constraint) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException sql && "23505".equals(sql.getSQLState())
+                    && sql.getMessage() != null && sql.getMessage().contains("\"" + constraint + "\"")) {
+                return true;
+            }
+        }
+        return false;
+    }
 }
