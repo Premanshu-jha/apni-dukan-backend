@@ -2,6 +2,7 @@ package in.apnidukan.files.storage;
 
 import java.io.InputStream;
 import java.time.Duration;
+import java.time.Instant;
 
 /**
  * Where file bytes live. The rest of the app only talks to this interface,
@@ -17,6 +18,12 @@ public interface FileStorage {
      * @param downloadName if not null, the browser saves the file under this name instead of showing it.
      */
     String signedLink(String key, Duration validFor, String downloadName);
+
+    /**
+     * A temporary link signed as if at {@code signedAt} (not now): every copy of the backend signing the same key for
+     * the same moment gives the very same link, so a phone's browser keeps the photo it already has.
+     */
+    String signedLinkAt(String key, Instant signedAt, Duration validFor);
 
     void delete(String key);
 }

@@ -202,8 +202,9 @@ public class FileService {
 
     /**
      * The owner or a helper of a shop. A salon's barber (BARBER) has no use for the shop's files (bills, receipts,
-     * the owner's photo), so he gets 403 NOT_ALLOWED. His role comes from the sign-in token; removing his sign-in
-     * ends his sessions at once, so it can't be stale.
+     * the owner's photo), so he gets 403 NOT_ALLOWED. The shop and role are read from the database
+     * (CurrentUserProvider.requireShop), so a token from before a closing, a hand-over or a removal can't reach the
+     * shop's files.
      */
     private CurrentUser shopStaff() {
         CurrentUser user = currentUser.requireShop();

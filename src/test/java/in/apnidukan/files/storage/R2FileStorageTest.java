@@ -40,4 +40,51 @@ class R2FileStorageTest {
         verify(s3).deleteObject(delete.capture());
         assertThat(delete.getValue().overrideConfiguration()).isEmpty();
     }
+    @Test
+    void aPhotoLinkSignedForAMomentIsExactlyTheLinkTheSdksPresignerMakesThen() {
+        R2Properties props = new R2Properties("https://acc.r2.cloudflarestorage.com", "bucket", "key", "secret", "auto");
+        try (software.amazon.awssdk.services.s3.presigner.S3Presigner presigner =
+                     software.amazon.awssdk.services.s3.presigner.S3Presigner.builder()
+                             .endpointOverride(java.net.URI.create(props.endpoint()))
+                             .region(software.amazon.awssdk.regions.Region.of(props.region()))
+                             .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider
+                                     .create(software.amazon.awssdk.auth.credentials.AwsBasicCredentials
+                                             .create("key", "secret")))
+                             .serviceConfiguration(software.amazon.awssdk.services.s3.S3Configuration.builder()
+                                     .pathStyleAccessEnabled(true).build())
+                             .build()) {
+            R2FileStorage storage = new R2FileStorage(s3, presigner, props, Duration.ofSeconds(60));
+            String sdk = storage.signedLink("shops/s/photos/f.jpg", Duration.ofMinutes(120), null);
+            String date = java.net.URI.create(sdk).getQuery().replaceAll(".*X-Amz-Date=([0-9TZ]+).*", "$1");
+            java.time.Instant at = java.time.LocalDateTime.parse(date,
+                    java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'"))
+                    .toInstant(java.time.ZoneOffset.UTC);
+            String ours = storage.signedLinkAt("shops/s/photos/f.jpg", at, Duration.ofMinutes(120));
+            // The same request, signed the same way: R2 accepts ours exactly as it accepts the SDK's
+            assertThat(query(ours)).isEqualTo(query(sdk));
+            assertThat(java.net.URI.create(ours).getRawPath()).isEqualTo(java.net.URI.create(sdk).getRawPath());
+        }
+    }
+
+    @Test
+    void twoServersSignTheSameLinkForTheSameHour() {
+        R2Properties props = new R2Properties("https://acc.r2.cloudflarestorage.com", "bucket", "key", "secret", "auto");
+        R2FileStorage one = new R2FileStorage(mock(S3Client.class), null, props, Duration.ofSeconds(60));
+        R2FileStorage two = new R2FileStorage(mock(S3Client.class), null, props, Duration.ofSeconds(60));
+        java.time.Instant hour = java.time.Instant.parse("2026-11-10T04:00:00Z");
+        assertThat(one.signedLinkAt("k.jpg", hour, Duration.ofMinutes(120)))
+                .isEqualTo(two.signedLinkAt("k.jpg", hour, Duration.ofMinutes(120)))
+                .contains("X-Amz-Date=20261110T040000Z").contains("X-Amz-Expires=7200");
+        assertThat(one.signedLinkAt("k.jpg", hour.plusSeconds(3600), Duration.ofMinutes(120)))
+                .isNotEqualTo(one.signedLinkAt("k.jpg", hour, Duration.ofMinutes(120)));
+    }
+
+    private static java.util.Map<String, String> query(String url) {
+        java.util.Map<String, String> out = new java.util.TreeMap<>();
+        for (String pair : java.net.URI.create(url).getRawQuery().split("&")) {
+            int eq = pair.indexOf('=');
+            out.put(eq < 0 ? pair : pair.substring(0, eq), eq < 0 ? "" : pair.substring(eq + 1));
+        }
+        return out;
+    }
 }
