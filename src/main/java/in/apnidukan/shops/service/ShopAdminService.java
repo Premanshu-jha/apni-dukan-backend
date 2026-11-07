@@ -12,6 +12,8 @@ import in.apnidukan.common.error.ApiException;
 import in.apnidukan.shops.api.AdminShopDetail;
 import in.apnidukan.shops.api.AdminShopDetail.Change;
 import in.apnidukan.shops.api.AdminShopDetail.TimelineEntry;
+import in.apnidukan.shops.api.AdminShopDetail.TimelineNext;
+import in.apnidukan.shops.api.AdminShopDetail.TimelinePage;
 import in.apnidukan.shops.api.AdminShopResponse;
 import in.apnidukan.shops.domain.ReviewGroup;
 import in.apnidukan.shops.domain.Shop;
@@ -20,6 +22,7 @@ import in.apnidukan.shops.domain.ShopEventType;
 import in.apnidukan.shops.domain.ShopRole;
 import in.apnidukan.shops.domain.ShopStatus;
 import in.apnidukan.shops.domain.ShopType;
+import in.apnidukan.shops.domain.TimelineCursor;
 import in.apnidukan.shops.domain.VisitIssue;
 import in.apnidukan.shops.repo.ShopMemberRepository;
 import in.apnidukan.shops.repo.ShopRepository;
@@ -64,11 +67,13 @@ public class ShopAdminService {
     private final List<ShopChangeListener> listeners;
     private final ShopReviewStore review;
     private final SalonFacts salons;
+    private final DashboardCounts dashboardCounts;
     private final Clock clock;
 
     public ShopAdminService(ShopRepository shops, ShopMemberRepository members, UserDirectory users, FileRefs files,
                             Notifications notifications, List<ShopChangeListener> listeners, ShopReviewStore review,
-                            SalonFacts salons, Clock clock) {
+                            SalonFacts salons, DashboardCounts dashboardCounts, Clock clock) {
+        this.dashboardCounts = dashboardCounts;
         this.review = review;
         this.salons = salons;
         this.shops = shops;
@@ -80,17 +85,16 @@ public class ShopAdminService {
         this.clock = clock;
     }
 
-    @Transactional(readOnly = true)
-    public List<AdminShopResponse> list(UUID adminId, ShopStatus status) {
-        requireAdmin(adminId);
-        return views(shops.findTop50ByStatusOrderByCreatedAtAsc(status));
-    }
-
-    /** The dashboard: how many shops of each type are in each group. */
+    /**
+     * The dashboard: how many shops of each type are in each group. Kept 30 seconds in Redis (one count over every
+     * shop for each admin page open is too much at tens of thousands of shops); a field-team decision clears it, so
+     * the admin who decided sees the new counts at once. Owners' own steps (submitting, a pin moved) show within
+     * 30 seconds. If Redis doesn't answer, the counts come straight from the database.
+     */
     @Transactional(readOnly = true)
     public Map<ShopType, Map<ReviewGroup, Long>> dashboard(UUID adminId) {
         requireAdmin(adminId);
-        return review.counts();
+        return dashboardCounts.get();
     }
 
     /**
@@ -101,6 +105,7 @@ public class ShopAdminService {
     public List<AdminShopResponse> list(UUID adminId, ShopType type, ReviewGroup group, String q,
                                         Instant afterSince, UUID afterId) {
         requireAdmin(adminId);
+        requireSearchable(q);
         List<UUID> ids = review.search(type, group, q,
                 afterId == null ? null : new ShopReviewStore.Cursor(afterSince, afterId));
         Map<UUID, Shop> byId = shops.findAllById(ids).stream().collect(Collectors.toMap(Shop::getId,
@@ -149,12 +154,45 @@ public class ShopAdminService {
             SalonFacts.Size size = salons.size(shopId);
             salon = new AdminShopDetail.Salon(size.barbers(), size.services());
         }
-        List<TimelineEntry> timeline = review.timeline(shopId).stream()
+        TimelinePage timeline = timelinePage(shopId, null);
+        return new AdminShopDetail(views(List.of(shop)).get(0), salon, changes, moved, oldOwnerPhoto, oldShopPhoto,
+                timeline.items(), timeline.next());
+    }
+
+    /**
+     * A shop's timeline, 50 entries a page, newest first, after the cursor (null: the newest, the same as the shop
+     * page's). 404 if there's no such shop.
+     */
+    @Transactional(readOnly = true)
+    public TimelinePage timeline(UUID adminId, UUID shopId, TimelineCursor after) {
+        requireAdmin(adminId);
+        if (!shops.existsById(shopId)) {
+            throw ApiException.notFound("Shop");
+        }
+        return timelinePage(shopId, after);
+    }
+
+    private TimelinePage timelinePage(UUID shopId, TimelineCursor after) {
+        int page = ShopReviewStore.TIMELINE_PAGE;
+        List<ShopReviewStore.Event> events = review.timeline(shopId, after, page + 1);
+        List<ShopReviewStore.Event> shown = events.size() > page ? events.subList(0, page) : events;
+        ShopReviewStore.Event last = shown.isEmpty() ? null : shown.get(shown.size() - 1);
+        return new TimelinePage(shown.stream()
                 .map(e -> new TimelineEntry(e.at(), e.event(), e.byName(), e.byAdmin(), e.reason(), e.note(),
                         e.checklist()))
-                .toList();
-        return new AdminShopDetail(views(List.of(shop)).get(0), salon, changes, moved, oldOwnerPhoto, oldShopPhoto,
-                timeline);
+                .toList(), events.size() > page ? new TimelineNext(last.at(), last.seq()) : null);
+    }
+
+    /**
+     * 400 VALIDATION_FAILED for a search of 1 or 2 letters: it would match most shops by name and read the trigram
+     * index for nothing useful. A shop number ("7", "#42") of any length still works; phone digits need 3 anyway.
+     */
+    static void requireSearchable(String q) {
+        String text = q == null ? "" : q.strip();
+        if (!text.isEmpty() && text.codePointCount(0, text.length()) < 3 && !text.matches("#?\\d+")) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("q", "type at least 3 letters"));
+        }
     }
 
     /** A note on the shop's timeline for admins only (no decision). 404 if there's no such shop. */
@@ -184,6 +222,7 @@ public class ShopAdminService {
         shop.approve(now());
         save(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.APPROVED, null, note, List.of());
+        dashboardCounts.clearAfterCommit();
         tellOwner(shop, "SHOP_APPROVED", "Your shop is live",
                 shop.details().name() + " is approved. Customers nearby can find it now.");
         return view(shop);
@@ -202,6 +241,7 @@ public class ShopAdminService {
         shop.reject(reason, now());
         save(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.SENT_BACK, reason, note, issues(checklist));
+        dashboardCounts.clearAfterCommit();
         tellOwner(shop, "SHOP_NOT_APPROVED", "Your shop needs a change",
                 shop.details().name() + " wasn't approved yet: " + reason + " Fix it in the app and submit again.");
         return view(shop);
@@ -220,6 +260,7 @@ public class ShopAdminService {
         shop.suspend(reason, now());
         save(shop);   // the row is now locked: bookings in progress have finished, new ones see SUSPENDED
         review.addEvent(shopId, now(), adminId, true, ShopEventType.SUSPENDED, reason, note, issues(checklist));
+        dashboardCounts.clearAfterCommit();
         listeners.forEach(l -> l.suspended(shop.getId()));
         tellOwner(shop, "SHOP_SUSPENDED", "Your shop is off the app",
                 shop.details().name() + " is hidden from customers: " + reason + " Contact Apni Dukan to fix this.");
@@ -237,6 +278,7 @@ public class ShopAdminService {
         shop.reinstate(now());
         save(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.REINSTATED, null, note, List.of());
+        dashboardCounts.clearAfterCommit();
         tellOwner(shop, "SHOP_REINSTATED", "Your shop will be checked again",
                 shop.details().name() + " is no longer suspended. Our team will visit; it goes live once approved.");
         return view(shop);

@@ -3,8 +3,10 @@ package in.apnidukan.shops.repo;
 import in.apnidukan.shops.domain.ReviewGroup;
 import in.apnidukan.shops.domain.ShopEventType;
 import in.apnidukan.shops.domain.ShopType;
+import in.apnidukan.shops.domain.TimelineCursor;
 import in.apnidukan.shops.domain.VisitIssue;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
@@ -204,16 +206,29 @@ public class ShopReviewStore {
                         : String.join(",", checklist.stream().map(Enum::name).toList()));
     }
 
-    /** Newest first. */
-    public List<Event> timeline(UUID shopId) {
-        return jdbc.query("SELECT e.*, u.name AS by_name FROM shop_events e LEFT JOIN users u ON u.id = e.by_user "
-                + "WHERE e.shop_id = ? ORDER BY e.at DESC, e.seq DESC", (rs, i) -> {
-                    String list = rs.getString("checklist");
-                    return new Event(rs.getTimestamp("at").toInstant(), ShopEventType.valueOf(rs.getString("event")),
-                            rs.getString("by_name"), rs.getBoolean("by_admin"), rs.getString("reason"),
-                            rs.getString("note"), list == null ? List.of()
-                                    : Arrays.stream(list.split(",")).map(VisitIssue::valueOf).toList());
-                }, shopId);
+    /** Timeline entries per page (the shop page shows the first; the next ones come from .../timeline). */
+    public static final int TIMELINE_PAGE = 50;
+
+    private static final String TIMELINE = "SELECT e.*, u.name AS by_name FROM shop_events e "
+            + "LEFT JOIN users u ON u.id = e.by_user WHERE e.shop_id = ?";
+    private static final String NEWEST_FIRST = " ORDER BY e.at DESC, e.seq DESC LIMIT ?";
+
+    /**
+     * Newest first, at most limit, after the cursor (null: from the newest): one range of ix_shop_events_shop
+     * (shop_id, at DESC, seq DESC), however long the timeline.
+     */
+    public List<Event> timeline(UUID shopId, TimelineCursor after, int limit) {
+        RowMapper<Event> row = (rs, i) -> {
+            String list = rs.getString("checklist");
+            return new Event(rs.getTimestamp("at").toInstant(), ShopEventType.valueOf(rs.getString("event")),
+                    rs.getString("by_name"), rs.getBoolean("by_admin"), rs.getString("reason"),
+                    rs.getString("note"), list == null ? List.of()
+                            : Arrays.stream(list.split(",")).map(VisitIssue::valueOf).toList(), rs.getLong("seq"));
+        };
+        return after == null
+                ? jdbc.query(TIMELINE + NEWEST_FIRST, row, shopId, limit)
+                : jdbc.query(TIMELINE + " AND (e.at, e.seq) < (?, ?)" + NEWEST_FIRST, row, shopId,
+                        Timestamp.from(after.afterAt()), after.afterSeq(), limit);
     }
 
     private static Snapshot snapshot(ResultSet rs) throws SQLException {
@@ -229,9 +244,12 @@ public class ShopReviewStore {
                            String udyamNumber, UUID ownerPhotoFileId, UUID shopPhotoFileId) {
     }
 
-    /** @param byName who did it (null for the system, or an account deleted since) */
+    /**
+     * @param byName who did it (null for the system, or an account deleted since)
+     * @param seq    the order of entries made in the same instant (for the next page's cursor)
+     */
     public record Event(Instant at, ShopEventType event, String byName, boolean byAdmin, String reason, String note,
-                        List<VisitIssue> checklist) {
+                        List<VisitIssue> checklist, long seq) {
 
         public Event {
             checklist = List.copyOf(checklist);

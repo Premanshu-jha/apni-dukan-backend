@@ -13,7 +13,11 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -53,6 +57,16 @@ public class ShopDirectoryService implements ShopDirectory {
     @Transactional(readOnly = true)
     public Optional<ShopCard> find(UUID shopId) {
         return shops.findById(shopId).map(ShopDirectoryService::card);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Map<UUID, ShopCard> findAll(Collection<UUID> shopIds) {
+        Map<UUID, ShopCard> out = new HashMap<>();
+        if (!shopIds.isEmpty()) {
+            shops.findAllById(new HashSet<>(shopIds)).forEach(s -> out.put(s.getId(), card(s)));
+        }
+        return out;
     }
 
     @Override
