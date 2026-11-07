@@ -36,10 +36,13 @@ public interface Notifications {
 
     /**
      * Forgets this person's salon messages (types starting SALON_): the ones still waiting aren't sent, and the app's
-     * list no longer shows them. For someone who left a salon or was removed from it: its customers' names and
+     * list no longer shows them, from this moment (they are deleted in the background). For someone who left a salon or was removed from it: its customers' names and
      * booking numbers aren't theirs to keep, and its day links would open another salon's day if they join one.
      */
     void forgetSalonMessages(UUID userId);
+
+    /** forgetSalonMessages for several people at once (everyone left a closed salon). */
+    void forgetSalonMessages(java.util.Collection<UUID> userIds);
 
     /**
      * @param type   what kind of message, e.g. BOOKING_CONFIRMED (for the log and the history)

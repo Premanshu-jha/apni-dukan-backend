@@ -19,6 +19,11 @@ import java.util.Base64;
 /**
  * Sends Web Push messages straight to the browsers' push services (RFC 8030), encrypted for the device and signed
  * with our VAPID key (see {@link WebPushCrypto}).
+ *
+ * One HTTP client for every message (this sender is a single bean): HTTP/2, so the sends to one push service (FCM,
+ * Mozilla, Apple, Microsoft) share a few kept-alive connections and run as parallel streams on them, instead of a new
+ * TLS handshake per message. Connections stay open between sends (the JDK client keeps idle ones for 20 minutes by
+ * default); NotificationSendJob limits the sends at once per push service.
  */
 public class WebPushSender implements PushSender {
 
@@ -33,6 +38,7 @@ public class WebPushSender implements PushSender {
     private final String subject;
     private final Clock clock;
     private final HttpClient http = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_2)   // every push service speaks it; HTTP/1.1 only if one doesn't
             .connectTimeout(Duration.ofSeconds(5))
             .followRedirects(HttpClient.Redirect.NEVER)   // a redirect could lead anywhere: never follow one
             .build();

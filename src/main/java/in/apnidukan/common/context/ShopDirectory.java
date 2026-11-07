@@ -24,6 +24,14 @@ public interface ShopDirectory {
     Optional<ShopCard> findForBooking(UUID shopId);
 
     /**
+     * Locks the shop's row against bookings until the transaction ends (SELECT ... FOR NO KEY UPDATE: it waits for
+     * bookings in progress, which hold it FOR SHARE, and bookings after it wait for this one, but foreign-key checks
+     * are not held up). A salon pausing online bookings takes it, so a booking either finished before the pause or
+     * sees it.
+     */
+    void holdAgainstBookings(UUID shopId);
+
+    /**
      * APPROVED shops of this type within radiusMetres of the point, nearest first, at most limit, after `after`
      * (the last card of the previous page; null for the first page). Found by the database's map index (PostGIS),
      * so it reads only shops near the point, however many there are.

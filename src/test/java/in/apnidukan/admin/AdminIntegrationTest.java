@@ -236,6 +236,59 @@ class AdminIntegrationTest {
     }
 
     @Test
+    void theNumbersRealHolderClaimingATestAccountGetsNoneOfTheTestersEmailNameOrShop() {
+        post("/admin/test-mode/phones", Map.of("phone", "9111111111", "label", "Tester owner"), boss);
+        post("/admin/test-mode/phones", Map.of("phone", "9111111112", "label", "Tester helper"), boss);
+        put("/admin/test-mode", Map.of("hours", 1), boss);
+        Reply testerIn = post("/auth/otp/verify", Map.of("phone", "9111111111", "code", "424242"), (String) null);
+        assertThat(testerIn.status()).as(testerIn.text()).isEqualTo(200);
+        UUID tester = UUID.fromString((String) field(field(testerIn.body(), "user"), "id"));
+        Reply helperIn = post("/auth/otp/verify", Map.of("phone", "9111111112", "code", "424242"), (String) null);
+        UUID testerHelper = UUID.fromString((String) field(field(helperIn.body(), "user"), "id"));
+        // The testers verified an email (the recovery address), set names, registered a salon, joined a real shop
+        jdbc.update("UPDATE users SET name = 'Tester', email = 'tester@test.in', email_verified_at = now() WHERE id = ?",
+                tester);
+        jdbc.update("UPDATE users SET name = 'Tester 2', email = 'tester2@test.in', email_verified_at = now() "
+                + "WHERE id = ?", testerHelper);
+        UUID testShop = UUID.randomUUID();
+        TestData.salon(jdbc, testShop, tester);
+        jdbc.update("UPDATE shops SET status = 'APPROVED' WHERE id = ?", testShop);
+        UUID realShop = UUID.randomUUID();
+        TestData.shop(jdbc, realShop, customer);
+        TestData.member(jdbc, realShop, testerHelper, "HELPER");
+
+        // Off the list, the numbers' real holders sign in with SMS codes
+        delete("/admin/test-mode/phones/9111111111", boss);
+        delete("/admin/test-mode/phones/9111111112", boss);
+        for (String phone : List.of("9111111111", "9111111112")) {
+            post("/auth/otp/send", Map.of("phone", phone), (String) null);
+            Reply real = post("/auth/otp/verify", Map.of("phone", phone, "code",
+                    CapturingSenders.codeSentTo(LAST_SMS, phone)), (String) null);
+            assertThat(real.status()).as(real.text()).isEqualTo(200);
+            assertThat(field(field(real.body(), "user"), "email")).isNull();
+        }
+        // Nothing of the testers stays: no email to recover the account with, no name, no shop
+        for (UUID claimed : List.of(tester, testerHelper)) {
+            assertThat(jdbc.queryForObject("SELECT test_account OR name IS NOT NULL OR email IS NOT NULL "
+                    + "OR email_verified_at IS NOT NULL FROM users WHERE id = ?", Boolean.class, claimed)).isFalse();
+            assertThat(count("shop_members WHERE user_id = '" + claimed + "'")).isZero();
+        }
+        // The testers' salon is closed (its bookings go through the closing job); the real shop keeps its owner
+        assertThat(jdbc.queryForObject("SELECT status FROM shops WHERE id = ?", String.class, testShop))
+                .isEqualTo("CLOSED");
+        assertThat(count("salon_closings WHERE shop_id = '" + testShop + "'")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM shops WHERE id = ?", String.class, realShop))
+                .isEqualTo("DRAFT");
+        assertThat(count("shop_members WHERE shop_id = '" + realShop + "'")).isEqualTo(1);
+        // "Lost phone" with the testers' email finds nothing; their sign-ins ended
+        assertThat(post("/auth/recover/complete", Map.of("email", "tester@test.in", "emailCode", "123456",
+                "newPhone", "9700000001", "phoneCode", "123456"), (String) null).status()).isEqualTo(400);
+        assertThat(get("/auth/me", (String) field(testerIn.body(), "accessToken")).status()).isEqualTo(401);
+        assertThat(post("/auth/refresh", Map.of("refreshToken", field(helperIn.body(), "refreshToken")),
+                (String) null).status()).isEqualTo(401);
+    }
+
+    @Test
     void theSuperAdminCantDeleteTheirAccountAndANewAdminSignsInAfresh() {
         Reply refused = post("/auth/me/delete-code", Map.of(), boss);
         assertThat(field(refused.body(), "code")).as(refused.text()).isEqualTo("SUPER_ADMIN");
@@ -288,9 +341,9 @@ class AdminIntegrationTest {
 
         Map<?, ?> counts = (Map<?, ?>) get("/admin/dashboard", admin).body();
         assertThat(counts.get("SALON")).isEqualTo(Map.of("FIRST_VISIT", 1, "RECHECK", 1, "SENT_BACK", 0, "LIVE", 1,
-                "SUSPENDED", 0));
+                "SUSPENDED", 0, "CLOSED", 0));
         assertThat(counts.get("KIRANA")).isEqualTo(Map.of("FIRST_VISIT", 0, "RECHECK", 0, "SENT_BACK", 1, "LIVE", 0,
-                "SUSPENDED", 1));
+                "SUSPENDED", 1, "CLOSED", 0));
 
         List<?> waiting = (List<?>) get("/admin/shops?type=SALON&group=FIRST_VISIT", admin).body();
         assertThat(waiting).hasSize(1);
@@ -592,6 +645,41 @@ class AdminIntegrationTest {
         // Redis losing the text (or a broken value) just counts again
         redis.opsForValue().set("admin:dashboard:1", "garbage");
         assertThat(field(((Map<?, ?>) get("/admin/dashboard", admin).body()).get("SALON"), "LIVE")).isEqualTo(1);
+    }
+
+    // ---------------- own shops ----------------
+
+    @Test
+    void anAdminCantDecideOnOrWriteNotesAboutAShopTheyBelongTo() {
+        UUID shop = shop("SALON", "PENDING_VISIT", "Ravi's Salon", "9000000050");
+        TestData.member(jdbc, shop, admin, "HELPER");
+        long v = version(shop);
+        List<Reply> refused = List.of(
+                post("/admin/shops/" + shop + "/approve", Map.of("version", v), admin),
+                post("/admin/shops/" + shop + "/reject", Map.of("version", v, "reason", "Board not visible"), admin),
+                post("/admin/shops/" + shop + "/suspend", Map.of("version", v, "reason", "Shut at visit"), admin),
+                post("/admin/shops/" + shop + "/reinstate", Map.of("version", v), admin),   // before its status
+                post("/admin/shops/" + shop + "/notes", Map.of("note", "Looks fine to me"), admin));
+        for (Reply r : refused) {
+            assertThat(r.status()).as(r.text()).isEqualTo(403);
+            assertThat(field(r.body(), "code")).isEqualTo("OWN_SHOP");
+            assertThat(field(r.body(), "message")).isEqualTo(
+                    "You can't decide on a shop you belong to. Ask another admin.");
+        }
+        assertThat(jdbc.queryForObject("SELECT status FROM shops WHERE id = ?", String.class, shop))
+                .isEqualTo("PENDING_VISIT");
+        assertThat(count("shop_events WHERE shop_id = '" + shop + "'")).isZero();
+
+        // The super admin too, for a shop they own; another admin decides
+        UUID bossShop = UUID.randomUUID();
+        jdbc.update("DELETE FROM shop_members WHERE user_id = ?", boss);
+        TestData.salon(jdbc, bossShop, boss);
+        jdbc.update("UPDATE shops SET status = 'PENDING_VISIT' WHERE id = ?", bossShop);
+        Reply own = post("/admin/shops/" + bossShop + "/approve", Map.of("version", version(bossShop)), boss);
+        assertThat(field(own.body(), "code")).as(own.text()).isEqualTo("OWN_SHOP");
+        assertThat(post("/admin/shops/" + bossShop + "/approve", Map.of("version", version(bossShop)), admin)
+                .status()).isEqualTo(200);
+        assertThat(post("/admin/shops/" + shop + "/approve", Map.of("version", v), boss).status()).isEqualTo(200);
     }
 
     // ---------------- helpers ----------------

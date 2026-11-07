@@ -198,6 +198,19 @@ public class Shop {
         this.updatedAt = now;
     }
 
+    /**
+     * Its owner closes it for good, from any status: customers can't find it, nobody works in it any more, and it is
+     * never opened again (the owner registers a new shop). The reason, if they gave one, is kept for the field team.
+     */
+    public void close(String reason, Instant now) {
+        if (status == ShopStatus.CLOSED) {
+            throw new IllegalStateException("The shop is closed already");
+        }
+        this.status = ShopStatus.CLOSED;
+        this.statusReason = reason;
+        this.updatedAt = now;
+    }
+
     public ShopDetails details() {
         return new ShopDetails(name, ownerName, addressLine, area, city, pincode, latitude, longitude, gstin, udyamNumber);
     }

@@ -1,0 +1,6 @@
+# Vulnerabilities Trivy reports that we have looked at and accept, one id per line, each with why and when to look
+# again. CI (the "dependencies" job) fails on any other High or Critical finding that has a fixed version.
+#
+# Format:
+#   # <library>: <why it doesn't affect us> (reviewed <date>, look again <date>)
+#   CVE-YYYY-NNNNN

@@ -12,10 +12,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class NotificationSendJobTest {
 
     @Test
-    void sendsAtOnceStayAtMostHalfTheDatabasePool() {
-        assertThat(NotificationSendJob.concurrency(8, 20)).isEqualTo(8);
-        assertThat(NotificationSendJob.concurrency(32, 20)).isEqualTo(10);
-        assertThat(NotificationSendJob.concurrency(4, 1)).isEqualTo(1);
+    void sendsAreLimitedPerPushServiceHost() {
+        assertThat(NotificationSendJob.hostOf("https://fcm.googleapis.com/fcm/send/abc")).isEqualTo("fcm.googleapis.com");
+        assertThat(NotificationSendJob.hostOf("https://web.push.apple.com/QGd")).isEqualTo("web.push.apple.com");
+        assertThat(NotificationSendJob.hostOf("not a url")).isEqualTo("push");
     }
 
     @Test

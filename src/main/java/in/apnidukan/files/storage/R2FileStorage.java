@@ -4,6 +4,12 @@ import in.apnidukan.files.config.R2Properties;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.http.SdkHttpMethod;
+import software.amazon.awssdk.http.SdkHttpRequest;
+import software.amazon.awssdk.http.auth.aws.signer.AwsV4HttpSigner;
+import software.amazon.awssdk.http.auth.spi.signer.HttpSigner;
+import software.amazon.awssdk.http.auth.spi.signer.SignedRequest;
+import software.amazon.awssdk.identity.spi.AwsCredentialsIdentity;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
@@ -12,10 +18,15 @@ import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
 
 import org.springframework.http.ContentDisposition;
+import software.amazon.awssdk.utils.http.SdkHttpUtils;
 
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 
 @Component
 public class R2FileStorage implements FileStorage {
@@ -24,6 +35,11 @@ public class R2FileStorage implements FileStorage {
     private final S3Presigner presigner;
     private final String bucket;
     private final Duration uploadTimeout;
+    private final String endpoint;
+    private final String region;
+    private final AwsCredentialsIdentity credentials;
+
+    private static final AwsV4HttpSigner SIGNER = AwsV4HttpSigner.create();
 
     /**
      * @param uploadTimeout one try of an upload (app.r2.upload-timeout, 60 s): a 10 MB file needs far longer than the
@@ -36,6 +52,10 @@ public class R2FileStorage implements FileStorage {
         this.presigner = presigner;
         this.bucket = props.bucket();
         this.uploadTimeout = uploadTimeout;
+        this.endpoint = props.endpoint().endsWith("/") ? props.endpoint().substring(0, props.endpoint().length() - 1)
+                : props.endpoint();
+        this.region = props.region();
+        this.credentials = AwsCredentialsIdentity.create(props.accessKey(), props.secretKey());
     }
 
     @Override
@@ -70,6 +90,32 @@ public class R2FileStorage implements FileStorage {
                 .getObjectRequest(get.build())
                 .build();
         return presigner.presignGetObject(presign).url().toString();
+    }
+
+    /**
+     * Signed with the AWS SDK's own SigV4 signer (the one S3Presigner uses), on a clock fixed at {@code signedAt}: the
+     * same query-string signature R2 checks for any presigned GET (path-style, unsigned payload, host the only signed
+     * header), only its date is the one given. R2FileStorageTest checks it is exactly the link S3Presigner makes for
+     * that moment.
+     */
+    @Override
+    public String signedLinkAt(String key, Instant signedAt, Duration validFor) {
+        SdkHttpRequest get = SdkHttpRequest.builder()
+                .method(SdkHttpMethod.GET)
+                .uri(URI.create(endpoint + "/" + bucket + "/" + SdkHttpUtils.urlEncodeIgnoreSlashes(key)))
+                .build();
+        SignedRequest signed = SIGNER.sign(r -> r
+                .identity(credentials)
+                .request(get)
+                .putProperty(AwsV4HttpSigner.SERVICE_SIGNING_NAME, "s3")
+                .putProperty(AwsV4HttpSigner.REGION_NAME, region)
+                .putProperty(AwsV4HttpSigner.AUTH_LOCATION, AwsV4HttpSigner.AuthLocation.QUERY_STRING)
+                .putProperty(AwsV4HttpSigner.EXPIRATION_DURATION, validFor)
+                .putProperty(AwsV4HttpSigner.PAYLOAD_SIGNING_ENABLED, false)
+                .putProperty(AwsV4HttpSigner.DOUBLE_URL_ENCODE, false)
+                .putProperty(AwsV4HttpSigner.NORMALIZE_PATH, false)
+                .putProperty(HttpSigner.SIGNING_CLOCK, Clock.fixed(signedAt, ZoneOffset.UTC)));
+        return signed.request().getUri().toString();
     }
 
     @Override

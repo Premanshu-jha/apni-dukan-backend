@@ -6,6 +6,7 @@ import in.apnidukan.salon.domain.AppointmentKind;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.domain.BlockType;
 import in.apnidukan.salon.domain.BookedService;
+import in.apnidukan.salon.domain.Interval;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -47,6 +48,14 @@ public class AppointmentStore {
             + "a.updated_at FROM unnest(?::uuid[]) AS b(id) "
             + "JOIN appointments a ON a.staff_id = b.id AND a.time_range && tstzrange(?, ?, '[)') "
             + "WHERE a." + HOLDING + " AND a.id <> ? ORDER BY a.starts_at";
+    /** What free-time checks read of the same rows: the barber, the times and whether it is a block (4 columns). */
+    private static final String BUSY_SQL = "SELECT a.staff_id, a.starts_at, a.ends_at, a.kind = 'BLOCK' "
+            + "FROM unnest(?::uuid[]) AS b(id) "
+            + "JOIN appointments a ON a.staff_id = b.id AND a.time_range && tstzrange(?, ?, '[)') "
+            + "WHERE a." + HOLDING + " AND a.id <> ?";
+    /** The same for every barber of the salon (through ix_appointments_shop_range, that day's rows only). */
+    private static final String SALON_BUSY_SQL = "SELECT staff_id, starts_at, ends_at, kind = 'BLOCK' FROM appointments "
+            + "WHERE shop_id = ? AND " + HOLDING + " AND time_range && tstzrange(?, ?, '[)')";
     /** Upcoming: still open (CONFIRMED or IN_SERVICE) and not over yet. Past: everything else. */
     private static final String UPCOMING_SQL = "SELECT " + COLUMNS + " FROM appointments WHERE customer_id = ? "
             + "AND status IN ('CONFIRMED', 'IN_SERVICE') AND ends_at > ? ORDER BY starts_at, id LIMIT ?";
@@ -107,6 +116,36 @@ public class AppointmentStore {
                 at(a.startsAt()), at(a.endsAt()), a.status().name(), at(a.startedAt()), a.startedWithCode(),
                 a.cancelReason(), a.createdBy(), a.clientRequestId(), at(a.createdAt()), at(a.updatedAt()));
         return !saved.isEmpty();
+    }
+
+    /** The unique key on booking numbers (V4: the column's own UNIQUE, named by Postgres). */
+    public static final String BOOKING_NO_KEY = "appointments_booking_no_key";
+
+    /**
+     * insertIfFree for an online booking, whose random booking number could, rarely, already be taken: the insert
+     * runs inside a savepoint, and a clash on the booking number (23505 on BOOKING_NO_KEY) undoes only that insert,
+     * so the same transaction tries again with the next number from {@code numbers}, up to {@code tries} numbers in
+     * all. Any other refusal is passed on.
+     * @return the booking as saved (with the number it got), or empty when the barber's time is taken
+     */
+    public Optional<Appointment> insertBookingIfFree(Appointment a, java.util.function.Supplier<String> numbers,
+                                                     int tries) {
+        Appointment next = a;
+        for (int i = 1; ; i++) {
+            jdbc.execute("SAVEPOINT booking_no");
+            try {
+                boolean saved = insertIfFree(next);
+                jdbc.execute("RELEASE SAVEPOINT booking_no");
+                return saved ? Optional.of(next) : Optional.empty();
+            } catch (org.springframework.dao.DataIntegrityViolationException e) {
+                jdbc.execute("ROLLBACK TO SAVEPOINT booking_no");
+                jdbc.execute("RELEASE SAVEPOINT booking_no");
+                if (i >= tries || !in.apnidukan.common.error.DatabaseErrors.violatedUnique(e, BOOKING_NO_KEY)) {
+                    throw e;
+                }
+                next = next.withBookingNo(numbers.get());
+            }
+        }
     }
 
     public void insertServices(UUID appointmentId, List<BookedService> services) {
@@ -174,17 +213,29 @@ public class AppointmentStore {
     }
 
     /**
-     * Every online booking of the salon still CONFIRMED that starts after {@code since} becomes CANCELLED_BY_SALON with
-     * the reason, each with an event, in one statement (through ix_appointments_shop_confirmed); returns them.
+     * Every online booking of the salon still CONFIRMED that starts after {@code since} becomes CANCELLED_BY_SALON
+     * with the reason, each with an event: at most {@code max} (soonest first) in one statement, so a closed or
+     * suspended salon's bookings are cancelled a slice at a time (SalonClosingJob). Rows another transaction holds right now (a customer
+     * cancelling) are skipped (SKIP LOCKED) and come in a later slice if still CONFIRMED.
      */
-    public List<Appointment> cancelAllUpcoming(UUID shopId, Instant since, String reason, String detail, Instant now) {
-        return jdbc.query("WITH closed AS (UPDATE appointments SET status = 'CANCELLED_BY_SALON', cancel_reason = ?, "
-                        + "updated_at = ? WHERE shop_id = ? AND kind = 'BOOKING' AND status = 'CONFIRMED' "
-                        + "AND starts_at > ? RETURNING " + COLUMNS + "), "
+    public List<Appointment> cancelUpcomingSlice(UUID shopId, Instant since, String reason, String detail, Instant now,
+                                                 int max) {
+        return jdbc.query("WITH pick AS MATERIALIZED (SELECT id FROM appointments WHERE shop_id = ? AND kind = 'BOOKING' "
+                        + "AND status = 'CONFIRMED' AND starts_at > ? ORDER BY starts_at, id LIMIT ? "
+                        + "FOR UPDATE SKIP LOCKED), "
+                        + "closed AS (UPDATE appointments SET status = 'CANCELLED_BY_SALON', cancel_reason = ?, "
+                        + "updated_at = ? WHERE id IN (SELECT id FROM pick) AND status = 'CONFIRMED' RETURNING "
+                        + COLUMNS + "), "
                         + "logged AS (INSERT INTO appointment_events (appointment_id, happened_at, by_user, event, detail) "
                         + "SELECT id, ?, NULL, 'CANCELLED_BY_SALON', ? FROM closed) "
                         + "SELECT " + COLUMNS + " FROM closed ORDER BY starts_at", ROW,
-                reason, at(now), shopId, at(since), at(now), detail);
+                shopId, at(since), max, reason, at(now), at(now), detail);
+    }
+
+    /** Whether the salon still has a CONFIRMED booking starting after {@code since} (one held elsewhere a moment ago). */
+    public boolean hasUpcoming(UUID shopId, Instant since) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM appointments WHERE shop_id = ? "
+                + "AND kind = 'BOOKING' AND status = 'CONFIRMED' AND starts_at > ?)", Boolean.class, shopId, at(since)));
     }
 
     /** CONFIRMED → NO_SHOW, CANCELLED_BY_CUSTOMER or CANCELLED_BY_SALON; frees the barber's time. */
@@ -314,7 +365,8 @@ public class AppointmentStore {
     /** Whether this appointment was given away from this barber (its REASSIGNED events read "from -> to"). */
     public boolean wasReassignedFrom(UUID appointmentId, UUID staffId) {
         Boolean found = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM appointment_events WHERE appointment_id = ? "
-                + "AND event = 'REASSIGNED' AND detail LIKE ?)", Boolean.class, appointmentId, staffId + " -> %");
+                + "AND event IN ('REASSIGNED', 'BARBER_CHANGED') AND detail LIKE ?)", Boolean.class, appointmentId,
+                staffId + " -> %");
         return Boolean.TRUE.equals(found);
     }
 
@@ -341,6 +393,32 @@ public class AppointmentStore {
             ps.setObject(3, at(to));
             ps.setObject(4, except == null ? new UUID(0, 0) : except);
         }, ROW);
+    }
+
+    /** Time held on a barber, as free-time checks need it. @param block a break, leave or closed day */
+    public record Busy(UUID staffId, Interval time, boolean block) {
+    }
+
+    private static final RowMapper<Busy> BUSY_ROW = (rs, i) -> new Busy(rs.getObject(1, UUID.class),
+            new Interval(rs.getObject(2, OffsetDateTime.class).toInstant(),
+                    rs.getObject(3, OffsetDateTime.class).toInstant()), rs.getBoolean(4));
+
+    /** holding() with only what free-time checks need (4 columns instead of 20). */
+    public List<Busy> busy(Collection<UUID> staffIds, Instant from, Instant to, UUID except) {
+        if (staffIds.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.query(BUSY_SQL, ps -> {
+            ps.setArray(1, ps.getConnection().createArrayOf("uuid", staffIds.toArray()));
+            ps.setObject(2, at(from));
+            ps.setObject(3, at(to));
+            ps.setObject(4, except == null ? new UUID(0, 0) : except);
+        }, BUSY_ROW);
+    }
+
+    /** busy() for every barber of the salon, [from, to): what SalonCalendar keeps in memory per salon and day. */
+    public List<Busy> salonBusy(UUID shopId, Instant from, Instant to) {
+        return jdbc.query(SALON_BUSY_SQL, BUSY_ROW, shopId, at(from), at(to));
     }
 
     /**
@@ -379,6 +457,81 @@ public class AppointmentStore {
         return jdbc.query(DAY_SQL, ROW, shopId, at(from), at(to));
     }
 
+    /**
+     * The salon's appointments written by transaction {@code fromXid} or later (change_xid, V21), at most
+     * {@code limit}, in the order they were written (change_seq): what may have changed on its day boards and upcoming
+     * list since an answer read while {@code fromXid} was the oldest transaction still running. Every day and every
+     * barber: the caller sorts out which are on the answer asked for and which left it.
+     *
+     * Bounded however old the cursor: the rows are read in the index's own order (ix_appointments_shop_change, V24)
+     * and the read stops after {@code limit}, so a cursor held low by a long transaction somewhere (OldSnapshotWatch)
+     * costs at most {@code limit} rows; only those few are then put in write order.
+     */
+    public List<Appointment> changedSince(UUID shopId, long fromXid, int limit) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM (SELECT " + COLUMNS + ", change_seq FROM appointments "
+                + "WHERE shop_id = ? AND change_xid >= ? ORDER BY change_xid LIMIT ?) c ORDER BY change_seq",
+                ROW, shopId, fromXid, limit);
+    }
+
+    /**
+     * Which of these appointments were ever taken away from this barber, in one query: given to another barber by the
+     * salon (REASSIGNED, "his id -> ...") or moved to another barber by the customer (BARBER_CHANGED, the same
+     * detail). The rows that could have been on his own board or list before they left it.
+     */
+    public java.util.Set<UUID> reassignedFrom(Collection<UUID> appointmentIds, UUID staffId) {
+        if (appointmentIds.isEmpty()) {
+            return java.util.Set.of();
+        }
+        Object[] ids = appointmentIds.toArray();
+        return new java.util.HashSet<>(jdbc.query("SELECT DISTINCT appointment_id FROM appointment_events "
+                + "WHERE appointment_id = ANY (?) AND event IN ('REASSIGNED', 'BARBER_CHANGED') AND detail LIKE ?",
+                ps -> {
+                    ps.setArray(1, ps.getConnection().createArrayOf("uuid", ids));
+                    ps.setString(2, staffId + " -> %");
+                }, (rs, i) -> rs.getObject(1, UUID.class)));
+    }
+
+    /**
+     * Online bookings of the salon still waiting (CONFIRMED) whose end passed in (after, upTo]: time alone took them
+     * off the upcoming list since an earlier answer (ix_appointments_shop_confirmed; none lasts a day). Only this
+     * barber's when staffId is set (a barber who sees only his own list).
+     */
+    public List<UUID> endedBetween(UUID shopId, UUID staffId, Instant after, Instant upTo) {
+        Object from = at(after.minus(java.time.Duration.ofDays(1)));
+        return staffId == null
+                ? jdbc.queryForList(ENDED_SQL, UUID.class, shopId, from, at(after), at(upTo))
+                : jdbc.queryForList(BARBER_ENDED_SQL, UUID.class, shopId, from, at(after), at(upTo), staffId);
+    }
+
+    private static final String ENDED_SQL = "SELECT id FROM appointments WHERE shop_id = ? AND status = 'CONFIRMED' "
+            + "AND kind <> 'BLOCK' AND starts_at > ? AND ends_at > ? AND ends_at <= ?";
+    private static final String BARBER_ENDED_SQL = ENDED_SQL + " AND staff_id = ?";
+
+    /**
+     * Bookings and walk-ins of the salon waiting to start (CONFIRMED) whose start passed in (after, upTo] and that are
+     * on [from, to): time alone turned them "not started" since an earlier answer (ix_appointments_shop_confirmed).
+     */
+    public List<Appointment> startedBetween(UUID shopId, Instant after, Instant upTo, Instant from, Instant to) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM appointments WHERE shop_id = ? AND status = 'CONFIRMED' "
+                        + "AND starts_at > ? AND starts_at <= ? AND time_range && tstzrange(?, ?, '[)') "
+                        + "ORDER BY starts_at, id", ROW, shopId, at(after), at(upTo), at(from), at(to));
+    }
+
+    /**
+     * The first moment after {@code after} that time alone changes a day board or the upcoming list on [from, to): a
+     * waiting booking's start (it turns "not started"), and with {@code ends} also an end (it leaves the upcoming list).
+     * For the whole salon (a barber's own column can only change at one of these). Through
+     * ix_appointments_shop_confirmed.
+     */
+    public Optional<Instant> nextChange(UUID shopId, Instant after, Instant from, Instant to, boolean ends) {
+        OffsetDateTime next = jdbc.queryForObject("SELECT LEAST(min(starts_at) FILTER (WHERE starts_at > ?), "
+                        + "CASE WHEN ? THEN min(ends_at) FILTER (WHERE ends_at > ?) END) FROM appointments "
+                        + "WHERE shop_id = ? AND status = 'CONFIRMED' AND kind <> 'BLOCK' AND ends_at > ? "
+                        + "AND starts_at < ? AND ends_at > ?", OffsetDateTime.class, at(after), ends, at(after), shopId,
+                at(after), at(to), at(from));
+        return Optional.ofNullable(next).map(OffsetDateTime::toInstant);
+    }
+
     /** forDay for one barber only (a barber who sees just his own column): the others' rows are never read. */
     public List<Appointment> forDay(UUID shopId, UUID staffId, Instant from, Instant to) {
         return jdbc.query(BARBER_DAY_SQL, ROW, shopId, at(from), at(to), staffId);
@@ -399,8 +552,10 @@ public class AppointmentStore {
 
     /**
      * Holds the barber's row in shared mode (SELECT ... FOR SHARE) until the transaction ends and says whether he
-     * is still active. Booking takes this before inserting; switching a barber off locks the same row for update,
-     * so the two run one after the other and a booking can never land on a barber being switched off.
+     * is still active. Booking, moving, reassigning and walk-ins take this before writing; switching a barber off and
+     * saving his hours or services lock the same row for update, so they run one after the other. This checks only
+     * "active": whether he still works then and does the services is checked next, by SalonCalendar.stillFits (a
+     * change saved meanwhile has committed by now and moved the salon's setup_version).
      */
     public boolean lockActiveBarber(UUID staffId) {
         List<Boolean> active = jdbc.query("SELECT active FROM salon_staff WHERE id = ? FOR SHARE",

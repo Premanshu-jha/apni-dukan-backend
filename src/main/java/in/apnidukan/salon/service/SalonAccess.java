@@ -3,9 +3,7 @@ package in.apnidukan.salon.service;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.context.ShopMemberships.Membership;
 import in.apnidukan.common.error.ApiException;
-import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.repo.SalonAccessStore;
-import in.apnidukan.salon.repo.SalonStaffRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
@@ -24,12 +22,10 @@ import java.util.UUID;
 public class SalonAccess {
 
     private final ShopMemberships memberships;
-    private final SalonStaffRepository staff;
     private final SalonAccessStore access;
 
-    public SalonAccess(ShopMemberships memberships, SalonStaffRepository staff, SalonAccessStore access) {
+    public SalonAccess(ShopMemberships memberships, SalonAccessStore access) {
         this.memberships = memberships;
-        this.staff = staff;
         this.access = access;
     }
 
@@ -62,23 +58,27 @@ public class SalonAccess {
         }
     }
 
-    /** The caller in his salon. 404 NO_SHOP without a shop; 409 NOT_A_SALON for a kirana. */
+    /**
+     * The caller in his salon. 404 NO_SHOP without a shop; 409 NOT_A_SALON for a kirana. It runs on every salon screen
+     * (the day board every 30 s), so it is small: one query for the owner (the membership with the shop's type), one
+     * more for a helper or barber (his barber profile and walk-in access together).
+     */
     public Caller caller(UUID userId) {
         Membership m = memberships.find(userId).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "NO_SHOP",
                 "You haven't registered or joined a shop yet."));
         if (!"SALON".equals(m.shopType())) {
             throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "This is only for salons.");
         }
-        UUID staffId = null;
-        if ("BARBER".equals(m.role())) {
-            SalonStaff me = staff.findByUserId(userId)
-                    .filter(s -> s.getShopId().equals(m.shopId()) && s.isActive())
-                    .orElseThrow(() -> new ApiException(HttpStatus.FORBIDDEN, "NOT_ALLOWED",
-                            "Your barber profile isn't active in this salon."));
-            staffId = me.getId();
+        if ("OWNER".equals(m.role())) {
+            return new Caller(userId, m.shopId(), m.role(), null, true);
         }
-        boolean walkIns = "OWNER".equals(m.role()) || access.hasWalkInAccess(m.shopId(), userId);
-        return new Caller(userId, m.shopId(), m.role(), staffId, walkIns);
+        SalonAccessStore.Seat seat = access.seat(m.shopId(), userId);
+        if ("BARBER".equals(m.role()) && seat.staffId() == null) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "NOT_ALLOWED",
+                    "Your barber profile isn't active in this salon.");
+        }
+        return new Caller(userId, m.shopId(), m.role(), "BARBER".equals(m.role()) ? seat.staffId() : null,
+                seat.walkIns());
     }
 
     /** 403 OWNER_ONLY unless the caller is the owner. */

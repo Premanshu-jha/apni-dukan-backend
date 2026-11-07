@@ -45,8 +45,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Clock;
 import java.time.DayOfWeek;
@@ -222,14 +220,16 @@ public class SalonSetupService {
         Map<UUID, List<Shift>> weekOf = shifts.findByStaffIdIn(ids).stream()
                 .collect(Collectors.groupingBy(StaffShift::getStaffId,
                         Collectors.mapping(StaffShift::shift, Collectors.toList())));
-        // Barbers' sign-in phones are for the owner only, not for other members
-        Map<UUID, Person> logins = !OWNER.equals(salon.role()) ? Map.of() : users.find(barbers.stream()
+        // Barbers' sign-in phones (and the phones invited) are for the owner only, not for other members
+        boolean owner = OWNER.equals(salon.role());
+        Map<UUID, Person> logins = !owner ? Map.of() : users.find(barbers.stream()
                 .map(SalonStaff::getUserId).filter(Objects::nonNull).toList());
+        Map<UUID, String> invited = !owner ? Map.of() : memberships.waitingBarberInvites(salon.shopId());
         return barbers.stream()
                 .map(b -> StaffResponse.from(b, sorted(servicesOf.getOrDefault(b.getId(), List.of())),
                         weekOf.getOrDefault(b.getId(), List.of()),
                         b.getUserId() == null || !logins.containsKey(b.getUserId()) ? null
-                                : logins.get(b.getUserId()).phone()))
+                                : logins.get(b.getUserId()).phone(), invited.get(b.getId())))
                 .toList();
     }
 
@@ -242,16 +242,16 @@ public class SalonSetupService {
         staff.saveAndFlush(barber);
         joinClosedDays(salon, barber, userId);
         if (in.phone() != null && !in.phone().isBlank()) {
-            link(salon, barber, in.phone());
+            link(salon, barber, in.phone(), userId);
         }
         return staffResponse(barber);
     }
 
     /**
-     * Gives a barber his own sign-in: the phone becomes a BARBER member of this salon (an account is made for it
-     * if nobody has signed in with it yet). He then signs in with the normal OTP and sees his own day.
-     * 409 LOGIN_EXISTS if he already has one (unlink it first); 409 ALREADY_IN_A_SHOP if that phone already works
-     * in a shop (one shop per person).
+     * Invites a phone to be this barber's own sign-in (ShopMemberships.inviteBarber): the answer is the same whether
+     * or not the number has an account, and his profile shows the phone as invitedPhone. He signs in with the normal
+     * OTP, accepts (GET /me/invites) and then sees his own day. 409 LOGIN_EXISTS if he already has a sign-in (unlink
+     * it first); a waiting invitation with another phone is replaced.
      */
     @Transactional
     public StaffResponse linkLogin(UUID userId, UUID staffId, String phone) {
@@ -260,19 +260,19 @@ public class SalonSetupService {
         if (!barber.isActive()) {
             throw new ApiException(HttpStatus.CONFLICT, "STAFF_INACTIVE", "Switch the barber on first.");
         }
-        link(salon, barber, phone);
+        link(salon, barber, phone, userId);
         return staffResponse(barber);
     }
 
     /**
-     * Takes a barber's sign-in away (he keeps his name, hours and history). His membership and any walk-in access
-     * go, and every session of his ends at once.
+     * Takes a barber's sign-in away (he keeps his name, hours and history), or cancels the invitation still waiting
+     * for one. His membership and any walk-in access go, and every session of his ends at once.
      */
     @Transactional
     public StaffResponse unlinkLogin(UUID userId, UUID staffId) {
         Membership salon = owner(userId);
         SalonStaff barber = staff.lockByIdAndShopId(staffId, salon.shopId()).orElseThrow(SalonSetupService::noStaff);
-        unlink(salon, barber);
+        unlink(salon, barber, userId);
         return staffResponse(barber);
     }
 
@@ -360,18 +360,17 @@ public class SalonSetupService {
         appointments.eventAll(saved, now, by, "CLOSED_DAY_ADDED", "barber added or switched on");
     }
 
-    private void link(Membership salon, SalonStaff barber, String phone) {
+    /** The caller holds the barber's lock (taken before the invitation's, the order accepting takes them in). */
+    private void link(Membership salon, SalonStaff barber, String phone, UUID by) {
         if (barber.getUserId() != null) {
             throw new ApiException(HttpStatus.CONFLICT, "LOGIN_EXISTS",
                     "This barber already has a sign-in. Remove it first to use another phone.");
         }
-        UUID login = users.findOrCreateByPhone(phone);
-        memberships.addMember(salon.shopId(), login, "BARBER");   // 409 ALREADY_IN_A_SHOP if he works elsewhere
-        barber.linkLogin(login, now());
-        saveStaff(barber);
+        memberships.inviteBarber(salon.shopId(), by, barber.getId(), phone);   // he joins when he accepts
     }
 
-    private void unlink(Membership salon, SalonStaff barber) {
+    private void unlink(Membership salon, SalonStaff barber, UUID by) {
+        memberships.cancelBarberInvite(salon.shopId(), barber.getId(), by);   // a waiting one goes too
         UUID login = barber.getUserId();
         if (login == null) {
             return;
@@ -382,12 +381,7 @@ public class SalonSetupService {
         barber.unlinkLogin(now());
         saveStaff(barber);
         // After the commit: a token refreshed in between would otherwise still name the salon for 15 minutes
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                sessions.revokeAll(login);   // tokens issued while he was in the salon stop working now
-            }
-        });
+        sessions.revokeAllAfterCommit(login, "Barber sign-in removed");
     }
 
     private void saveStaff(SalonStaff barber) {
@@ -423,7 +417,7 @@ public class SalonSetupService {
             barber.apply(name, active, now());
             saveStaff(barber);
             if (!active) {
-                unlink(salon, barber);   // a barber who left can't sign in to the salon any more
+                unlink(salon, barber, userId);   // a barber who left can't sign in to the salon any more
             }
             if (switchedOn) {
                 joinClosedDays(salon, barber, userId);
@@ -659,7 +653,10 @@ public class SalonSetupService {
         String phone = barber.getUserId() == null ? null
                 : users.find(List.of(barber.getUserId())).values().stream().findFirst().map(Person::phone)
                         .orElse(null);
-        return StaffResponse.from(barber, serviceIds, week, phone);
+        // Only the owner changes a barber, so only the owner gets this answer
+        String invited = barber.getUserId() != null ? null
+                : memberships.waitingBarberInvites(barber.getShopId()).get(barber.getId());
+        return StaffResponse.from(barber, serviceIds, week, phone, invited);
     }
 
     /** Same order every time, so the app's list doesn't jump around. */

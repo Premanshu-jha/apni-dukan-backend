@@ -44,26 +44,28 @@ import java.util.concurrent.TimeUnit;
  * 100 messages every 30 seconds. Claiming is one short statement (NotificationStore.claimDue, FOR UPDATE SKIP
  * LOCKED); the sending happens after it, so no database connection waits on a push service.
  *
- * <p>A batch is sent <b>in parallel</b> on virtual threads, at most app.notifications.send-concurrency (8) at a
- * time: a send mostly waits on the push service or MSG91, so the waits overlap instead of queueing. Everything a
- * batch needs from the database is read once for the whole batch (every device in one query, every phone in one),
- * and each message's outcome is written the moment it is known (one short statement), so a crash or redeploy
- * mid-batch never forgets what was already sent. The database work of a send is that and one lease renewal, each
- * a single statement outside any transaction: a send holds a connection for milliseconds, never while it waits on
- * the network. The concurrency is still kept at most
- * half the connection pool (clamped with a warning), so web requests always find connections.
+ * <p>A batch is sent <b>in parallel</b> on virtual threads, at most app.notifications.send-concurrency (64) at a
+ * time, and at most app.notifications.per-host-concurrency (32) to one push service or to MSG91, so one slow
+ * provider can't take every slot and none is flooded: a send mostly waits on the network, so the waits overlap
+ * instead of queueing. Everything a batch needs from the database is read once for the whole batch (every device in
+ * one query, every phone in one). The sends themselves never touch the database: the batch's own thread renews the
+ * leases of the next few messages in one statement just before handing them out (a quarter of the concurrency at a
+ * time), and outcomes are written together, one statement per app.notifications.record-every (50) outcomes or every
+ * quarter second, by one thread at a time. So the sender uses at most two connections however high the
+ * concurrency, and web requests always find theirs. Outcomes are written within a quarter second of being known, and
+ * every one is written before the round ends or the server stops: a crash loses at most that quarter second's.
  *
  * <p><b>Several copies of the backend</b>: this job does not take a JobLeases lease. Every copy runs it, and SKIP
  * LOCKED gives each claim different rows, so more copies simply send more in parallel; giving up (giveUp) is one
  * idempotent UPDATE. A message is sent at most once in normal operation: just before sending, its lease is renewed
- * only if it is still this copy's (NotificationStore.renew), and its outcome is recorded only under that lease.
+ * only if it is still this copy's (NotificationStore.renewAll), and its outcome is recorded only under that lease.
  * A send that has started is never interrupted: each one is bounded (at most {@link #MAX_DEVICES} devices, no new
  * device after {@link #MESSAGE_BUDGET}, each device call with its own HTTP timeouts), well inside its lease, and
  * every outcome is recorded. A round claims only about what can be sent before app.notifications.batch-deadline-ms
  * (3 minutes) at the expected pace (app.notifications.expected-send-ms); messages of a batch not started by the
  * deadline, or when the server is stopping, are given back untried (their attempt is not counted) and the round
- * ends. A server that dies in the moment between a provider accepting a message and its outcome being written can
- * still send that one message twice.
+ * ends. A server that dies in the moment between a provider accepting a message and its outcome being written (at
+ * most a quarter second, see above) can still send those messages twice.
  *
  * <p>A failed message is tried again after 1, 5 and 15 minutes, then marked FAILED.
  */
@@ -103,6 +105,15 @@ public class NotificationSendJob {
     private final int staffSmsPerPerson;
     private final int batchSize;
     private final int claimSize;
+    private final int parallel;
+    /** Leases renewed in one statement, just before those messages are handed to the senders. */
+    private final int renewGroup;
+    private final int perHost;
+    private final int recordEvery;
+    /** The outcomes of batches being sent now (stop() writes what they still hold). */
+    private final Set<Outcomes> open = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** At most perHost sends at once to each push service (by host) and to the SMS provider ("sms"). */
+    private final Map<String, java.util.concurrent.Semaphore> hosts = new java.util.concurrent.ConcurrentHashMap<>();
     private final Duration batchDeadline;
     /** Set when the server is stopping: no more claims, no new sends; running ones finish and record. */
     private volatile boolean stopping;
@@ -115,14 +126,16 @@ public class NotificationSendJob {
                                @Value("${app.sms.booking-daily-limit:100000}") int smsBookingDailyLimit,
                                @Value("${app.sms.staff-per-person-daily-limit:1000}") int staffSmsPerPerson,
                                @Value("${app.notifications.batch-size:500}") int batchSize,
-                               @Value("${app.notifications.send-concurrency:8}") int concurrency,
-                               @Value("${spring.datasource.hikari.maximum-pool-size:10}") int dbPoolSize,
+                               @Value("${app.notifications.send-concurrency:64}") int concurrency,
+                               @Value("${app.notifications.per-host-concurrency:32}") int perHost,
+                               @Value("${app.notifications.record-every:50}") int recordEvery,
                                @Value("${app.notifications.batch-deadline-ms:180000}") long batchDeadlineMs,
                                @Value("${app.notifications.expected-send-ms:1000}") long expectedSendMs,
                                Clock clock, @Value("${app.jobs.enabled:true}") boolean enabled) {
-        if (batchSize < 1 || concurrency < 1 || batchDeadlineMs < 1 || expectedSendMs < 1) {
-            throw new IllegalStateException("app.notifications.batch-size, send-concurrency, batch-deadline-ms and "
-                    + "expected-send-ms must be at least 1");
+        if (batchSize < 1 || concurrency < 1 || perHost < 1 || recordEvery < 1 || batchDeadlineMs < 1
+                || expectedSendMs < 1) {
+            throw new IllegalStateException("app.notifications.batch-size, send-concurrency, per-host-concurrency, "
+                    + "record-every, batch-deadline-ms and expected-send-ms must be at least 1");
         }
         this.jobs = jobs;
         this.devices = devices;
@@ -135,26 +148,15 @@ public class NotificationSendJob {
         this.staffSmsPerPerson = staffSmsPerPerson;
         this.batchSize = batchSize;
         this.batchDeadline = Duration.ofMillis(batchDeadlineMs);
-        int parallel = concurrency(concurrency, dbPoolSize);
+        this.parallel = concurrency;
+        this.renewGroup = Math.max(1, concurrency / 4);
+        this.perHost = perHost;
+        this.recordEvery = recordEvery;
         this.claimSize = claimSize(batchSize, parallel, batchDeadlineMs, expectedSendMs);
         // A fixed number of virtual threads: cheap to wait on the network, and never more sends at once than this
         this.senders = Executors.newFixedThreadPool(parallel, Thread.ofVirtual().name("notify-send-", 0).factory());
         this.clock = clock;
         this.enabled = enabled;
-    }
-
-    /**
-     * The sends allowed at once: as asked, but at most half the database pool (at least 1), so the sender can never
-     * take the connections web requests need. Clamped with a warning rather than refusing to start.
-     */
-    static int concurrency(int requested, int dbPoolSize) {
-        int most = Math.max(1, dbPoolSize / 2);
-        if (requested > most) {
-            log.warn("NOTIFY_SEND_CONCURRENCY {} is more than half of DB_POOL_SIZE {}: using {}", requested,
-                    dbPoolSize, most);
-            return most;
-        }
-        return requested;
     }
 
     /**
@@ -175,13 +177,18 @@ public class NotificationSendJob {
     }
 
     @PreDestroy
-    void stop() throws InterruptedException {
+    public void stop() throws InterruptedException {
         // No more claims; sends already running finish and record (never interrupted: the provider may have
         // accepted them); waiting ones are given back untried
         stopping = true;
         senders.shutdown();
         if (!senders.awaitTermination(MESSAGE_BUDGET.toSeconds() + 20, TimeUnit.SECONDS)) {
             log.warn("Notification sends still running at shutdown");
+        }
+        // Then every outcome still waiting is written here, whatever the batch's own thread is doing (the scheduler
+        // may be stopping it). This bean is destroyed before the store and the DataSource it uses, so they still work
+        for (Outcomes o : open) {
+            o.writeAll();
         }
     }
 
@@ -202,12 +209,92 @@ public class NotificationSendJob {
         return handled;
     }
 
-    /** What sending one message came to: its outcome (null if not sent by us) and devices that are gone. */
+    /** What sending one message came to: its outcome and devices that are gone. */
     private record Sent(Outcome outcome, List<UUID> goneDevices) {
     }
 
-    /** A message handed back untried (deadline or stopping). */
-    private static final Sent GIVEN_BACK = new Sent(null, List.of());
+    /** How often outcomes waiting to be written are written anyway (fewer than record-every of them). */
+    static final Duration RECORD_AT_LEAST_EVERY = Duration.ofMillis(250);
+
+    /**
+     * Outcomes waiting to be written, from every sender thread. Written in one statement each time record-every of
+     * them are waiting (by the thread that added the last one, unless another is already writing: it picks them up)
+     * and by the batch's thread at least every RECORD_AT_LEAST_EVERY and at its end. One writer at a time.
+     */
+    private final class Outcomes {
+        /** When outcomes were last written (System.nanoTime). */
+        private volatile long lastWrite = System.nanoTime();
+        private final java.util.concurrent.locks.ReentrantLock adding = new java.util.concurrent.locks.ReentrantLock();
+        private final java.util.concurrent.locks.ReentrantLock writing = new java.util.concurrent.locks.ReentrantLock();
+        private List<Outcome> waiting = new ArrayList<>();
+        private List<UUID> gone = new ArrayList<>();
+
+        void add(Sent sent) {
+            int count;
+            adding.lock();
+            try {
+                waiting.add(sent.outcome());
+                gone.addAll(sent.goneDevices());
+                count = waiting.size();
+            } finally {
+                adding.unlock();
+            }
+            if (count >= recordEvery && writing.tryLock()) {
+                try {
+                    write();
+                } finally {
+                    writing.unlock();
+                }
+            }
+        }
+
+        /** writeAll() if the last write was RECORD_AT_LEAST_EVERY ago or more. */
+        void writeIfDue() {
+            if (System.nanoTime() - lastWrite >= RECORD_AT_LEAST_EVERY.toNanos()) {
+                writeAll();
+            }
+        }
+
+        /** Writes everything waiting now (waits for a write in progress first). */
+        void writeAll() {
+            writing.lock();
+            try {
+                write();
+            } finally {
+                writing.unlock();
+            }
+        }
+
+        private void write() {
+            lastWrite = System.nanoTime();
+            while (true) {
+                List<Outcome> outcomes;
+                List<UUID> devicesGone;
+                adding.lock();
+                try {
+                    outcomes = waiting;
+                    devicesGone = gone;
+                    waiting = new ArrayList<>();
+                    gone = new ArrayList<>();
+                } finally {
+                    adding.unlock();
+                }
+                if (outcomes.isEmpty() && devicesGone.isEmpty()) {
+                    return;
+                }
+                try {
+                    for (int i = 0; i < outcomes.size(); i += recordEvery) {
+                        jobs.record(outcomes.subList(i, Math.min(outcomes.size(), i + recordEvery)));
+                    }
+                    devices.delete(devicesGone);
+                } catch (RuntimeException e) {
+                    // Not written: those messages become due again when their lease runs out (sent again then)
+                    log.warn("Recording {} notification outcomes failed: {}", outcomes.size(),
+                            e.getClass().getSimpleName());
+                }
+            }
+        }
+    }
 
     /** Sends one batch; returns how many of its messages were given back untried. */
     private int sendBatch(List<NotificationJob> batch, Instant lease) {
@@ -226,67 +313,156 @@ public class NotificationSendJob {
         Map<UUID, Outcome> overBudget = overSmsBudget(batch, lease);
         jobs.record(List.copyOf(overBudget.values()));   // dropped SMS: recorded at once, never sent
 
+        List<NotificationJob> toSend = batch.stream().filter(job -> !overBudget.containsKey(job.id())).toList();
+        Outcomes outcomes = new Outcomes();
+        open.add(outcomes);
+        java.util.concurrent.Semaphore slots = new java.util.concurrent.Semaphore(parallel);
+        List<Future<?>> running = new ArrayList<>(toSend.size());
+        int next = 0;
         int givenBack = 0;
-        List<Future<Sent>> running = new ArrayList<>(batch.size());
-        for (NotificationJob job : batch) {
-            if (overBudget.containsKey(job.id())) {
-                continue;
-            }
-            try {
-                running.add(senders.submit(() -> sendOne(job, lease, deadline, devicesByUser, people)));
-            } catch (RejectedExecutionException stopped) {
-                giveBack(job, lease);
-                givenBack++;
-            }
-        }
-        for (Future<Sent> f : running) {
-            try {
-                // Each send is bounded (see the class comment) and records its own outcome, so this can't hang
-                // and, if this thread is stopped, nothing already sent is forgotten
-                if (f.get() == GIVEN_BACK) {
-                    givenBack++;
+        try {
+            while (next < toSend.size()) {
+                // A free slot (writing what is waiting while none is), then as many more as are free, up to a group
+                int free = waitForSlot(slots, deadline, outcomes);
+                if (free == 0) {
+                    break;   // the deadline passed, or the server is stopping: the rest go back untried
                 }
-            } catch (ExecutionException e) {
-                log.warn("Sending a notification failed: {}", e.getCause().getClass().getSimpleName());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
+                int more = Math.min(renewGroup, toSend.size() - next) - 1;
+                while (more > 0 && slots.tryAcquire()) {
+                    free++;
+                    more--;
+                }
+                List<NotificationJob> group = toSend.subList(next, Math.min(toSend.size(), next + free));
+                next += group.size();
+                slots.release(free - group.size());
+                // Still ours (not cancelled, not taken after our lease ran out): one statement for the group
+                Instant mine = now().plus(LEASE);
+                Set<UUID> ours = jobs.renewAll(group.stream().map(NotificationJob::id).toList(), lease, mine);
+                for (NotificationJob job : group) {
+                    if (!ours.contains(job.id())) {
+                        slots.release();
+                        continue;
+                    }
+                    try {
+                        running.add(senders.submit(() -> {
+                            try {
+                                Sent sent = sendOne(job, mine, devicesByUser, people);
+                                if (sent != null) {
+                                    outcomes.add(sent);
+                                }
+                            } finally {
+                                slots.release();
+                            }
+                        }));
+                    } catch (RejectedExecutionException stopped) {
+                        slots.release();
+                        jobs.releaseAll(List.of(job.id()), mine, now());
+                        givenBack++;
+                    }
+                }
             }
+            if (next < toSend.size()) {
+                List<UUID> rest = toSend.subList(next, toSend.size()).stream().map(NotificationJob::id).toList();
+                jobs.releaseAll(rest, lease, now());   // their attempt isn't counted; due again now
+                givenBack += rest.size();
+            }
+        } catch (RuntimeException e) {
+            // The database didn't answer a renewal or a release: the messages not handed out stay leased and are due
+            // again when their lease runs out; the sends already running finish and are written below
+            log.warn("Handing out a notification batch failed: {}", e.getClass().getSimpleName());
+            givenBack = Math.max(1, toSend.size() - next);   // not handled; at least 1, so the round stops here
+        } finally {
+            // Each send is bounded (see the class comment), so this can't hang; meanwhile what came back is written
+            // at least every RECORD_AT_LEAST_EVERY
+            waiting:
+            for (Future<?> f : running) {
+                while (true) {
+                    try {
+                        f.get(RECORD_AT_LEAST_EVERY.toMillis(), TimeUnit.MILLISECONDS);
+                        break;
+                    } catch (java.util.concurrent.TimeoutException stillSending) {
+                        outcomes.writeIfDue();
+                    } catch (ExecutionException e) {
+                        log.warn("Sending a notification failed: {}", e.getCause().getClass().getSimpleName());
+                        break;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break waiting;
+                    }
+                }
+            }
+            boolean allBack = running.stream().allMatch(Future::isDone);
+            outcomes.writeAll();   // every outcome is written before the round goes on (or the server stops)
+            if (allBack) {
+                open.remove(outcomes);
+            }
+            // Otherwise this thread was stopped while sends still run: stop() writes what they bring back
         }
         return givenBack;
     }
 
-    /** Hands a claimed message back untried: due again now, its attempt not counted. */
-    private void giveBack(NotificationJob job, Instant lease) {
-        jobs.release(job.id(), lease, now());
+    /**
+     * Waits for one free send slot, writing the waiting outcomes every RECORD_AT_LEAST_EVERY meanwhile; returns 1, or
+     * 0 if the batch's deadline passed or the server is stopping first.
+     */
+    private int waitForSlot(java.util.concurrent.Semaphore slots, long deadline, Outcomes outcomes) {
+        while (!stopping && System.nanoTime() - deadline < 0) {
+            try {
+                boolean got = slots.tryAcquire(RECORD_AT_LEAST_EVERY.toMillis(), TimeUnit.MILLISECONDS);
+                outcomes.writeIfDue();   // also while slots keep coming free at once
+                if (got) {
+                    return stopping || System.nanoTime() - deadline >= 0 ? releaseAndStop(slots) : 1;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return 0;
+            }
+            outcomes.writeAll();
+        }
+        return 0;
+    }
+
+    private static int releaseAndStop(java.util.concurrent.Semaphore slots) {
+        slots.release();
+        return 0;
     }
 
     /**
-     * Sends one message if it is still ours and records its outcome at once. GIVEN_BACK if the batch's deadline
-     * passed before its turn or the server is stopping; null if it is no longer ours or failed unexpectedly (due
-     * again when its lease runs out).
+     * Sends one message whose lease was just renewed ({@code lease}); its outcome is written by the batch (Outcomes).
+     * Null if it failed unexpectedly (due again when its lease runs out).
      */
-    private Sent sendOne(NotificationJob job, Instant lease, long deadline,
-                         Map<UUID, List<PushSubscription>> devicesByUser, Map<UUID, UserDirectory.Person> people) {
+    private Sent sendOne(NotificationJob job, Instant lease, Map<UUID, List<PushSubscription>> devicesByUser,
+                         Map<UUID, UserDirectory.Person> people) {
         try {
-            if (stopping || System.nanoTime() - deadline > 0) {
-                giveBack(job, lease);
-                return GIVEN_BACK;
-            }
-            Instant mine = now().plus(LEASE);
-            if (!jobs.renew(job.id(), lease, mine)) {   // no longer ours (cancelled, or taken after our lease)
-                return null;
-            }
-            Sent sent = job.channel() == Channel.SMS
-                    ? new Sent(deliverSms(job, mine, people.get(job.userId())), List.of())
-                    : deliverPush(job, mine, devicesByUser.getOrDefault(job.userId(), List.of()));
-            jobs.record(List.of(sent.outcome()));
-            devices.delete(sent.goneDevices());
-            return sent;
+            return job.channel() == Channel.SMS
+                    ? new Sent(deliverSms(job, lease, people.get(job.userId())), List.of())
+                    : deliverPush(job, lease, devicesByUser.getOrDefault(job.userId(), List.of()));
         } catch (RuntimeException e) {
             // One bad message must not stop the rest; it becomes due again when its lease runs out
             log.warn("Sending notification {} failed: {}", job.id(), e.getClass().getSimpleName());
             return null;
+        }
+    }
+
+    /** Runs a call to one provider while holding one of its perHost slots (waiting for one if all are taken). */
+    private <T> T atHost(String host, java.util.function.Supplier<T> call) {
+        java.util.concurrent.Semaphore slot = hosts.computeIfAbsent(host,
+                h -> new java.util.concurrent.Semaphore(perHost));
+        slot.acquireUninterruptibly();
+        try {
+            return call.get();
+        } finally {
+            slot.release();
+        }
+    }
+
+    /** The push service a device's address points at (its host), for the per-host limit. */
+    static String hostOf(String endpoint) {
+        try {
+            String host = java.net.URI.create(endpoint).getHost();
+            return host == null ? "push" : host;
+        } catch (IllegalArgumentException e) {
+            return "push";
         }
     }
 
@@ -301,7 +477,7 @@ public class NotificationSendJob {
                 failed++;   // out of time for this message: the remaining devices are tried on the next try
                 break;
             }
-            switch (sender.send(device, payload)) {
+            switch (atHost(hostOf(device.endpoint()), () -> sender.send(device, payload))) {
                 case SENT -> sent++;
                 case GONE -> gone.add(device.id());
                 case FAILED -> failed++;
@@ -338,7 +514,7 @@ public class NotificationSendJob {
         if (template.isEmpty() || person == null || person.phone() == null) {   // no phone: account deleted
             return Outcome.finished(job.id(), JobStatus.NO_DEVICE, now(), lease);
         }
-        if (sms.send(person.phone(), template.get(), job.smsVariables())) {
+        if (atHost("sms", () -> sms.send(person.phone(), template.get(), job.smsVariables()))) {
             countSms(job);   // only SMS really sent count; refused ones and retries don't
             return Outcome.finished(job.id(), JobStatus.SENT, now(), lease);
         }

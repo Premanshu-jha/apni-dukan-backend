@@ -7,6 +7,8 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
 import java.util.List;
@@ -74,6 +76,40 @@ public class SessionRevocations {
 
     public void revokeAll(UUID userId) {
         redis.execute(RAISE_AND_EXPIRE, List.of(key(userId)), Long.toString(ttl.toMillis()));
+    }
+
+    /**
+     * revokeAll for callers whose real sign-out is already in the database (refresh tokens ended, a membership
+     * gone): if Redis doesn't answer, a WARN instead of an error. An error there would undo the database change (inside
+     * a transaction) or tell the app nothing happened (after the commit); the person's access tokens then simply run
+     * out within 15 minutes. Returns whether Redis took it.
+     */
+    public boolean revokeAllOrWarn(UUID userId, String why) {
+        try {
+            revokeAll(userId);
+            return true;
+        } catch (DataAccessException redisDown) {
+            log.warn("{} for {}, but Redis didn't take the sign-out ({}); their tokens end within 15 minutes", why,
+                    userId, redisDown.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    /**
+     * revokeAllOrWarn once the current transaction has committed (at once when none is running): a token refreshed
+     * in between would otherwise still carry what was just taken away.
+     */
+    public void revokeAllAfterCommit(UUID userId, String why) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            revokeAllOrWarn(userId, why);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                revokeAllOrWarn(userId, why);
+            }
+        });
     }
 
     /** How long a session number is kept after its last change (the refresh lifetime plus a day). */

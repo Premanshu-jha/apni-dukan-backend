@@ -48,6 +48,11 @@ public class ShopMember {
         this.createdAt = now;
     }
 
+    /** Takes the shop over (a hand-over to a helper or barber of this shop); the old owner has left it first. */
+    public void becomeOwner() {
+        this.role = ShopRole.OWNER;
+    }
+
     public UUID getId() { return id; }
     public UUID getShopId() { return shopId; }
     public UUID getUserId() { return userId; }

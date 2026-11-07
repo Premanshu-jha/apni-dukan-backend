@@ -39,6 +39,15 @@ public interface UserRepository extends JpaRepository<User, UUID> {
     @Query("SELECT u.phone FROM User u WHERE u.id = :id")
     Optional<String> findPhoneById(UUID id);
 
+    /**
+     * Whether the account with this phone signed in within the last 30 days (a sign-in made then: its refresh token is
+     * still kept, swapped or not). For the SMS budget (SmsBudget): near the cap, these people get codes first.
+     */
+    @Query(value = "SELECT EXISTS (SELECT 1 FROM users u JOIN refresh_tokens r ON r.user_id = u.id "
+            + "WHERE u.phone = :phone AND u.deleted_at IS NULL AND r.created_at > now() - interval '30 days')",
+            nativeQuery = true)
+    boolean signedInRecently(String phone);
+
     /** Only the id, so the row locked next (lockById) is read fresh, not from this lookup's copy. */
     @Query("SELECT u.id FROM User u WHERE lower(u.email) = lower(:email) AND u.emailVerifiedAt IS NOT NULL")
     Optional<UUID> findIdByVerifiedEmail(String email);

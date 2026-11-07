@@ -23,6 +23,15 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     @Query("SELECT s FROM Shop s WHERE s.id = :id")
     Optional<Shop> findForShare(UUID id);
 
+    /** The shop, its row locked (FOR UPDATE) until the transaction ends: closing it, or handing it over. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT s FROM Shop s WHERE s.id = :id")
+    Optional<Shop> lockById(UUID id);
+
+    /** Locks the shop's row against bookings (FOR NO KEY UPDATE, see ShopDirectory.holdAgainstBookings). */
+    @Query(value = "SELECT CAST(id AS text) FROM shops WHERE id = :id FOR NO KEY UPDATE", nativeQuery = true)
+    Optional<String> holdAgainstBookings(UUID id);
+
     /** Whether a file is some shop's owner or shop photo. */
     boolean existsByOwnerPhotoFileIdOrShopPhotoFileId(UUID ownerPhotoFileId, UUID shopPhotoFileId);
 }

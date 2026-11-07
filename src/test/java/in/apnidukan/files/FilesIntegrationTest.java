@@ -64,6 +64,11 @@ class FilesIntegrationTest {
                 }
 
                 @Override
+                public String signedLinkAt(String key, java.time.Instant signedAt, java.time.Duration validFor) {
+                    return real.signedLinkAt(key, signedAt, validFor);
+                }
+
+                @Override
                 public void delete(String key) {
                     if (r2DeletesFail) {
                         throw new IllegalStateException("R2 is down");
@@ -329,8 +334,10 @@ class FilesIntegrationTest {
     }
 
     /** A real access token for a person acting for this shop (the shop's id is made up until shops exist). */
+    /** The token of that shop's owner (files act for the shop in the database, so it must be theirs). */
     private String tokenFor(String shop) {
-        return jwt.issue(new AuthPrincipal(UUID.fromString(USER), UUID.fromString(shop), "OWNER", false), 0).token();
+        String owner = SHOP_B.equals(shop) ? OTHER_OWNER : USER;
+        return jwt.issue(new AuthPrincipal(UUID.fromString(owner), UUID.fromString(shop), "OWNER", false), 0).token();
     }
 
     private static byte[] fakeJpeg() {

@@ -94,10 +94,9 @@ class SalonAccountDeletion implements AccountDeletionListener {
         // Waits for a booking or move of theirs in progress; one waiting behind this sees the account deleted
         // (BookingService checks that after taking the same lock) and is refused
         appointments.lockCustomer(userId);
-        // Locks in the order every other writer takes them: their open booking rows (a salon cancelling one holds the
-        // row, then its counter), then every salon's counter at once in shop id order (their name goes from those
-        // screens, and the cancellations below take no new counter one by one), then, in AuthService, the person's
-        // row (see PersonDetailsListener)
+        // Locks in the order every other writer takes them: their open booking rows, then all their rows (by id: their
+        // name goes from the salons' screens, which bumpForCustomer marks by writing the rows again), then, in
+        // AuthService, the person's row (see PersonDetailsListener). The salons' counters move at commit (V21)
         appointments.lockOpenForCustomer(userId, now);
         versions.bumpForCustomer(userId);
         checkCanDelete(userId, now);   // again, under the lock: nothing changed since the code was sent

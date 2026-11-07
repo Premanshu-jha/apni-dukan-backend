@@ -144,6 +144,20 @@ public class User {
         }
     }
 
+    /**
+     * The number's real holder signed in with an SMS code to an account testers made: it is theirs now, normal for
+     * good, and what the testers put in goes. Their email above all: it is the recovery address, so a tester could
+     * otherwise move the account back to a phone of theirs ("lost phone"). The name goes too; the holder adds their
+     * own. (Account recovery keeps the email: whoever recovers has just proved they read that inbox.)
+     */
+    public void claimByRealHolder(Instant now) {
+        this.testAccount = false;
+        this.email = null;
+        this.emailVerifiedAt = null;
+        this.name = null;
+        this.updatedAt = now;
+    }
+
     public boolean isTestAccount() { return testAccount; }
     public Instant getAdminSince() { return adminSince; }
     public Instant getCreatedAt() { return createdAt; }

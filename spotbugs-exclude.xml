@@ -51,6 +51,33 @@
             <Class name="in.apnidukan.files.service.PhotoCleaning"/>
             <Class name="in.apnidukan.notifications.service.InboxService"/>
             <Class name="in.apnidukan.auth.service.AuthService"/>
+            <Class name="in.apnidukan.notifications.service.SalonMessagePurgeJob"/>
+            <Class name="in.apnidukan.salon.service.SalonClosingJob"/>
+            <Class name="in.apnidukan.salon.service.SalonCalendar"/>
+            <Class name="in.apnidukan.salon.service.SalonSetups"/>
         </Or>
+    </Match>
+    <!-- SpotBugs 4.10 / FindSecBugs 1.14 (new findings in code that didn't change):
+         SecurityConfig.writeError writes the 401/403 answers of the security filters. Every call passes our own
+         constant code and message (NOT_SIGNED_IN, FORBIDDEN, ...), never anything from the request, and the answer is
+         application/json, so there is nothing a browser could run. -->
+    <Match>
+        <Bug pattern="XSS_SERVLET"/>
+        <Class name="in.apnidukan.common.security.SecurityConfig"/>
+        <Method name="writeError"/>
+    </Match>
+    <!-- A request wrapper's getInputStream must hand out the stream it wraps (here the one that counts bytes against
+         the size limit): that is the whole point of the wrapper, not a leak of its internals. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+        <Class name="in.apnidukan.common.web.RequestSizeLimitFilter$LimitedRequest"/>
+        <Method name="getInputStream"/>
+    </Match>
+    <!-- revokeAllOrWarn logs why the sign-out was asked for: every caller passes a constant of our own ("Shop membership
+         ended", ...) and a UUID, never anything from a request, so no line break can get into the log. -->
+    <Match>
+        <Bug pattern="CRLF_INJECTION_LOGS"/>
+        <Class name="in.apnidukan.common.security.SessionRevocations"/>
+        <Method name="revokeAllOrWarn"/>
     </Match>
 </FindBugsFilter>

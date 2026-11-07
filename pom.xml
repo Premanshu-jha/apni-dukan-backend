@@ -30,9 +30,9 @@
              mvn verify runs the integration tests, so it needs Docker running (mvn verify -Djacoco.skip=true without). -->
         <coverage.lines.minimum>0.85</coverage.lines.minimum>
         <coverage.branches.minimum>0.68</coverage.branches.minimum>
-        <spotbugs-plugin.version>4.9.3.0</spotbugs-plugin.version>
-        <findsecbugs.version>1.13.0</findsecbugs.version>
-        <errorprone.version>2.36.0</errorprone.version>
+        <spotbugs-plugin.version>4.10.5.0</spotbugs-plugin.version>
+        <findsecbugs.version>1.14.0</findsecbugs.version>
+        <errorprone.version>2.51.0</errorprone.version>
         <archunit.version>1.5.1</archunit.version>
     </properties>
 
@@ -124,6 +124,12 @@
             <artifactId>spring-boot-starter-mail</artifactId>
         </dependency>
 
+        <!-- In-memory caches (the salons' setups for free-time checks): bounded, no lock for the whole map.
+             Version managed by Spring Boot. -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
         <!-- File storage: Cloudflare R2 through the S3 API -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -240,6 +246,8 @@
                         <configuration>
                             <compilerArgs>
                                 <arg>-XDcompilePolicy=simple</arg>
+                                <!-- Error Prone 2.4x+ needs this on JDK 21 (type annotations it reads) -->
+                                <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
                                 <arg>--should-stop=ifError=FLOW</arg>
                                 <arg>-Xplugin:ErrorProne</arg>
                             </compilerArgs>

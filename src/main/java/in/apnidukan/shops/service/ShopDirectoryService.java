@@ -76,6 +76,12 @@ public class ShopDirectoryService implements ShopDirectory {
     }
 
     @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void holdAgainstBookings(UUID shopId) {
+        shops.holdAgainstBookings(shopId);
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public List<ShopCard> nearby(String type, java.math.BigDecimal latitude, java.math.BigDecimal longitude,
                                  int radiusMetres, int limit, Cursor after, boolean skipPausedSalons) {

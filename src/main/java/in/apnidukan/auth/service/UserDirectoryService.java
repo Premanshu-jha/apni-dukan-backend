@@ -3,15 +3,10 @@ package in.apnidukan.auth.service;
 import in.apnidukan.auth.domain.User;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.context.UserDirectory;
-import in.apnidukan.common.error.ApiException;
-import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Clock;
-import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -25,35 +20,20 @@ import java.util.stream.Collectors;
 public class UserDirectoryService implements UserDirectory {
 
     private final UserRepository users;
-    private final Clock clock;
 
-    public UserDirectoryService(UserRepository users, Clock clock) {
+    public UserDirectoryService(UserRepository users) {
         this.users = users;
-        this.clock = clock;
-    }
-
-    /**
-     * Runs in its own short transaction, so a clash with the same phone signing up at the same moment (unique
-     * phone) can be retried with a fresh read instead of breaking the caller's transaction.
-     */
-    @Override
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public UUID findOrCreateByPhone(String phoneInput) {
-        String phone = PhoneNumbers.normalize(phoneInput);
-        return users.findByPhone(phone).map(User::getId).orElseGet(() -> {
-            try {
-                return users.saveAndFlush(new User(UUID.randomUUID(), phone, Instant.now(clock))).getId();
-            } catch (DataIntegrityViolationException e) {
-                // The same phone signed up at the same moment from another request
-                throw new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN", "Please try again.");
-            }
-        });
     }
 
     @Override
     @Transactional(readOnly = true)
     public Optional<UUID> findByPhone(String phoneInput) {
         return users.findByPhone(PhoneNumbers.normalize(phoneInput)).map(User::getId);
+    }
+
+    @Override
+    public String normalizePhone(String phoneInput) {
+        return PhoneNumbers.normalize(phoneInput);
     }
 
     @Override

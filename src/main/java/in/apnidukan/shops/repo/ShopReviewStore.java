@@ -41,7 +41,8 @@ public class ShopReviewStore {
             + "WHEN s.status = 'PENDING_VISIT' THEN 'FIRST_VISIT' "
             + "WHEN s.status = 'DRAFT' AND s.status_reason IS NOT NULL THEN 'SENT_BACK' "
             + "WHEN s.status = 'APPROVED' THEN 'LIVE' "
-            + "WHEN s.status = 'SUSPENDED' THEN 'SUSPENDED' END";
+            + "WHEN s.status = 'SUSPENDED' THEN 'SUSPENDED' "
+            + "WHEN s.status = 'CLOSED' THEN 'CLOSED' END";
 
     /**
      * Where a list page ends: the last shop's status_since and id. Lists are ordered by both (longest in the group
@@ -89,6 +90,7 @@ public class ShopReviewStore {
             case SENT_BACK -> "s.status = 'DRAFT' AND s.status_reason IS NOT NULL";
             case LIVE -> "s.status = 'APPROVED'";
             case SUSPENDED -> "s.status = 'SUSPENDED'";
+            case CLOSED -> "s.status = 'CLOSED'";
         });
         List<Object> args = new ArrayList<>(List.of(type.name()));
         String text = q == null ? "" : q.strip();
@@ -194,6 +196,12 @@ public class ShopReviewStore {
                 + "AND (a.owner_photo_file_id = ? OR a.shop_photo_file_id = ?) AND a.rev = (SELECT max(b.rev) "
                 + "FROM shops_aud b WHERE b.id = a.id AND b.status = 'APPROVED'))", Boolean.class, fileId, fileId);
         return Boolean.TRUE.equals(yes);
+    }
+
+    /** The shop this person closed most recently after {@code since}, if any (ix_shop_events_closed_by). */
+    public Optional<UUID> closedBy(UUID userId, Instant since) {
+        return jdbc.queryForList("SELECT shop_id FROM shop_events WHERE by_user = ? AND event = 'CLOSED' AND at > ? "
+                + "ORDER BY at DESC LIMIT 1", UUID.class, userId, Timestamp.from(since)).stream().findFirst();
     }
 
     /** Writes a timeline entry; a trigger (V16) keeps the shop's status_since and ever_approved from it. */

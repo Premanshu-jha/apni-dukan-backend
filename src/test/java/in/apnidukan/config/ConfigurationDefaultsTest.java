@@ -47,12 +47,14 @@ class ConfigurationDefaultsTest {
     }
 
     @Test
-    void theSenderUsesAtMostHalfTheDatabasePool() throws IOException {
+    void theSenderRunsManySendsAtOnceWithoutTyingThemToTheDatabasePool() throws IOException {
         PropertySourcesPropertyResolver r = defaults();
         assertThat(number(r, "spring.datasource.hikari.maximum-pool-size")).isEqualTo(20);
-        assertThat(number(r, "app.notifications.send-concurrency")).isEqualTo(8);
-        assertThat(number(r, "app.notifications.send-concurrency") * 2)
-                .isLessThanOrEqualTo(number(r, "spring.datasource.hikari.maximum-pool-size"));
+        // Sends hold no connection (leases a group at a time, outcomes in batches): far above the pool, on purpose
+        assertThat(number(r, "app.notifications.send-concurrency")).isEqualTo(64);
+        assertThat(number(r, "app.notifications.per-host-concurrency")).isEqualTo(32);
+        assertThat(number(r, "app.notifications.record-every")).isEqualTo(50);
+        assertThat(number(r, "app.sms.hourly-limit")).isEqualTo(10_000);
     }
 
     @Test
@@ -66,5 +68,16 @@ class ConfigurationDefaultsTest {
         assertThat(r.getProperty("app.db.job-statement-timeout")).isEqualTo("60s");
         // Flyway's own connection has no limit, whatever the database role's default is
         assertThat(r.getProperty("spring.flyway.init-sqls")).isEqualTo("SET statement_timeout = 0");
+        // A second copy waits for the first one's migrations (15 minutes) instead of giving up and crash-looping
+        assertThat(number(r, "spring.flyway.lock-retry-count")).isEqualTo(900);
+    }
+
+    @Test
+    void cachesAreBoundedBySizeAndOwnersGetBookingsByPushOnly() throws IOException {
+        PropertySourcesPropertyResolver r = defaults();
+        assertThat(r.getProperty("app.salon.setup-cache-weight")).isEqualTo("2000000");
+        assertThat(r.getProperty("app.salon.busy-cache-rows")).isEqualTo("500000");
+        assertThat(r.getProperty("app.notifications.owner-booking-sms")).isEqualTo("false");
+        assertThat(r.getProperty("app.jobs.salon-closing-batch")).isEqualTo("500");
     }
 }

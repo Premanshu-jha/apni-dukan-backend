@@ -7,6 +7,7 @@ import in.apnidukan.common.notify.TextMessages;
 import in.apnidukan.common.security.AuthPrincipal;
 import in.apnidukan.common.security.JwtService;
 import in.apnidukan.notifications.domain.PushSubscription;
+import in.apnidukan.notifications.domain.JobStatus;
 import in.apnidukan.notifications.repo.NotificationStore;
 import in.apnidukan.notifications.repo.PushSubscriptionStore;
 import in.apnidukan.notifications.service.MessageCleanupJob;
@@ -46,6 +47,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -70,8 +75,13 @@ class MessagesAtScaleIntegrationTest {
     static final List<String> TEXTED = new CopyOnWriteArrayList<>();
     static volatile PushSender.Result pushResult = PushSender.Result.SENT;
     static volatile long pushMillis = 40;
+    /** How long a device whose address contains "/slow-" takes. */
+    static volatile long slowMillis = 2000;
     static final AtomicInteger IN_FLIGHT = new AtomicInteger();
     static final AtomicInteger MOST_IN_FLIGHT = new AtomicInteger();
+    /** Sends running at once and the most seen, per push service host. */
+    static final Map<String, AtomicInteger> HOST_IN_FLIGHT = new java.util.concurrent.ConcurrentHashMap<>();
+    static final Map<String, AtomicInteger> HOST_MOST = new java.util.concurrent.ConcurrentHashMap<>();
     static final AtomicInteger DEVICE_LOOKUPS = new AtomicInteger();
     static final AtomicInteger PHONE_LOOKUPS = new AtomicInteger();
 
@@ -89,12 +99,17 @@ class MessagesAtScaleIntegrationTest {
         PushSender slowPushSender() {
             return (PushSubscription device, String payload) -> {
                 MOST_IN_FLIGHT.accumulateAndGet(IN_FLIGHT.incrementAndGet(), Math::max);
+                String host = java.net.URI.create(device.endpoint()).getHost();
+                AtomicInteger onHost = HOST_IN_FLIGHT.computeIfAbsent(host, h -> new AtomicInteger());
+                HOST_MOST.computeIfAbsent(host, h -> new AtomicInteger()).accumulateAndGet(onHost.incrementAndGet(),
+                        Math::max);
                 try {
-                    Thread.sleep(pushMillis);
+                    Thread.sleep(device.endpoint().contains("/slow-") ? slowMillis : pushMillis);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } finally {
                     IN_FLIGHT.decrementAndGet();
+                    onHost.decrementAndGet();
                 }
                 PUSHED.add(payload);
                 return pushResult;
@@ -128,13 +143,13 @@ class MessagesAtScaleIntegrationTest {
         UserDirectory countingUsers(UserDirectoryService real) {
             return new UserDirectory() {
                 @Override
-                public UUID findOrCreateByPhone(String phone) {
-                    return real.findOrCreateByPhone(phone);
+                public Optional<UUID> findByPhone(String phone) {
+                    return real.findByPhone(phone);
                 }
 
                 @Override
-                public Optional<UUID> findByPhone(String phone) {
-                    return real.findByPhone(phone);
+                public String normalizePhone(String phone) {
+                    return real.normalizePhone(phone);
                 }
 
                 @Override
@@ -171,6 +186,8 @@ class MessagesAtScaleIntegrationTest {
         TestContainers.register(registry);
         registry.add("app.notifications.batch-size", () -> "5");
         registry.add("app.notifications.send-concurrency", () -> "4");
+        registry.add("app.notifications.per-host-concurrency", () -> "2");   // at most 2 at once to one service
+        registry.add("app.notifications.record-every", () -> "3");   // outcomes written three at a time
         registry.add("app.cleanup.batch", () -> "3");
         registry.add("app.sms.booking-daily-limit", () -> "4");   // configurable (default 100,000)
         registry.add("app.sms.template.booking-cancelled-by-salon", () -> "tpl-salon-cancel");
@@ -188,6 +205,12 @@ class MessagesAtScaleIntegrationTest {
     @Autowired MessageCleanupJob cleanup;
     @Autowired NotificationStore store;
     @Autowired JobLeases leases;
+    @Autowired PushSubscriptionStore deviceStore;
+    @Autowired PushSender pushSender;
+    @Autowired TextMessages textMessages;
+    @Autowired in.apnidukan.notifications.service.SmsTemplates smsTemplates;
+    @Autowired UserDirectory userDirectory;
+    @Autowired in.apnidukan.common.security.RateLimiter rateLimiter;
 
     @BeforeEach
     void setUp() {
@@ -202,6 +225,9 @@ class MessagesAtScaleIntegrationTest {
         pushResult = PushSender.Result.SENT;
         pushMillis = 40;
         MOST_IN_FLIGHT.set(0);
+        HOST_IN_FLIGHT.clear();
+        HOST_MOST.clear();
+        slowMillis = 2000;
         DEVICE_LOOKUPS.set(0);
         PHONE_LOOKUPS.set(0);
     }
@@ -226,6 +252,112 @@ class MessagesAtScaleIntegrationTest {
         assertThat(MOST_IN_FLIGHT.get()).isBetween(2, 4);   // in parallel, never more than send-concurrency
         assertThat(sender.runOnce()).isZero();
         assertThat(jobs).hasSize(12);
+    }
+
+    @Test
+    void sendsToOnePushServiceStayUnderItsOwnLimitWhileOthersUseTheRestAndEveryOutcomeIsWritten() {
+        for (int i = 0; i < 10; i++) {
+            UUID person = person(i);
+            jdbc.update("INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, created_at) "
+                    + "VALUES (?, ?, ?, 'key', 'auth', ?)", UUID.randomUUID(), person, (i % 2 == 0
+                    ? "https://fcm.googleapis.com/fcm/send/d-" : "https://updates.push.services.mozilla.com/wpush/v2/d-")
+                    + i, Timestamp.from(NOW));
+            due(person, "PUSH", "BOOKING_CONFIRMED");
+        }
+        pushMillis = 150;
+        assertThat(sender.runOnce()).isEqualTo(10);
+        assertThat(HOST_MOST.get("fcm.googleapis.com").get()).isBetween(1, 2);
+        assertThat(HOST_MOST.get("updates.push.services.mozilla.com").get()).isBetween(1, 2);
+        assertThat(MOST_IN_FLIGHT.get()).isBetween(3, 4);   // both services at once, never above send-concurrency
+        // Written in threes and the rest at the end: all of them before the round returned
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM notification_jobs WHERE status = 'SENT' "
+                + "AND finished_at IS NOT NULL", Integer.class)).isEqualTo(10);
+    }
+
+    /** A sender of its own (writing outcomes only by time: 50 a statement), so stopping it leaves the others alone. */
+    private NotificationSendJob ownSender() {
+        return new NotificationSendJob(store, deviceStore, pushSender, textMessages, smsTemplates, userDirectory,
+                rateLimiter, 100_000, 1000, 5, 4, 2, 50, 180_000, 50, CLOCK, false);
+    }
+
+    @Test
+    void anOutcomeIsWrittenWithinHalfASecondWhileOtherSendsOfTheBatchStillRun() throws Exception {
+        UUID quick = person(1);
+        device(quick, 1);
+        UUID quickJob = due(quick, "PUSH", "BOOKING_CONFIRMED");
+        UUID slow = person(2);
+        jdbc.update("INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, "
+                + "'https://fcm.googleapis.com/fcm/send/slow-2', 'key', 'auth', ?)", UUID.randomUUID(), slow,
+                Timestamp.from(NOW));
+        UUID slowJob = due(slow, "PUSH", "BOOKING_CONFIRMED");
+        NotificationSendJob own = ownSender();
+        ExecutorService thread = Executors.newSingleThreadExecutor();
+        try {
+            Future<Integer> round = thread.submit(own::runOnce);
+            // Waits for the condition (polling), not a fixed time: the quick one's outcome is written while the slow
+            // one (2 s) is still being sent
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofMillis(1500))
+                    .pollInterval(java.time.Duration.ofMillis(20)).until(() -> "SENT".equals(status(quickJob)));
+            assertThat(round.isDone()).isFalse();   // the slow one is still being sent
+            assertThat(status(slowJob)).isEqualTo("PENDING");
+            assertThat(round.get(10, TimeUnit.SECONDS)).isEqualTo(2);
+            assertThat(status(slowJob)).isEqualTo("SENT");
+        } finally {
+            thread.shutdownNow();
+            own.stop();
+        }
+    }
+
+    @Test
+    void stoppingTheServerWritesEveryOutcomeOfSendsThatWereRunning() throws Exception {
+        UUID slow = person(2);
+        jdbc.update("INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, "
+                + "'https://fcm.googleapis.com/fcm/send/slow-2', 'key', 'auth', ?)", UUID.randomUUID(), slow,
+                Timestamp.from(NOW));
+        UUID slowJob = due(slow, "PUSH", "BOOKING_CONFIRMED");
+        slowMillis = 1000;
+        NotificationSendJob own = ownSender();
+        ExecutorService thread = Executors.newSingleThreadExecutor();
+        try {
+            IN_FLIGHT.set(0);
+            thread.submit(own::runOnce);
+            // Being sent now: waits until the push service has it (polling), not a fixed time
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5))
+                    .pollInterval(java.time.Duration.ofMillis(10)).until(() -> IN_FLIGHT.get() == 1);
+            thread.shutdownNow();   // the scheduler stopping the round's own thread
+            own.stop();   // the server stopping: the running send finishes, its outcome is written before this returns
+            assertThat(status(slowJob)).isEqualTo("SENT");
+        } finally {
+            thread.shutdownNow();
+        }
+    }
+
+    private String status(UUID job) {
+        return jdbc.queryForObject("SELECT status FROM notification_jobs WHERE id = ?", String.class, job);
+    }
+
+    @Test
+    void outcomesOfAnyKindAreWrittenInOneStatementOnlyWhileTheMessageIsStillOurs() {
+        UUID a = due(person(1), "PUSH", "BOOKING_CONFIRMED");
+        UUID b = due(person(2), "PUSH", "BOOKING_CONFIRMED");
+        UUID c = due(person(3), "PUSH", "BOOKING_CONFIRMED");
+        Instant lease = NOW.plus(Duration.ofMinutes(5));
+        assertThat(store.claimDue(NOW, 10, Duration.ofMinutes(5), 8)).hasSize(3);
+        jdbc.update("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = now() WHERE id = ?", c);
+        store.record(List.of(NotificationStore.Outcome.finished(a, JobStatus.SENT, NOW, lease),
+                NotificationStore.Outcome.retry(b, NOW.plus(Duration.ofMinutes(1)), lease),
+                NotificationStore.Outcome.finished(c, JobStatus.SENT, NOW, lease)));
+        assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE id = ?", String.class, a))
+                .isEqualTo("SENT");
+        assertThat(jdbc.queryForObject("SELECT status || ' ' || (next_try_at = ?) FROM notification_jobs "
+                + "WHERE id = ?", String.class, Timestamp.from(NOW.plus(Duration.ofMinutes(1))), b))
+                .isEqualTo("PENDING true");
+        assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE id = ?", String.class, c))
+                .isEqualTo("CANCELLED");   // the cancel in between wins
+        // A lease that isn't ours any more: nothing changes
+        store.record(List.of(NotificationStore.Outcome.finished(b, JobStatus.FAILED, NOW, lease)));
+        assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE id = ?", String.class, b))
+                .isEqualTo("PENDING");
     }
 
     @Test

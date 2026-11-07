@@ -10,13 +10,10 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
+/** refresh_tokens through JPA; what a refresh itself reads and writes is in RefreshTokenStore (one round trip each). */
 public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID> {
 
     Optional<RefreshToken> findByTokenHash(String tokenHash);
-
-    /** Whose token it is, without loading the token (it is read fresh after the person's row is locked). */
-    @Query("SELECT t.userId FROM RefreshToken t WHERE t.tokenHash = :tokenHash")
-    Optional<UUID> findUserIdByTokenHash(String tokenHash);
 
     /** Records which token this one was swapped for. */
     @Modifying
@@ -35,13 +32,6 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
             + "WHERE t.id = :id AND t.revokeReason IN (in.apnidukan.auth.domain.RevokeReason.ROTATED, "
             + "in.apnidukan.auth.domain.RevokeReason.GRACE_REPLACED)")
     int markReuseDetected(UUID id);
-
-    /**
-     * The database's clock, in microseconds: refresh compares the swap times other copies of the backend wrote with it,
-     * so servers whose own clocks differ can't disagree about the grace.
-     */
-    @Query(value = "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint", nativeQuery = true)
-    long databaseMicros();
 
     /** Forgets the device labels of a person's sign-ins (their account was deleted). */
     @Modifying

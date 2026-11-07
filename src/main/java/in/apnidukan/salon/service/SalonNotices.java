@@ -13,6 +13,7 @@ import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.salon.repo.SalonStaffRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
@@ -26,6 +27,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -57,34 +59,54 @@ public class SalonNotices {
     private final ShopMemberships memberships;
     private final SalonStaffRepository staff;
     private final UserDirectory users;
+    private final boolean ownerBookingSms;
 
     /**
      * @param memberships @Lazy: the shops module (which implements it) calls back into the salon module when a shop
      *                    changes (SalonShopChanges uses these notices), so it is looked up on first use instead
+     * @param ownerBookingSms app.notifications.owner-booking-sms: the owner also gets the SMS of each booking, move and
+     *                        cancel (off by default; barbers keep theirs when the template is set)
      */
     public SalonNotices(Notifications notifications, @Lazy ShopMemberships memberships, SalonStaffRepository staff,
-                        UserDirectory users) {
+                        UserDirectory users,
+                        @Value("${app.notifications.owner-booking-sms:false}") boolean ownerBookingSms) {
+        this.ownerBookingSms = ownerBookingSms;
         this.notifications = notifications;
         this.memberships = memberships;
         this.staff = staff;
         this.users = users;
     }
 
-    /** Booking saved: the confirmation now, and the reminder 60 minutes before if it was booked well ahead. */
-    public void booked(Appointment a, ShopCard salon, List<BookedService> services, Instant now) {
-        notifications.queue(new Notice(a.customerId(), "BOOKING_CONFIRMED", a.id(), now,
+    /**
+     * Booking saved: the confirmation now, the reminder 60 minutes before if it was booked well ahead, and the salon
+     * told. The barber's name and sign-in come from the setup the booking was made with (in memory), so it costs three
+     * statements: the customer's name, the salon's members, and every message in one batch.
+     */
+    public void booked(Appointment a, ShopCard salon, List<BookedService> services, SalonSetups.Setup setup,
+                       Instant now) {
+        List<Notice> out = new ArrayList<>();
+        out.add(new Notice(a.customerId(), "BOOKING_CONFIRMED", a.id(), now,
                 "Booked at " + salon.name(),
                 salon.name() + ", " + DAY_TIME.format(a.startsAt()) + ", " + names(services) + ". Booking "
                         + a.bookingNo() + ". Pay at the salon.",
                 url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt()),
                         "BOOKING", a.bookingNo())));
-        remind(a, salon, now);
+        if (Duration.between(now, a.startsAt()).compareTo(REMINDER_ONLY_IF_BOOKED_AHEAD) > 0) {
+            out.add(reminder(a, salon));
+        }
         String who = customerName(a);
-        String barber = barberName(a.staffId());
-        tellSalon(a, List.of(a.staffId()), "SALON_NEW_BOOKING", "New booking, " + TIME.format(a.startsAt()),
+        Optional<SalonSetups.Barber> his = setup.barber(a.staffId());
+        String barber = his.map(SalonSetups.Barber::name).orElseGet(() -> barberName(a.staffId()));
+        Set<UUID> logins = his.isPresent() ? loginOf(his.get()) : logins(List.of(a.staffId()));
+        out.addAll(salonNotices(a, logins, "SALON_NEW_BOOKING", "New booking, " + TIME.format(a.startsAt()),
                 who + " booked " + names(services) + " with " + barber + ", " + DAY_TIME.format(a.startsAt())
                         + ". Booking " + a.bookingNo() + ".",
-                salonSms(who, a, barber), a.customerId(), now);
+                salonSms(who, a, barber), a.customerId(), now));
+        notifications.queueAll(out);
+    }
+
+    private static Set<UUID> loginOf(SalonSetups.Barber barber) {
+        return barber.login() == null ? Set.of() : Set.of(barber.login());
     }
 
     /**
@@ -234,6 +256,11 @@ public class SalonNotices {
         notifications.forgetSalonMessages(userId);
     }
 
+    /** forgetSalonMessages for several people at once (the salon closed). */
+    public void forgetSalonMessages(java.util.Collection<UUID> userIds) {
+        notifications.forgetSalonMessages(userIds);
+    }
+
     /** Started, no-show: nothing more to remind about. */
     public void closed(Appointment a) {
         notifications.cancelPending(a.id());
@@ -263,30 +290,45 @@ public class SalonNotices {
     }
 
     /**
-     * To the salon's owner and the given barbers' sign-ins (with the SMS, when a template is set), and to its helpers
-     * (in the app only: they run the front desk, and SMS costs per message). Each person once.
+     * To the salon's owner, its helpers and the given barbers' sign-ins, each person once, written in one batch. The
+     * barbers also get the SMS (when a template is set for the type); the owner only when
+     * app.notifications.owner-booking-sms is on (off by default: a busy salon's owner would get an SMS per booking, and
+     * the app's push and list already tell them); helpers in the app only (they run the front desk).
      * @param about the customer the text names, so their account deletion blanks it (null when it names nobody)
      */
     private void tellSalon(Appointment a, List<UUID> barbers, String type, String title, String body,
                            Map<String, String> sms, UUID about, Instant now) {
-        Set<UUID> withSms = new LinkedHashSet<>();
+        notifications.queueAll(salonNotices(a, logins(barbers), type, title, body, sms, about, now));
+    }
+
+    private List<Notice> salonNotices(Appointment a, Set<UUID> barberLogins, String type, String title, String body,
+                                      Map<String, String> sms, UUID about, Instant now) {
+        Set<UUID> withSms = new LinkedHashSet<>(barberLogins);
         Set<UUID> appOnly = new LinkedHashSet<>();
         for (var m : memberships.members(a.shopId())) {
             if ("OWNER".equals(m.role())) {
-                withSms.add(m.userId());
+                (ownerBookingSms ? withSms : appOnly).add(m.userId());
             } else if ("HELPER".equals(m.role())) {
                 appOnly.add(m.userId());
             }
         }
-        staff.findAllById(barbers).stream().map(SalonStaff::getUserId).filter(Objects::nonNull).forEach(withSms::add);
         appOnly.removeAll(withSms);
         String day = dayUrl(a);
+        List<Notice> out = new ArrayList<>();
         for (UUID person : withSms) {
-            notifications.queue(new Notice(person, type, null, now, title, body, day, sms, about));
+            out.add(new Notice(person, type, null, now, title, body, day, sms, about));
         }
         for (UUID person : appOnly) {
-            notifications.queue(new Notice(person, type, null, now, title, body, day, Map.of(), about));
+            out.add(new Notice(person, type, null, now, title, body, day, Map.of(), about));
         }
+        return out;
+    }
+
+    /** The sign-ins of these barbers (those who have one), in one query. */
+    private Set<UUID> logins(List<UUID> barbers) {
+        Set<UUID> out = new LinkedHashSet<>();
+        staff.findAllById(barbers).stream().map(SalonStaff::getUserId).filter(Objects::nonNull).forEach(out::add);
+        return out;
     }
 
     /** To the given barbers' sign-ins only, in the app (no SMS), never to the person who made the change. */

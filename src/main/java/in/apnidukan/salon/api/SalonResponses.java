@@ -33,19 +33,21 @@ public final class SalonResponses {
      * @param hours sorted by day, then start time
      * @param loginPhone the phone of his own sign-in, or null if he has none
      * @param photoFileId his photo (open it with GET /files/{id}/link), or null
+     * @param invitedPhone the phone invited to sign in as him, while that invitation waits (owner only), else null
      */
     public record StaffResponse(UUID id, String name, boolean active, List<UUID> serviceIds, List<ShiftOut> hours,
                                 String loginPhone, UUID photoFileId, long version, Instant createdAt,
-                                Instant updatedAt) {
+                                Instant updatedAt, String invitedPhone) {
 
         public static StaffResponse from(SalonStaff staff, List<UUID> serviceIds, List<Shift> shifts,
-                                         String loginPhone) {
+                                         String loginPhone, String invitedPhone) {
             List<ShiftOut> hours = shifts.stream()
                     .sorted(Comparator.comparingInt(Shift::weekday).thenComparingInt(Shift::startMin))
                     .map(ShiftOut::from)
                     .toList();
             return new StaffResponse(staff.getId(), staff.getName(), staff.isActive(), serviceIds, hours, loginPhone,
-                    staff.getPhotoFileId(), staff.getVersion(), staff.getCreatedAt(), staff.getUpdatedAt());
+                    staff.getPhotoFileId(), staff.getVersion(), staff.getCreatedAt(), staff.getUpdatedAt(),
+                    invitedPhone);
         }
     }
 

@@ -1,6 +1,7 @@
 package in.apnidukan.common.context;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -17,10 +18,19 @@ public interface ShopMemberships {
     List<Member> members(UUID shopId);
 
     /**
-     * Adds a person to a shop with a role other than OWNER (a salon linking a barber's login).
-     * 409 ALREADY_IN_A_SHOP if the person already works in a shop (this one or another): one shop per person.
+     * Invites the person with this phone to sign in as this barber profile of the salon (see ShopInvitesService): the
+     * same answer whether or not the number has an account; he joins when he accepts. A waiting invitation for the
+     * profile with another phone is replaced. The caller holds the profile's lock. Returns the phone as stored.
+     * 400 INVALID_PHONE / VALIDATION_FAILED (own number); 409 ALREADY_A_MEMBER (already in this salon),
+     * 409 INVITE_PENDING (this phone has another invitation waiting here); 429 after 20 invitations a day.
      */
-    void addMember(UUID shopId, UUID userId, String role);
+    String inviteBarber(UUID shopId, UUID ownerId, UUID staffId, String phone);
+
+    /** Cancels the barber profile's waiting sign-in invitation, if any (the caller holds the profile's lock). */
+    void cancelBarberInvite(UUID shopId, UUID staffId, UUID by);
+
+    /** The salon's waiting barber invitations: profile → the phone invited. */
+    Map<UUID, String> waitingBarberInvites(UUID shopId);
 
     /** Removes a person from a shop (never the owner). Does nothing if they aren't a member of it. */
     void removeMember(UUID shopId, UUID userId);

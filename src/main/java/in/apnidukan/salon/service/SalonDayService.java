@@ -23,6 +23,7 @@ import in.apnidukan.salon.api.BookingResponses.HistoryView;
 import in.apnidukan.salon.api.BookingResponses.HoursBlock;
 import in.apnidukan.salon.api.BookingResponses.MemberView;
 import in.apnidukan.salon.api.BookingResponses.PauseView;
+import in.apnidukan.salon.api.BookingResponses.UpcomingChanges;
 import in.apnidukan.salon.api.BookingResponses.WalkInOption;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.AppointmentCursor;
@@ -33,6 +34,7 @@ import in.apnidukan.salon.domain.Availability.BarberDay;
 import in.apnidukan.salon.domain.Availability.WalkInSlot;
 import in.apnidukan.salon.domain.BlockType;
 import in.apnidukan.salon.domain.BookedService;
+import in.apnidukan.salon.domain.DayCursor;
 import in.apnidukan.salon.domain.Interval;
 import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
@@ -41,6 +43,7 @@ import in.apnidukan.salon.domain.StrikeKind;
 import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.salon.repo.SalonAccessStore;
 import in.apnidukan.salon.repo.SalonStaffRepository;
+import in.apnidukan.salon.repo.SalonVersionStore;
 import in.apnidukan.salon.repo.StaffShiftRepository;
 import in.apnidukan.salon.repo.StrikeStore;
 import in.apnidukan.salon.service.SalonAccess.Caller;
@@ -130,13 +133,18 @@ public class SalonDayService {
     private final ShopMemberships memberships;
     private final UserDirectory users;
     private final SalonEtags etags;
+    private final SalonSetups setups;
+    private final SalonVersionStore versions;
     private final Clock clock;
 
     public SalonDayService(SalonAccess access, SalonCalendar calendar, AppointmentStore appointments,
                            StrikeStore strikes, SalonStaffRepository staff, StaffShiftRepository shifts,
                            SalonAccessStore salonAccess, StartCodes codes, SalonNotices notices, ShopDirectory shops,
-                           ShopMemberships memberships, UserDirectory users, SalonEtags etags, Clock clock) {
+                           ShopMemberships memberships, UserDirectory users, SalonEtags etags, SalonSetups setups,
+                           SalonVersionStore versions, Clock clock) {
         this.etags = etags;
+        this.setups = setups;
+        this.versions = versions;
         this.access = access;
         this.calendar = calendar;
         this.appointments = appointments;
@@ -159,7 +167,8 @@ public class SalonDayService {
      * without walk-in access gets only his own column.
      * With its ETag (null when the sign-in token doesn't name the salon: then the answer is
      * fingerprinted by EtagConfig as before). The salon's change counter is read before anything else, so a change
-     * made while the answer is put together gives the next request a new tag, never an old answer.
+     * made while the answer is put together gives the next request a new tag, never an old answer. The answer carries
+     * {@code seq}, the cursor for asking only for what changed after it (dayChanges).
      */
     @Transactional(readOnly = true)
     public Tagged<DayView> day(CurrentUser me, LocalDate date) {
@@ -167,6 +176,193 @@ public class SalonDayService {
         Caller c = access.caller(me.userId());
         Instant now = now();
         LocalDate day = date != null ? date : today(now);
+        Built built = wholeDay(c, day, now, versions.board(c.shopId()));
+        // The answer changes by itself only when a waiting appointment's start passes (notStarted) and, for "today",
+        // at midnight; until then the same tag stands
+        Instant validUntil = earliest(now, built.all().stream().filter(a -> a.status() == AppointmentStatus.CONFIRMED)
+                .map(Appointment::startsAt), date == null ? Availability.dayStart(day.plusDays(1)) : null);
+        return new Tagged<>(built.view(), version.flatMap(v -> etags.tag(v, c, SalonEtags.DAY, dayParams(date),
+                validUntil)).orElse(null));
+    }
+
+    /** Changed rows a delta may carry; more than this, and the whole day is cheaper to send. */
+    static final int DELTA_MAX = 300;
+    /** A cursor older than this gets the whole day (a phone back from a long sleep). */
+    static final Duration DELTA_MAX_AGE = Duration.ofHours(1);
+
+    /**
+     * Only what changed on the day board since an earlier answer (its {@code seq}, sent back as {@code since}): the
+     * appointments of that day written since, in the order they were written ({@code changed}, each as the board
+     * shows it, to replace by id), the ids of those that left it ({@code removed}: moved to another day or barber,
+     * a removed block), and the bookings whose start passed since (now "not started"). The whole day instead
+     * ({@code full: true}) when the setup changed (barbers, their hours and services, who works there or may add
+     * walk-ins), when the cursor is unknown, older than an hour or for another date ("today" after midnight), or when
+     * more than DELTA_MAX rows changed. A busy salon's board polled every 30 s then costs a few small reads and a few
+     * hundred bytes instead of the whole day.
+     */
+    @Transactional(readOnly = true)
+    public DayView dayChanges(CurrentUser me, LocalDate date, String since) {
+        Caller c = access.caller(me.userId());   // one or two small reads (SalonAccess)
+        Instant now = now();
+        LocalDate day = date != null ? date : today(now);
+        SalonVersionStore.Board board = versions.board(c.shopId());   // before any row: see V21
+        Optional<DayCursor> cursor = DayCursor.parse(since, false)
+                .filter(from -> deltaPossible(from, board, day, now));
+        if (cursor.isPresent() && nothingSince(cursor.get(), board, now)) {
+            // The counter unchanged and no waiting start passed: nothing at all changed, and nothing else is read
+            return new DayView(day, null, c.staffId(), false, cursor(false, day, board, now,
+                    cursor.get().validUntil()), board.setupVersion(), List.of(), List.of());
+        }
+        Instant dayFrom = Availability.dayStart(day);
+        Instant dayTo = Availability.dayStart(day.plusDays(1));
+        Optional<Delta> delta = cursor.flatMap(cur -> delta(c, cur, board, a -> onBoard(a, c, dayFrom, dayTo)));
+        if (delta.isEmpty()) {
+            return wholeDay(c, day, now, board).view();
+        }
+        Map<UUID, Appointment> changed = delta.get().changed();
+        // Time alone: bookings whose start passed since the last answer show "not started" now
+        if (now.isAfter(cursor.get().at())) {
+            for (Appointment a : appointments.startedBetween(c.shopId(), cursor.get().at(), now, dayFrom, dayTo)) {
+                if (onBoard(a, c, dayFrom, dayTo)) {
+                    changed.putIfAbsent(a.id(), a);
+                }
+            }
+        }
+        List<AppointmentView> views = changed.isEmpty() ? List.of() : views(c, List.copyOf(changed.values()));
+        Instant validUntil = appointments.nextChange(c.shopId(), now, dayFrom, dayTo, false).orElse(dayTo);
+        return new DayView(day, null, c.staffId(), false, cursor(false, day, board, now, validUntil),
+                board.setupVersion(), views, delta.get().removed());
+    }
+
+    /**
+     * Whether nothing at all can have changed since the cursor: the salon's counter is the same (no appointment of
+     * it was written since: it moves at each commit) and no waiting booking's start (or, for the upcoming list, end)
+     * has come since. Then a delta needs no other read.
+     */
+    private static boolean nothingSince(DayCursor from, SalonVersionStore.Board board, Instant now) {
+        return board.version() == from.version() && now.isBefore(from.validUntil());
+    }
+
+    /**
+     * Only what changed on the upcoming list since an earlier answer of this call (see dayChanges): {@code full: true}
+     * means "load the list's pages again and go on from this seq" (an unknown cursor gives that too, so the app asks
+     * once with any since to get its first seq); otherwise {@code changed} (bookings now on the list, new or
+     * changed, or turned "not started") and {@code removed} (ids no longer on it: cancelled, started, moved out of
+     * the window or to another barber, or over).
+     */
+    @Transactional(readOnly = true)
+    public UpcomingChanges upcomingChanges(CurrentUser me, String since) {
+        Caller c = access.caller(me.userId());
+        Instant now = now();
+        LocalDate today = today(now);
+        Instant until = Availability.dayStart(today.plusDays(UPCOMING_DAYS + 1L));
+        SalonVersionStore.Board board = versions.board(c.shopId());
+        Optional<DayCursor> cursor = DayCursor.parse(since, true)
+                .filter(from -> deltaPossible(from, board, today, now));
+        UUID onlyStaff = c.seesAll() ? null : c.staffId();
+        if (cursor.isPresent() && nothingSince(cursor.get(), board, now)) {
+            // Nothing written and no start or end came since: an empty delta from the counters alone
+            return new UpcomingChanges(false, cursor(true, today, board, now, cursor.get().validUntil()),
+                    board.setupVersion(), List.of(), List.of());
+        }
+        Optional<Delta> delta = cursor.flatMap(cur -> delta(c, cur, board, a -> onUpcoming(a, onlyStaff, now, until)));
+        String seq = cursor(true, today, board, now, appointments.nextChange(c.shopId(), now, now, until, true)
+                .orElse(Availability.dayStart(today.plusDays(1))));
+        if (delta.isEmpty()) {
+            return new UpcomingChanges(true, seq, board.setupVersion(), null, null);
+        }
+        Map<UUID, Appointment> changed = delta.get().changed();
+        List<UUID> removed = new ArrayList<>(delta.get().removed());
+        Instant from = cursor.get().at();
+        if (now.isAfter(from)) {
+            // Time alone: a start passed ("not started" now) or an end passed (off the list)
+            for (Appointment a : appointments.startedBetween(c.shopId(), from, now, from, until)) {
+                if (onUpcoming(a, onlyStaff, now, until)) {
+                    changed.putIfAbsent(a.id(), a);
+                }
+            }
+            for (UUID id : appointments.endedBetween(c.shopId(), onlyStaff, from, now)) {
+                if (!changed.containsKey(id) && !removed.contains(id)) {
+                    removed.add(id);   // the app drops ids it doesn't have
+                }
+            }
+        }
+        List<AppointmentView> views = changed.isEmpty() ? List.of() : views(c, List.copyOf(changed.values()));
+        return new UpcomingChanges(false, seq, board.setupVersion(), views, removed);
+    }
+
+    /** What was written since a cursor, split by whether it is on the answer now. */
+    private record Delta(Map<UUID, Appointment> changed, List<UUID> removed) {
+    }
+
+    /**
+     * The rows written since the cursor, split by {@code shown}; empty when there are too many (more than DELTA_MAX:
+     * the whole answer is cheaper). {@code removed} holds only rows that could have been in this caller's answer: for
+     * a barber who sees only himself, his own rows and rows given away from him, never other barbers' ids.
+     */
+    private Optional<Delta> delta(Caller c, DayCursor from, SalonVersionStore.Board board,
+                                  java.util.function.Predicate<Appointment> shown) {
+        // The counter unchanged: no appointment of the salon was written since (it moves at the commit of each one)
+        List<Appointment> written = board.version() == from.version() ? List.of()
+                : appointments.changedSince(c.shopId(), from.oldestRunningXid(), DELTA_MAX + 1);
+        if (written.size() > DELTA_MAX) {
+            return Optional.empty();
+        }
+        Map<UUID, Appointment> changed = new LinkedHashMap<>();
+        List<Appointment> left = new ArrayList<>();
+        for (Appointment a : written) {
+            if (shown.test(a)) {
+                changed.put(a.id(), a);
+            } else {
+                left.add(a);
+            }
+        }
+        List<UUID> removed;
+        if (c.seesAll()) {
+            removed = left.stream().map(Appointment::id).toList();
+        } else {
+            Set<UUID> givenAway = appointments.reassignedFrom(left.stream()
+                    .filter(a -> !a.staffId().equals(c.staffId())).map(Appointment::id).toList(), c.staffId());
+            removed = left.stream().filter(a -> a.staffId().equals(c.staffId()) || givenAway.contains(a.id()))
+                    .map(Appointment::id).toList();
+        }
+        return Optional.of(new Delta(changed, removed));
+    }
+
+    /** Whether a delta from this cursor can be trusted; otherwise the whole answer goes. */
+    private static boolean deltaPossible(DayCursor from, SalonVersionStore.Board board, LocalDate day, Instant now) {
+        return from.date().equals(day)   // another date's board (or yesterday's "today", or upcoming list)
+                && from.setupVersion() == board.setupVersion()
+                && from.oldestRunningXid() <= board.oldestRunningXid()   // never ahead of the database: unknown
+                && from.version() <= board.version()
+                && !from.at().isAfter(now)
+                && Duration.between(from.at(), now).compareTo(DELTA_MAX_AGE) <= 0;
+    }
+
+    /** On the board this caller sees for [from, to): that day, not a removed block, and his own if he sees one column. */
+    private static boolean onBoard(Appointment a, Caller c, Instant from, Instant to) {
+        return a.status() != AppointmentStatus.REMOVED && a.startsAt().isBefore(to) && a.endsAt().isAfter(from)
+                && (c.seesAll() || a.staffId().equals(c.staffId()));
+    }
+
+    /** On the upcoming list (as AppointmentStore.upcomingInSalon reads it): a waiting booking not over yet. */
+    private static boolean onUpcoming(Appointment a, UUID onlyStaff, Instant now, Instant until) {
+        return a.kind() != AppointmentKind.BLOCK && a.status() == AppointmentStatus.CONFIRMED
+                && a.endsAt().isAfter(now) && a.startsAt().isBefore(until)
+                && (onlyStaff == null || a.staffId().equals(onlyStaff));
+    }
+
+    private static String cursor(boolean upcoming, LocalDate day, SalonVersionStore.Board board, Instant now,
+                                 Instant validUntil) {
+        return new DayCursor(upcoming, day, board.oldestRunningXid(), board.setupVersion(), board.version(), now,
+                validUntil).text();
+    }
+
+    /** A whole day board and the appointments on it. */
+    private record Built(DayView view, List<Appointment> all) {
+    }
+
+    private Built wholeDay(Caller c, LocalDate day, Instant now, SalonVersionStore.Board board) {
         Instant from = Availability.dayStart(day);
         Instant to = Availability.dayStart(day.plusDays(1));
         List<Appointment> all;
@@ -200,13 +396,12 @@ public class SalonDayService {
                         .map(a -> view(a, services.getOrDefault(a.id(), List.of()), customers, now, c))
                         .toList()))
                 .toList();
-        DayView view = new DayView(day, columns, c.staffId());
-        // The answer changes by itself only when a waiting appointment's start passes (notStarted) and, for "today",
-        // at midnight; until then the same tag stands
-        Instant validUntil = earliest(now, all.stream().filter(a -> a.status() == AppointmentStatus.CONFIRMED)
-                .map(Appointment::startsAt), date == null ? Availability.dayStart(day.plusDays(1)) : null);
-        return new Tagged<>(view, version.flatMap(v -> etags.tag(v, c, SalonEtags.DAY, dayParams(date), validUntil))
-                .orElse(null));
+        // Until when time alone can't change it: the first start still to come of a booking waiting on it
+        Instant validUntil = all.stream().filter(a -> a.status() == AppointmentStatus.CONFIRMED)
+                .map(Appointment::startsAt).filter(t -> t.isAfter(now)).min(Comparator.naturalOrder()).orElse(to);
+        return new Built(new DayView(day, columns, c.staffId(), true, cursor(false, day, board, now, validUntil),
+                board.setupVersion(),
+                null, null), all);
     }
 
     /** What the day screen's tag says about the request: the date asked for (none = today). */
@@ -248,18 +443,21 @@ public class SalonDayService {
     public List<WalkInOption> walkInOptions(UUID userId, List<UUID> serviceIds) {
         Caller c = access.walkIns(userId);
         Instant now = now();
-        List<BookedService> chosen = calendar.chosenServices(c.shopId(), serviceIds);
+        // The barbers, what they do and their weeks from memory while the setup is unchanged (SalonSetups)
+        SalonSetups.Setup setup = setups.of(c.shopId());
+        List<BookedService> chosen = calendar.chosenServices(setup, serviceIds);
         Duration length = SalonCalendar.length(chosen);
-        List<SalonStaff> barbers = calendar.barbersFor(c.shopId(), ids(chosen));
-        Map<UUID, SalonStaff> byId = barbers.stream().collect(Collectors.toMap(SalonStaff::getId, Function.identity()));
+        List<SalonSetups.Barber> barbers = calendar.barbersFor(setup, ids(chosen));
+        Map<UUID, SalonSetups.Barber> byId = barbers.stream()
+                .collect(Collectors.toMap(SalonSetups.Barber::id, Function.identity()));
         LocalDate today = today(now);
         Instant dayEnd = Availability.dayStart(today.plusDays(1));
-        List<BarberDay> days = calendar.days(barbers, today, null);
+        List<BarberDay> days = calendar.setupDays(barbers, today, null);
         List<WalkInOption> options = new ArrayList<>();
         for (BarberDay d : days) {
             Optional<WalkInSlot> slot = Availability.walkIn(d, length, now, dayEnd);
-            SalonStaff b = byId.get(d.staffId());
-            options.add(new WalkInOption(b.getId(), b.getName(), slot.map(WalkInSlot::freeNow).orElse(false),
+            SalonSetups.Barber b = byId.get(d.staffId());
+            options.add(new WalkInOption(b.id(), b.name(), slot.map(WalkInSlot::freeNow).orElse(false),
                     slot.map(WalkInSlot::start).orElse(null), slot.map(s -> clockTime(s.start())).orElse(null),
                     d.bookedMinutes()));
         }
@@ -294,29 +492,35 @@ public class SalonDayService {
             return salonView(c, e);
         }
         Instant now = now();
-        List<BookedService> chosen = calendar.chosenServices(c.shopId(), in.serviceIds());
+        // From the setup in memory (SalonSetups), with the same checks; once his row is locked below, that he is still
+        // active, and (if the setup changed meanwhile) that he still does these services, against the database
+        SalonSetups.Setup setup = setups.of(c.shopId());
+        List<BookedService> chosen = calendar.chosenServices(setup, in.serviceIds());
         Duration length = SalonCalendar.length(chosen);
-        SalonStaff barber = activeBarber(c, in.staffId());
-        if (calendar.barbersFor(c.shopId(), ids(chosen)).stream().noneMatch(b -> b.getId().equals(barber.getId()))) {
+        SalonSetups.Barber barber = setup.barber(in.staffId()).orElseThrow(SalonDayService::staffNotFound);
+        if (calendar.barbersFor(setup, ids(chosen)).stream().noneMatch(b -> b.id().equals(barber.id()))) {
             throw SalonCalendar.invalid("staffId", "this barber doesn't do all of the chosen services");
         }
         Instant start = now.truncatedTo(ChronoUnit.MINUTES);
         String guest = in.name() == null || in.name().isBlank() ? null : clean(GUEST_NAME, in.name());
-        Appointment a = new Appointment(UUID.randomUUID(), c.shopId(), barber.getId(), AppointmentKind.WALK_IN, null,
+        Appointment a = new Appointment(UUID.randomUUID(), c.shopId(), barber.id(), AppointmentKind.WALK_IN, null,
                 null, null, null, guest, null, start, start.plus(length), AppointmentStatus.IN_SERVICE, now,
                 null, null, c.userId(), requestId, now, now);
-        if (!appointments.lockActiveBarber(barber.getId())) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "STAFF_NOT_FOUND", "No such barber.");
+        if (!appointments.lockActiveBarber(barber.id())) {
+            throw staffNotFound();
+        }
+        if (!calendar.stillFits(c.shopId(), setup.version(), barber.id(), ids(chosen), null)) {
+            throw setupChanged();
         }
         if (!appointments.insertIfFree(a)) {
-            BarberDay day = calendar.day(barber, today(now), null);
+            BarberDay day = calendar.setupDays(List.of(barber), today(now), null).get(0);
             Optional<WalkInSlot> next = Availability.walkIn(day, length, now,
                     Availability.dayStart(today(now).plusDays(1)));
             Map<String, Object> details = new LinkedHashMap<>();
             details.put("freeNow", false);
             details.put("freeAt", next.map(s -> (Object) s.start().toString()).orElse("not today"));
             throw new ApiException(HttpStatus.CONFLICT, "BARBER_BUSY",
-                    barber.getName() + " isn't free right now. Pick a barber who is free now.", details);
+                    barber.name() + " isn't free right now. Pick a barber who is free now.", details);
         }
         appointments.insertServices(a.id(), chosen);
         appointments.event(a.id(), now, c.userId(), "WALK_IN_STARTED", null);
@@ -353,7 +557,7 @@ public class SalonDayService {
     /**
      * The owner's history: bookings and walk-ins on the India dates from..to (at most 31 days), latest first, a page
      * of HISTORY_PAGE after the cursor (null: the first page), with how many ended in each status and what the
-     * completed ones were worth at list price (over the whole range, on every page). Owner or helper.
+     * completed ones were worth at list price (over the whole range, on the first page only). Owner or helper.
      */
     @Transactional(readOnly = true)
     public HistoryView history(UUID userId, LocalDate from, LocalDate to, AppointmentCursor after) {
@@ -370,9 +574,12 @@ public class SalonDayService {
         boolean more = list.size() > HISTORY_PAGE;
         List<Appointment> shown = more ? list.subList(0, HISTORY_PAGE) : list;
         AppointmentCursor next = more ? AppointmentCursor.after(shown.get(HISTORY_PAGE - 1)) : null;
-        // Counts and the amount over the whole range, in the database: right whichever page this is
-        return new HistoryView(from, to, appointments.historyCounts(c.shopId(), start, end),
-                appointments.completedPaise(c.shopId(), start, end), views(c, shown), more, next);
+        // Counts and the amount over the whole range, on the first page only: they don't change from page to page,
+        // and each is a scan of the whole range (a busy salon has 60,000 appointments in 31 days). Later pages carry
+        // null for both; the app keeps the first page's.
+        boolean first = after == null;
+        return new HistoryView(from, to, first ? appointments.historyCounts(c.shopId(), start, end) : null,
+                first ? appointments.completedPaise(c.shopId(), start, end) : null, views(c, shown), more, next);
     }
 
     // ---------- start, no-show, reassign, cancel ----------
@@ -584,9 +791,10 @@ public class SalonDayService {
         if (a.staffId().equals(in.staffId())) {
             return salonView(c, a);
         }
-        SalonStaff target = activeBarber(c, in.staffId());
+        SalonSetups.Setup setup = setups.of(c.shopId());
+        SalonSetups.Barber target = setup.barber(in.staffId()).orElseThrow(SalonDayService::staffNotFound);
         List<UUID> serviceIds = ids(appointments.services(List.of(a.id())).getOrDefault(a.id(), List.of()));
-        if (calendar.barbersFor(c.shopId(), serviceIds).stream().noneMatch(b -> b.getId().equals(target.getId()))) {
+        if (calendar.barbersFor(setup, serviceIds).stream().noneMatch(b -> b.id().equals(target.id()))) {
             throw SalonCalendar.invalid("staffId", "this barber doesn't do all of its services");
         }
         Instant now = now();
@@ -598,18 +806,23 @@ public class SalonDayService {
             Duration left = Duration.between(start, a.endsAt());
             end = start.plus(left.compareTo(MIN_LEFT) < 0 ? MIN_LEFT : left);
         }
-        if (!calendar.day(target, LocalDate.ofInstant(start, SalonTime.ZONE), a.id()).isFree(new Interval(start, end))) {
-            throw barberBusy(target);
+        if (!calendar.setupDays(List.of(target), LocalDate.ofInstant(start, SalonTime.ZONE), a.id()).get(0)
+                .isFree(new Interval(start, end))) {
+            throw barberBusy(target.name());
         }
-        if (!appointments.lockActiveBarber(target.getId())) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "STAFF_NOT_FOUND", "No such barber.");
+        if (!appointments.lockActiveBarber(target.id())) {
+            throw staffNotFound();
+        }
+        // New hours or services saved for him meanwhile (under the lock we now hold) are checked here
+        if (!calendar.stillFits(c.shopId(), setup.version(), target.id(), serviceIds, new Interval(start, end))) {
+            throw setupChanged();
         }
         if (walkInInChair) {
             moveWalkInOrBusy(a, target, start, end, now);
         } else {
             moveOrBusy(a, target, start, end, now);
         }
-        appointments.event(a.id(), now, c.userId(), "REASSIGNED", a.staffId() + " -> " + target.getId());
+        appointments.event(a.id(), now, c.userId(), "REASSIGNED", a.staffId() + " -> " + target.id());
         Appointment moved = appointments.find(a.id()).orElseThrow();
         notices.reassigned(a, moved, salonCard(c.shopId()), c.userId(), now);
         return salonView(c, moved);
@@ -828,6 +1041,9 @@ public class SalonDayService {
         if (!end.isAfter(now) || end.isAfter(now.plus(MAX_PAUSE))) {
             throw SalonCalendar.invalid("until", "must be in the next 30 days");
         }
+        // The shop's row against bookings first: one in progress (it holds the row FOR SHARE and read "not paused")
+        // finishes before the pause, and one after it reads the pause
+        shops.holdAgainstBookings(c.shopId());
         salonAccess.pause(c.shopId(), end, c.userId(), now);
         return new PauseView(end);
     }
@@ -951,14 +1167,15 @@ public class SalonDayService {
     }
 
     /** Like moveOrBusy, for a walk-in already in the chair. */
-    private void moveWalkInOrBusy(Appointment a, SalonStaff target, Instant start, Instant end, Instant now) {
+    private void moveWalkInOrBusy(Appointment a, SalonSetups.Barber target, Instant start, Instant end,
+                                  Instant now) {
         try {
-            if (!appointments.moveWalkInInService(a.id(), target.getId(), start, end, now)) {
+            if (!appointments.moveWalkInInService(a.id(), target.id(), start, end, now)) {
                 throw changed();
             }
         } catch (DataIntegrityViolationException e) {
             if (hasSqlState(e, OVERLAP)) {
-                throw barberBusy(target);
+                throw barberBusy(target.name());
             }
             throw e;
         } catch (PessimisticLockingFailureException e) {
@@ -979,14 +1196,14 @@ public class SalonDayService {
      * Moves the appointment; if the database's no-overlap rule refuses it (someone took the time in between),
      * 409 BARBER_BUSY and the whole change is undone.
      */
-    private void moveOrBusy(Appointment a, SalonStaff target, Instant start, Instant end, Instant now) {
+    private void moveOrBusy(Appointment a, SalonSetups.Barber target, Instant start, Instant end, Instant now) {
         try {
-            if (!appointments.move(a.id(), target.getId(), start, end, now)) {
+            if (!appointments.move(a.id(), target.id(), start, end, now)) {
                 throw changed();
             }
         } catch (DataIntegrityViolationException e) {
             if (hasSqlState(e, OVERLAP)) {
-                throw barberBusy(target);
+                throw barberBusy(target.name());
             }
             throw e;
         } catch (PessimisticLockingFailureException e) {
@@ -1102,6 +1319,12 @@ public class SalonDayService {
         }
     }
 
+    /** The barber's hours or services changed while this was on its way: 409 TRY_AGAIN, the screen reloads. */
+    static ApiException setupChanged() {
+        return new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN",
+                "This barber's hours or services just changed. Reload and try again.");
+    }
+
     static ApiException tryAgain() {
         return new ApiException(HttpStatus.CONFLICT, "TRY_AGAIN", "Someone else changed the same times. Try again.");
     }
@@ -1124,8 +1347,12 @@ public class SalonDayService {
         return wrongStatus("It was changed in the meantime. Reload.", Map.of("reason", "CHANGED"));
     }
 
-    private static ApiException barberBusy(SalonStaff target) {
-        return new ApiException(HttpStatus.CONFLICT, "BARBER_BUSY", target.getName() + " is busy at that time.");
+    private static ApiException barberBusy(String name) {
+        return new ApiException(HttpStatus.CONFLICT, "BARBER_BUSY", name + " is busy at that time.");
+    }
+
+    private static ApiException staffNotFound() {
+        return new ApiException(HttpStatus.NOT_FOUND, "STAFF_NOT_FOUND", "No such barber.");
     }
 
     static ApiException notFound() {

@@ -120,3 +120,24 @@ jobs:
           PY
           if [ $rc -ne 0 ]; then exit $rc; fi
           exit $py
+
+  # Known vulnerabilities in the libraries we ship (pom.xml and everything it pulls in, read by Trivy from Maven
+  # Central). Fails on a High or Critical finding that has a fixed version; a finding we have looked at and accept
+  # goes into .trivyignore with the reason and a date to look again. Separate job, runs in parallel.
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan the Maven dependencies for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true          # nothing to upgrade to yet: shown by Dependabot when a fix comes out
+          trivyignores: .trivyignore
+          exit-code: '1'
+          format: table

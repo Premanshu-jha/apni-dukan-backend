@@ -70,4 +70,20 @@ public final class ShopRequests {
     /** Registration done: ask for the field team's visit. Needs both photos. */
     public record Submit(@NotNull Long version) {
     }
+
+    /**
+     * Close the shop for good.
+     * @param version the version you last read (GET /shops/me)
+     * @param reason  optional, for the field team (2-200 characters)
+     */
+    public record Close(@NotNull Long version, @Size(max = 200) String reason) {
+    }
+
+    /**
+     * Ask someone to take the shop over.
+     * @param phone   their 10-digit mobile number
+     * @param version the version you last read (GET /shops/me)
+     */
+    public record Handover(@NotBlank @Size(max = 20) String phone, @NotNull Long version) {
+    }
 }
