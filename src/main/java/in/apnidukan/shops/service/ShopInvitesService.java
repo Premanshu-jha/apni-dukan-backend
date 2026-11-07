@@ -67,7 +67,7 @@ public class ShopInvitesService {
     /** Invitations one shop may make per day (helpers and barbers together). */
     static final int INVITES_PER_DAY = 20;
     /** The answer to every invitation, whether or not the number has an account. */
-    public static final String SAME_ANSWER = "Invitation sent. They'll see it in Apni Dukan when they sign in with "
+    public static final String SAME_ANSWER = "Invitation sent. They'll see it in Clozest when they sign in with "
             + "this number.";
 
     /** A waiting invitation, as the owner sees it: the phone they typed, never a name. */
@@ -323,7 +323,7 @@ public class ShopInvitesService {
         // Told in the app if the number has an account; nothing in the owner's answer depends on it
         users.findByPhone(v.toPhone()).ifPresent(to -> notifications.queue(new Notice(to, "SHOP_INVITE", v.id(),
                 v.createdAt(), "An invitation to join " + shop.details().name(), shop.details().name() + " ("
-                + shop.details().area() + ") invited you to join as " + as + ". Open Apni Dukan to accept or decline.",
+                + shop.details().area() + ") invited you to join as " + as + ". Open Clozest to accept or decline.",
                 "/invites", Map.of())));
     }
 

@@ -58,7 +58,7 @@ import java.util.stream.Collectors;
  * Its rows stay for the field team and the customers' past bookings.
  *
  * <p><b>Handing over</b> (POST /shops/me/handover): the owner names a phone number. The answer is the same whether
- * or not that number has an account, so it can't be used to find out who uses Apni Dukan; a shop may ask at most
+ * or not that number has an account, so it can't be used to find out who uses Clozest; a shop may ask at most
  * {@link #HANDOVERS_PER_DAY} times a day. The person with that phone sees the request after signing in
  * (GET /me/handover) and accepts or declines; it runs out after 7 days, and the owner can cancel it. On accept, in one
  * transaction: the old owner leaves the shop (as if removed: their sessions end) and the new one becomes its OWNER
@@ -87,7 +87,7 @@ public class ShopOwnershipService implements TestAccountShops {
     static final String TEST_ACCOUNT_CLAIMED = "Closed automatically: a test account's shop, and the number's real "
             + "holder signed in";
     /** The answer to every hand-over request, whether or not the number has an account. */
-    public static final String SAME_ANSWER = "If that number has an Apni Dukan account, they'll see your request.";
+    public static final String SAME_ANSWER = "If that number has a Clozest account, they'll see your request.";
 
     /** The owner's view of their waiting request. */
     public record HandoverView(UUID id, String phone, Instant createdAt, Instant expiresAt) {
@@ -251,7 +251,7 @@ public class ShopOwnershipService implements TestAccountShops {
         // Told in the app if the number has an account; nothing in the answer depends on it
         users.findByPhone(phone).ifPresent(to -> notifications.queue(new Notice(to, "SHOP_HANDOVER_REQUEST", h.id(),
                 now, "A shop for you", "The owner of " + shop.details().name() + " wants to hand the shop over to "
-                + "you. Open Apni Dukan to accept or decline.", "/handover", Map.of())));
+                + "you. Open Clozest to accept or decline.", "/handover", Map.of())));
         return new HandoverRequested(SAME_ANSWER, view(h));
     }
 
@@ -350,7 +350,7 @@ public class ShopOwnershipService implements TestAccountShops {
                 "Shop handed over", name + " now belongs to the person you chose. You are no longer in it.",
                 "/shops/me", Map.of()));
         notifications.queue(new Notice(userId, "SHOP_HANDOVER_DONE", handoverId, now, "The shop is yours",
-                "You now own " + name + " on Apni Dukan. Check its details and photos.", "/shops/me", Map.of()));
+                "You now own " + name + " on Clozest. Check its details and photos.", "/shops/me", Map.of()));
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
 

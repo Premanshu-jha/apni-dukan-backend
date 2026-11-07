@@ -368,8 +368,8 @@ public class AuthService {
             throw tooManyEmailCodes(userId);
         }
         String code = otp.issue(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, ip);
-        email.send(address, "Your Apni Dukan verification code",
-                "Your Apni Dukan verification code is " + code + ".\n\nIt works for 10 minutes. "
+        email.send(address, "Your Clozest verification code",
+                "Your Clozest verification code is " + code + ".\n\nIt works for 10 minutes. "
                         + "If you didn't ask for it, ignore this email.");
     }
 
@@ -398,9 +398,9 @@ public class AuthService {
         });
         if (previous[0] != null) {
             String old = previous[0];
-            background.runAlways("email-changed notice", () -> email.send(old, "Your Apni Dukan email was changed",
-                    "The recovery email of your Apni Dukan account was changed to " + mask(address) + ".\n\n"
-                            + "If this wasn't you, contact Apni Dukan support immediately."));
+            background.runAlways("email-changed notice", () -> email.send(old, "Your Clozest email was changed",
+                    "The recovery email of your Clozest account was changed to " + mask(address) + ".\n\n"
+                            + "If this wasn't you, contact Clozest support immediately."));
         }
         return saved;
     }
@@ -423,7 +423,7 @@ public class AuthService {
         String emailCode = otp.issue(OtpPurpose.RECOVER_EMAIL, address, ip);
         String phoneCode = otp.issue(OtpPurpose.RECOVER_PHONE, newPhone, ip);
         if (exists) {
-            background.run("recovery email", () -> email.send(address, "Recover your Apni Dukan account",
+            background.run("recovery email", () -> email.send(address, "Recover your Clozest account",
                     "Your recovery code is " + emailCode + ".\n\nIt works for 10 minutes. "
                             + "If you didn't ask for this, ignore this email; your account stays as it is."));
         }
@@ -486,9 +486,9 @@ public class AuthService {
             // Not under the daily SMS cap: this warning must get out even if someone used up the cap
             background.runAlways("account-moved SMS", () -> sms.sendAccountMoved(previousPhone, ending));
         }
-        background.runAlways("account-moved email", () -> email.send(address, "Your Apni Dukan account moved to a new phone",
+        background.runAlways("account-moved email", () -> email.send(address, "Your Clozest account moved to a new phone",
                 "Your account now uses the phone number ending " + ending + ". Every other device was signed out."
-                        + "\n\nIf this wasn't you, contact Apni Dukan support immediately."));
+                        + "\n\nIf this wasn't you, contact Clozest support immediately."));
         return tokens;
     }
 
@@ -568,7 +568,7 @@ public class AuthService {
     private void requireNotOwner(UUID userId) {
         if (memberships.find(userId).filter(m -> "OWNER".equals(m.role())).isPresent()) {
             throw new ApiException(HttpStatus.CONFLICT, "SHOP_OWNER",
-                    "You own a shop on Apni Dukan. Close it or hand it over before deleting your account.");
+                    "You own a shop on Clozest. Close it or hand it over before deleting your account.");
         }
         // Without the super admin nobody could manage admins or switch test mode off until the database is edited
         if (users.findById(userId).map(User::getAdminRole).orElse(AdminRole.NONE) == AdminRole.SUPER_ADMIN) {

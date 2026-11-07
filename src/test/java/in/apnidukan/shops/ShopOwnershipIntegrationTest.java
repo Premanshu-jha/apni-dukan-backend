@@ -210,7 +210,7 @@ class ShopOwnershipIntegrationTest {
                 owner);
         assertThat(asked.status()).as(asked.text()).isEqualTo(202);
         assertThat(field(asked.body(), "message"))
-                .isEqualTo("If that number has an Apni Dukan account, they'll see your request.");
+                .isEqualTo("If that number has a Clozest account, they'll see your request.");
         assertThat(field(get("/shops/me/handover", owner).body(), "phone")).isEqualTo("9000000401");
         assertThat(field(post("/shops/me/handover", Map.of("phone", "9000000402", "version", shopVersion()),
                 owner).body(), "code")).isEqualTo("HANDOVER_PENDING");
@@ -254,7 +254,7 @@ class ShopOwnershipIntegrationTest {
         Reply unknown = post("/shops/me/handover", Map.of("phone", "9000000499", "version", shopVersion()), owner);
         assertThat(unknown.status()).isEqualTo(202);
         assertThat(field(unknown.body(), "message"))
-                .isEqualTo("If that number has an Apni Dukan account, they'll see your request.");
+                .isEqualTo("If that number has a Clozest account, they'll see your request.");
         assertThat(count("notification_jobs WHERE type = 'SHOP_HANDOVER_REQUEST'")).isZero();
         // Someone signing up with that number later finds it
         UUID later = person("9000000499");
