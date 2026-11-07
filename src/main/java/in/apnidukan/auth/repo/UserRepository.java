@@ -31,6 +31,14 @@ public interface UserRepository extends JpaRepository<User, UUID> {
     @Query(value = "SELECT deleted_at IS NULL FROM users WHERE id = :id FOR SHARE", nativeQuery = true)
     Optional<Boolean> lockIfActive(UUID id);
 
+    /** The name only (no entity is loaded, so the row locked next with lockById is read fresh). */
+    @Query("SELECT u.name FROM User u WHERE u.id = :id")
+    Optional<String> findNameById(UUID id);
+
+    /** The phone only (no entity is loaded, so the row locked next with lockById is read fresh). */
+    @Query("SELECT u.phone FROM User u WHERE u.id = :id")
+    Optional<String> findPhoneById(UUID id);
+
     /** Only the id, so the row locked next (lockById) is read fresh, not from this lookup's copy. */
     @Query("SELECT u.id FROM User u WHERE lower(u.email) = lower(:email) AND u.emailVerifiedAt IS NOT NULL")
     Optional<UUID> findIdByVerifiedEmail(String email);

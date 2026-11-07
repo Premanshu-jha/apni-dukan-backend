@@ -2,6 +2,7 @@ package in.apnidukan.auth.service;
 
 import in.apnidukan.auth.repo.SignInCleanupStore;
 import in.apnidukan.common.jobs.JobLeases;
+import in.apnidukan.common.jobs.LongStatements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -35,12 +36,13 @@ public class SignInCleanupJob {
 
     private final SignInCleanupStore store;
     private final JobLeases leases;
+    private final LongStatements statements;
     private final Clock clock;
     private final Duration keep;
     private final int batch;
     private final boolean enabled;
 
-    public SignInCleanupJob(SignInCleanupStore store, JobLeases leases, Clock clock,
+    public SignInCleanupJob(SignInCleanupStore store, JobLeases leases, LongStatements statements, Clock clock,
                             @Value("${app.auth.ended-sign-ins-keep-days:30}") int keepDays,
                             @Value("${app.cleanup.batch:10000}") int batch,
                             @Value("${app.jobs.enabled:true}") boolean enabled) {
@@ -50,6 +52,7 @@ public class SignInCleanupJob {
         }
         this.store = store;
         this.leases = leases;
+        this.statements = statements;
         this.clock = clock;
         this.keep = Duration.ofDays(keepDays);
         this.batch = batch;
@@ -74,12 +77,12 @@ public class SignInCleanupJob {
         int expired = 0;
         int n;
         do {   // a full slice means there may be more
-            n = store.deleteExpired(before, batch);
+            n = statements.run(() -> store.deleteExpired(before, batch));   // up to 60 s, not a request's 5
             expired += n;
         } while (n == batch);
         int revoked = 0;
         do {
-            n = store.deleteRevoked(before, batch);
+            n = statements.run(() -> store.deleteRevoked(before, batch));
             revoked += n;
         } while (n == batch);
         log.info("Deleted {} expired and {} ended sign-ins (more than {} days ago)", expired, revoked, keep.toDays());
