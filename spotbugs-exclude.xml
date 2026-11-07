@@ -33,7 +33,7 @@
     </Match>
     <!-- These constructors refuse to start the app when a required setting is missing or too weak (fail fast, on
          purpose): no SMS/mail settings, production misconfiguration, a JWT_SECRET too short to sign safely, or a job's batch
-         size, concurrency or retention below 1. -->
+         size, concurrency, retention or slice below 1, or a refresh grace longer than the 60 s retry time. -->
     <Match>
         <Bug pattern="CT_CONSTRUCTOR_THROW"/>
         <Or>
@@ -49,6 +49,8 @@
             <Class name="in.apnidukan.files.service.FileRefService"/>
             <Class name="in.apnidukan.notifications.service.AccountWipeJob"/>
             <Class name="in.apnidukan.files.service.PhotoCleaning"/>
+            <Class name="in.apnidukan.notifications.service.InboxService"/>
+            <Class name="in.apnidukan.auth.service.AuthService"/>
         </Or>
     </Match>
 </FindBugsFilter>
