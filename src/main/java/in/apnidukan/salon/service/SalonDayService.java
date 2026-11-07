@@ -734,7 +734,7 @@ public class SalonDayService {
         Instant now = now();
         requireStatus(a, AppointmentStatus.NO_SHOW);
         if (now.isAfter(a.startsAt().plus(UNDO_NO_SHOW_WITHIN))) {
-            throw wrongStatus("Too late to undo here (more than 24 hours). Apni Dukan support can still remove the "
+            throw wrongStatus("Too late to undo here (more than 24 hours). Clozest support can still remove the "
                     + "customer's strike.", Map.of("reason", "TOO_LATE"));
         }
         if (!appointments.undoNoShow(a.id(), AppointmentStatus.CANCELLED_BY_SALON, "No-show undone", now)) {

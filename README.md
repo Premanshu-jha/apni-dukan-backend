@@ -1,6 +1,6 @@
-# Apni Dukan – backend
+# Clozest – backend
 
-All the backend functionality of Apni Dukan: Spring Boot 4.1 · Java 21 · Neon Postgres · Flyway · Cloudflare R2 · Redis Cloud
+All the backend functionality of Clozest: Spring Boot 4.1 · Java 21 · Neon Postgres · Flyway · Cloudflare R2 · Redis Cloud
 
 Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 
@@ -318,8 +318,8 @@ and the field team's records still show it; the admin website lists it in the `C
 to it (409 `WRONG_STATUS`).
 
 **Handing over** (`POST /shops/me/handover {phone, version}`): the owner names a phone number. The answer is always
-"If that number has an Apni Dukan account, they'll see your request." (whether or not it has one), so this can't be used
-to find out who uses Apni Dukan; a shop may ask 5 times a day. The person with that phone sees it after signing in
+"If that number has a Clozest account, they'll see your request." (whether or not it has one), so this can't be used
+to find out who uses Clozest; a shop may ask 5 times a day. The person with that phone sees it after signing in
 (`GET /me/handover`; they also get a message in the partner app if they have an account), and accepts or declines. One
 request waits per shop; it runs out after 7 days; the owner can cancel it. Accepting needs a verified email and a name
 (as registering a shop does), and either no shop or a place in this shop (a helper or barber is promoted; a barber's
@@ -369,7 +369,7 @@ be changed later; `GET /shops/me` returns it.
 
 ## The admin website (`/api/v1/admin`)
 
-For Apni Dukan's own team. Everything here needs an admin's sign-in (the normal phone OTP); anyone else gets 403.
+For Clozest's own team. Everything here needs an admin's sign-in (the normal phone OTP); anyone else gets 403.
 Who is an admin is read from the database on every call, so someone removed is refused at once even with a token
 issued before.
 
@@ -470,7 +470,7 @@ Separately, one request carries at most 200 `serviceIds` and 50 blocks of `hours
    - `JWT_SECRET`: a long random value, at least 32 characters
      (for example the output of `openssl rand -base64 48`). Changing it signs everyone out.
    - `MSG91_AUTH_KEY` and `MSG91_OTP_TEMPLATE_ID`: the same values as in the OMR project. OTPs are sent as
-     real SMS through MSG91 with that template until Apni Dukan has its own DLT registration.
+     real SMS through MSG91 with that template until Clozest has its own DLT registration.
      Later: `SMS_ACCOUNT_MOVED_ENABLED=true` with `MSG91_ACCOUNT_MOVED_TEMPLATE_ID`, the template for
      "your account was moved to a new number ending ##ENDING##" (sent to the old phone after account recovery).
      Off by default until that DLT template exists; required on the real server.
@@ -846,7 +846,11 @@ In the app only (no SMS): `BOOKING_BARBER_CHANGED`, `BOOKING_NO_SHOW_UNDONE`, `S
 `SALON_CANCELLED_BY_SALON`, `SALON_WALK_IN_CANCELLED` (to the owner).
 
 Example DLT text for the reminder: "Reminder: {#var#} at {#var#} today, {#var#}. Show code {#var#} at the counter.
-Held till {#var#}. - Apni Dukan". The SMS uses the same MSG91 account as the sign-in OTP.
+Held till {#var#}. - Clozest". The SMS uses the same MSG91 account as the sign-in OTP.
+
+The product is now called Clozest. SMS text is fixed by the approved DLT templates, so the code doesn't change it:
+every DLT template (OTP, account moved, bookings) should be registered (or re-registered) to say Clozest, not Apni Dukan.
+Repo, package (`in.apnidukan`), env var, database, Redis key and API path names stay as they are.
 
 ## Before going live (checklist)
 
@@ -1139,7 +1143,7 @@ Setting up Resend:
 2. For testing, send from `onboarding@resend.dev` (the default `EMAIL_FROM`): it only delivers to the email address
    of your own Resend account. For real customers, add your domain under Domains, put the DNS records Resend shows
    (SPF, DKIM) at your DNS provider, wait until it says Verified, and set `EMAIL_FROM`, e.g.
-   `Apni Dukan <no-reply@apnidukan.in>`. Production must set `EMAIL_FROM`: the real server (`APP_PRODUCTION=true`)
+   `Clozest <no-reply@apnidukan.in>`. Production must set `EMAIL_FROM`: the real server (`APP_PRODUCTION=true`)
    refuses to start with the test address.
 3. On Railway: Variables → add `RESEND_API_KEY` (the key, starting `re_`) and `EMAIL_FROM`, then redeploy. The Gmail
    variables can be removed afterwards. Never commit the key.
@@ -1151,7 +1155,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 | Variable | Default | What |
 | --- | --- | --- |
 | `RESEND_API_KEY` | (empty: Gmail SMTP) | Resend API key; email goes through Resend when set |
-| `EMAIL_FROM` | `Apni Dukan <onboarding@resend.dev>` | Sender for Resend (a verified domain in production) |
+| `EMAIL_FROM` | `Clozest <onboarding@resend.dev>` | Sender for Resend (a verified domain in production) |
 | `DB_POOL_SIZE` | 20 | Database connections per server (`DB_POOL_MIN_IDLE` 5, `DB_CONNECTION_TIMEOUT_MS` 10000) |
 | `SCHEDULER_THREADS` | 4 | Threads for the background jobs |
 | `SMS_DAILY_LIMIT` | 50000 | Code SMS per day, everyone together (the budget; raise it as sign-ins grow). New numbers wait from 80% |

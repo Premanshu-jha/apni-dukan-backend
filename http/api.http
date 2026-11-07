@@ -1,4 +1,4 @@
-### Apni Dukan API: click ▶ next to a request (environment "local"). See http/README.md.
+### Clozest API: click ▶ next to a request (environment "local"). See http/README.md.
 # Your phone, email and the codes you receive (otp, emailCode) go in http-client.private.env.json, which Git ignores,
 # so nothing personal is ever committed from this file. The file id is saved automatically by request 7.
 

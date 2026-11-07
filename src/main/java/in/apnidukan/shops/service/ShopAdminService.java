@@ -264,7 +264,7 @@ public class ShopAdminService {
         dashboardCounts.clearAfterCommit();
         listeners.forEach(l -> l.suspended(shop.getId()));
         tellOwner(shop, "SHOP_SUSPENDED", "Your shop is off the app",
-                shop.details().name() + " is hidden from customers: " + reason + " Contact Apni Dukan to fix this.");
+                shop.details().name() + " is hidden from customers: " + reason + " Contact Clozest to fix this.");
         return view(shop);
     }
 
