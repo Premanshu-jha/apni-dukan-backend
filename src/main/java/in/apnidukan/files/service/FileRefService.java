@@ -45,13 +45,19 @@ public class FileRefService implements FileRefs {
     }
 
     private final StoredFileRepository repository;
+    private final in.apnidukan.files.repo.FileDeletionStore deletions;
+    private final in.apnidukan.files.repo.VideoUploadStore videoUploads;
     private final FileStorage storage;
     private final Clock clock;
     private final Duration linkValidity;
     private final Cache<UUID, Cached> cache = Caffeine.newBuilder().maximumSize(MAX_CACHED).build();
 
-    public FileRefService(StoredFileRepository repository, FileStorage storage, Clock clock,
-                          @Value("${app.files.photo-link-minutes:60}") long linkMinutes) {
+    public FileRefService(StoredFileRepository repository, in.apnidukan.files.repo.FileDeletionStore deletions,
+                          FileStorage storage, Clock clock,
+                          @Value("${app.files.photo-link-minutes:60}") long linkMinutes,
+                          in.apnidukan.files.repo.VideoUploadStore videoUploads) {
+        this.videoUploads = videoUploads;
+        this.deletions = deletions;
         if (linkMinutes <= MIN_LEFT.toMinutes()) {
             throw new IllegalStateException("app.files.photo-link-minutes must be more than " + MIN_LEFT.toMinutes());
         }
@@ -102,6 +108,40 @@ public class FileRefService implements FileRefs {
             }
         }
         return out;
+    }
+
+    @Override
+    @Transactional
+    public void keep(UUID fileId) {
+        StoredFile f = repository.findById(fileId).orElseThrow(FileRefService::gone);
+        // Locked first: a claim of the deletion job under way is waited for; one not yet started skips this row
+        deletions.lock(f.getStorageKey());
+        if (!deletions.fileExists(fileId)) {
+            throw gone();   // the job purged it (a video completed but not set within a day)
+        }
+        deletions.done(f.getStorageKey());
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public boolean expiredVideo(UUID fileId) {
+        return !repository.existsById(fileId) && videoUploads.completedWith(fileId);
+    }
+
+    /** 409 UPLOAD_GONE: the salon video is no longer stored. */
+    public static in.apnidukan.common.error.ApiException gone() {
+        return new in.apnidukan.common.error.ApiException(org.springframework.http.HttpStatus.CONFLICT, "UPLOAD_GONE",
+                "This video expired. Upload it again.");
+    }
+
+    @Override
+    @Transactional
+    public void release(UUID fileId) {
+        repository.findById(fileId).ifPresent(f -> {
+            repository.deleteByIdAndShopId(f.getId(), f.getShopId());
+            deletions.queueNow(f.getStorageKey(), clock.instant());
+            cache.invalidate(f.getId());
+        });
     }
 
     /** The start of the hour this moment falls in (the same on every server, whatever its own clock's seconds). */
