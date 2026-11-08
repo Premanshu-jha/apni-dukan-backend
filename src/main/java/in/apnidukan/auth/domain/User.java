@@ -75,6 +75,13 @@ public class User {
         this.updatedAt = now;
     }
 
+    /** A test account gives up its email to the real person who proved the inbox is theirs (AuthService). */
+    public void releaseEmail(Instant now) {
+        this.email = null;
+        this.emailVerifiedAt = null;
+        this.updatedAt = now;
+    }
+
     public void rename(String name, Instant now) {
         this.name = name;
         this.updatedAt = now;
