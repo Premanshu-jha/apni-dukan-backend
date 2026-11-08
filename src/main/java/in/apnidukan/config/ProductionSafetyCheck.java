@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import in.apnidukan.auth.notify.SmsSender;
 import in.apnidukan.notifications.service.LoggingPushSender;
 import in.apnidukan.notifications.service.PushSender;
+import in.apnidukan.shops.service.AddressLocator;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -32,10 +33,22 @@ public class ProductionSafetyCheck {
                                  @Value("${app.sms.account-moved.enabled:false}") boolean accountMovedSms,
                                  PushSender push, ClientAddress client, HumanCheck humans,
                                  @Value("${spring.flyway.url:}") String migrationUrl,
-                                 @Value("${spring.datasource.url:}") String appUrl) {
+                                 @Value("${spring.datasource.url:}") String appUrl, AddressLocator addresses) {
         check(production, sms, email, corsOrigins, accountMovedSms, push);
+        noteAddressSearch(production, addresses.enabled());
         checkSignInAbuse(production, client.configured(), humans.enabled());
         checkMigrationUrl(production, migrationUrl, appUrl);
+    }
+
+    /**
+     * Address search at registration is optional (the owner can use the phone's GPS): never refused, only noted, so
+     * a missing GOOGLE_GEOCODING_KEY is visible in the log.
+     */
+    static void noteAddressSearch(boolean production, boolean enabled) {
+        if (production && !enabled) {
+            log.info("GOOGLE_GEOCODING_KEY is not set: \"Find my salon on the map\" is off; owners place the pin "
+                    + "with their phone's location.");
+        }
     }
 
     /**

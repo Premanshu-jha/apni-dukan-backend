@@ -365,6 +365,14 @@ class ShopIntegrationTest {
         assertThat(post("/shops", validShop(), access).status()).isEqualTo(201);
     }
 
+    @Test
+    void addressSearchIsOffWithoutAGoogleKeySoTheAppHidesIt() {
+        Reply r = post("/shops/geocode", Map.of("addressLine", "Shop 4, Lake View Apartments", "area", "Kondapur",
+                "city", "Hyderabad", "pincode", "500084"), token(OWNER_PHONE));
+        assertThat(r.status()).isEqualTo(503);
+        assertThat(r.body().get("code")).isEqualTo("GEOCODING_OFF");
+    }
+
     private static Map<String, Object> validShop() {
         Map<String, Object> shop = new HashMap<>();
         shop.put("name", "Sharma Kirana Store");
