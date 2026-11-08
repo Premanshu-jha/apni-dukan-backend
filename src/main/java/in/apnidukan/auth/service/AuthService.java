@@ -60,6 +60,8 @@ public class AuthService {
     static final Duration HOUR = Duration.ofHours(1);
     /** Email codes one account may request per day (each goes out through our mail account). */
     static final int EMAIL_SENDS_PER_ACCOUNT_PER_DAY = 10;
+    /** OTP test mode: tries at verifying a test email with any code, per account (TestModeService). */
+    static final int TEST_EMAIL_VERIFIES_PER_ACCOUNT_PER_HOUR = 10;
     /**
      * A swapped refresh token coming back within this time is treated as the app retrying (a reply lost on a weak
      * mobile network, or two calls at once), not as a copy: it gets a new pair under the refresh grace (see
@@ -389,6 +391,13 @@ public class AuthService {
         String address = Emails.normalize(emailInput);
         limitVerifies(ip);
         boolean testCode = code != null && code.trim().matches("\\d{6}") && testEmail(userId, address);
+        if (testCode && !limits.tryHit("email-test-verify-user:" + userId, TEST_EMAIL_VERIFIES_PER_ACCOUNT_PER_HOUR,
+                HOUR)) {
+            // Any code works here, so tries are capped per account too (the normal path's code locks after 5 wrong)
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS",
+                    "Too many tries. Try again later.")
+                    .retryAfter(limits.secondsLeft("email-test-verify-user:" + userId));
+        }
         if (!testCode) {
             otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
         }
@@ -396,9 +405,16 @@ public class AuthService {
         User saved = tx.execute(status -> {
             User user = users.lockById(userId).filter(u -> !u.isDeleted())   // never onto a deleted account
                     .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
-            if (testCode && (user.isAdmin() || !user.isTestAccount())) {
-                // Changed between the check and now (made an admin, or claimed by the number's holder): the real code
+            if (testCode && (user.isAdmin() || !user.isTestAccount() || !testMode.acceptsAnyEmailCode(userId))) {
+                // Changed between the check and now (test mode off, number removed, made an admin, or claimed by the
+                // number's holder): the real code only, and nothing is stored
                 throw new ApiException(HttpStatus.BAD_REQUEST, "WRONG_CODE", "That code is not correct");
+            }
+            if (testCode && user.isEmailVerified() && !address.equals(user.getEmail())) {
+                // Replacing a verified email needs the phone code first (sendEmailCode); the test path skips that
+                // step, so it never replaces one
+                throw new ApiException(HttpStatus.FORBIDDEN, "PHONE_CODE_REQUIRED",
+                        "To change your verified email, first confirm with a code sent to your phone.");
             }
             users.findByVerifiedEmail(address)
                     .filter(other -> !other.getId().equals(userId))
@@ -415,7 +431,7 @@ public class AuthService {
                 throw emailInUse();
             }
         });
-        if (previous[0] != null) {
+        if (previous[0] != null && !Emails.isTestAddress(previous[0])) {   // no real inbox to tell at a test address
             String old = previous[0];
             background.runAlways("email-changed notice", () -> email.send(old, "Your Clozest email was changed",
                     "The recovery email of your Clozest account was changed to " + mask(address) + ".\n\n"
