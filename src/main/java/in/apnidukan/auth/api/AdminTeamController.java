@@ -94,6 +94,17 @@ public class AdminTeamController {
         return testMode.removePhone(caller(), phone);
     }
 
+    /** 409 REAL_ACCOUNT_EMAIL (a real account's or an admin's verified email) or ALREADY_TEST_EMAIL. */
+    @PostMapping("/test-mode/emails")
+    public ResponseEntity<State> addEmail(@Valid @RequestBody TestEmail body) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(testMode.addEmail(caller(), body.email(), body.label()));
+    }
+
+    @DeleteMapping("/test-mode/emails/{email}")
+    public State removeEmail(@PathVariable String email) {
+        return testMode.removeEmail(caller(), email);
+    }
+
     private UUID caller() {
         return currentUser.get().userId();
     }
@@ -106,5 +117,9 @@ public class AdminTeamController {
 
     /** @param label who or what it is for, e.g. "Prem's test barber" */
     public record TestPhone(@NotBlank @Size(max = 20) String phone, @NotBlank @Size(max = 60) String label) {
+    }
+
+    /** @param label who or what it is for, e.g. "Prem's test salon" */
+    public record TestEmail(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 60) String label) {
     }
 }
