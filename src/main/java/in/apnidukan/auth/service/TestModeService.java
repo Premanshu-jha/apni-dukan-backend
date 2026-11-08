@@ -85,6 +85,21 @@ public class TestModeService {
         return Boolean.TRUE.equals(yes);
     }
 
+    /**
+     * {@link #acceptsAnyEmailCode}, read again inside the caller's save, the caller holding the account's row
+     * (lockById). When it passes, the test-mode row and this number's and email's list rows stay locked (FOR SHARE)
+     * until that save ends, so switching test mode off or removing the number or the email waits for it.
+     */
+    @Transactional   // joins the caller's save (not read-only: FOR SHARE needs a writable transaction)
+    public boolean acceptsAnyEmailCodeHeld(UUID userId, String email) {
+        List<Integer> rows = jdbc.queryForList("SELECT 1 FROM otp_test_mode m JOIN users u ON u.id = ? "
+                + "JOIN test_phones t ON t.phone = u.phone JOIN test_emails e ON e.email = ? "
+                + "WHERE m.id = 1 AND m.until > ? "
+                + "AND u.test_account AND u.admin_role = 'NONE' AND u.deleted_at IS NULL FOR SHARE OF m, t, e",
+                Integer.class, userId, email, Timestamp.from(now()));
+        return !rows.isEmpty();
+    }
+
     /** Is test mode on now, and until when (for the banner on every admin screen). */
     @Transactional(readOnly = true)
     public Switch current() {
