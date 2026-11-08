@@ -189,19 +189,20 @@ class AdminIntegrationTest {
 
         assertThat(jdbc.queryForObject("SELECT test_account FROM users WHERE phone = '9111111111'", Boolean.class))
                 .isTrue();
-        // A real email address needs the real email code (else a test account could take someone's email)
+        // An email that isn't on the test list needs the real email code (else a test account could take someone's)
         String access = (String) field(in.body(), "accessToken");
         assertThat(post("/auth/email/send-code", Map.of("email", "tester@gmail.com"), access).status())
                 .isEqualTo(202);
         assertThat(LAST_EMAIL).containsKey("tester@gmail.com");
         assertThat(post("/auth/email/verify", Map.of("email", "tester@gmail.com", "code", "777777"), access)
                 .status()).isEqualTo(400);
-        // A test address (example.com) takes any 6 digits, and no email goes out
+        // A test email (on the list) takes any 6 digits, and no email goes out
+        listEmail("tester.qa@gmail.com");
         LAST_EMAIL.clear();
-        assertThat(post("/auth/email/send-code", Map.of("email", "tester@example.com"), access).status())
+        assertThat(post("/auth/email/send-code", Map.of("email", "tester.qa@gmail.com"), access).status())
                 .isEqualTo(202);
         assertThat(LAST_EMAIL).isEmpty();
-        Reply verified = post("/auth/email/verify", Map.of("email", "tester@example.com", "code", "777777"), access);
+        Reply verified = post("/auth/email/verify", Map.of("email", "tester.qa@gmail.com", "code", "777777"), access);
         assertThat(verified.status()).as(verified.text()).isEqualTo(200);
         assertThat(field(verified.body(), "emailVerified")).isEqualTo(true);
 
@@ -217,9 +218,40 @@ class AdminIntegrationTest {
     }
 
     @Test
-    void onlyATestAccountInTestModeVerifiesATestEmailWithAnyCode() {
+    void theSuperAdminListsTestEmailsButNeverARealAccountsOrAnAdmins() {
+        Reply added = post("/admin/test-mode/emails", Map.of("email", "  QA.Salon@Gmail.com ", "label", "QA salon"), boss);
+        assertThat(added.status()).as(added.text()).isEqualTo(201);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> emails = (List<Map<String, Object>>) field(added.body(), "emails");
+        assertThat(emails).hasSize(1);
+        assertThat(emails.get(0)).containsEntry("email", "qa.salon@gmail.com").containsEntry("label", "QA salon")
+                .containsEntry("inUse", false);
+        Reply again = post("/admin/test-mode/emails", Map.of("email", "qa.salon@gmail.com", "label", "Again"), boss);
+        assertThat(field(again.body(), "code")).as(again.text()).isEqualTo("ALREADY_TEST_EMAIL");
+        // A real account's verified email, or an admin's, can't be listed
+        Reply real = post("/admin/test-mode/emails", Map.of("email", "9000000003@test.in", "label", "Oops"), boss);
+        assertThat(real.status()).isEqualTo(409);
+        assertThat(field(real.body(), "code")).isEqualTo("REAL_ACCOUNT_EMAIL");
+        Reply admins = post("/admin/test-mode/emails", Map.of("email", "9000000002@test.in", "label", "Oops"), boss);
+        assertThat(field(admins.body(), "code")).isEqualTo("REAL_ACCOUNT_EMAIL");
+        assertThat(post("/admin/test-mode/emails", Map.of("email", "not an email", "label", "Oops"), boss).status())
+                .isEqualTo(400);
+        // Only the super admin
+        assertThat(post("/admin/test-mode/emails", Map.of("email", "x@gmail.com", "label", "Ravi's"), admin).status())
+                .isEqualTo(403);
+        assertThat((List<?>) field(get("/admin/test-mode", boss).body(), "emails")).hasSize(1);
+        Reply removed = delete("/admin/test-mode/emails/qa.salon@gmail.com", boss);
+        assertThat(removed.status()).as(removed.text()).isEqualTo(200);
+        assertThat((List<?>) field(removed.body(), "emails")).isEmpty();
+        assertThat(count("admin_events WHERE event IN ('TEST_EMAIL_ADDED', 'TEST_EMAIL_REMOVED')")).isEqualTo(2);
+    }
+
+    @Test
+    void onlyATestAccountInTestModeVerifiesAListedEmailWithAnyCode() {
         post("/admin/test-mode/phones", Map.of("phone", "9111111111", "label", "Tester"), boss);
         post("/admin/test-mode/phones", Map.of("phone", "9111111112", "label", "Tester 2"), boss);
+        listEmail("a@salon.in");
+        listEmail("b@salon.in");
         put("/admin/test-mode", Map.of("hours", 1), boss);
         String tester = (String) field(post("/auth/otp/verify", Map.of("phone", "9111111111", "code", "424242"),
                 (String) null).body(), "accessToken");
@@ -227,40 +259,49 @@ class AdminIntegrationTest {
                 (String) null).body(), "accessToken");
 
         // Not 6 digits: refused even here
-        assertThat(post("/auth/email/verify", Map.of("email", "a@salon.test", "code", "12345"), tester).status())
+        assertThat(post("/auth/email/verify", Map.of("email", "a@salon.in", "code", "12345"), tester).status())
                 .isEqualTo(400);
-        assertThat(post("/auth/email/verify", Map.of("email", "a@salon.test", "code", "111111"), tester).status())
+        assertThat(post("/auth/email/verify", Map.of("email", "a@salon.in", "code", "111111"), tester).status())
                 .isEqualTo(200);
-        // Verified emails stay unique: another test account can't take the same test address
-        Reply clash = post("/auth/email/verify", Map.of("email", "a@salon.test", "code", "222222"), tester2);
+        assertThat(((Map<?, ?>) ((List<?>) field(get("/admin/test-mode", boss).body(), "emails")).get(0)).get("inUse"))
+                .isEqualTo(true);
+        // Verified emails stay unique: another test account can't take the same test email
+        Reply clash = post("/auth/email/verify", Map.of("email", "a@salon.in", "code", "222222"), tester2);
         assertThat(field(clash.body(), "code")).as(clash.text()).isEqualTo("EMAIL_IN_USE");
+        // An email that isn't listed: the real code, and the email is sent
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "c@salon.in"), tester2).status()).isEqualTo(202);
+        assertThat(LAST_EMAIL).containsKey("c@salon.in");
+        assertThat(post("/auth/email/verify", Map.of("email", "c@salon.in", "code", "424242"), tester2).status())
+                .isIn(400, 429);
 
-        // A real account (the customer): the real code, and the email is sent, even for example.com
+        // A real account (the customer) using a listed email: the real code, and the email is sent
         jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", customer);   // a new email
         String realAccount = token(customer);
         LAST_EMAIL.clear();
-        assertThat(post("/auth/email/send-code", Map.of("email", "someone@example.com"), realAccount).status())
+        assertThat(post("/auth/email/send-code", Map.of("email", "b@salon.in"), realAccount).status())
                 .isEqualTo(202);
-        assertThat(LAST_EMAIL).containsKey("someone@example.com");
-        assertThat(post("/auth/email/verify", Map.of("email", "someone@example.com", "code", "424242"), realAccount)
+        assertThat(LAST_EMAIL).containsKey("b@salon.in");
+        assertThat(post("/auth/email/verify", Map.of("email", "b@salon.in", "code", "424242"), realAccount)
                 .status()).isIn(400, 429);
         // An admin never gets in with any code either
-        assertThat(post("/auth/email/verify", Map.of("email", "boss@example.com", "code", "424242"), admin)
+        jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", admin);
+        assertThat(post("/auth/email/verify", Map.of("email", "b@salon.in", "code", "424242"), admin)
                 .status()).isNotEqualTo(200);
 
-        // "Lost phone" never takes any code, not even for a test account's test address
-        assertThat(post("/auth/recover/complete", Map.of("email", "a@salon.test", "emailCode", "123456",
+        // "Lost phone" never takes any code, not even for a test account's test email
+        assertThat(post("/auth/recover/complete", Map.of("email", "a@salon.in", "emailCode", "123456",
                 "newPhone", "9700000001", "phoneCode", "123456"), (String) null).status()).isEqualTo(400);
 
-        // Test mode off: the real code again, and the email is sent
+        // Test mode off: the real code again, and the email is sent, even to a listed email
         assertThat(delete("/admin/test-mode", boss).status()).isEqualTo(200);
         LAST_EMAIL.clear();
         // (a session made straight for the test: the real ones were signed out with test mode)
         String still = token(UUID.fromString(jdbc.queryForObject("SELECT id::text FROM users WHERE phone = '9111111112'",
                 String.class)));
-        assertThat(post("/auth/email/send-code", Map.of("email", "b@salon.test"), still).status()).isEqualTo(202);
-        assertThat(LAST_EMAIL).containsKey("b@salon.test");
-        assertThat(post("/auth/email/verify", Map.of("email", "b@salon.test", "code", "333333"), still).status())
+        assertThat(post("/auth/email/send-code", Map.of("email", "b@salon.in"), still).status()).isEqualTo(202);
+        assertThat(LAST_EMAIL).containsKey("b@salon.in");
+        assertThat(post("/auth/email/verify", Map.of("email", "b@salon.in", "code", "333333"), still).status())
                 .isIn(400, 429);
 
         // The number's real holder claims the account later: the tester's test email goes with the rest
@@ -270,7 +311,126 @@ class AdminIntegrationTest {
                 CapturingSenders.codeSentTo(LAST_SMS, "9111111111")), (String) null);
         assertThat(real.status()).as(real.text()).isEqualTo(200);
         assertThat(field(field(real.body(), "user"), "email")).isNull();
-        assertThat(count("users WHERE email = 'a@salon.test'")).isZero();
+        assertThat(count("users WHERE email = 'a@salon.in'")).isZero();
+    }
+
+    @Test
+    void aRealPersonWhoProvesTheInboxGetsAnEmailATestAccountHolds() {
+        String tester = testerIn("9111111111");
+        listEmail("shared@gmail.com");
+        assertThat(post("/auth/email/verify", Map.of("email", "shared@gmail.com", "code", "424242"), tester).status())
+                .isEqualTo(200);
+        // The customer (a real account) proves with the real code that the inbox is theirs
+        jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", customer);
+        String real = token(customer);
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "shared@gmail.com"), real).status()).isEqualTo(202);
+        Reply got = post("/auth/email/verify", Map.of("email", "shared@gmail.com", "code",
+                CapturingSenders.codeSentTo(LAST_EMAIL, "shared@gmail.com")), real);
+        assertThat(got.status()).as(got.text()).isEqualTo(200);
+        assertThat(field(got.body(), "email")).isEqualTo("shared@gmail.com");
+        // The test account let it go
+        assertThat(jdbc.queryForObject("SELECT email IS NULL AND email_verified_at IS NULL FROM users "
+                + "WHERE phone = '9111111111'", Boolean.class)).isTrue();
+        // And a test account can't take it back from a real account, with any code or the real one
+        Reply back = post("/auth/email/verify", Map.of("email", "shared@gmail.com", "code", "424242"), tester);
+        assertThat(field(back.body(), "code")).as(back.text()).isEqualTo("EMAIL_IN_USE");
+        assertThat(jdbc.queryForObject("SELECT email FROM users WHERE id = ?", String.class, customer))
+                .isEqualTo("shared@gmail.com");
+    }
+
+    @Test
+    void aTestAccountMadeAnAdminKeepsItsEmailAgainstARealVerify() {
+        String tester = testerIn("9111111111");
+        listEmail("shared@gmail.com");
+        assertThat(post("/auth/email/verify", Map.of("email", "shared@gmail.com", "code", "424242"), tester).status())
+                .isEqualTo(200);
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE phone = '9111111111'");
+        jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", customer);
+        String real = token(customer);
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "shared@gmail.com"), real).status()).isEqualTo(202);
+        Reply refused = post("/auth/email/verify", Map.of("email", "shared@gmail.com", "code",
+                CapturingSenders.codeSentTo(LAST_EMAIL, "shared@gmail.com")), real);
+        assertThat(field(refused.body(), "code")).as(refused.text()).isEqualTo("EMAIL_IN_USE");
+        assertThat(jdbc.queryForObject("SELECT email FROM users WHERE phone = '9111111111'", String.class))
+                .isEqualTo("shared@gmail.com");
+    }
+
+    @Test
+    void aRealAccountChangingAwayFromAListedEmailStillGetsTheNotice() {
+        // The super admin listed an email nobody had verified; then its real owner verified it with the real code
+        listEmail("real.person@gmail.com");
+        jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", customer);
+        String real = token(customer);
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "real.person@gmail.com"), real).status())
+                .isEqualTo(202);
+        assertThat(post("/auth/email/verify", Map.of("email", "real.person@gmail.com", "code",
+                CapturingSenders.codeSentTo(LAST_EMAIL, "real.person@gmail.com")), real).status()).isEqualTo(200);
+        // Changed the normal way: the phone code, then the new email's code
+        LAST_SMS.clear();
+        assertThat(post("/auth/email/change-phone-code", Map.of(), real).status()).isEqualTo(202);
+        String phoneCode = CapturingSenders.codeSentTo(LAST_SMS, "9000000003");
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "new.person@gmail.com", "phoneCode", phoneCode), real)
+                .status()).isEqualTo(202);
+        Reply changed = post("/auth/email/verify", Map.of("email", "new.person@gmail.com", "code",
+                CapturingSenders.codeSentTo(LAST_EMAIL, "new.person@gmail.com")), real);
+        assertThat(changed.status()).as(changed.text()).isEqualTo(200);
+        long until = System.currentTimeMillis() + 5000;   // the notice goes out in the background
+        while (!LAST_EMAIL.containsKey("real.person@gmail.com") && System.currentTimeMillis() < until) {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        assertThat(LAST_EMAIL.get("real.person@gmail.com")).contains("was changed");
+    }
+
+    @Test
+    void whileTheAnyCodeSaveRunsTestModeTheNumberAndTheEmailCantBeTakenAway() {
+        List<String> changes = List.of("UPDATE otp_test_mode SET until = NULL WHERE id = 1",
+                "DELETE FROM test_phones WHERE phone = '9111111111'",
+                "DELETE FROM test_emails WHERE email = 'x.qa@gmail.com'");
+        String tester = testerIn("9111111111");
+        listEmail("x.qa@gmail.com");
+        TransactionTemplate apart = new TransactionTemplate(transactions);
+        apart.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        List<String> blocked = new java.util.ArrayList<>();
+        try {
+            doAnswer(inv -> {
+                Object held = inv.callRealMethod();
+                // Right after the re-check passed, inside the save: each change has to wait for the save
+                for (String change : changes) {
+                    try {
+                        apart.executeWithoutResult(st -> {
+                            jdbc.execute("SET LOCAL lock_timeout = '300ms'");
+                            jdbc.update(change);
+                        });
+                    } catch (org.springframework.dao.DataAccessException waited) {
+                        blocked.add(change);
+                    }
+                }
+                return held;
+            }).when(testMode).acceptsAnyEmailCodeHeld(any(), any());
+            Reply verified = post("/auth/email/verify", Map.of("email", "x.qa@gmail.com", "code", "424242"), tester);
+            assertThat(verified.status()).as(verified.text()).isEqualTo(200);
+        } finally {
+            org.mockito.Mockito.reset(testMode);
+        }
+        assertThat(blocked).containsExactlyElementsOf(changes);
+        // After the save, they go through
+        for (String change : changes) {
+            assertThat(jdbc.update(change)).as(change).isEqualTo(1);
+        }
+    }
+
+    /** Puts an email on the test list. */
+    private void listEmail(String email) {
+        Reply added = post("/admin/test-mode/emails", Map.of("email", email, "label", "Tester"), boss);
+        assertThat(added.status()).as(added.text()).isEqualTo(201);
     }
 
     /** A test account signed in through test mode, for the email tests below. */
@@ -285,9 +445,10 @@ class AdminIntegrationTest {
     @Test
     void theTestEmailPathNeverReplacesAVerifiedEmail() {
         String tester = testerIn("9111111111");
+        listEmail("x.qa@gmail.com");
         jdbc.update("UPDATE users SET email = 'tester@gmail.com', email_verified_at = now() WHERE phone = '9111111111'");
         // Straight to verify, skipping the phone code that replacing a verified email needs
-        Reply refused = post("/auth/email/verify", Map.of("email", "x@example.com", "code", "424242"), tester);
+        Reply refused = post("/auth/email/verify", Map.of("email", "x.qa@gmail.com", "code", "424242"), tester);
         assertThat(refused.status()).as(refused.text()).isEqualTo(403);
         assertThat(field(refused.body(), "code")).isEqualTo("PHONE_CODE_REQUIRED");
         assertThat(jdbc.queryForObject("SELECT email FROM users WHERE phone = '9111111111'", String.class))
@@ -295,10 +456,11 @@ class AdminIntegrationTest {
     }
 
     @Test
-    void noEmailChangedNoticeGoesToATestAddress() {
-        for (String[] t : List.of(new String[] {"9111111111", "x@example.com"},
-                new String[] {"9111111112", "y@salon.test"})) {
+    void noEmailChangedNoticeGoesToATestEmail() {
+        for (String[] t : List.of(new String[] {"9111111111", "x.qa@gmail.com"},
+                new String[] {"9111111112", "y.qa@salon.in"})) {
             String tester = testerIn(t[0]);
+            listEmail(t[1]);
             assertThat(post("/auth/email/verify", Map.of("email", t[1], "code", "424242"), tester).status())
                     .isEqualTo(200);
             // Then replaced by a real address the normal way (phone code, then the real email code)
@@ -324,11 +486,12 @@ class AdminIntegrationTest {
     @Test
     void anyCodeTriesAreLimitedPerAccount() {
         String tester = testerIn("9111111111");
+        listEmail("x.qa@gmail.com");
         for (int i = 0; i < 10; i++) {
-            assertThat(post("/auth/email/verify", Map.of("email", "x@example.com", "code", "42424" + i), tester)
+            assertThat(post("/auth/email/verify", Map.of("email", "x.qa@gmail.com", "code", "42424" + i), tester)
                     .status()).isEqualTo(200);
         }
-        Reply limited = post("/auth/email/verify", Map.of("email", "x@example.com", "code", "424249"), tester);
+        Reply limited = post("/auth/email/verify", Map.of("email", "x.qa@gmail.com", "code", "424249"), tester);
         assertThat(limited.status()).as(limited.text()).isEqualTo(429);
     }
 
@@ -336,12 +499,14 @@ class AdminIntegrationTest {
     void theTestEmailIsCheckedAgainInsideTheSaveSoAChangeMeanwhileStoresNothing() {
         List<String> changes = List.of("UPDATE otp_test_mode SET until = NULL WHERE id = 1",   // test mode off
                 "DELETE FROM test_phones WHERE phone = '9111111111'",                           // number removed
-                "UPDATE users SET test_account = false WHERE phone = '9111111111'");            // claimed
+                "UPDATE users SET test_account = false WHERE phone = '9111111111'",             // claimed
+                "DELETE FROM test_emails WHERE email = 'x.qa@gmail.com'");                      // email removed
         for (String change : changes) {
             TestData.clean(jdbc);
             boss = person("9000000001");
             jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', name = 'Prem' WHERE id = ?", boss);
             String tester = testerIn("9111111111");
+            listEmail("x.qa@gmail.com");
             UUID id = UUID.fromString(jdbc.queryForObject("SELECT id::text FROM users WHERE phone = '9111111111'",
                     String.class));
             // The first check passes; right after it, before the save, the change happens (its own transaction)
@@ -355,8 +520,8 @@ class AdminIntegrationTest {
                     apart.executeWithoutResult(st -> jdbc.update(change));
                 }
                 return real;
-            }).when(testMode).acceptsAnyEmailCode(any());
-            Reply refused = post("/auth/email/verify", Map.of("email", "x@example.com", "code", "424242"), tester);
+            }).when(testMode).acceptsAnyEmailCode(any(), any());
+            Reply refused = post("/auth/email/verify", Map.of("email", "x.qa@gmail.com", "code", "424242"), tester);
             assertThat(done[0]).as(change).isTrue();
             assertThat(field(refused.body(), "code")).as(change + ": " + refused.text()).isEqualTo("WRONG_CODE");
             assertThat(jdbc.queryForObject("SELECT email IS NULL AND email_verified_at IS NULL FROM users WHERE id = ?",

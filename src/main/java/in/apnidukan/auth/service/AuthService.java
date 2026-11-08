@@ -148,12 +148,12 @@ public class AuthService {
     }
 
     /**
-     * OTP test mode for the email step: a test account (TestModeService#acceptsAnyEmailCode) verifying a test address
-     * (Emails#isTestAddress, e.g. name@example.com) gets no email and takes any 6 digits. A real address, a real
-     * account, an admin, or test mode off: the real code, as always. Never used for recovery or account deletion.
+     * OTP test mode for the email step: a test account verifying an email on the test list
+     * (TestModeService#acceptsAnyEmailCode) gets no email and takes any 6 digits. Any other email, a real account, an
+     * admin, or test mode off: the real code, as always. Never used for recovery or account deletion.
      */
     private boolean testEmail(UUID userId, String address) {
-        return Emails.isTestAddress(address) && testMode.acceptsAnyEmailCode(userId);
+        return testMode.acceptsAnyEmailCode(userId, address);
     }
 
     public void sendLoginOtp(String phoneInput, String ip, String captchaToken) {
@@ -387,6 +387,16 @@ public class AuthService {
                         + "If you didn't ask for it, ignore this email.");
     }
 
+    /**
+     * Whether a real person who just proved, with the real code, that this inbox is theirs takes it from its holder:
+     * only from a test account, never an admin's, and only while (read under its row lock) it still holds exactly
+     * this verified email.
+     */
+    static boolean releasable(User holder, String address) {
+        return holder.isTestAccount() && !holder.isAdmin() && holder.isEmailVerified()
+                && address.equalsIgnoreCase(holder.getEmail());
+    }
+
     public User verifyEmail(UUID userId, String emailInput, String code, String ip) {
         String address = Emails.normalize(emailInput);
         limitVerifies(ip);
@@ -402,12 +412,16 @@ public class AuthService {
             otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
         }
         String[] previous = new String[1];
+        boolean[] testAccount = new boolean[1];
         User saved = tx.execute(status -> {
             User user = users.lockById(userId).filter(u -> !u.isDeleted())   // never onto a deleted account
                     .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
-            if (testCode && (user.isAdmin() || !user.isTestAccount() || !testMode.acceptsAnyEmailCode(userId))) {
-                // Changed between the check and now (test mode off, number removed, made an admin, or claimed by the
-                // number's holder): the real code only, and nothing is stored
+            if (testCode && (user.isAdmin() || !user.isTestAccount()
+                    || !testMode.acceptsAnyEmailCodeHeld(userId, address))) {
+                // Changed between the check and now (test mode off, number or email removed, made an admin, or
+                // claimed by the number's holder): the real code only, and nothing is stored. Passing, it holds the
+                // test-mode, number and email rows until the save commits, so none of those changes can land
+                // in between
                 throw new ApiException(HttpStatus.BAD_REQUEST, "WRONG_CODE", "That code is not correct");
             }
             if (testCode && user.isEmailVerified() && !address.equals(user.getEmail())) {
@@ -416,13 +430,26 @@ public class AuthService {
                 throw new ApiException(HttpStatus.FORBIDDEN, "PHONE_CODE_REQUIRED",
                         "To change your verified email, first confirm with a code sent to your phone.");
             }
-            users.findByVerifiedEmail(address)
-                    .filter(other -> !other.getId().equals(userId))
-                    .ifPresent(other -> {
-                        throw emailInUse();
-                    });
+            UUID holderId = users.findIdByVerifiedEmail(address)
+                    .filter(other -> !other.equals(userId))
+                    .orElse(null);
+            if (holderId != null) {
+                if (testCode) {
+                    throw emailInUse();   // a test account never takes an email from anyone (not even locked)
+                }
+                // Locked and read fresh (only the id was looked up), so what is checked is what is changed
+                User holder = users.lockById(holderId).orElseThrow(AuthService::emailInUse);
+                if (!releasable(holder, address)) {
+                    throw emailInUse();
+                }
+                // Someone proved with the real code that the inbox is theirs, and a test account holds it: the test
+                // account lets it go, so a tester never blocks a real person's email
+                holder.releaseEmail(Instant.now(clock));
+                users.saveAndFlush(holder);
+            }
             if (user.isEmailVerified() && !address.equals(user.getEmail())) {
                 previous[0] = user.getEmail();
+                testAccount[0] = user.isTestAccount();
             }
             user.verifyEmail(address, Instant.now(clock));
             try {
@@ -431,7 +458,9 @@ public class AuthService {
                 throw emailInUse();
             }
         });
-        if (previous[0] != null && !Emails.isTestAddress(previous[0])) {   // no real inbox to tell at a test address
+        // No notice only for a test account's test email (no real inbox behind it); a real account always gets one,
+        // even at an address on the test list
+        if (previous[0] != null && !(testAccount[0] && testMode.isTestEmail(previous[0]))) {
             String old = previous[0];
             background.runAlways("email-changed notice", () -> email.send(old, "Your Clozest email was changed",
                     "The recovery email of your Clozest account was changed to " + mask(address) + ".\n\n"

@@ -28,14 +28,14 @@ import java.util.UUID;
  * no account yet, or whose account was made this way (users.test_account): a number that belongs to a real
  * customer or shop can't be added, and an admin's account never takes any code (not even if both somehow
  * happened), so test mode can't open someone's real account or the admin website. A test account stays signed in
- * only while test mode is on for its number (AuthService.refresh). Email codes, recovery and account deletion
- * always need the real code, except one case: a test account verifying a test email address (name@example.com and
- * the like, never a real inbox) while test mode is on takes any 6 digits and no email is sent
- * ({@link #acceptsAnyEmailCode}), so testers can finish sign-up. Recovery and account deletion never do.
+ * only while test mode is on for its number (AuthService.refresh). The emails in test_emails work the same way for
+ * the email step: a test account verifying one of them while test mode is on takes any 6 digits and no email is sent
+ * ({@link #acceptsAnyEmailCode}), so testers can finish sign-up. An email already verified by a real account or an
+ * admin can't be added. Every other email, recovery and account deletion always need the real code.
  * It switches itself off at `until`: nothing has to run for that, every check compares with the clock.
  *
- * Changes to test numbers and to admins take the same database lock (AdminTeamService.LOCK), so a number can't
- * become an admin and a test number at the same moment.
+ * Changes to test numbers, test emails and admins take the same database lock (AdminTeamService.LOCK), so a number
+ * can't become an admin and a test number at the same moment.
  */
 @Service
 public class TestModeService {
@@ -71,18 +71,33 @@ public class TestModeService {
     }
 
     /**
-     * Whether this signed-in account may verify a test email address (see {@link
-     * in.apnidukan.auth.service.Emails#isTestAddress}) with any code right now: the same people as {@link
-     * #acceptsAnyCode}, i.e. test mode is on, the account was made in test mode (users.test_account), its number is
-     * still on the test list, it isn't an admin and isn't deleted. Read on every email code send and check.
+     * Whether this signed-in account may verify this (normalised) email with any code right now: test mode is on, the
+     * email is on the test list, and the account is one {@link #acceptsAnyCode} covers (made in test mode, its number
+     * still on the test list, not an admin, not deleted). Read on every email code send and check.
      */
     @Transactional(readOnly = true)
-    public boolean acceptsAnyEmailCode(UUID userId) {
+    public boolean acceptsAnyEmailCode(UUID userId, String email) {
         Boolean yes = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM otp_test_mode m JOIN users u ON u.id = ? "
-                + "JOIN test_phones t ON t.phone = u.phone WHERE m.id = 1 AND m.until > ? "
+                + "JOIN test_phones t ON t.phone = u.phone JOIN test_emails e ON e.email = ? "
+                + "WHERE m.id = 1 AND m.until > ? "
                 + "AND u.test_account AND u.admin_role = 'NONE' AND u.deleted_at IS NULL)",
-                Boolean.class, userId, Timestamp.from(now()));
+                Boolean.class, userId, email, Timestamp.from(now()));
         return Boolean.TRUE.equals(yes);
+    }
+
+    /**
+     * {@link #acceptsAnyEmailCode}, read again inside the caller's save, the caller holding the account's row
+     * (lockById). When it passes, the test-mode row and this number's and email's list rows stay locked (FOR SHARE)
+     * until that save ends, so switching test mode off or removing the number or the email waits for it.
+     */
+    @Transactional   // joins the caller's save (not read-only: FOR SHARE needs a writable transaction)
+    public boolean acceptsAnyEmailCodeHeld(UUID userId, String email) {
+        List<Integer> rows = jdbc.queryForList("SELECT 1 FROM otp_test_mode m JOIN users u ON u.id = ? "
+                + "JOIN test_phones t ON t.phone = u.phone JOIN test_emails e ON e.email = ? "
+                + "WHERE m.id = 1 AND m.until > ? "
+                + "AND u.test_account AND u.admin_role = 'NONE' AND u.deleted_at IS NULL FOR SHARE OF m, t, e",
+                Integer.class, userId, email, Timestamp.from(now()));
+        return !rows.isEmpty();
     }
 
     /** Is test mode on now, and until when (for the banner on every admin screen). */
@@ -168,6 +183,50 @@ public class TestModeService {
         return read();
     }
 
+    /**
+     * 409 REAL_ACCOUNT_EMAIL if a real account or an admin has already verified this email, 409 ALREADY_TEST_EMAIL if
+     * it is listed already.
+     */
+    @Transactional
+    public State addEmail(UUID superAdminId, String emailInput, String labelInput) {
+        requireSuperAdmin(superAdminId);
+        String email = Emails.normalize(emailInput);
+        String label = TextCleaner.clean(LABEL, labelInput);
+        AdminTeamService.lockTeam(jdbc);
+        users.findByVerifiedEmail(email)
+                .filter(holder -> holder.isAdmin() || !holder.isTestAccount())
+                .ifPresent(holder -> {
+                    throw new ApiException(HttpStatus.CONFLICT, "REAL_ACCOUNT_EMAIL",
+                            "That email belongs to a real account. Use an email nobody has verified on Clozest.");
+                });
+        int added = jdbc.update("INSERT INTO test_emails (email, label, added_by, added_at) VALUES (?, ?, ?, ?) "
+                + "ON CONFLICT (email) DO NOTHING", email, label, superAdminId, Timestamp.from(now()));
+        if (added == 0) {
+            throw new ApiException(HttpStatus.CONFLICT, "ALREADY_TEST_EMAIL", "That email is a test email already.");
+        }
+        events.record(superAdminId, "TEST_EMAIL_ADDED", null, email + " (" + label + ")");
+        return read();
+    }
+
+    /** Taking an email off the list changes nothing else: an account that verified it keeps it. */
+    @Transactional
+    public State removeEmail(UUID superAdminId, String emailInput) {
+        requireSuperAdmin(superAdminId);
+        String email = Emails.normalize(emailInput);
+        AdminTeamService.lockTeam(jdbc);
+        if (jdbc.update("DELETE FROM test_emails WHERE email = ?", email) > 0) {
+            events.record(superAdminId, "TEST_EMAIL_REMOVED", null, email);
+        }
+        return read();
+    }
+
+    /** True if this (normalised) email is a test email, whether or not test mode is on. */
+    public boolean isTestEmail(String email) {
+        Boolean yes = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM test_emails WHERE email = ?)",
+                Boolean.class, email);
+        return Boolean.TRUE.equals(yes);
+    }
+
     /** True if this (normalised) phone is a test number, whether or not test mode is on. */
     boolean isTestPhone(String phone) {
         Boolean yes = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM test_phones WHERE phone = ?)",
@@ -206,7 +265,12 @@ public class TestModeService {
                 + "FROM test_phones t ORDER BY t.added_at, t.phone",
                 (rs, i) -> new TestPhone(rs.getString("phone"), rs.getString("label"),
                         rs.getTimestamp("added_at").toInstant(), rs.getBoolean("has_account")));
-        return new State(s.on(), s.until(), s.on() ? by : null, phones);
+        List<TestEmail> emails = jdbc.query("SELECT e.email, e.label, e.added_at, "
+                + "EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = e.email AND u.email_verified_at IS NOT NULL) "
+                + "AS in_use FROM test_emails e ORDER BY e.added_at, e.email",
+                (rs, i) -> new TestEmail(rs.getString("email"), rs.getString("label"),
+                        rs.getTimestamp("added_at").toInstant(), rs.getBoolean("in_use")));
+        return new State(s.on(), s.until(), s.on() ? by : null, phones, emails);
     }
 
     private void requireSuperAdmin(UUID userId) {
@@ -224,15 +288,22 @@ public class TestModeService {
     /**
      * @param turnedOnByName who turned it on (null when off)
      * @param phones         the test numbers, oldest first
+     * @param emails         the test emails, oldest first
      */
-    public record State(boolean on, Instant until, String turnedOnByName, List<TestPhone> phones) {
+    public record State(boolean on, Instant until, String turnedOnByName, List<TestPhone> phones,
+                        List<TestEmail> emails) {
 
         public State {
             phones = List.copyOf(phones);
+            emails = List.copyOf(emails);
         }
     }
 
     /** @param hasAccount whether someone has signed in with it yet */
     public record TestPhone(String phone, String label, Instant addedAt, boolean hasAccount) {
+    }
+
+    /** @param inUse whether an account has verified it yet */
+    public record TestEmail(String email, String label, Instant addedAt, boolean inUse) {
     }
 }
