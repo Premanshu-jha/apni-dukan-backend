@@ -278,6 +278,7 @@ sequenceDiagram
 | --- | --- |
 | `POST /api/v1/shops` | Registers your shop as `DRAFT`, you as owner. 409 `ALREADY_HAS_SHOP` if you have one. Then refresh your token |
 | `POST /api/v1/shops/geocode` | Someone without a shop (registration comes before the shop exists) or a shop's owner; a helper or barber gets 403 `OWNER_ONLY`. `{addressLine, area, city, pincode}` (the same limits as `POST /shops`) → 200 `{latitude, longitude, precision: EXACT\|STREET\|AREA, formattedAddress}` for the pin the owner then drags onto the door. 404 `ADDRESS_NOT_FOUND`, 429 `TRY_LATER` (20 searches an hour, 10 new addresses a day, each), 503 `GEOCODING_OFF` (no `GOOGLE_GEOCODING_KEY`), 503 `GEOCODING_UNAVAILABLE`. See "Finding the salon from its address" |
+| `POST /api/v1/shops/reverse-geocode` | The same people and limits as `/geocode` (one budget for both). `{latitude, longitude}` (inside India, else 400 `VALIDATION_FAILED`) → 200 `{addressLine, area, city, pincode, formattedAddress}`, `""` for any part Google didn't give, so the app can fill the form's empty fields from the GPS point. 404 `ADDRESS_NOT_FOUND`; 403, 429 and 503 as for `/geocode` |
 | `GET /api/v1/shops/me` | Your shop, its status and your role (`myRole`). 404 `NO_SHOP` if none |
 | `PATCH /api/v1/shops/me` | Owner only (403 `OWNER_ONLY`). Send `version` and only the fields to change; `""` removes GSTIN/Udyam |
 | `PUT /api/v1/shops/me/photos` | Owner. `{version, ownerPhotoFileId?, shopPhotoFileId?}`: ids of photos uploaded to `POST /files` with purpose `OWNER_PHOTO` / `SHOP_PHOTO` |
@@ -346,6 +347,15 @@ sequenceDiagram
 - **The key:** `GOOGLE_GEOCODING_KEY`, restricted in Google Cloud to the Geocoding API only. It goes only in the
   request URL to Google, which is never logged; logs carry Google's status word only, never the address or Google's
   `error_message`. Without the key the call answers 503 `GEOCODING_OFF` and the app hides the button.
+
+**The other way round:** after "Use my location", the app asks `POST /shops/reverse-geocode` with the GPS point and
+fills only the address fields the owner left empty. The backend asks Google with `latlng` (rounded to 4 decimals, about
+11 m), `result_type=street_address|premise|route|sublocality|locality|postal_code`, `region=in` and `language=en`,
+and maps the first result's `address_components`: `addressLine` = the building (premise, else street number) and the
+street (route), `area` = sublocality_level_1, else sublocality, else neighborhood, `city` = locality, else the
+district (administrative_area_level_2), `pincode` = the postal code only when it is a 6-digit Indian pincode. Answers
+are kept by the rounded point, 30 days (nothing there: 6 hours). It shares everything with the forward search: who may
+ask, the per-person limits and the day's Google cap, timeouts, key safety and the Redis rules.
 
 ### Closing a shop or handing it over
 
@@ -649,6 +659,7 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 | Call | Before | Now | What the apps should do |
 | --- | --- | --- | --- |
 | `POST /shops/geocode` | none | new: the typed address → `{latitude, longitude, precision, formattedAddress}`; 403 `OWNER_ONLY` (helpers, barbers), 404 `ADDRESS_NOT_FOUND`, 429 `TRY_LATER`, 503 `GEOCODING_OFF` / `GEOCODING_UNAVAILABLE` | partner app: "Find my salon on the map" on registration step 1; hide it on `GEOCODING_OFF` |
+| `POST /shops/reverse-geocode` | none | new: a GPS point → `{addressLine, area, city, pincode, formattedAddress}`; the same answers and budget as `/geocode`, 400 outside India | partner app: after "Use my location", fill the empty address fields; ignore failures |
 
 **Final review round** (the apps must follow these):
 
