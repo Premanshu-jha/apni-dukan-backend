@@ -53,6 +53,8 @@ class ShopGeocodeIntegrationTest {
     private static final String OWNER_PHONE = "9848012381";
     private static final AtomicInteger GOOGLE_CALLS = new AtomicInteger();
     private static final AtomicReference<String> GOOGLE_ANSWER = new AtomicReference<>("");
+    /** Google's answer to a reverse lookup (latlng=...). */
+    private static final AtomicReference<String> GOOGLE_REVERSE = new AtomicReference<>("");
     private static final HttpServer GOOGLE = fakeGoogle();
 
     private static HttpServer fakeGoogle() {
@@ -61,7 +63,8 @@ class ShopGeocodeIntegrationTest {
             server.createContext("/geocode/json", exchange -> {
                 GOOGLE_CALLS.incrementAndGet();
                 String q = URLDecoder.decode(exchange.getRequestURI().getRawQuery(), StandardCharsets.UTF_8);
-                byte[] out = (q.contains("key=test-geo-key") ? GOOGLE_ANSWER.get()
+                byte[] out = (q.contains("key=test-geo-key")
+                        ? (q.contains("latlng=") ? GOOGLE_REVERSE.get() : GOOGLE_ANSWER.get())
                         : "{\"status\":\"REQUEST_DENIED\"}").getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(200, out.length);
                 exchange.getResponseBody().write(out);
@@ -111,6 +114,12 @@ class ShopGeocodeIntegrationTest {
         GOOGLE_ANSWER.set("""
                 {"status":"OK","results":[{"formatted_address":"Lake View Apartments, Kondapur, Hyderabad 500084",
                 "geometry":{"location":{"lat":17.4651,"lng":78.3644},"location_type":"GEOMETRIC_CENTER"}}]}
+                """);
+        GOOGLE_REVERSE.set("""
+                {"status":"OK","results":[{"formatted_address":"Lake View Apartments, Kondapur, Hyderabad 500084",
+                "address_components":[{"long_name":"Lake View Apartments","types":["premise"]},
+                {"long_name":"Kondapur","types":["sublocality_level_1","sublocality"]},
+                {"long_name":"Hyderabad","types":["locality"]},{"long_name":"500084","types":["postal_code"]}]}]}
                 """);
     }
 
@@ -220,6 +229,51 @@ class ShopGeocodeIntegrationTest {
         assertThat(r.status()).isEqualTo(503);
         assertThat(r.body().get("code")).isEqualTo("SERVICE_BUSY");
         assertThat(GOOGLE_CALLS.get()).isZero();
+    }
+
+    @Test
+    void theAddressAtTheGpsPointFillsTheFormAndIsKept() {
+        String access = token(OWNER_PHONE);
+        Reply r = post("/shops/reverse-geocode", Map.of("latitude", 17.46512, "longitude", 78.36441), access);
+        assertThat(r.status()).as(r.body().toString()).isEqualTo(200);
+        assertThat(r.body().get("addressLine")).isEqualTo("Lake View Apartments");
+        assertThat(r.body().get("area")).isEqualTo("Kondapur");
+        assertThat(r.body().get("city")).isEqualTo("Hyderabad");
+        assertThat(r.body().get("pincode")).isEqualTo("500084");
+        // A few metres away: the same rounded point, from the cache
+        assertThat(post("/shops/reverse-geocode", Map.of("latitude", 17.46508, "longitude", 78.36438), access)
+                .status()).isEqualTo(200);
+        assertThat(GOOGLE_CALLS.get()).isEqualTo(1);
+
+        GOOGLE_REVERSE.set("{\"status\":\"ZERO_RESULTS\",\"results\":[]}");
+        Reply none = post("/shops/reverse-geocode", Map.of("latitude", 20.0, "longitude", 80.0), access);
+        assertThat(none.status()).isEqualTo(404);
+        assertThat(none.body().get("code")).isEqualTo("ADDRESS_NOT_FOUND");
+    }
+
+    @Test
+    void aPointOutsideIndiaIsRefusedBeforeGoogle() {
+        String access = token(OWNER_PHONE);
+        Reply r = post("/shops/reverse-geocode", Map.of("latitude", 51.5, "longitude", -0.12), access);
+        assertThat(r.status()).isEqualTo(400);
+        assertThat(r.body().get("code")).isEqualTo("VALIDATION_FAILED");
+        assertThat(GOOGLE_CALLS.get()).isZero();
+    }
+
+    @Test
+    void bothWaysShareOnePersonsDailyGoogleLimit() {
+        String access = token(OWNER_PHONE);
+        for (int i = 0; i < 5; i++) {
+            Map<String, Object> a = address();
+            a.put("addressLine", "Shop " + i + ", Lake View Apartments");
+            assertThat(post("/shops/geocode", a, access).status()).isEqualTo(200);
+            assertThat(post("/shops/reverse-geocode", Map.of("latitude", 17.0 + i / 100.0, "longitude", 78.0),
+                    access).status()).isEqualTo(200);
+        }
+        Reply r = post("/shops/reverse-geocode", Map.of("latitude", 18.0, "longitude", 78.0), access);
+        assertThat(r.status()).isEqualTo(429);
+        assertThat(r.body().get("code")).isEqualTo("TRY_LATER");
+        assertThat(GOOGLE_CALLS.get()).isEqualTo(10);
     }
 
     private String token(String phone) {

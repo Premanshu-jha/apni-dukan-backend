@@ -51,6 +51,12 @@ public final class ShopRequests {
             @NotNull @Pattern(regexp = "[1-9][0-9]{5}", message = "must be a 6-digit pincode") String pincode) {
     }
 
+    /** The phone's GPS point, to fill the registration form's address (inside India, as for POST /shops). */
+    public record ReverseGeocode(
+            @NotNull @DecimalMin("6.0") @DecimalMax("37.6") BigDecimal latitude,
+            @NotNull @DecimalMin("68.0") @DecimalMax("97.5") BigDecimal longitude) {
+    }
+
     /**
      * My shop edits. Leave a field out (or null) to keep it; send "" for gstin/udyamNumber to remove it.
      * @param version the version you last read (GET /shops/me); if someone saved in between you get 409 SHOP_CHANGED

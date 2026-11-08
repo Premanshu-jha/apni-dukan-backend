@@ -6,10 +6,12 @@ import in.apnidukan.shops.api.ShopRequests.Close;
 import in.apnidukan.shops.api.ShopRequests.CreateShop;
 import in.apnidukan.shops.api.ShopRequests.Geocode;
 import in.apnidukan.shops.api.ShopRequests.Handover;
+import in.apnidukan.shops.api.ShopRequests.ReverseGeocode;
 import in.apnidukan.shops.api.ShopRequests.SetPhotos;
 import in.apnidukan.shops.api.ShopRequests.Submit;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
 import in.apnidukan.shops.service.AddressLocator;
+import in.apnidukan.shops.service.AddressLocator.Described;
 import in.apnidukan.shops.service.AddressLocator.Located;
 import in.apnidukan.shops.service.ShopInvitesService;
 import in.apnidukan.shops.service.ShopInvitesService.InviteResult;
@@ -161,6 +163,16 @@ public class ShopController {
     public Located geocode(@Valid @RequestBody Geocode body) {
         return addresses.locate(currentUser.get().userId(), body.addressLine(), body.area(), body.city(),
                 body.pincode());
+    }
+
+    /**
+     * Registration: the address at the phone's GPS point, to fill the form's empty fields. 200 {addressLine, area,
+     * city, pincode, formattedAddress} ("" where Google gave nothing). 400 outside India; otherwise the same answers,
+     * people and limits as POST /shops/geocode (one budget for both).
+     */
+    @PostMapping("/reverse-geocode")
+    public Described reverseGeocode(@Valid @RequestBody ReverseGeocode body) {
+        return addresses.describe(currentUser.get().userId(), body.latitude(), body.longitude());
     }
 
     /** My shop: details, status and your role. 404 NO_SHOP if you have none. */
