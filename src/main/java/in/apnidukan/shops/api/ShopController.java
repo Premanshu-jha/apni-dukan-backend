@@ -197,8 +197,17 @@ public class ShopController {
     }
 
     /**
+     * Set the salon video (owner): the file from POST /files/video-uploads/{id}/complete. Send the version from GET
+     * /shops/me. A video it replaces is deleted.
+     */
+    @PutMapping("/me/video")
+    public ShopResponse setVideo(@Valid @RequestBody ShopRequests.SetVideo body) {
+        return shops.setVideo(currentUser.get().userId(), body);
+    }
+
+    /**
      * Registration step 2 (owner): ask for the field team's visit. DRAFT → PENDING_VISIT.
-     * 409 PHOTOS_REQUIRED until both photos are set.
+     * 409 PHOTOS_REQUIRED until both photos and the salon video are set.
      */
     @PostMapping("/me/submit")
     public ShopResponse submit(@Valid @RequestBody Submit body) {

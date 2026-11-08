@@ -148,6 +148,9 @@ public class ShopAdminService {
                 changes.add(new Change("shopPhoto", "Shop's photo", null, null));
                 oldShopPhoto = existingLink(approved.shopPhotoFileId());
             }
+            if (!Objects.equals(approved.shopVideoFileId(), shop.getShopVideoFileId())) {
+                changes.add(new Change("shopVideo", "Salon video", null, null));
+            }
         }
         AdminShopDetail.Salon salon = null;
         if (shop.getType() == ShopType.SALON) {
@@ -155,8 +158,10 @@ public class ShopAdminService {
             salon = new AdminShopDetail.Salon(size.barbers(), size.services());
         }
         TimelinePage timeline = timelinePage(shopId, null);
+        // The salon video only here (the field team's shop page), never in lists or anything customers see
+        String video = shop.getShopVideoFileId() == null ? null : existingLink(shop.getShopVideoFileId());
         return new AdminShopDetail(views(List.of(shop)).get(0), salon, changes, moved, oldOwnerPhoto, oldShopPhoto,
-                timeline.items(), timeline.next());
+                video, timeline.items(), timeline.next());
     }
 
     /**

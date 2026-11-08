@@ -83,7 +83,14 @@ public final class ShopRequests {
     public record SetPhotos(@NotNull Long version, UUID ownerPhotoFileId, UUID shopPhotoFileId) {
     }
 
-    /** Registration done: ask for the field team's visit. Needs both photos. */
+    /**
+     * Set the salon video: the file from POST /files/video-uploads/{id}/complete.
+     * @param version the version you last read (GET /shops/me); 409 SHOP_CHANGED if someone saved in between
+     */
+    public record SetVideo(@NotNull Long version, @NotNull UUID fileId) {
+    }
+
+    /** Registration done: ask for the field team's visit. Needs both photos and the salon video. */
     public record Submit(@NotNull Long version) {
     }
 

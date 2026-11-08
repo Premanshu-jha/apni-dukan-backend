@@ -14,25 +14,28 @@ import java.util.UUID;
  * A shop as the app sees it. myRole is the caller's role in it; type says kirana or salon.
  * @param ownerPhotoFileId the owner's photo, or null until set (needed before Submit for visit)
  * @param shopPhotoFileId  the shop's photo, or null until set (needed before Submit for visit)
+ * @param shopVideoFileId  the salon video, or null until set (needed before Submit for visit); the owner's only
  * @param statusReason why the field team sent it back to DRAFT or suspended it; null otherwise (and for barbers)
  * @param version send this back with PATCH /shops/me
  */
 public record ShopResponse(UUID id, long shopCode, String name, String ownerName, String addressLine, String area,
                            String city, String pincode, BigDecimal latitude, BigDecimal longitude, String gstin,
                            String udyamNumber, ShopStatus status, String statusReason, ShopType type, ShopRole myRole,
-                           UUID ownerPhotoFileId, UUID shopPhotoFileId, long version,
+                           UUID ownerPhotoFileId, UUID shopPhotoFileId, UUID shopVideoFileId, long version,
                            Instant createdAt, Instant updatedAt) {
 
-    /** The same without GSTIN, Udyam number and the owner's photo. */
+    /** The same without GSTIN, Udyam number, the owner's photo and the salon video. */
     public ShopResponse forBarber() {
         return new ShopResponse(id, shopCode, name, ownerName, addressLine, area, city, pincode, latitude, longitude,
-                null, null, status, null, type, myRole, null, shopPhotoFileId, version, createdAt, updatedAt);
+                null, null, status, null, type, myRole, null, shopPhotoFileId, null, version, createdAt, updatedAt);
     }
 
     public static ShopResponse from(Shop shop, ShopRole myRole) {
         ShopDetails d = shop.details();
         return new ShopResponse(shop.getId(), shop.getShopCode(), d.name(), d.ownerName(), d.addressLine(), d.area(),
                 d.city(), d.pincode(), d.latitude(), d.longitude(), d.gstin(), d.udyamNumber(), shop.getStatus(),
-                shop.getStatusReason(), shop.getType(), myRole, shop.getOwnerPhotoFileId(), shop.getShopPhotoFileId(), shop.getVersion(), shop.getCreatedAt(), shop.getUpdatedAt());
+                shop.getStatusReason(), shop.getType(), myRole, shop.getOwnerPhotoFileId(), shop.getShopPhotoFileId(),
+                myRole == ShopRole.OWNER ? shop.getShopVideoFileId() : null, shop.getVersion(), shop.getCreatedAt(),
+                shop.getUpdatedAt());
     }
 }

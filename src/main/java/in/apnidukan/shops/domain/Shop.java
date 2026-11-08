@@ -76,6 +76,10 @@ public class Shop {
     @Column(name = "shop_photo_file_id")
     private UUID shopPhotoFileId;
 
+    /** A short video of the salon (a SHOP_VIDEO upload) for the field team; required before Submit for visit. */
+    @Column(name = "shop_video_file_id")
+    private UUID shopVideoFileId;
+
     /** Why the field team sent it back to DRAFT or suspended it (shown to the owner); null otherwise. */
     @Column(name = "status_reason", length = 200)
     private String statusReason;
@@ -128,10 +132,22 @@ public class Shop {
         return ownerPhotoFileId != null && shopPhotoFileId != null;
     }
 
-    /** Registration done: DRAFT → PENDING_VISIT, waiting for the field team. Needs both photos. */
+    /** Sets the salon video (null: none). */
+    public void setVideo(UUID shopVideoFileId, Instant now) {
+        this.shopVideoFileId = shopVideoFileId;
+        this.updatedAt = now;
+    }
+
+    /** What the field team needs before a visit: both photos, and for a salon its video too. */
+    public boolean readyForVisit() {
+        return hasBothPhotos() && (type != ShopType.SALON || shopVideoFileId != null);
+    }
+
+    /** Registration done: DRAFT → PENDING_VISIT, waiting for the field team. Needs both photos and the video. */
     public void submitForVisit(Instant now) {
-        if (status != ShopStatus.DRAFT || !hasBothPhotos()) {
-            throw new IllegalStateException("Only a DRAFT shop with both photos can be submitted, not " + status);
+        if (status != ShopStatus.DRAFT || !readyForVisit()) {
+            throw new IllegalStateException("Only a DRAFT shop with both photos (and a salon's video) can be submitted, not "
+                    + status);
         }
         this.status = ShopStatus.PENDING_VISIT;
         this.statusReason = null;
@@ -222,6 +238,7 @@ public class Shop {
     public ShopType getType() { return type; }
     public UUID getOwnerPhotoFileId() { return ownerPhotoFileId; }
     public UUID getShopPhotoFileId() { return shopPhotoFileId; }
+    public UUID getShopVideoFileId() { return shopVideoFileId; }
     public long getVersion() { return version; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
