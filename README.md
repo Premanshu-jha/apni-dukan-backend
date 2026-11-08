@@ -553,7 +553,9 @@ verify with any 6-digit code, and no SMS or email is sent to them. Everything el
   The any-code path never replaces an already verified email (403 `PHONE_CODE_REQUIRED`, as the normal change flow
   asks for the phone code first), is limited to 10 tries an hour per account (429), and is checked again inside the
   save (test mode off, the number or email removed, or the account claimed meanwhile: 400 `WRONG_CODE`, nothing
-  stored). No "email changed" notice is sent to a test email.
+  stored); once that check passes it holds those rows until the save commits, so switching test mode off or
+  removing the number or email waits for it. A test account never takes an email another account holds. No "email
+  changed" notice is sent when a test account leaves a test email; a real account always gets one.
 - Recovery ("lost phone") and account deletion always need the real codes.
 
 For testing on the real deployment without SMS credit or real inboxes, switched on for a few hours at a time. Every
