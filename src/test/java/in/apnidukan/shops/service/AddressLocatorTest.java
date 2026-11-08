@@ -195,6 +195,18 @@ class AddressLocatorTest {
     }
 
     @Test
+    void whenTheDaysCapIsAlreadyUsedThePersonsAllowanceIsntTouched() {
+        when(limits.current(startsWith("geocode-day:"))).thenReturn(280L);
+        assertThatThrownBy(this::locate).isInstanceOfSatisfying(ApiException.class,
+                e -> assertThat(e.getCode()).isEqualTo("GEOCODING_UNAVAILABLE"));
+        assertThatThrownBy(() -> describe("28.6215", "77.3652")).isInstanceOfSatisfying(ApiException.class,
+                e -> assertThat(e.getCode()).isEqualTo("GEOCODING_UNAVAILABLE"));
+        verify(limits, never()).tryHit(startsWith("geocode-user-day:"), anyInt(), any());
+        verify(limits, never()).hit(startsWith("geocode-day:"), any());
+        verify(google, never()).find(anyString(), anyString());
+    }
+
+    @Test
     void theCapsLastLookupStillGoesThrough() {
         when(limits.hit(startsWith("geocode-day:"), any())).thenReturn(280L);
         googleFinds(Precision.AREA, false);
@@ -233,6 +245,75 @@ class AddressLocatorTest {
         when(members.findByUserId(OWNER)).thenReturn(Optional.of(owner));
         googleFinds(Precision.EXACT, false);
         assertThat(locate().precision()).isEqualTo(Precision.EXACT);
+    }
+
+    private static final AddressLocator.Described NOIDA =
+            new AddressLocator.Described("Ithum Tower, Sector 62 Road", "Sector 62", "Noida", "201309", "Ithum Tower, Noida");
+
+    private AddressLocator.Described describe(String lat, String lng) {
+        return locator.describe(OWNER, new java.math.BigDecimal(lat), new java.math.BigDecimal(lng));
+    }
+
+    @Test
+    void theAddressAtAPointIsAskedRoundedToFourDecimalsAndKept30Days() {
+        when(google.describe(anyString(), anyString())).thenReturn(Optional.of(new GoogleGeocoder.Place(
+                "Ithum Tower, Sector 62 Road", "Sector 62", "Noida", "201309", "Ithum Tower, Noida")));
+        assertThat(describe("28.621549", "77.365249")).isEqualTo(NOIDA);
+        verify(google).describe("28.6215", "77.3652");
+        verify(values).set(eq("geocode-at:28.6215,77.3652"), anyString(), eq(Duration.ofDays(30)));
+        // The same budget as the forward search
+        verify(limits).tryHit("geocode-user:" + OWNER, 20, Duration.ofHours(1));
+        verify(limits).tryHit("geocode-user-day:" + OWNER, 10, Duration.ofHours(24));
+        verify(limits).hit("geocode-day:2026-11-07", Duration.ofHours(25));
+    }
+
+    @Test
+    void aKeptAddressAtAPointComesBackWithoutGoogle() {
+        when(values.get("geocode-at:28.6215,77.3652")).thenReturn(AddressLocator.toCache(NOIDA));
+        assertThat(describe("28.62151", "77.36521")).isEqualTo(NOIDA);
+        verify(google, never()).describe(anyString(), anyString());
+        verify(limits, never()).hit(startsWith("geocode-day:"), any());
+        // Empty fields survive the cache
+        AddressLocator.Described partial = new AddressLocator.Described("", "Sector 62", "Noida", "", "");
+        assertThat(AddressLocator.describedFromCache(AddressLocator.toCache(partial))).contains(partial);
+        assertThat(AddressLocator.describedFromCache("garbage")).isEmpty();
+    }
+
+    @Test
+    void nothingAtAPointIsKeptSixHours() {
+        when(google.describe(anyString(), anyString())).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> describe("28.6215", "77.3652")).isInstanceOfSatisfying(ApiException.class,
+                e -> assertThat(e.getCode()).isEqualTo("ADDRESS_NOT_FOUND"));
+        verify(values).set("geocode-at:28.6215,77.3652", "NONE", Duration.ofHours(6));
+        when(values.get("geocode-at:28.6215,77.3652")).thenReturn("NONE");
+        assertThatThrownBy(() -> describe("28.6215", "77.3652")).isInstanceOf(ApiException.class);
+        verify(google).describe(anyString(), anyString());
+    }
+
+    @Test
+    void theAddressAtAPointHasTheSameGuards() {
+        AddressLocator off = new AddressLocator(null, limits, redis, members, CLOCK);
+        assertThatThrownBy(() -> off.describe(OWNER, java.math.BigDecimal.ONE, java.math.BigDecimal.ONE))
+                .isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.getCode()).isEqualTo("GEOCODING_OFF"));
+
+        when(limits.tryHit(eq("geocode-user-day:" + OWNER), eq(10), any())).thenReturn(false);
+        assertThatThrownBy(() -> describe("28.6215", "77.3652")).isInstanceOfSatisfying(ApiException.class,
+                e -> assertThat(e.getCode()).isEqualTo("TRY_LATER"));
+
+        ShopMember barber = memberAs(ShopRole.BARBER);
+        when(members.findByUserId(OWNER)).thenReturn(Optional.of(barber));
+        assertThatThrownBy(() -> describe("28.6215", "77.3652")).isInstanceOfSatisfying(ApiException.class,
+                e -> assertThat(e.getCode()).isEqualTo("OWNER_ONLY"));
+        verify(google, never()).describe(anyString(), anyString());
+    }
+
+    @Test
+    void ifRedisDoesntKeepTheAddressAtAPointItStillComesBack() {
+        when(google.describe(anyString(), anyString())).thenReturn(Optional.of(new GoogleGeocoder.Place(
+                "Ithum Tower, Sector 62 Road", "Sector 62", "Noida", "201309", "Ithum Tower, Noida")));
+        doThrow(new RedisConnectionFailureException("down")).when(values)
+                .set(anyString(), anyString(), any(Duration.class));
+        assertThat(describe("28.6215", "77.3652")).isEqualTo(NOIDA);
     }
 
     @Test
