@@ -79,7 +79,7 @@ public class FileDeletionJob {
         rounds:
         while (tried < MAX_PER_RUN) {
             Instant now = clock.instant();
-            List<Pending> due = queue.due(now, SLICE);
+            List<Pending> due = queue.claimDue(now, SLICE, now.plus(MAX_RUN));
             for (Pending p : due) {
                 if (!clock.instant().isBefore(stopAt)) {
                     log.info("File deletions stopped for this round after {} tries (time is up); the rest next round",
@@ -104,7 +104,7 @@ public class FileDeletionJob {
                 }
             }
             if (due.size() < SLICE) {
-                break;   // a failed key was moved later, so a full slice always means more may be due
+                break;   // claimed keys were moved later, so a full slice always means more may be due
             }
         }
         if (deleted > 0) {

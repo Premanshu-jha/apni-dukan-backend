@@ -32,7 +32,7 @@ class FileDeletionJobTest {
     @Test
     void aSlowR2StopsTheRoundWhenItsTimeIsUpNotAtTheLease() {
         List<Pending> full = IntStream.range(0, FileDeletionJob.SLICE).mapToObj(i -> new Pending("k" + i, 0)).toList();
-        when(queue.due(any(), anyInt())).thenReturn(full);
+        when(queue.claimDue(any(), anyInt(), any())).thenReturn(full);
         doAnswer(inv -> {
             clock.advance(Duration.ofMinutes(1));   // each delete takes a minute
             return null;
