@@ -26,7 +26,8 @@ class FileDeletionJobTest {
     private final TestClock clock = new TestClock(Instant.parse("2026-11-10T04:30:00Z"));
     private final FileDeletionStore queue = mock(FileDeletionStore.class);
     private final FileStorage storage = mock(FileStorage.class);
-    private final FileDeletionJob job = new FileDeletionJob(queue, storage, null, clock, true);
+    private final FileDeletionJob job = new FileDeletionJob(queue, storage, null, clock, true,
+            mock(in.apnidukan.files.repo.VideoUploadStore.class));
 
     @Test
     void aSlowR2StopsTheRoundWhenItsTimeIsUpNotAtTheLease() {
