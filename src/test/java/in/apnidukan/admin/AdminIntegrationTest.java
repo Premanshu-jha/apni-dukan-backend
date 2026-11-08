@@ -1,5 +1,6 @@
 package in.apnidukan.admin;
 
+import in.apnidukan.auth.service.TestModeService;
 import in.apnidukan.common.security.AuthPrincipal;
 import in.apnidukan.common.security.JwtService;
 import in.apnidukan.common.security.SessionRevocations;
@@ -24,6 +25,10 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.client.RestClient;
 
 import java.sql.Timestamp;
@@ -37,6 +42,8 @@ import static in.apnidukan.support.CapturingSenders.LAST_EMAIL;
 import static in.apnidukan.support.CapturingSenders.LAST_SMS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * The admin website's backend against real Postgres and Redis: roles (one super admin, admins added and removed),
@@ -70,6 +77,8 @@ class AdminIntegrationTest {
     @Autowired StringRedisTemplate redis;
     @Autowired JwtService jwt;
     @Autowired SessionRevocations sessions;
+    @Autowired PlatformTransactionManager transactions;
+    @MockitoSpyBean TestModeService testMode;
 
     RestClient http;
     String base;
@@ -262,6 +271,98 @@ class AdminIntegrationTest {
         assertThat(real.status()).as(real.text()).isEqualTo(200);
         assertThat(field(field(real.body(), "user"), "email")).isNull();
         assertThat(count("users WHERE email = 'a@salon.test'")).isZero();
+    }
+
+    /** A test account signed in through test mode, for the email tests below. */
+    private String testerIn(String phone) {
+        post("/admin/test-mode/phones", Map.of("phone", phone, "label", "Tester"), boss);
+        put("/admin/test-mode", Map.of("hours", 1), boss);
+        Reply in = post("/auth/otp/verify", Map.of("phone", phone, "code", "424242"), (String) null);
+        assertThat(in.status()).as(in.text()).isEqualTo(200);
+        return (String) field(in.body(), "accessToken");
+    }
+
+    @Test
+    void theTestEmailPathNeverReplacesAVerifiedEmail() {
+        String tester = testerIn("9111111111");
+        jdbc.update("UPDATE users SET email = 'tester@gmail.com', email_verified_at = now() WHERE phone = '9111111111'");
+        // Straight to verify, skipping the phone code that replacing a verified email needs
+        Reply refused = post("/auth/email/verify", Map.of("email", "x@example.com", "code", "424242"), tester);
+        assertThat(refused.status()).as(refused.text()).isEqualTo(403);
+        assertThat(field(refused.body(), "code")).isEqualTo("PHONE_CODE_REQUIRED");
+        assertThat(jdbc.queryForObject("SELECT email FROM users WHERE phone = '9111111111'", String.class))
+                .isEqualTo("tester@gmail.com");
+    }
+
+    @Test
+    void noEmailChangedNoticeGoesToATestAddress() {
+        for (String[] t : List.of(new String[] {"9111111111", "x@example.com"},
+                new String[] {"9111111112", "y@salon.test"})) {
+            String tester = testerIn(t[0]);
+            assertThat(post("/auth/email/verify", Map.of("email", t[1], "code", "424242"), tester).status())
+                    .isEqualTo(200);
+            // Then replaced by a real address the normal way (phone code, then the real email code)
+            LAST_SMS.clear();
+            assertThat(post("/auth/email/change-phone-code", Map.of(), tester).status()).isEqualTo(202);
+            String phoneCode = CapturingSenders.codeSentTo(LAST_SMS, t[0]);
+            LAST_EMAIL.clear();
+            String real = "real" + t[0] + "@gmail.com";
+            assertThat(post("/auth/email/send-code", Map.of("email", real, "phoneCode", phoneCode), tester).status())
+                    .isEqualTo(202);
+            Reply changed = post("/auth/email/verify", Map.of("email", real, "code",
+                    CapturingSenders.codeSentTo(LAST_EMAIL, real)), tester);
+            assertThat(changed.status()).as(changed.text()).isEqualTo(200);
+            try {
+                Thread.sleep(300);   // the notice goes out in the background
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            assertThat(LAST_EMAIL).doesNotContainKey(t[1]);
+        }
+    }
+
+    @Test
+    void anyCodeTriesAreLimitedPerAccount() {
+        String tester = testerIn("9111111111");
+        for (int i = 0; i < 10; i++) {
+            assertThat(post("/auth/email/verify", Map.of("email", "x@example.com", "code", "42424" + i), tester)
+                    .status()).isEqualTo(200);
+        }
+        Reply limited = post("/auth/email/verify", Map.of("email", "x@example.com", "code", "424249"), tester);
+        assertThat(limited.status()).as(limited.text()).isEqualTo(429);
+    }
+
+    @Test
+    void theTestEmailIsCheckedAgainInsideTheSaveSoAChangeMeanwhileStoresNothing() {
+        List<String> changes = List.of("UPDATE otp_test_mode SET until = NULL WHERE id = 1",   // test mode off
+                "DELETE FROM test_phones WHERE phone = '9111111111'",                           // number removed
+                "UPDATE users SET test_account = false WHERE phone = '9111111111'");            // claimed
+        for (String change : changes) {
+            TestData.clean(jdbc);
+            boss = person("9000000001");
+            jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', name = 'Prem' WHERE id = ?", boss);
+            String tester = testerIn("9111111111");
+            UUID id = UUID.fromString(jdbc.queryForObject("SELECT id::text FROM users WHERE phone = '9111111111'",
+                    String.class));
+            // The first check passes; right after it, before the save, the change happens (its own transaction)
+            TransactionTemplate apart = new TransactionTemplate(transactions);
+            apart.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+            boolean[] done = {false};
+            doAnswer(inv -> {
+                Object real = inv.callRealMethod();
+                if (!done[0]) {
+                    done[0] = true;
+                    apart.executeWithoutResult(st -> jdbc.update(change));
+                }
+                return real;
+            }).when(testMode).acceptsAnyEmailCode(any());
+            Reply refused = post("/auth/email/verify", Map.of("email", "x@example.com", "code", "424242"), tester);
+            assertThat(done[0]).as(change).isTrue();
+            assertThat(field(refused.body(), "code")).as(change + ": " + refused.text()).isEqualTo("WRONG_CODE");
+            assertThat(jdbc.queryForObject("SELECT email IS NULL AND email_verified_at IS NULL FROM users WHERE id = ?",
+                    Boolean.class, id)).as(change).isTrue();
+            org.mockito.Mockito.reset(testMode);
+        }
     }
 
     @Test
