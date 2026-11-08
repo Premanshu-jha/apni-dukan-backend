@@ -33,4 +33,18 @@ class EmailsTest {
         assertTimeoutPreemptively(Duration.ofMillis(200),
                 () -> assertThatThrownBy(() -> Emails.normalize(evil)).isInstanceOf(ApiException.class));
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"tester@example.com", "a@example.org", "a@example.net", "b@shop.example.com",
+            "c@qa.test", "d@salon.test"})
+    void reservedTestDomainsAreTestAddresses(String email) {
+        assertThat(Emails.isTestAddress(email)).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"tester@gmail.com", "a@example.co", "a@myexample.com", "a@example.com.in", "a@test.in",
+            "a@testing.com", "a@notexample.org"})
+    void realDomainsAreNotTestAddresses(String email) {
+        assertThat(Emails.isTestAddress(email)).isFalse();
+    }
 }

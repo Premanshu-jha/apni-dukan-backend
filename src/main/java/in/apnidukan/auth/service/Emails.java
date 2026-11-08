@@ -26,6 +26,35 @@ public final class Emails {
         return email;
     }
 
+    /** Domains reserved for testing (RFC 2606 and RFC 6761): no real person's inbox is ever there. */
+    private static final java.util.List<String> TEST_DOMAINS = java.util.List.of("example.com", "example.org",
+            "example.net");
+
+    /**
+     * Whether an (already normalised) address is a test address: at example.com, example.org or example.net (or a
+     * subdomain of them), or under the .test top-level domain. Only such addresses can be verified without a real code,
+     * by a test account in OTP test mode (TestModeService), so a tester can never take a real person's email.
+     */
+    public static boolean isTestAddress(String normalizedEmail) {
+        if (normalizedEmail == null) {
+            return false;
+        }
+        int at = normalizedEmail.lastIndexOf('@');
+        if (at < 0) {
+            return false;
+        }
+        String domain = normalizedEmail.substring(at + 1);
+        if (domain.endsWith(".test")) {
+            return true;
+        }
+        for (String d : TEST_DOMAINS) {
+            if (domain.equals(d) || domain.endsWith("." + d)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean looksValid(String email) {
         int at = email.indexOf('@');
         if (at <= 0 || at != email.lastIndexOf('@')) {
