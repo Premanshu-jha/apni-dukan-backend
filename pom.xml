@@ -24,7 +24,7 @@
         <jjwt.version>0.13.0</jjwt.version>
 
         <!-- Automatic code checks (run by "mvn verify" and on every pull request) -->
-        <jacoco.version>0.8.15</jacoco.version>
+        <jacoco.version>0.8.16</jacoco.version>
         <!-- Build fails if tests cover less than this share of the code's lines / branches. Today about 89% / 72-75%;
              the branch figure moves a little between runs (tests that race requests), so its minimum keeps a margin.
              mvn verify runs the integration tests, so it needs Docker running (mvn verify -Djacoco.skip=true without). -->
