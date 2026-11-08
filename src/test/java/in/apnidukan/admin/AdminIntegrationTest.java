@@ -180,13 +180,21 @@ class AdminIntegrationTest {
 
         assertThat(jdbc.queryForObject("SELECT test_account FROM users WHERE phone = '9111111111'", Boolean.class))
                 .isTrue();
-        // The email code is always the real one (else a test account could claim someone's email)
+        // A real email address needs the real email code (else a test account could take someone's email)
         String access = (String) field(in.body(), "accessToken");
+        assertThat(post("/auth/email/send-code", Map.of("email", "tester@gmail.com"), access).status())
+                .isEqualTo(202);
+        assertThat(LAST_EMAIL).containsKey("tester@gmail.com");
+        assertThat(post("/auth/email/verify", Map.of("email", "tester@gmail.com", "code", "777777"), access)
+                .status()).isEqualTo(400);
+        // A test address (example.com) takes any 6 digits, and no email goes out
+        LAST_EMAIL.clear();
         assertThat(post("/auth/email/send-code", Map.of("email", "tester@example.com"), access).status())
                 .isEqualTo(202);
-        assertThat(LAST_EMAIL).containsKey("tester@example.com");
-        assertThat(post("/auth/email/verify", Map.of("email", "tester@example.com", "code", "777777"), access)
-                .status()).isEqualTo(400);
+        assertThat(LAST_EMAIL).isEmpty();
+        Reply verified = post("/auth/email/verify", Map.of("email", "tester@example.com", "code", "777777"), access);
+        assertThat(verified.status()).as(verified.text()).isEqualTo(200);
+        assertThat(field(verified.body(), "emailVerified")).isEqualTo(true);
 
         // It switches itself off when the time is up, and the test account's session can't be renewed then
         String refresh = (String) field(in.body(), "refreshToken");
@@ -197,6 +205,63 @@ class AdminIntegrationTest {
         post("/auth/otp/send", Map.of("phone", "9111111111"), (String) null);
         assertThat(LAST_SMS).containsKey("9111111111");
         assertThat(count("admin_events WHERE event IN ('TEST_PHONE_ADDED', 'TEST_MODE_ON')")).isEqualTo(2);
+    }
+
+    @Test
+    void onlyATestAccountInTestModeVerifiesATestEmailWithAnyCode() {
+        post("/admin/test-mode/phones", Map.of("phone", "9111111111", "label", "Tester"), boss);
+        post("/admin/test-mode/phones", Map.of("phone", "9111111112", "label", "Tester 2"), boss);
+        put("/admin/test-mode", Map.of("hours", 1), boss);
+        String tester = (String) field(post("/auth/otp/verify", Map.of("phone", "9111111111", "code", "424242"),
+                (String) null).body(), "accessToken");
+        String tester2 = (String) field(post("/auth/otp/verify", Map.of("phone", "9111111112", "code", "424242"),
+                (String) null).body(), "accessToken");
+
+        // Not 6 digits: refused even here
+        assertThat(post("/auth/email/verify", Map.of("email", "a@salon.test", "code", "12345"), tester).status())
+                .isEqualTo(400);
+        assertThat(post("/auth/email/verify", Map.of("email", "a@salon.test", "code", "111111"), tester).status())
+                .isEqualTo(200);
+        // Verified emails stay unique: another test account can't take the same test address
+        Reply clash = post("/auth/email/verify", Map.of("email", "a@salon.test", "code", "222222"), tester2);
+        assertThat(field(clash.body(), "code")).as(clash.text()).isEqualTo("EMAIL_IN_USE");
+
+        // A real account (the customer): the real code, and the email is sent, even for example.com
+        jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", customer);   // a new email
+        String realAccount = token(customer);
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "someone@example.com"), realAccount).status())
+                .isEqualTo(202);
+        assertThat(LAST_EMAIL).containsKey("someone@example.com");
+        assertThat(post("/auth/email/verify", Map.of("email", "someone@example.com", "code", "424242"), realAccount)
+                .status()).isIn(400, 429);
+        // An admin never gets in with any code either
+        assertThat(post("/auth/email/verify", Map.of("email", "boss@example.com", "code", "424242"), admin)
+                .status()).isNotEqualTo(200);
+
+        // "Lost phone" never takes any code, not even for a test account's test address
+        assertThat(post("/auth/recover/complete", Map.of("email", "a@salon.test", "emailCode", "123456",
+                "newPhone", "9700000001", "phoneCode", "123456"), (String) null).status()).isEqualTo(400);
+
+        // Test mode off: the real code again, and the email is sent
+        assertThat(delete("/admin/test-mode", boss).status()).isEqualTo(200);
+        LAST_EMAIL.clear();
+        // (a session made straight for the test: the real ones were signed out with test mode)
+        String still = token(UUID.fromString(jdbc.queryForObject("SELECT id::text FROM users WHERE phone = '9111111112'",
+                String.class)));
+        assertThat(post("/auth/email/send-code", Map.of("email", "b@salon.test"), still).status()).isEqualTo(202);
+        assertThat(LAST_EMAIL).containsKey("b@salon.test");
+        assertThat(post("/auth/email/verify", Map.of("email", "b@salon.test", "code", "333333"), still).status())
+                .isIn(400, 429);
+
+        // The number's real holder claims the account later: the tester's test email goes with the rest
+        delete("/admin/test-mode/phones/9111111111", boss);
+        post("/auth/otp/send", Map.of("phone", "9111111111"), (String) null);
+        Reply real = post("/auth/otp/verify", Map.of("phone", "9111111111", "code",
+                CapturingSenders.codeSentTo(LAST_SMS, "9111111111")), (String) null);
+        assertThat(real.status()).as(real.text()).isEqualTo(200);
+        assertThat(field(field(real.body(), "user"), "email")).isNull();
+        assertThat(count("users WHERE email = 'a@salon.test'")).isZero();
     }
 
     @Test
