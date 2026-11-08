@@ -339,6 +339,94 @@ class AdminIntegrationTest {
                 .isEqualTo("shared@gmail.com");
     }
 
+    @Test
+    void aTestAccountMadeAnAdminKeepsItsEmailAgainstARealVerify() {
+        String tester = testerIn("9111111111");
+        listEmail("shared@gmail.com");
+        assertThat(post("/auth/email/verify", Map.of("email", "shared@gmail.com", "code", "424242"), tester).status())
+                .isEqualTo(200);
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE phone = '9111111111'");
+        jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", customer);
+        String real = token(customer);
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "shared@gmail.com"), real).status()).isEqualTo(202);
+        Reply refused = post("/auth/email/verify", Map.of("email", "shared@gmail.com", "code",
+                CapturingSenders.codeSentTo(LAST_EMAIL, "shared@gmail.com")), real);
+        assertThat(field(refused.body(), "code")).as(refused.text()).isEqualTo("EMAIL_IN_USE");
+        assertThat(jdbc.queryForObject("SELECT email FROM users WHERE phone = '9111111111'", String.class))
+                .isEqualTo("shared@gmail.com");
+    }
+
+    @Test
+    void aRealAccountChangingAwayFromAListedEmailStillGetsTheNotice() {
+        // The super admin listed an email nobody had verified; then its real owner verified it with the real code
+        listEmail("real.person@gmail.com");
+        jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", customer);
+        String real = token(customer);
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "real.person@gmail.com"), real).status())
+                .isEqualTo(202);
+        assertThat(post("/auth/email/verify", Map.of("email", "real.person@gmail.com", "code",
+                CapturingSenders.codeSentTo(LAST_EMAIL, "real.person@gmail.com")), real).status()).isEqualTo(200);
+        // Changed the normal way: the phone code, then the new email's code
+        LAST_SMS.clear();
+        assertThat(post("/auth/email/change-phone-code", Map.of(), real).status()).isEqualTo(202);
+        String phoneCode = CapturingSenders.codeSentTo(LAST_SMS, "9000000003");
+        LAST_EMAIL.clear();
+        assertThat(post("/auth/email/send-code", Map.of("email", "new.person@gmail.com", "phoneCode", phoneCode), real)
+                .status()).isEqualTo(202);
+        Reply changed = post("/auth/email/verify", Map.of("email", "new.person@gmail.com", "code",
+                CapturingSenders.codeSentTo(LAST_EMAIL, "new.person@gmail.com")), real);
+        assertThat(changed.status()).as(changed.text()).isEqualTo(200);
+        long until = System.currentTimeMillis() + 5000;   // the notice goes out in the background
+        while (!LAST_EMAIL.containsKey("real.person@gmail.com") && System.currentTimeMillis() < until) {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        assertThat(LAST_EMAIL.get("real.person@gmail.com")).contains("was changed");
+    }
+
+    @Test
+    void whileTheAnyCodeSaveRunsTestModeTheNumberAndTheEmailCantBeTakenAway() {
+        List<String> changes = List.of("UPDATE otp_test_mode SET until = NULL WHERE id = 1",
+                "DELETE FROM test_phones WHERE phone = '9111111111'",
+                "DELETE FROM test_emails WHERE email = 'x.qa@gmail.com'");
+        String tester = testerIn("9111111111");
+        listEmail("x.qa@gmail.com");
+        TransactionTemplate apart = new TransactionTemplate(transactions);
+        apart.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        List<String> blocked = new java.util.ArrayList<>();
+        try {
+            doAnswer(inv -> {
+                Object held = inv.callRealMethod();
+                // Right after the re-check passed, inside the save: each change has to wait for the save
+                for (String change : changes) {
+                    try {
+                        apart.executeWithoutResult(st -> {
+                            jdbc.execute("SET LOCAL lock_timeout = '300ms'");
+                            jdbc.update(change);
+                        });
+                    } catch (org.springframework.dao.DataAccessException waited) {
+                        blocked.add(change);
+                    }
+                }
+                return held;
+            }).when(testMode).acceptsAnyEmailCodeHeld(any(), any());
+            Reply verified = post("/auth/email/verify", Map.of("email", "x.qa@gmail.com", "code", "424242"), tester);
+            assertThat(verified.status()).as(verified.text()).isEqualTo(200);
+        } finally {
+            org.mockito.Mockito.reset(testMode);
+        }
+        assertThat(blocked).containsExactlyElementsOf(changes);
+        // After the save, they go through
+        for (String change : changes) {
+            assertThat(jdbc.update(change)).as(change).isEqualTo(1);
+        }
+    }
+
     /** Puts an email on the test list. */
     private void listEmail(String email) {
         Reply added = post("/admin/test-mode/emails", Map.of("email", email, "label", "Tester"), boss);
