@@ -20,7 +20,7 @@
     <properties>
         <java.version>21</java.version>
         <!-- AWS SDK v2, used to talk to Cloudflare R2 (S3-compatible). Update to the newest 2.x when IntelliJ suggests it. -->
-        <aws-sdk.version>2.57.3</aws-sdk.version>
+        <aws-sdk.version>2.57.8</aws-sdk.version>
         <jjwt.version>0.13.0</jjwt.version>
 
         <!-- Automatic code checks (run by "mvn verify" and on every pull request) -->
