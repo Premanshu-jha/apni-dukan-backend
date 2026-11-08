@@ -542,8 +542,16 @@ number nobody has signed in with can be added; the account its first test sign-i
 admin's. A test account stays signed in only while test mode is on for its number: switching it off, the time
 running out, or removing the number ends its sessions (refresh answers 401 `TEST_MODE_OFF`). If the number's real holder
 later signs in with the SMS code (or the account is recovered onto a real phone), it becomes a normal account for
-good and every tester still signed in to it is signed out. Email codes, recovery
-and account deletion always need the real code (otherwise a test account could claim someone's email). For testing
+good and every tester still signed in to it is signed out. The apps then ask for a verified email: test accounts
+sign in with any phone code and, for test email addresses (anything@example.com, @example.org, @example.net, their
+subdomains, or anything under `.test`), any 6-digit email code; no email is sent. A real email address (gmail.com and
+so on) always needs the real email code, so a test account can never take someone's inbox; verified emails stay
+unique (409 `EMAIL_IN_USE`). The any-code path never replaces an already verified email (403
+`PHONE_CODE_REQUIRED`, as the normal change flow asks for the phone code first), is limited to 10 tries an hour per
+account (429), is checked again inside the save (test mode switched off, the number removed, or the account claimed
+meanwhile: 400 `WRONG_CODE`, nothing stored), and no "email changed" notice is ever sent to a test address. Real accounts and admins always need the real code, even for example.com. Recovery
+("lost phone") and account deletion always need the real code, and the test email goes with the rest when the
+number's real holder claims the account. For testing
 on the real deployment without SMS credit; like the OMR project's per-student OTP bypass, but switched on for a few
 hours at a time. Every change (admins, test numbers, test mode on and off) is logged in `admin_events`.
 
@@ -731,6 +739,12 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 `customerPhone`, to call someone who is running late.
 
 ### API changes in this version (deploy the backend first, then the apps)
+
+**OTP test mode covers the email step** (no app change needed):
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /auth/email/send-code`, `POST /auth/email/verify` | the real email code always | a test account in test mode verifying a test address (name@example.com, …@example.org/.net, `.test`) gets no email and any 6 digits verify; everything else as before | nothing; testers type any 6 digits |
 
 **Salon video at registration** (needed by the partner app before its owners can submit):
 
