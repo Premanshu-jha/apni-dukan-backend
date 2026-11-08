@@ -8,7 +8,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.UUID;
 
-/** The super admin's log (admin_events): admins and test numbers added or removed, test mode on and off. */
+/** The super admin's log (admin_events): admins, test numbers and test emails added or removed, test mode on and off. */
 @Component
 class AdminEvents {
 
