@@ -277,6 +277,7 @@ sequenceDiagram
 | Call | What it does |
 | --- | --- |
 | `POST /api/v1/shops` | Registers your shop as `DRAFT`, you as owner. 409 `ALREADY_HAS_SHOP` if you have one. Then refresh your token |
+| `POST /api/v1/shops/geocode` | Someone without a shop (registration comes before the shop exists) or a shop's owner; a helper or barber gets 403 `OWNER_ONLY`. `{addressLine, area, city, pincode}` (the same limits as `POST /shops`) → 200 `{latitude, longitude, precision: EXACT\|STREET\|AREA, formattedAddress}` for the pin the owner then drags onto the door. 404 `ADDRESS_NOT_FOUND`, 429 `TRY_LATER` (20 searches an hour, 10 new addresses a day, each), 503 `GEOCODING_OFF` (no `GOOGLE_GEOCODING_KEY`), 503 `GEOCODING_UNAVAILABLE`. See "Finding the salon from its address" |
 | `GET /api/v1/shops/me` | Your shop, its status and your role (`myRole`). 404 `NO_SHOP` if none |
 | `PATCH /api/v1/shops/me` | Owner only (403 `OWNER_ONLY`). Send `version` and only the fields to change; `""` removes GSTIN/Udyam |
 | `PUT /api/v1/shops/me/photos` | Owner. `{version, ownerPhotoFileId?, shopPhotoFileId?}`: ids of photos uploaded to `POST /files` with purpose `OWNER_PHOTO` / `SHOP_PHOTO` |
@@ -296,6 +297,55 @@ sequenceDiagram
 | `POST /api/v1/admin/shops/{id}/reinstate` | Field team. `{version, note?}`: SUSPENDED → PENDING_VISIT, back in the visit list; live again only once approved after a new check (so nothing changed while suspended goes live unchecked). Cancelled bookings stay cancelled |
 
 The owner gets a message for each field-team decision (approved, sent back, suspended, reinstated).
+
+### Finding the salon from its address
+
+At registration the owner may not be standing in the salon, so the phone's GPS would put the pin at home. "Find my
+salon on the map" sends the typed address to `POST /shops/geocode`; the backend asks Google's Geocoding API (classic
+v3 endpoint) and answers where it is, and the app drops the pin there for the owner to drag onto the door. GPS stays
+the other way, and the field team checks the pin on its visit either way.
+
+```mermaid
+sequenceDiagram
+    participant P as Partner app
+    participant B as Backend
+    participant R as Redis
+    participant G as Google Geocoding
+    P->>B: POST /shops/geocode {addressLine, area, city, pincode}
+    Note over B: a helper or barber: 403 OWNER_ONLY
+    B->>R: this person's searches this hour (max 20, else 429 TRY_LATER)
+    B->>R: this address asked before? (found: 30 days, partial match: 1 day, not found: 6 hours)
+    alt asked before
+        B-->>P: 200 the kept answer, or 404 (Google isn't asked)
+    else new address
+        B->>R: this person's Google lookups today (max 10, else 429 TRY_LATER)
+        B->>R: everyone's Google lookups this Pacific day (max 280, else 503 GEOCODING_UNAVAILABLE)
+        B->>G: address, components=country:IN|postal_code, region=in, key (4 s in all)
+        G-->>B: OK / ZERO_RESULTS / an error status
+        B->>R: keep the answer (if Redis doesn't take it, the answer still goes back)
+        B-->>P: 200 {latitude, longitude, precision, formattedAddress} / 404 ADDRESS_NOT_FOUND / 503
+    end
+```
+
+- **Precision:** Google's `location_type` becomes `EXACT` (ROOFTOP: the building), `STREET` (RANGE_INTERPOLATED) or
+  `AREA` (GEOMETRIC_CENTER, APPROXIMATE); a `partial_match` (Google matched only part of the address) is always `AREA`. Indian addresses are often only found to the street or area, which is why
+  the owner always drags the pin; the app says so for STREET and AREA.
+- **Errors:** ZERO_RESULTS, or a result outside India, is 404 `ADDRESS_NOT_FOUND`. Any other Google status
+  (OVER_QUERY_LIMIT, REQUEST_DENIED, ...), a non-200 answer, an unreadable answer, a timeout (2 s to connect, 4 s for
+  the whole answer, headers and body, no retries) or no network is 503 `GEOCODING_UNAVAILABLE` ("use your location").
+- **Who:** someone registering (no shop yet) or a shop's owner. Helpers and barbers get 403 `OWNER_ONLY`. Customers
+  can't be told apart from someone about to register, so the per-person daily limit below covers them.
+- **Cost guard:** at most 280 calls to Google a day for the whole backend, under the 300 a day set as the quota in
+  Google Cloud (Google's free allowance is 10,000 a month). The day is Google's: it starts at midnight Pacific time
+  (12:30 IST in summer, 13:30 IST in winter), the moment Google's own quota resets. Per person: 20 searches an hour
+  and 10 calls to Google a day (only new addresses count, and not once everyone's day is used up), so one account
+  can't use up everyone's day. Answers are
+  kept in Redis by a hash of the tidied address: found 30 days, a partial match 1 day, not found 6 hours, so a repeat
+  costs nothing. If Redis is down the search answers 503 `SERVICE_BUSY` before Google is called; only keeping an
+  answer may fail (logged as a WARN), and the owner still gets the pin.
+- **The key:** `GOOGLE_GEOCODING_KEY`, restricted in Google Cloud to the Geocoding API only. It goes only in the
+  request URL to Google, which is never logged; logs carry Google's status word only, never the address or Google's
+  `error_message`. Without the key the call answers 503 `GEOCODING_OFF` and the app hides the button.
 
 ### Closing a shop or handing it over
 
@@ -478,6 +528,9 @@ Separately, one request carries at most 200 `serviceIds` and 50 blocks of `hours
    - Email: `RESEND_API_KEY` and `EMAIL_FROM` to send through Resend (see "Email" below). Without a Resend key,
      `MAIL_USERNAME` (your Gmail address) and `MAIL_PASSWORD` (its 16-letter app password), the same as in
      Vidyavriti: email codes then go through Gmail SMTP. `MAIL_ENABLED=false` prints them in the console instead.
+   - Optional: `GOOGLE_GEOCODING_KEY`, a Google Maps Platform key restricted to the Geocoding API, for "Find my
+     salon on the map" at registration (see "Finding the salon from its address"). Without it that button is hidden
+     and owners place the pin with their phone's location, as before.
    - Optional: `CORS_ALLOWED_ORIGINS`
      (default `http://localhost:5173`, the shop app's dev server; separate several with commas).
    - On the real server only: `APP_PRODUCTION=true`. The app then refuses to start unless everything a real
@@ -590,6 +643,12 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 `customerPhone`, to call someone who is running late.
 
 ### API changes in this version (deploy the backend first, then the apps)
+
+**Address search at registration** (optional for the apps):
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /shops/geocode` | none | new: the typed address → `{latitude, longitude, precision, formattedAddress}`; 403 `OWNER_ONLY` (helpers, barbers), 404 `ADDRESS_NOT_FOUND`, 429 `TRY_LATER`, 503 `GEOCODING_OFF` / `GEOCODING_UNAVAILABLE` | partner app: "Find my salon on the map" on registration step 1; hide it on `GEOCODING_OFF` |
 
 **Final review round** (the apps must follow these):
 
@@ -865,6 +924,8 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
   under memory pressure. If Redis stops answering, signed-in calls keep working; sign-in codes and start codes
   answer 503 `SERVICE_BUSY` until it is back (`Retry-After: 5`).
 - `APP_PRODUCTION=true`, own DLT templates, `SMS_ACCOUNT_MOVED_ENABLED=true`.
+- **Address search (optional):** `GOOGLE_GEOCODING_KEY` on Railway, a key restricted to the Geocoding API, with
+  the API's daily quota set in Google Cloud (300 a day: v3 requests per day; the v4 ones at 0) and a budget alert.
 - **Email:** Resend recommended (`RESEND_API_KEY`); with Gmail the real server starts but logs a WARN, since Gmail
   carries a few hundred emails a day. With Resend, `EMAIL_FROM` must be set to an address on your verified domain
   (the real server refuses Resend's test address).
