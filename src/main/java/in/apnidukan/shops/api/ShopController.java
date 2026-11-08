@@ -4,10 +4,13 @@ import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.shops.api.ShopRequests.Close;
 import in.apnidukan.shops.api.ShopRequests.CreateShop;
+import in.apnidukan.shops.api.ShopRequests.Geocode;
 import in.apnidukan.shops.api.ShopRequests.Handover;
 import in.apnidukan.shops.api.ShopRequests.SetPhotos;
 import in.apnidukan.shops.api.ShopRequests.Submit;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
+import in.apnidukan.shops.service.AddressLocator;
+import in.apnidukan.shops.service.AddressLocator.Located;
 import in.apnidukan.shops.service.ShopInvitesService;
 import in.apnidukan.shops.service.ShopInvitesService.InviteResult;
 import in.apnidukan.shops.service.ShopInvitesService.InviteView;
@@ -44,10 +47,12 @@ public class ShopController {
     private final ShopMembersService people;
     private final ShopOwnershipService ownership;
     private final ShopInvitesService invites;
+    private final AddressLocator addresses;
 
     public ShopController(ShopService shops, CurrentUserProvider currentUser, ShopMembersService people,
-                          ShopOwnershipService ownership, ShopInvitesService invites) {
+                          ShopOwnershipService ownership, ShopInvitesService invites, AddressLocator addresses) {
         this.invites = invites;
+        this.addresses = addresses;
         this.shops = shops;
         this.currentUser = currentUser;
         this.people = people;
@@ -144,6 +149,18 @@ public class ShopController {
     @ResponseStatus(HttpStatus.CREATED)
     public ShopResponse create(@Valid @RequestBody CreateShop body) {
         return shops.create(currentUser.get().userId(), body);
+    }
+
+    /**
+     * Registration: where the typed address is on the map, for the pin the owner then drags onto the door.
+     * 200 {latitude, longitude, precision: EXACT|STREET|AREA, formattedAddress}. 404 ADDRESS_NOT_FOUND,
+     * 429 TRY_LATER (20 an hour each), 503 GEOCODING_OFF (not set up: the app hides the button),
+     * 503 GEOCODING_UNAVAILABLE (Google failed, or today's lookups are used up).
+     */
+    @PostMapping("/geocode")
+    public Located geocode(@Valid @RequestBody Geocode body) {
+        return addresses.locate(currentUser.get().userId(), body.addressLine(), body.area(), body.city(),
+                body.pincode());
     }
 
     /** My shop: details, status and your role. 404 NO_SHOP if you have none. */

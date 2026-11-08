@@ -42,6 +42,16 @@ public final class ShopRequests {
     }
 
     /**
+     * Find a typed address on the map (registration, before the shop exists): the same fields and limits as POST /shops.
+     */
+    public record Geocode(
+            @NotBlank @Size(min = 5, max = 200) String addressLine,
+            @NotBlank @Size(min = 2, max = 100) String area,
+            @NotBlank @Size(min = 2, max = 60) String city,
+            @NotNull @Pattern(regexp = "[1-9][0-9]{5}", message = "must be a 6-digit pincode") String pincode) {
+    }
+
+    /**
      * My shop edits. Leave a field out (or null) to keep it; send "" for gstin/udyamNumber to remove it.
      * @param version the version you last read (GET /shops/me); if someone saved in between you get 409 SHOP_CHANGED
      */
