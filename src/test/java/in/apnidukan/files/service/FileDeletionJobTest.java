@@ -26,12 +26,13 @@ class FileDeletionJobTest {
     private final TestClock clock = new TestClock(Instant.parse("2026-11-10T04:30:00Z"));
     private final FileDeletionStore queue = mock(FileDeletionStore.class);
     private final FileStorage storage = mock(FileStorage.class);
-    private final FileDeletionJob job = new FileDeletionJob(queue, storage, null, clock, true);
+    private final FileDeletionJob job = new FileDeletionJob(queue, storage, null, clock, true,
+            mock(in.apnidukan.files.repo.VideoUploadStore.class));
 
     @Test
     void aSlowR2StopsTheRoundWhenItsTimeIsUpNotAtTheLease() {
         List<Pending> full = IntStream.range(0, FileDeletionJob.SLICE).mapToObj(i -> new Pending("k" + i, 0)).toList();
-        when(queue.due(any(), anyInt())).thenReturn(full);
+        when(queue.claimDue(any(), anyInt(), any())).thenReturn(full);
         doAnswer(inv -> {
             clock.advance(Duration.ofMinutes(1));   // each delete takes a minute
             return null;

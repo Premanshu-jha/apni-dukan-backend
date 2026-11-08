@@ -8,6 +8,8 @@ public enum FilePurpose {
     OWNER_PHOTO("owners"),
     /** A salon barber's photo (optional). */
     STAFF_PHOTO("staff"),
+    /** A short video of the salon for the field team (registration); customers never see it. */
+    SHOP_VIDEO("videos"),
     BILL("bills"),
     RECEIPT("receipts");
 

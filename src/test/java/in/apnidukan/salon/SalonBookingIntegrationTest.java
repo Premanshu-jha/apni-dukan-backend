@@ -1040,11 +1040,21 @@ class SalonBookingIntegrationTest {
         assertThat(photos.status()).as(photos.text()).isEqualTo(200);
         // An attached photo can't be deleted
         assertThat(delete("/files/" + ownerPhoto, newOwner, newSalon).status()).isEqualTo(409);
+        // Nor submitted without the salon video (its upload is tested in SalonVideoIntegrationTest)
+        Reply noVideo = post("/shops/me/submit", Map.of("version", field(photos.body(), "version")), newOwner);
+        assertThat(field(noVideo.body(), "code")).as(noVideo.text()).isEqualTo("PHOTOS_REQUIRED");
+        UUID video = UUID.randomUUID();
+        jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, uploaded_by, "
+                + "created_at) VALUES (?, ?, 'SHOP_VIDEO', ?, 'video/mp4', 10, ?, ?, now())", video, newSalon,
+                "test/" + video + ".mp4", video.toString().replace("-", "") + "0".repeat(32), newOwner);
+        Reply withVideo = put("/shops/me/video", Map.of("version", field(photos.body(), "version"),
+                "fileId", video.toString()), newOwner);
+        assertThat(withVideo.status()).as(withVideo.text()).isEqualTo(200);
 
         UUID admin = person("9000000099");
         jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
         assertThat(approve(newSalon, admin).status()).isEqualTo(409);   // DRAFT
-        Reply submitted = post("/shops/me/submit", Map.of("version", field(photos.body(), "version")), newOwner);
+        Reply submitted = post("/shops/me/submit", Map.of("version", field(withVideo.body(), "version")), newOwner);
         assertThat(field(submitted.body(), "status")).as(submitted.text()).isEqualTo("PENDING_VISIT");
 
         assertThat(get("/admin/shops", customer).status()).isEqualTo(403);   // not the field team

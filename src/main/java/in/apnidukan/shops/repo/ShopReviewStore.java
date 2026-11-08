@@ -243,13 +243,15 @@ public class ShopReviewStore {
         return new Snapshot(rs.getString("name"), rs.getString("owner_name"), rs.getString("address_line"),
                 rs.getString("area"), rs.getString("city"), rs.getString("pincode"), rs.getBigDecimal("latitude"),
                 rs.getBigDecimal("longitude"), rs.getString("gstin"), rs.getString("udyam_number"),
-                rs.getObject("owner_photo_file_id", UUID.class), rs.getObject("shop_photo_file_id", UUID.class));
+                rs.getObject("owner_photo_file_id", UUID.class), rs.getObject("shop_photo_file_id", UUID.class),
+                rs.getObject("shop_video_file_id", UUID.class));
     }
 
     /** A shop's details at one point in its history. */
     public record Snapshot(String name, String ownerName, String addressLine, String area, String city,
                            String pincode, BigDecimal latitude, BigDecimal longitude, String gstin,
-                           String udyamNumber, UUID ownerPhotoFileId, UUID shopPhotoFileId) {
+                           String udyamNumber, UUID ownerPhotoFileId, UUID shopPhotoFileId,
+                           UUID shopVideoFileId) {
     }
 
     /**

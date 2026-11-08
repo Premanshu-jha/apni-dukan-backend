@@ -75,6 +75,26 @@ class FilesIntegrationTest {
                     }
                     real.delete(key);
                 }
+
+                @Override
+                public String uploadLink(String key, String contentType, long sizeBytes, java.time.Duration validFor) {
+                    return real.uploadLink(key, contentType, sizeBytes, validFor);
+                }
+
+                @Override
+                public void copy(String fromKey, String toKey) {
+                    real.copy(fromKey, toKey);
+                }
+
+                @Override
+                public java.util.OptionalLong size(String key) {
+                    return real.size(key);
+                }
+
+                @Override
+                public byte[] firstBytes(String key, int count) {
+                    return real.firstBytes(key, count);
+                }
             };
         }
     }

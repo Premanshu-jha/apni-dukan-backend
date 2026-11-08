@@ -97,6 +97,84 @@ ERROR "R2 still refuses to delete ..." with its key (point an alert at it). Ever
 (`R2_ATTEMPT_TIMEOUT`), 15 s in all with the library's retries (`R2_CALL_TIMEOUT`); an upload (up to 10 MB) has its
 own limit, 60 s per try and 120 s in all (`R2_UPLOAD_TIMEOUT`).
 
+### The salon video: `POST /api/v1/files/video-uploads`
+
+Salon registration needs a short video of the salon (15–45 s, up to 100 MB) for the field team; customers never see
+it. A kirana needs none (and can't send one: 409 `NOT_A_SALON`). It is far too big to pass through the backend, so the
+phone sends it **straight to R2**, to a staging key that is never the kept video:
+
+```mermaid
+sequenceDiagram
+    participant P as Partner app (owner)
+    participant B as Backend
+    participant R as R2
+    P->>B: POST /files/video-uploads {sizeBytes, contentType, durationSeconds (or null)}
+    B->>B: salon owner only · 15–45 s (±1; null: not checked) · ≤ 100 MB · MP4/MOV/WebM · 5 a day (one at a time per shop)
+    B->>B: video_uploads row · staging key queued in file_deletions, due 60 min after the link (45 min after it runs out), never taken off
+    B-->>P: 201 {uploadId, uploadUrl (15 min, staging key), expiresAt, expiresInSeconds}
+    P->>R: PUT uploadUrl (Content-Type as given) with a progress bar
+    P->>B: POST /files/video-uploads/{id}/complete (within 45 min of the link)
+    B->>R: HEAD staging (size must match)
+    B->>R: copy staging → a new key of its own (queued first, due in 24 h)
+    B->>R: HEAD + first 64 bytes of the copy (size; video ftyp brand / EBML)
+    B->>B: files row (SHOP_VIDEO)
+    B-->>P: 201 {id, purpose: SHOP_VIDEO, ...} (200 the same file again)
+    P->>B: PUT /shops/me/video {version, fileId} · the copy is taken off the deletion queue
+```
+
+- **Answers:** `start`: 201; 400 `VALIDATION_FAILED` (`durationSeconds`), 400 `UNSUPPORTED_FILE_TYPE`, 413
+  `FILE_TOO_LARGE`, 403 `OWNER_ONLY` (helpers, barbers), 409 `NOT_A_SALON`, 429 `TOO_MANY_UPLOADS` (5 links a shop a
+  day; starts at the same moment are counted one after the other under an advisory lock). `complete`: 404
+  `UPLOAD_NOT_FOUND`, 409 `UPLOAD_NOT_FINISHED` (nothing stored yet: send it again), 409 `UPLOAD_EXPIRED` (more than
+  45 minutes after the link: start again), 409 `UPLOAD_GONE` (completed, then replaced, or purged unused after a day), 400
+  `UPLOAD_SIZE_MISMATCH` or `UNSUPPORTED_FILE_TYPE` (a photo or sound file in the same box family, e.g. HEIC, AVIF,
+  M4A, is refused). `PUT /shops/me/video`: 400 `fileId` unless it is this shop's SHOP_VIDEO, 409 `UPLOAD_GONE` once it was purged; a salon's owner only;
+  like a new photo, a new video on a live salon sends it back to the field team ("Salon video" in its changes).
+- **What is kept is what was checked:** the link writes only the staging key; the kept video is a copy made inside R2
+  and checked after copying, under a key no link can write. A PUT to the same link after "complete" changes nothing
+  kept and is deleted with the staging key. **R2's check of the signed Content-Length isn't relied on**: the size is
+  checked on the staging object and on the copy.
+- **Nothing is left behind:** the staging key is deleted 60 minutes after the link was given (45 minutes after the
+  link ran out, so after the 45-minute window to complete); a completed video not set on the shop within 24 hours is
+  deleted together with its files row (then setting it, or completing its upload again, answers 409 `UPLOAD_GONE`
+  "This video expired. Upload it again."); a video replaced by a new one loses its row in the same transaction and its bytes
+  are queued for deletion due now (a refused save, e.g. 409 `SHOP_CHANGED`, changes nothing). All by
+  `FileDeletionJob`, which also forgets upload rows older than 7 days. It claims due keys with `FOR UPDATE SKIP
+  LOCKED` (pushed later while it works on them), and `PUT /shops/me/video` locks the video's queue row before taking
+  it off: a save and a purge at the same moment never both win (the save waits, then answers `UPLOAD_GONE`; or the
+  job skips the row the save holds). A key whose files row is still used is taken off the queue, never deleted. A `POST /files` with purpose `SHOP_VIDEO` is
+  refused (videos only come through the link).
+- **Who sees it:** the owner (`GET /files/{id}/link`, `shopVideoFileId` in `GET /shops/me`; a helper gets 403
+  `OWNER_ONLY` for the video's link and delete) and the field team (`videoUrl` on `GET /admin/shops/{id}` only, not in
+  lists). Never in the customer app's answers.
+- **Submit:** `POST /shops/me/submit` for a salon answers 409 `PHOTOS_REQUIRED` with `shopVideoFileId: "add a short
+  video of the salon"` until it is set. Shops already approved before this version aren't asked for one.
+- **Approval doesn't check for a video (intended):** `POST /admin/shops/{id}/approve` and `/reinstate` don't require
+  it, so a salon submitted before this version (already `PENDING_VISIT`), or suspended and reinstated, is approved
+  without one; the field team sees "No video yet". Only submitting needs it.
+- **Migrations:** V26 (table and column, its foreign key `NOT VALID`), V27 (index, built concurrently), V28 (validates
+  the foreign key, as V23 did).
+
+**One-time setup in Cloudflare (needed before the video step works):** the phone's browser PUTs to R2 from the partner
+app's address, so the bucket needs a CORS rule. Cloudflare dashboard → R2 → the bucket (`R2_BUCKET`) → Settings →
+CORS Policy → Add, with the partner app's addresses (the same as in `CORS_ALLOWED_ORIGINS`; the admin website only
+plays videos, which needs no CORS):
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://partner.example.com"],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedHeaders": ["Content-Type", "Content-Length"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+The apps' Content-Security-Policy must also allow the R2 address: `connect-src` (partner, the PUT) and `media-src`
+(partner preview and admin player), as `img-src` already does for photos.
+
 ## How sign-in works
 
 No passwords and no Google sign-in. The phone number is the account; an email is optional and only used for recovery.
@@ -654,6 +732,17 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 
 ### API changes in this version (deploy the backend first, then the apps)
 
+**Salon video at registration** (needed by the partner app before its owners can submit):
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /files/video-uploads`, `.../{id}/complete` | none | new (see "The salon video"): a one-time R2 upload link (`expiresInSeconds` too; `durationSeconds` may be null), then record it; 409 `NOT_A_SALON` for a kirana | partner app: the "Salon video" card on registration step 2 |
+| `PUT /shops/me/video {version, fileId}` | none | new: sets the salon video (owner) | partner app: after complete |
+| `POST /shops/me/submit` | 409 `PHOTOS_REQUIRED` naming the photos | for a salon also names `shopVideoFileId` (a kirana: unchanged) | partner app: block Submit until the video is set |
+| `GET /files/{id}/link`, `DELETE /files/{id}` | | 403 `OWNER_ONLY` for a helper on the salon video | nothing (helpers never see its id) |
+| `GET /shops/me` | | adds `shopVideoFileId` (owner only; null for helpers and barbers) | partner app: show the video card's state |
+| `GET /admin/shops/{id}` | | adds `videoUrl`; a change `shopVideo` ("Salon video") | admin website: a video player on the business page |
+
 **Address search at registration** (optional for the apps):
 
 | Call | Before | Now | What the apps should do |
@@ -935,6 +1024,8 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
   under memory pressure. If Redis stops answering, signed-in calls keep working; sign-in codes and start codes
   answer 503 `SERVICE_BUSY` until it is back (`Retry-After: 5`).
 - `APP_PRODUCTION=true`, own DLT templates, `SMS_ACCOUNT_MOVED_ENABLED=true`.
+- **Salon video:** the R2 bucket's CORS rule for the partner app's address (see "The salon video"); without it the
+  phone's upload is refused by the browser and owners can't submit.
 - **Address search (optional):** `GOOGLE_GEOCODING_KEY` on Railway, a key restricted to the Geocoding API, with
   the API's daily quota set in Google Cloud (300 a day: v3 requests per day; the v4 ones at 0) and a budget alert.
 - **Email:** Resend recommended (`RESEND_API_KEY`); with Gmail the real server starts but logs a WARN, since Gmail
@@ -965,6 +1056,7 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
 
 ## Uploads: limits and photos
 
+- The **salon video**: 15–45 s, up to 100 MB, MP4/MOV/WebM, 5 upload links a shop a day (see "The salon video").
 - At most **100 uploads per shop per day** (India day), then 429 `TOO_MANY_UPLOADS`. A duplicate of an earlier upload
   doesn't count.
 - **Shop, owner and barber photos** must be JPEG or PNG. They are drawn again as a JPEG of at most 1280 px on the

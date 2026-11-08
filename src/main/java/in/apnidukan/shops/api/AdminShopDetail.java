@@ -13,12 +13,14 @@ import java.util.List;
  * @param pinMovedMetres         how far the pin moved, when it did
  * @param previousOwnerPhotoUrl  the approved owner photo, only when it has been replaced since
  * @param previousShopPhotoUrl   the approved shop photo, only when it has been replaced since
+ * @param videoUrl               a link to the salon video (valid at least 15 more minutes); null if none
  * @param timeline               newest first, the first 50 entries
  * @param timelineNext           where the next 50 start (GET /admin/shops/{id}/timeline with these); null when the
  *                               timeline has no more
  */
 public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> changes, Long pinMovedMetres,
-                              String previousOwnerPhotoUrl, String previousShopPhotoUrl, List<TimelineEntry> timeline,
+                              String previousOwnerPhotoUrl, String previousShopPhotoUrl, String videoUrl,
+                              List<TimelineEntry> timeline,
                               TimelineNext timelineNext) {
 
     public AdminShopDetail {
@@ -43,8 +45,8 @@ public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> 
 
     /**
      * @param field  name, ownerName, addressLine, area, city, pincode, location, gstin, udyamNumber, ownerPhoto,
-     *               shopPhoto
-     * @param before the approved value (null for photos: see the photo links)
+     *               shopPhoto, shopVideo
+     * @param before the approved value (null for photos and the video: see the links)
      * @param after  the value now
      */
     public record Change(String field, String label, String before, String after) {

@@ -7,6 +7,7 @@ import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.text.TextCleaner.TextField;
 import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.files.FileRefs.FileRef;
+import in.apnidukan.shops.api.ShopRequests;
 import in.apnidukan.shops.api.ShopRequests.CreateShop;
 import in.apnidukan.shops.api.ShopRequests.SetPhotos;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
@@ -206,8 +207,45 @@ public class ShopService implements ShopMemberships {
     }
 
     /**
+     * Sets the salon video (a salon's owner only; 409 NOT_A_SALON for a kirana): a SHOP_VIDEO file of this shop (POST
+     * /files/video-uploads/{id}/complete); otherwise 400 naming fileId. Like a new photo, a new video on an approved
+     * shop sends it back to the field team. In the same transaction the new video is kept (off the deletion queue) and
+     * the one it replaces goes (its row now, its bytes queued for deletion due now); a refused save changes neither.
+     */
+    @Transactional
+    public ShopResponse setVideo(UUID userId, ShopRequests.SetVideo in) {
+        Shop shop = ownedShop(userId, in.version());
+        if (shop.getType() != ShopType.SALON) {
+            throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The salon video is only for salons.");
+        }
+        UUID video = files.find(in.fileId())
+                .filter(x -> x.shopId().equals(shop.getId()) && "SHOP_VIDEO".equals(x.purpose()) && x.isVideo())
+                .map(FileRef::id)
+                .orElseThrow(() -> files.expiredVideo(in.fileId())
+                        ? new ApiException(HttpStatus.CONFLICT, "UPLOAD_GONE", "This video expired. Upload it again.")
+                        : invalid("fileId", "must be a video uploaded with POST /files/video-uploads"));
+        UUID old = shop.getShopVideoFileId();
+        if (!video.equals(old)) {
+            files.keep(video);   // first: 409 UPLOAD_GONE if it was purged meanwhile, and the shop stays as it was
+            shop.setVideo(video, now());
+            recheck(shop, userId);   // the field team checked the old video: check the new one
+            try {
+                saveShop(shop);
+            } catch (DataIntegrityViolationException deletedMeanwhile) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                        Map.of("fileId", "may have just been deleted; upload it again"));
+            }
+            if (old != null) {
+                files.release(old);   // the shop no longer points at it (saved above), so its row can go
+            }
+        }
+        return ShopResponse.from(shop, ShopRole.OWNER);
+    }
+
+    /**
      * Registration step 2: the owner asks for the field team's visit. DRAFT → PENDING_VISIT. Needs the owner's and
-     * the shop's photo (409 PHOTOS_REQUIRED); from any other status, 409 WRONG_STATUS.
+     * the shop's photo, and a salon's video (409 PHOTOS_REQUIRED, naming what is missing); from any other status, 409
+     * WRONG_STATUS.
      */
     @Transactional
     public ShopResponse submitForVisit(UUID userId, long version) {
@@ -216,7 +254,7 @@ public class ShopService implements ShopMemberships {
             throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
                     "Only a shop still in DRAFT can be submitted; this one is " + shop.getStatus() + ".");
         }
-        if (!shop.hasBothPhotos()) {
+        if (!shop.readyForVisit()) {
             Map<String, Object> missing = new java.util.LinkedHashMap<>();
             if (shop.getOwnerPhotoFileId() == null) {
                 missing.put("ownerPhotoFileId", "add the owner's photo");
@@ -224,8 +262,13 @@ public class ShopService implements ShopMemberships {
             if (shop.getShopPhotoFileId() == null) {
                 missing.put("shopPhotoFileId", "add a photo of the shop");
             }
-            throw new ApiException(HttpStatus.CONFLICT, "PHOTOS_REQUIRED",
-                    "Add the owner's photo and a photo of the shop first.", missing);
+            boolean salon = shop.getType() == ShopType.SALON;
+            if (salon && shop.getShopVideoFileId() == null) {
+                missing.put("shopVideoFileId", "add a short video of the salon");
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "PHOTOS_REQUIRED", salon
+                    ? "Add the owner's photo, a photo of the shop and a short video of the salon first."
+                    : "Add the owner's photo and a photo of the shop first.", missing);
         }
         shop.submitForVisit(now());
         saveShop(shop);
@@ -233,11 +276,13 @@ public class ShopService implements ShopMemberships {
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
 
-    /** True if this file is the owner's or the shop's photo of some shop (then it can't be deleted). */
+    /** True if this file is the owner's or the shop's photo, or the salon video, of some shop (then it stays). */
     @Transactional(readOnly = true)
     public boolean usesFile(UUID fileId) {
-        // A photo of the last approved version stays too: the field team compares it with the new one
-        return shops.existsByOwnerPhotoFileIdOrShopPhotoFileId(fileId, fileId) || review.isLastApprovedPhoto(fileId);
+        // A photo of the last approved version stays too: the field team compares it with the new one. An old video
+        // doesn't: it is replaced, not compared, and too big to keep for nothing
+        return shops.existsByOwnerPhotoFileIdOrShopPhotoFileIdOrShopVideoFileId(fileId, fileId, fileId)
+                || review.isLastApprovedPhoto(fileId);
     }
 
     /** An approved shop changed what the field team checked: back to them, noted on its timeline. */

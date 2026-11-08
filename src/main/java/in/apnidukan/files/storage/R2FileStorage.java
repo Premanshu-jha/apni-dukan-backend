@@ -11,11 +11,15 @@ import software.amazon.awssdk.http.auth.spi.signer.HttpSigner;
 import software.amazon.awssdk.http.auth.spi.signer.SignedRequest;
 import software.amazon.awssdk.identity.spi.AwsCredentialsIdentity;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
+import software.amazon.awssdk.services.s3.presigner.model.PutObjectPresignRequest;
 
 import org.springframework.http.ContentDisposition;
 import software.amazon.awssdk.utils.http.SdkHttpUtils;
@@ -27,6 +31,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.OptionalLong;
 
 @Component
 public class R2FileStorage implements FileStorage {
@@ -121,5 +126,59 @@ public class R2FileStorage implements FileStorage {
     @Override
     public void delete(String key) {
         s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+    }
+
+    /**
+     * A presigned PUT: the content type and length are part of the signature, so R2 refuses a PUT of another type or
+     * size, and the object may be written only until the link runs out. Cache-Control is not signed (the phone can't
+     * add it), so stored videos keep R2's default; their view links are short-lived anyway.
+     */
+    @Override
+    public String uploadLink(String key, String contentType, long sizeBytes, Duration validFor) {
+        PutObjectRequest put = PutObjectRequest.builder()
+                .bucket(bucket)
+                .key(key)
+                .contentType(contentType)
+                .contentLength(sizeBytes)
+                .build();
+        PutObjectPresignRequest presign = PutObjectPresignRequest.builder()
+                .signatureDuration(validFor)
+                .putObjectRequest(put)
+                .build();
+        return presigner.presignPutObject(presign).url().toString();
+    }
+
+    /** A server-side copy (up to 5 GB in one call); given the upload's time limit, as it may move 100 MB. */
+    @Override
+    public void copy(String fromKey, String toKey) {
+        s3.copyObject(CopyObjectRequest.builder()
+                .sourceBucket(bucket).sourceKey(fromKey)
+                .destinationBucket(bucket).destinationKey(toKey)
+                .overrideConfiguration(o -> o.apiCallAttemptTimeout(uploadTimeout)
+                        .apiCallTimeout(uploadTimeout.multipliedBy(2)))
+                .build());
+    }
+
+    @Override
+    public OptionalLong size(String key) {
+        try {
+            Long length = s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build()).contentLength();
+            return length == null ? OptionalLong.empty() : OptionalLong.of(length);
+        } catch (NoSuchKeyException missing) {
+            return OptionalLong.empty();
+        } catch (software.amazon.awssdk.services.s3.model.S3Exception e) {
+            if (e.statusCode() == 404) {
+                return OptionalLong.empty();   // HEAD has no body, so R2 answers a bare 404 for a missing key
+            }
+            throw e;
+        }
+    }
+
+    @Override
+    public byte[] firstBytes(String key, int count) {
+        GetObjectRequest get = GetObjectRequest.builder().bucket(bucket).key(key)
+                .range("bytes=0-" + (count - 1)).build();
+        byte[] bytes = s3.getObjectAsBytes(get).asByteArray();
+        return bytes.length <= count ? bytes : java.util.Arrays.copyOf(bytes, count);
     }
 }

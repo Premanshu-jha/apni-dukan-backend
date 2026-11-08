@@ -78,6 +78,10 @@ public class FileService {
 
     public FileUploadResult upload(MultipartFile upload, FilePurpose purpose) {
         CurrentUser user = shopStaff();
+        if (purpose == FilePurpose.SHOP_VIDEO) {
+            throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE",
+                    "The salon video is sent with an upload link (POST /files/video-uploads), not here");
+        }
 
         if (upload == null || upload.isEmpty()) {
             throw ApiException.badRequest("EMPTY_FILE", "The file is empty");
@@ -153,6 +157,7 @@ public class FileService {
         CurrentUser user = shopStaff();
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
+        requireOwnerForVideo(user, file);
         String downloadName = download ? downloadName(file) : null;
         String url = storage.signedLink(file.getStorageKey(), linkValidity, downloadName);
         return new FileLink(url, Instant.now(clock).plus(linkValidity));
@@ -180,6 +185,7 @@ public class FileService {
     private String deleteRow(CurrentUser user, UUID fileId) {
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
+        requireOwnerForVideo(user, file);
         if (usageCheckers.stream().anyMatch(checker -> checker.isInUse(file))
                 || attachedElsewhere.stream().anyMatch(module -> module.isAttached(file.getId()))) {
             throw new ApiException(HttpStatus.CONFLICT, "FILE_IN_USE",
@@ -212,6 +218,13 @@ public class FileService {
             throw new ApiException(HttpStatus.FORBIDDEN, "NOT_ALLOWED", "Barbers can't use the shop's files.");
         }
         return user;
+    }
+
+    /** The salon video is the owner's (and the field team's, on their own pages): 403 OWNER_ONLY for a helper. */
+    private static void requireOwnerForVideo(CurrentUser user, StoredFile file) {
+        if (file.getPurpose() == FilePurpose.SHOP_VIDEO && !"OWNER".equals(user.role())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can open the salon video.");
+        }
     }
 
     private static Inspection inspect(MultipartFile upload) {

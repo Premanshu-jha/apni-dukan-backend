@@ -32,6 +32,7 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     @Query(value = "SELECT CAST(id AS text) FROM shops WHERE id = :id FOR NO KEY UPDATE", nativeQuery = true)
     Optional<String> holdAgainstBookings(UUID id);
 
-    /** Whether a file is some shop's owner or shop photo. */
-    boolean existsByOwnerPhotoFileIdOrShopPhotoFileId(UUID ownerPhotoFileId, UUID shopPhotoFileId);
+    /** Whether a file is some shop's owner or shop photo, or its salon video. */
+    boolean existsByOwnerPhotoFileIdOrShopPhotoFileIdOrShopVideoFileId(UUID ownerPhotoFileId, UUID shopPhotoFileId,
+                                                                       UUID shopVideoFileId);
 }

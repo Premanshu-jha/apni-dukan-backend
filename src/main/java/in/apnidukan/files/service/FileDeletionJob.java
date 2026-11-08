@@ -40,9 +40,15 @@ public class FileDeletionJob {
     private final JobLeases leases;
     private final Clock clock;
     private final boolean enabled;
+    private final in.apnidukan.files.repo.VideoUploadStore videoUploads;
+
+    /** Salon video upload links are forgotten this long after they were given (VideoUploadService). */
+    static final Duration VIDEO_UPLOADS_KEPT = Duration.ofDays(7);
 
     public FileDeletionJob(FileDeletionStore queue, FileStorage storage, JobLeases leases, Clock clock,
-                           @Value("${app.jobs.enabled:true}") boolean enabled) {
+                           @Value("${app.jobs.enabled:true}") boolean enabled,
+                           in.apnidukan.files.repo.VideoUploadStore videoUploads) {
+        this.videoUploads = videoUploads;
         this.queue = queue;
         this.storage = storage;
         this.leases = leases;
@@ -73,7 +79,7 @@ public class FileDeletionJob {
         rounds:
         while (tried < MAX_PER_RUN) {
             Instant now = clock.instant();
-            List<Pending> due = queue.due(now, SLICE);
+            List<Pending> due = queue.claimDue(now, SLICE, now.plus(MAX_RUN));
             for (Pending p : due) {
                 if (!clock.instant().isBefore(stopAt)) {
                     log.info("File deletions stopped for this round after {} tries (time is up); the rest next round",
@@ -98,11 +104,16 @@ public class FileDeletionJob {
                 }
             }
             if (due.size() < SLICE) {
-                break;   // a failed key was moved later, so a full slice always means more may be due
+                break;   // claimed keys were moved later, so a full slice always means more may be due
             }
         }
         if (deleted > 0) {
             log.info("Deleted {} queued objects from R2", deleted);
+        }
+        // Old salon video upload links: their objects are queued above already; the rows only count today's starts
+        int forgotten = videoUploads.pruneOlderThan(clock.instant().minus(VIDEO_UPLOADS_KEPT));
+        if (forgotten > 0) {
+            log.info("Forgot {} salon video upload links older than 7 days", forgotten);
         }
         return deleted;
     }

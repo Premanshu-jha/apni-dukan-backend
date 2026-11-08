@@ -34,7 +34,8 @@ class FileRefServiceTest {
         when(storage.signedLinkAt(anyString(), any(Instant.class), any(Duration.class)))
                 .thenAnswer(i -> "https://r2/" + i.getArgument(0) + "?at=" + i.getArgument(1) + "&for="
                         + i.getArgument(2));
-        return new FileRefService(repository, storage, clock, 60);
+        return new FileRefService(repository, mock(in.apnidukan.files.repo.FileDeletionStore.class), storage, clock, 60,
+                mock(in.apnidukan.files.repo.VideoUploadStore.class));
     }
 
     @Test
