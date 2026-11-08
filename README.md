@@ -535,25 +535,29 @@ during a deploy.) The super admin is never changed from the website and can't de
 | `GET /admin/team` · `POST /admin/team {phone}` · `DELETE /admin/team/{userId}` | Super admin only (403 `SUPER_ADMIN_ONLY` for an admin). `since` is when they became an admin. Add makes that phone an admin (the account is made if it has none) and ends any session already open on it; 409 `ALREADY_ADMIN`, 409 `TEST_PHONE` (a test number, or an account made in test mode). Remove: their sessions end at once; 409 `CANT_REMOVE_SUPER_ADMIN` |
 | `GET` · `PUT {hours}` · `DELETE /admin/test-mode` | Super admin only. OTP test mode on for 1–8 hours (it switches itself off), or off now |
 | `POST /admin/test-mode/phones {phone, label}` · `DELETE /admin/test-mode/phones/{phone}` | Super admin only. The test numbers. 409 `ADMIN_PHONE` (an admin's number), 409 `REAL_ACCOUNT` (a number that already has a real account), 409 `ALREADY_TEST_PHONE`. Removing one signs its test account out |
+| `POST /admin/test-mode/emails {email, label}` · `DELETE /admin/test-mode/emails/{email}` | Super admin only. The test emails (stored trimmed and in lower case; `GET /admin/test-mode` lists them as `emails`, each with `inUse`). 409 `REAL_ACCOUNT_EMAIL` (already verified by a real account or an admin), 409 `ALREADY_TEST_EMAIL`. Removing one changes nothing else |
 
-**OTP test mode.** While it is on, the test numbers sign in with any 6 digits and no SMS is sent to them. Only a
-number nobody has signed in with can be added; the account its first test sign-in makes is a test account
-(`users.test_account`), and only such an account ever takes any code, never a real customer's, a shop's or an
-admin's. A test account stays signed in only while test mode is on for its number: switching it off, the time
-running out, or removing the number ends its sessions (refresh answers 401 `TEST_MODE_OFF`). If the number's real holder
-later signs in with the SMS code (or the account is recovered onto a real phone), it becomes a normal account for
-good and every tester still signed in to it is signed out. The apps then ask for a verified email: test accounts
-sign in with any phone code and, for test email addresses (anything@example.com, @example.org, @example.net, their
-subdomains, or anything under `.test`), any 6-digit email code; no email is sent. A real email address (gmail.com and
-so on) always needs the real email code, so a test account can never take someone's inbox; verified emails stay
-unique (409 `EMAIL_IN_USE`). The any-code path never replaces an already verified email (403
-`PHONE_CODE_REQUIRED`, as the normal change flow asks for the phone code first), is limited to 10 tries an hour per
-account (429), is checked again inside the save (test mode switched off, the number removed, or the account claimed
-meanwhile: 400 `WRONG_CODE`, nothing stored), and no "email changed" notice is ever sent to a test address. Real accounts and admins always need the real code, even for example.com. Recovery
-("lost phone") and account deletion always need the real code, and the test email goes with the rest when the
-number's real holder claims the account. For testing
-on the real deployment without SMS credit; like the OMR project's per-student OTP bypass, but switched on for a few
-hours at a time. Every change (admins, test numbers, test mode on and off) is logged in `admin_events`.
+**OTP test mode.** The super admin adds test numbers and test emails; while test mode is on, those sign in and
+verify with any 6-digit code, and no SMS or email is sent to them. Everything else always needs the real code.
+
+- Test numbers: only a number nobody has signed in with can be added. The account its first test sign-in makes is
+  a test account (`users.test_account`), and only such an account ever takes any code, never a real customer's, a
+  shop's or an admin's. It stays signed in only while test mode is on for its number: switching it off, the time
+  running out, or removing the number ends its sessions (refresh answers 401 `TEST_MODE_OFF`). If the number's real
+  holder later signs in with the SMS code (or the account is recovered onto a real phone), it becomes a normal
+  account for good, its email and name are cleared, and every tester still signed in to it is signed out.
+- Test emails: an email already verified by a real account or an admin can't be added. Only a test account, with
+  test mode on, verifies a listed email with any code; a real account or an admin verifying it gets the real code
+  by email as usual. Verified emails stay unique (409 `EMAIL_IN_USE`), but a test account never blocks a real person:
+  whoever proves with the real emailed code that the inbox is theirs takes the email, and the test account loses it.
+  The any-code path never replaces an already verified email (403 `PHONE_CODE_REQUIRED`, as the normal change flow
+  asks for the phone code first), is limited to 10 tries an hour per account (429), and is checked again inside the
+  save (test mode off, the number or email removed, or the account claimed meanwhile: 400 `WRONG_CODE`, nothing
+  stored). No "email changed" notice is sent to a test email.
+- Recovery ("lost phone") and account deletion always need the real codes.
+
+For testing on the real deployment without SMS credit or real inboxes, switched on for a few hours at a time. Every
+change (admins, test numbers, test emails, test mode on and off) is logged in `admin_events`.
 
 **Timeline** (`shop_events`): sent for a visit (owner), changed after approval (owner), approved, sent back,
 suspended, reinstated, note, closed (owner, with their reason), handed over (the new owner). A note and a hand-over
@@ -740,11 +744,13 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 
 ### API changes in this version (deploy the backend first, then the apps)
 
-**OTP test mode covers the email step** (no app change needed):
+**OTP test mode has a test email list** (replaces the example.com rule):
 
 | Call | Before | Now | What the apps should do |
 | --- | --- | --- | --- |
-| `POST /auth/email/send-code`, `POST /auth/email/verify` | the real email code always | a test account in test mode verifying a test address (name@example.com, …@example.org/.net, `.test`) gets no email and any 6 digits verify; everything else as before | nothing; testers type any 6 digits |
+| `GET /admin/test-mode` | `{on, until, turnedOnByName, phones}` | adds `emails: [{email, label, addedAt, inUse}]` | admin website: the "Test emails" list |
+| `POST /admin/test-mode/emails {email, label}`, `DELETE /admin/test-mode/emails/{email}` | none | new, super admin only (see the table above) | admin website: add and remove test emails |
+| `POST /auth/email/send-code`, `POST /auth/email/verify` | a test account's example.com/.org/.net or `.test` address took any 6 digits | a test account's listed test email takes any 6 digits (no email sent); example.com is no longer special. A real person verifying, with the real code, an email a test account holds takes it from the test account | nothing; testers type any 6 digits |
 
 **Salon video at registration** (needed by the partner app before its owners can submit):
 
@@ -1360,7 +1366,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V26__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V30__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
@@ -1385,6 +1391,8 @@ a test checks this, and that such a file builds nothing without `CONCURRENTLY`).
 the next start refuses with "Detected failed migration". **Repair (no Flyway CLI needed):** in Neon's SQL editor run
 `DELETE FROM flyway_schema_history WHERE success = false;` and deploy again; the file drops the half-built index and builds it again. A new check
 on a large table is added `NOT VALID` and validated in the next migration, as V22 and V23 do.
+
+**V29** (test emails) adds the empty `test_emails` table and widens the `admin_events` event check (a few rows): quick.
 
 **Deploying this version.** Run the migrations with **one copy** first (scale Railway to 1 replica for the deploy, then
 back up): V24 builds indexes CONCURRENTLY and can take minutes on a big `appointments`. A second copy starting meanwhile
