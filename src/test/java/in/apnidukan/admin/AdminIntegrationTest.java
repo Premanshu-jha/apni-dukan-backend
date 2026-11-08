@@ -405,9 +405,11 @@ class AdminIntegrationTest {
         // The owner sees the reason, never the note
         assertThat(get("/shops/me", owner).text()).contains("100 m away").doesNotContain("called him");
 
-        // Sent again by the owner (both photos are needed to submit): on the timeline
-        jdbc.update("UPDATE shops SET owner_photo_file_id = ?, shop_photo_file_id = ? WHERE id = ?",
-                file(salon, owner, "OWNER_PHOTO"), file(salon, owner, "SHOP_PHOTO"), salon);
+        // Sent again by the owner (both photos and the salon video are needed to submit): on the timeline
+        UUID video = file(salon, owner, "SHOP_VIDEO");
+        jdbc.update("UPDATE files SET content_type = 'video/mp4' WHERE id = ?", video);
+        jdbc.update("UPDATE shops SET owner_photo_file_id = ?, shop_photo_file_id = ?, shop_video_file_id = ? "
+                + "WHERE id = ?", file(salon, owner, "OWNER_PHOTO"), file(salon, owner, "SHOP_PHOTO"), video, salon);
         Reply submitted = post("/shops/me/submit", Map.of("version", version(salon)), owner);
         assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
         assertThat(field(((List<?>) field(get("/admin/shops/" + salon, admin).body(), "timeline")).get(0), "event"))

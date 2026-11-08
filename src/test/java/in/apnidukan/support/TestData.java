@@ -15,10 +15,10 @@ public final class TestData {
     /** Empties every table the tests write to (children first). */
     public static void clean(JdbcTemplate jdbc) {
         // Photos point at files and files point at shops: let go of the photos first
-        jdbc.update("UPDATE shops SET owner_photo_file_id = NULL, shop_photo_file_id = NULL");
+        jdbc.update("UPDATE shops SET owner_photo_file_id = NULL, shop_photo_file_id = NULL, shop_video_file_id = NULL");
         jdbc.update("UPDATE salon_staff SET photo_file_id = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
-        for (String table : new String[] {"shop_invites", "salon_closings", "salon_message_purges", "shop_handovers", "job_leases", "account_wipes", "file_deletions", "shop_events", "admin_events", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
+        for (String table : new String[] {"video_uploads", "shop_invites", "salon_closings", "salon_message_purges", "shop_handovers", "job_leases", "account_wipes", "file_deletions", "shop_events", "admin_events", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
                 "appointments", "walk_in_access", "salon_pauses", "notification_jobs", "push_subscriptions",
                 "staff_hours_aud", "staff_services_aud", "salon_staff_aud",
                 "salon_services_aud", "salon_settings_aud", "shop_members_aud", "shops_aud", "revinfo", "staff_hours",
