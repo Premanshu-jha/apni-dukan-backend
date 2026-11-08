@@ -29,7 +29,9 @@ import java.util.UUID;
  * customer or shop can't be added, and an admin's account never takes any code (not even if both somehow
  * happened), so test mode can't open someone's real account or the admin website. A test account stays signed in
  * only while test mode is on for its number (AuthService.refresh). Email codes, recovery and account deletion
- * always need the real code.
+ * always need the real code, except one case: a test account verifying a test email address (name@example.com and
+ * the like, never a real inbox) while test mode is on takes any 6 digits and no email is sent
+ * ({@link #acceptsAnyEmailCode}), so testers can finish sign-up. Recovery and account deletion never do.
  * It switches itself off at `until`: nothing has to run for that, every check compares with the clock.
  *
  * Changes to test numbers and to admins take the same database lock (AdminTeamService.LOCK), so a number can't
@@ -65,6 +67,21 @@ public class TestModeService {
                 + "AND NOT EXISTS (SELECT 1 FROM users u WHERE u.phone = t.phone "
                 + "AND (u.admin_role <> 'NONE' OR NOT u.test_account)))",
                 Boolean.class, phone, Timestamp.from(now()));
+        return Boolean.TRUE.equals(yes);
+    }
+
+    /**
+     * Whether this signed-in account may verify a test email address (see {@link
+     * in.apnidukan.auth.service.Emails#isTestAddress}) with any code right now: the same people as {@link
+     * #acceptsAnyCode}, i.e. test mode is on, the account was made in test mode (users.test_account), its number is
+     * still on the test list, it isn't an admin and isn't deleted. Read on every email code send and check.
+     */
+    @Transactional(readOnly = true)
+    public boolean acceptsAnyEmailCode(UUID userId) {
+        Boolean yes = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM otp_test_mode m JOIN users u ON u.id = ? "
+                + "JOIN test_phones t ON t.phone = u.phone WHERE m.id = 1 AND m.until > ? "
+                + "AND u.test_account AND u.admin_role = 'NONE' AND u.deleted_at IS NULL)",
+                Boolean.class, userId, Timestamp.from(now()));
         return Boolean.TRUE.equals(yes);
     }
 

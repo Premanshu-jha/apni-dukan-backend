@@ -145,6 +145,15 @@ public class AuthService {
         return code != null && code.trim().matches("\\d{6}") && phone != null && testMode.acceptsAnyCode(phone);
     }
 
+    /**
+     * OTP test mode for the email step: a test account (TestModeService#acceptsAnyEmailCode) verifying a test address
+     * (Emails#isTestAddress, e.g. name@example.com) gets no email and takes any 6 digits. A real address, a real
+     * account, an admin, or test mode off: the real code, as always. Never used for recovery or account deletion.
+     */
+    private boolean testEmail(UUID userId, String address) {
+        return Emails.isTestAddress(address) && testMode.acceptsAnyEmailCode(userId);
+    }
+
     public void sendLoginOtp(String phoneInput, String ip, String captchaToken) {
         String phone = PhoneNumbers.normalize(phoneInput);
         limitSends(ip);
@@ -367,6 +376,9 @@ public class AuthService {
         if (!limits.tryHit("email-send-user:" + userId, EMAIL_SENDS_PER_ACCOUNT_PER_DAY, Duration.ofHours(24))) {
             throw tooManyEmailCodes(userId);
         }
+        if (testEmail(userId, address)) {
+            return;   // OTP test mode: a test account's test address takes any 6 digits, and no email goes out
+        }
         String code = otp.issue(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, ip);
         email.send(address, "Your Clozest verification code",
                 "Your Clozest verification code is " + code + ".\n\nIt works for 10 minutes. "
@@ -376,11 +388,18 @@ public class AuthService {
     public User verifyEmail(UUID userId, String emailInput, String code, String ip) {
         String address = Emails.normalize(emailInput);
         limitVerifies(ip);
-        otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
+        boolean testCode = code != null && code.trim().matches("\\d{6}") && testEmail(userId, address);
+        if (!testCode) {
+            otp.verify(OtpPurpose.EMAIL_VERIFY, userId + ":" + address, code, ip);
+        }
         String[] previous = new String[1];
         User saved = tx.execute(status -> {
             User user = users.lockById(userId).filter(u -> !u.isDeleted())   // never onto a deleted account
                     .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+            if (testCode && (user.isAdmin() || !user.isTestAccount())) {
+                // Changed between the check and now (made an admin, or claimed by the number's holder): the real code
+                throw new ApiException(HttpStatus.BAD_REQUEST, "WRONG_CODE", "That code is not correct");
+            }
             users.findByVerifiedEmail(address)
                     .filter(other -> !other.getId().equals(userId))
                     .ifPresent(other -> {
