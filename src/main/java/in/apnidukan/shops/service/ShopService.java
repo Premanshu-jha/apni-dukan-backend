@@ -73,11 +73,14 @@ public class ShopService implements ShopMemberships {
     private final ShopReviewStore review;
     private final Clock clock;
     private final ShopInvitesService invites;
+    private final ShopAssignments assignments;
 
     public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files, UserDirectory users,
                        List<ShopChangeListener> listeners, ShopReviewStore review, Clock clock,
-                       ShopInvitesService invites) {
+                       ShopInvitesService invites,
+                       ShopAssignments assignments) {
         this.invites = invites;
+        this.assignments = assignments;
         this.review = review;
         this.users = users;
         this.shops = shops;
@@ -138,6 +141,7 @@ public class ShopService implements ShopMemberships {
         if (member.getRole() != ShopRole.OWNER) {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can change these details.");
         }
+        assignments.lockForAssignment();   // before the shop's row: a new address may assign it below
         Shop shop = shops.findById(member.getShopId()).orElseThrow();
         if (in.version() != shop.getVersion()) {
             throw shopChanged();
@@ -157,6 +161,7 @@ public class ShopService implements ShopMemberships {
         if (updated.equals(old)) {
             return ShopResponse.from(shop, member.getRole());
         }
+        boolean wasApproved = shop.getStatus() == ShopStatus.APPROVED;
         shop.apply(updated, now());
         boolean moved = !sameLocation(old, updated);
         if (moved) {
@@ -169,6 +174,11 @@ public class ShopService implements ShopMemberships {
         }
         if (moved) {
             listeners.forEach(l -> l.locationChanged(shop.getId()));   // e.g. salon reminders with the new address
+        }
+        if (moved && wasApproved) {
+            assignments.startedWaiting(shop.getId(), "RECHECK");
+        } else if (!old.pincode().equals(updated.pincode())) {
+            assignments.pincodeChanged(shop.getId());   // waiting for a visit: the agent may not cover the new one
         }
         return ShopResponse.from(shop, member.getRole());
     }
@@ -186,10 +196,14 @@ public class ShopService implements ShopMemberships {
                 : photo("shopPhotoFileId", in.shopPhotoFileId(), shop, "SHOP_PHOTO");
         if (!java.util.Objects.equals(owner, shop.getOwnerPhotoFileId())
                 || !java.util.Objects.equals(front, shop.getShopPhotoFileId())) {
+            boolean wasApproved = shop.getStatus() == ShopStatus.APPROVED;
             shop.setPhotos(owner, front, now());
             recheck(shop, userId);   // the field team checked the old photos: check the new ones
             try {
                 saveShop(shop);
+                if (wasApproved) {
+                    assignments.startedWaiting(shop.getId(), "RECHECK");
+                }
             } catch (DataIntegrityViolationException deletedMeanwhile) {
                 // A chosen file was deleted at the same moment: the database's foreign key refused the link
                 Map<String, Object> fields = new java.util.LinkedHashMap<>();
@@ -227,10 +241,14 @@ public class ShopService implements ShopMemberships {
         UUID old = shop.getShopVideoFileId();
         if (!video.equals(old)) {
             files.keep(video);   // first: 409 UPLOAD_GONE if it was purged meanwhile, and the shop stays as it was
+            boolean wasApproved = shop.getStatus() == ShopStatus.APPROVED;
             shop.setVideo(video, now());
             recheck(shop, userId);   // the field team checked the old video: check the new one
             try {
                 saveShop(shop);
+                if (wasApproved) {
+                    assignments.startedWaiting(shop.getId(), "RECHECK");
+                }
             } catch (DataIntegrityViolationException deletedMeanwhile) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                         Map.of("fileId", "may have just been deleted; upload it again"));
@@ -273,6 +291,7 @@ public class ShopService implements ShopMemberships {
         shop.submitForVisit(now());
         saveShop(shop);
         review.addEvent(shop.getId(), now(), userId, false, ShopEventType.SUBMITTED, null, null, List.of());
+        assignments.startedWaiting(shop.getId(), "SUBMITTED");
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
 
@@ -298,6 +317,7 @@ public class ShopService implements ShopMemberships {
         if (member.getRole() != ShopRole.OWNER) {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can change these details.");
         }
+        assignments.lockForAssignment();   // before the shop's row: the change may assign it to a field agent
         Shop shop = shops.findById(member.getShopId()).orElseThrow();
         if (version != shop.getVersion()) {
             throw shopChanged();

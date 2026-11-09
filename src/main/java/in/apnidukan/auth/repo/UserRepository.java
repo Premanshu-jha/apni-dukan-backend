@@ -48,6 +48,18 @@ public interface UserRepository extends JpaRepository<User, UUID> {
             nativeQuery = true)
     boolean signedInRecently(String phone);
 
+    /** Only the id of the account with this phone (no entity is loaded, so lockById next reads the row fresh). */
+    @Query("SELECT u.id FROM User u WHERE u.phone = :phone")
+    Optional<UUID> findIdByPhone(String phone);
+
+    /**
+     * "ROLE" or "ROLE:DESIGNATION" of a live account, read fresh from the row (no entity is loaded or reused), so a
+     * check made again after waiting for a lock sees a change committed meanwhile. Empty for a deleted account.
+     */
+    @Query(value = "SELECT admin_role || COALESCE(':' || admin_designation, '') FROM users "
+            + "WHERE id = :id AND deleted_at IS NULL", nativeQuery = true)
+    Optional<String> findTeamRoleById(UUID id);
+
     /** Only the id, so the row locked next (lockById) is read fresh, not from this lookup's copy. */
     @Query("SELECT u.id FROM User u WHERE lower(u.email) = lower(:email) AND u.emailVerifiedAt IS NOT NULL")
     Optional<UUID> findIdByVerifiedEmail(String email);

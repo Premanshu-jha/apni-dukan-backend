@@ -93,9 +93,12 @@ public class ShopInvitesService {
     private final RateLimiter limits;
     private final Clock clock;
 
+    private final ShopAssignments assignments;
+
     public ShopInvitesService(ShopRepository shops, ShopMemberRepository members, ShopInviteStore invites,
                               UserDirectory users, Notifications notifications, List<ShopChangeListener> listeners,
-                              RateLimiter limits, Clock clock) {
+                              RateLimiter limits, ShopAssignments assignments, Clock clock) {
+        this.assignments = assignments;
         this.shops = shops;
         this.members = members;
         this.invites = invites;
@@ -252,6 +255,8 @@ public class ShopInvitesService {
     @Transactional
     public ShopResponse accept(UUID userId, UUID inviteId) {
         Invite asked = addressedTo(userId, inviteId);
+        assignments.lockForAssignment();   // before any row: joining may take the shop from them (memberJoined)
+        assignments.lockBeforeJoining(asked.shopId(), userId);   // for update, only if it waits for their own visit
         Shop shop = shops.findForShare(asked.shopId()).orElseThrow();   // the shop's row first (see the class notes)
         Optional<UUID> mine = members.lockByUserId(userId);
         if (!users.lockIfActive(userId)) {   // a deletion of this account waits for us, or went first
@@ -299,6 +304,7 @@ public class ShopInvitesService {
         notifications.queue(new Notice(asked.invitedBy(), "SHOP_INVITE_ACCEPTED", inviteId, now, "Invitation accepted",
                 who + " joined " + shop.details().name() + " as " + (role == ShopRole.HELPER ? "a helper" : "a barber")
                         + ".", "/shops/me", Map.of()));
+        assignments.memberJoined(shop.getId(), userId);   // a field agent can't visit a business they work in
         return ShopResponse.from(shop, role);
     }
 

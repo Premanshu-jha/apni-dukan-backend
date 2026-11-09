@@ -1,6 +1,7 @@
 package in.apnidukan.auth.service;
 
 import in.apnidukan.auth.domain.User;
+import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.context.UserDirectory;
 import org.springframework.stereotype.Service;
@@ -77,5 +78,17 @@ public class UserDirectoryService implements UserDirectory {
     @Transactional(readOnly = true)
     public boolean isAdmin(UUID userId) {
         return users.findById(userId).map(User::isAdmin).orElse(false);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public TeamRole teamRole(UUID userId) {
+        // Read fresh from the row (never an entity cached earlier in this transaction): assignments check the role
+        // again after waiting for the team lock
+        return users.findTeamRoleById(userId).map(r -> switch (r) {
+            case "SUPER_ADMIN" -> TeamRole.SUPER_ADMIN;
+            case "ADMIN:FIELD_AGENT" -> TeamRole.FIELD_AGENT;
+            default -> TeamRole.NONE;
+        }).orElse(TeamRole.NONE);
     }
 }

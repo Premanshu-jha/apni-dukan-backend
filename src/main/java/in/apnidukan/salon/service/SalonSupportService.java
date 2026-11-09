@@ -2,6 +2,7 @@ package in.apnidukan.salon.service;
 
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
+import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.text.TextCleaner;
@@ -95,9 +96,14 @@ public class SalonSupportService {
         return new StrikeView(s.appointmentId(), s.bookingNo(), salon, s.kind().name(), s.struckAt());
     }
 
+    /** Support is for super admins only (a field agent gets 403 SUPER_ADMIN_ONLY; anyone else 404). */
     private void requireAdmin(UUID userId) {
-        if (!users.isAdmin(userId)) {
+        TeamRole role = users.teamRole(userId);
+        if (!role.onTeam()) {
             throw ApiException.notFound("Page");
+        }
+        if (role != TeamRole.SUPER_ADMIN) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "SUPER_ADMIN_ONLY", "Only a super admin can do this.");
         }
     }
 }

@@ -2,6 +2,7 @@ package in.apnidukan.shops.service;
 
 import in.apnidukan.common.context.SalonFacts;
 import in.apnidukan.common.context.ShopChangeListener;
+import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.common.notify.Notifications.Notice;
@@ -50,8 +51,10 @@ import java.util.stream.Collectors;
  * Field-team pages: the shops waiting for a visit, with the owner's and the shop's photo; approving one after the
  * visit or sending it back with a reason; suspending a shop (off the app; a salon's upcoming online bookings are
  * cancelled) and reinstating it. Each decision carries the version the field team saw (409 SHOP_CHANGED if the
- * owner changed something since) and tells the owner. Only for users.admin: the security config refuses everyone else (403), and the flag is checked again
- * in the database here, because the one in a sign-in token can be up to 15 minutes old.
+ * owner changed something since) and tells the owner. Only for the team: the security config refuses everyone else
+ * (403), and the role is read again from the database here, because the one in a sign-in token can be up to 15
+ * minutes old. A field agent sees and decides only the businesses assigned to them (any other: 404, as if it didn't
+ * exist); suspending and reinstating are for super admins (ShopAssignments has the rules).
  */
 @Service
 public class ShopAdminService {
@@ -68,12 +71,15 @@ public class ShopAdminService {
     private final ShopReviewStore review;
     private final SalonFacts salons;
     private final DashboardCounts dashboardCounts;
+    private final ShopAssignments assignments;
     private final Clock clock;
 
     public ShopAdminService(ShopRepository shops, ShopMemberRepository members, UserDirectory users, FileRefs files,
                             Notifications notifications, List<ShopChangeListener> listeners, ShopReviewStore review,
-                            SalonFacts salons, DashboardCounts dashboardCounts, Clock clock) {
+                            SalonFacts salons, DashboardCounts dashboardCounts, ShopAssignments assignments,
+                            Clock clock) {
         this.dashboardCounts = dashboardCounts;
+        this.assignments = assignments;
         this.review = review;
         this.salons = salons;
         this.shops = shops;
@@ -93,21 +99,28 @@ public class ShopAdminService {
      */
     @Transactional(readOnly = true)
     public Map<ShopType, Map<ReviewGroup, Long>> dashboard(UUID adminId) {
-        requireAdmin(adminId);
-        return dashboardCounts.get();
+        TeamRole role = requireAdmin(adminId);
+        // A field agent's own businesses: a small index range, counted fresh (never shared through Redis)
+        return role == TeamRole.FIELD_AGENT ? review.counts(adminId) : dashboardCounts.get();
     }
 
     /**
      * One page (50) of a group's shops, longest waiting first, after the cursor (null: the first page); `q` searches
-     * shop number, names and owner phone.
+     * shop number, names and owner phone. A field agent gets only their own (whatever {@code assignedTo} says); a
+     * super admin may narrow it to one agent's ({@code assignedTo}) or to those nobody is assigned
+     * ({@code unassigned}).
      */
     @Transactional(readOnly = true)
     public List<AdminShopResponse> list(UUID adminId, ShopType type, ReviewGroup group, String q,
-                                        Instant afterSince, UUID afterId) {
-        requireAdmin(adminId);
+                                        Instant afterSince, UUID afterId, UUID assignedTo, boolean unassigned) {
+        TeamRole role = requireAdmin(adminId);
         requireSearchable(q);
+        if (role == TeamRole.FIELD_AGENT) {
+            assignedTo = adminId;
+            unassigned = false;
+        }
         List<UUID> ids = review.search(type, group, q,
-                afterId == null ? null : new ShopReviewStore.Cursor(afterSince, afterId));
+                afterId == null ? null : new ShopReviewStore.Cursor(afterSince, afterId), assignedTo, unassigned);
         Map<UUID, Shop> byId = shops.findAllById(ids).stream().collect(Collectors.toMap(Shop::getId,
                 Function.identity()));
         return views(ids.stream().map(byId::get).filter(Objects::nonNull).toList());
@@ -116,7 +129,7 @@ public class ShopAdminService {
     /** One shop with what changed since it was last approved and its timeline. 404 if there's no such shop. */
     @Transactional(readOnly = true)
     public AdminShopDetail detail(UUID adminId, UUID shopId) {
-        requireAdmin(adminId);
+        assignments.requireCanSee(adminId, shopId);
         Shop shop = shops.findById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
         Snapshot approved = review.lastApproved(shopId).orElse(null);
         List<Change> changes = new ArrayList<>();
@@ -170,7 +183,7 @@ public class ShopAdminService {
      */
     @Transactional(readOnly = true)
     public TimelinePage timeline(UUID adminId, UUID shopId, TimelineCursor after) {
-        requireAdmin(adminId);
+        assignments.requireCanSee(adminId, shopId);
         if (!shops.existsById(shopId)) {
             throw ApiException.notFound("Shop");
         }
@@ -203,7 +216,7 @@ public class ShopAdminService {
     /** A note on the shop's timeline for admins only (no decision). 404 if there's no such shop. */
     @Transactional
     public TimelineEntry addNote(UUID adminId, UUID shopId, String noteInput) {
-        requireAdmin(adminId);
+        assignments.requireCanSee(adminId, shopId);
         if (!shops.existsById(shopId)) {
             throw ApiException.notFound("Shop");
         }
@@ -223,7 +236,7 @@ public class ShopAdminService {
      */
     @Transactional
     public AdminShopResponse approve(UUID adminId, UUID shopId, long version, String noteInput) {
-        Shop shop = checked(adminId, shopId, version, "approved", ShopStatus.PENDING_VISIT);
+        Shop shop = checked(adminId, shopId, version, "approved", false, ShopStatus.PENDING_VISIT);
         String note = optionalNote(noteInput);
         shop.approve(now());
         save(shop);
@@ -241,7 +254,7 @@ public class ShopAdminService {
     @Transactional
     public AdminShopResponse reject(UUID adminId, UUID shopId, long version, String reasonInput, String noteInput,
                                     Collection<VisitIssue> checklist) {
-        Shop shop = checked(adminId, shopId, version, "sent back", ShopStatus.PENDING_VISIT);
+        Shop shop = checked(adminId, shopId, version, "sent back", false, ShopStatus.PENDING_VISIT);
         String reason = TextCleaner.clean(REASON, reasonInput);
         String note = optionalNote(noteInput);
         shop.reject(reason, now());
@@ -260,7 +273,8 @@ public class ShopAdminService {
     @Transactional
     public AdminShopResponse suspend(UUID adminId, UUID shopId, long version, String reasonInput, String noteInput,
                                      Collection<VisitIssue> checklist) {
-        Shop shop = checked(adminId, shopId, version, "suspended", ShopStatus.APPROVED, ShopStatus.PENDING_VISIT);
+        Shop shop = checked(adminId, shopId, version, "suspended", true, ShopStatus.APPROVED,
+                ShopStatus.PENDING_VISIT);
         String reason = TextCleaner.clean(REASON, reasonInput);
         String note = optionalNote(noteInput);
         shop.suspend(reason, now());
@@ -279,20 +293,31 @@ public class ShopAdminService {
      */
     @Transactional
     public AdminShopResponse reinstate(UUID adminId, UUID shopId, long version, String noteInput) {
-        Shop shop = checked(adminId, shopId, version, "reinstated", ShopStatus.SUSPENDED);
+        assignments.lockForAssignment();   // first: it is assigned below, after its row is locked
+        Shop shop = checked(adminId, shopId, version, "reinstated", true, ShopStatus.SUSPENDED);
         String note = optionalNote(noteInput);
         shop.reinstate(now());
         save(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.REINSTATED, null, note, List.of());
+        assignments.startedWaiting(shopId, "REINSTATED");
         dashboardCounts.clearAfterCommit();
         tellOwner(shop, "SHOP_REINSTATED", "Your shop will be checked again",
                 shop.details().name() + " is no longer suspended. Our team will visit; it goes live once approved.");
         return view(shop);
     }
 
-    /** The shop, if it is what the field team saw (same version) and in a status this decision applies to. */
-    private Shop checked(UUID adminId, UUID shopId, long version, String what, ShopStatus... allowed) {
-        requireAdmin(adminId);
+    /**
+     * The shop, if it is what the field team saw (same version) and in a status this decision applies to, and this
+     * admin may decide on it: a field agent only on one assigned to them, a super admin on any;
+     * {@code superAdminOnly} for suspending and reinstating. The shop's row is locked first, so a reassignment can't
+     * slip in between this check and the decision.
+     */
+    private Shop checked(UUID adminId, UUID shopId, long version, String what, boolean superAdminOnly,
+                         ShopStatus... allowed) {
+        if (superAdminOnly) {
+            assignments.requireSuperAdmin(adminId);
+        }
+        assignments.requireCanDecide(adminId, shopId);
         Shop shop = shops.findById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
         requireNotOwnShop(adminId, shopId);
         // Status first: when another admin decided meanwhile, say so (not "the owner changed it")
@@ -338,13 +363,23 @@ public class ShopAdminService {
         Set<UUID> approvedBefore = review.everApproved(ids);
         Map<UUID, String> phones = review.ownerPhones(ids);
         Map<UUID, Instant> since = review.statusSince(ids);
+        Map<UUID, UUID> assignees = assignments.assignees(ids);
+        Map<UUID, UserDirectory.Person> agents = users.find(new java.util.HashSet<>(assignees.values()));
         // Every photo link of the page with one read of the files table
         Map<UUID, String> links = files.links(list.stream()
                 .flatMap(shop -> java.util.stream.Stream.of(shop.getOwnerPhotoFileId(), shop.getShopPhotoFileId()))
                 .filter(Objects::nonNull).toList());
         return list.stream().map(shop -> AdminShopResponse.from(shop, link(links, shop.getOwnerPhotoFileId()),
                 link(links, shop.getShopPhotoFileId()), approvedBefore.contains(shop.getId()), phones.get(shop.getId()),
-                since.get(shop.getId()))).toList();
+                since.get(shop.getId()), assignee(assignees.get(shop.getId()), agents))).toList();
+    }
+
+    private static AdminShopResponse.Assignee assignee(UUID id, Map<UUID, UserDirectory.Person> agents) {
+        if (id == null) {
+            return null;
+        }
+        UserDirectory.Person p = agents.get(id);
+        return new AdminShopResponse.Assignee(id, p == null ? null : p.name());
     }
 
     private static void change(List<Change> out, String field, String label, String before, String after) {
@@ -393,11 +428,13 @@ public class ShopAdminService {
 
     /**
      * The security config already refused anyone whose token isn't an admin's (403). This catches a token issued
-     * before the admin flag was removed: 404, so the pages don't reveal that they exist.
+     * before the admin flag was removed: 404, so the pages don't reveal that they exist. Returns their role.
      */
-    private void requireAdmin(UUID userId) {
-        if (!users.isAdmin(userId)) {
+    private TeamRole requireAdmin(UUID userId) {
+        TeamRole role = users.teamRole(userId);
+        if (!role.onTeam()) {
             throw ApiException.notFound("Page");
         }
+        return role;
     }
 }

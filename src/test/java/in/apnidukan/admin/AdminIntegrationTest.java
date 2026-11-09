@@ -103,16 +103,25 @@ class AdminIntegrationTest {
         boss = person("9000000001");
         jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', name = 'Prem' WHERE id = ?", boss);
         admin = person("9000000002");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN', name = 'Field Ravi' WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN', admin_designation = 'FIELD_AGENT', name = 'Field Ravi' "
+                + "WHERE id = ?", admin);
         customer = person("9000000003");
     }
 
     // ---------------- roles ----------------
 
     @Test
-    void thereIsAtMostOneSuperAdmin() {
-        assertThatThrownBy(() -> jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", admin))
+    void theDatabaseKeepsDesignationsForAdminsOnlyAndAllowsMoreThanOneSuperAdmin() {
+        // An ADMIN needs a designation, nobody else has one
+        assertThatThrownBy(() -> jdbc.update("UPDATE users SET admin_designation = NULL WHERE id = ?", admin))
                 .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> jdbc.update("UPDATE users SET admin_designation = 'FIELD_AGENT' WHERE id = ?",
+                customer)).isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", customer))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        // A second super admin is fine now
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', admin_designation = NULL WHERE id = ?", admin);
+        assertThat(count("users WHERE admin_role = 'SUPER_ADMIN'")).isEqualTo(2);
     }
 
     @Test
@@ -123,15 +132,15 @@ class AdminIntegrationTest {
 
         // An ordinary admin can't manage the team or test mode
         assertThat(field(get("/admin/team", admin).body(), "code")).isEqualTo("SUPER_ADMIN_ONLY");
-        assertThat(post("/admin/team", Map.of("phone", "9000000009"), admin).status()).isEqualTo(403);
+        assertThat(post("/admin/team", newMember("9000000009"), admin).status()).isEqualTo(403);
         assertThat(field(put("/admin/test-mode", Map.of("hours", 1), admin).body(), "code"))
                 .isEqualTo("SUPER_ADMIN_ONLY");
 
         // A phone nobody has used yet: the account is made, and they sign in with the normal OTP
-        Reply added = post("/admin/team", Map.of("phone", "+91 90000 00009"), boss);
+        Reply added = post("/admin/team", newMember("+91 90000 00009"), boss);
         assertThat(added.status()).as(added.text()).isEqualTo(201);
         UUID newAdmin = UUID.fromString((String) field(added.body(), "userId"));
-        assertThat(field(post("/admin/team", Map.of("phone", "9000000009"), boss).body(), "code"))
+        assertThat(field(post("/admin/team", newMember("9000000009"), boss).body(), "code"))
                 .isEqualTo("ALREADY_ADMIN");
         List<?> team = (List<?>) get("/admin/team", boss).body();
         assertThat(team).hasSize(3);
@@ -143,14 +152,15 @@ class AdminIntegrationTest {
         assertThat(delete("/admin/team/" + newAdmin, boss).status()).isEqualTo(204);
         assertThat(get("/admin/me", held).status()).isEqualTo(401);
         assertThat(get("/admin/shops?type=SALON&group=FIRST_VISIT", newAdmin).status()).isEqualTo(403);
-        assertThat(field(delete("/admin/team/" + boss, boss).body(), "code")).isEqualTo("CANT_REMOVE_SUPER_ADMIN");
+        assertThat(field(delete("/admin/team/" + boss, boss).body(), "code")).isEqualTo("CANT_REMOVE_YOURSELF");
         assertThat(count("admin_events WHERE event IN ('ADMIN_ADDED', 'ADMIN_REMOVED')")).isEqualTo(2);
     }
 
     @Test
     void aTokenFromBeforeTheAdminWasRemovedInTheDatabaseIsRefused() {
         String held = token(admin);
-        jdbc.update("UPDATE users SET admin_role = 'NONE' WHERE id = ?", admin);   // without the sign-out
+        // Without the sign-out
+        jdbc.update("UPDATE users SET admin_role = 'NONE', admin_designation = NULL WHERE id = ?", admin);
         assertThat(get("/admin/shops?type=KIRANA&group=LIVE", held).status()).isEqualTo(404);
         assertThat(get("/admin/me", held).status()).isEqualTo(404);
     }
@@ -345,7 +355,8 @@ class AdminIntegrationTest {
         listEmail("shared@gmail.com");
         assertThat(post("/auth/email/verify", Map.of("email", "shared@gmail.com", "code", "424242"), tester).status())
                 .isEqualTo(200);
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE phone = '9111111111'");
+        jdbc.update("UPDATE users SET admin_role = 'ADMIN', admin_designation = 'FIELD_AGENT' "
+                + "WHERE phone = '9111111111'");
         jdbc.update("UPDATE users SET email = NULL, email_verified_at = NULL WHERE id = ?", customer);
         String real = token(customer);
         LAST_EMAIL.clear();
@@ -548,7 +559,7 @@ class AdminIntegrationTest {
         Reply removed = delete("/admin/test-mode/phones/9111111111", boss);
         assertThat(removed.status()).isEqualTo(200);
         assertThat(get("/auth/me", (String) field(in.body(), "accessToken")).status()).isEqualTo(401);   // out
-        assertThat(field(post("/admin/team", Map.of("phone", "9111111111"), boss).body(), "code"))
+        assertThat(field(post("/admin/team", newMember("9111111111"), boss).body(), "code"))
                 .isEqualTo("TEST_PHONE");
 
         // The number's real holder signs in later with the SMS code: the account becomes a normal one for good
@@ -625,7 +636,7 @@ class AdminIntegrationTest {
         assertThat(field(refused.body(), "code")).as(refused.text()).isEqualTo("SUPER_ADMIN");
         // Someone already signed in to a customer's account made an admin: that session ends
         String held = token(customer);
-        assertThat(post("/admin/team", Map.of("phone", "9000000003"), boss).status()).isEqualTo(201);
+        assertThat(post("/admin/team", newMember("9000000003"), boss).status()).isEqualTo(201);
         assertThat(get("/auth/me", held).status()).isEqualTo(401);
         List<?> team = (List<?>) get("/admin/team", boss).body();
         assertThat(field(team.get(team.size() - 1), "since")).isEqualTo(NOW.toString());
@@ -638,7 +649,7 @@ class AdminIntegrationTest {
         post("/admin/test-mode/phones", Map.of("phone", "9111111111", "label", "Tester"), boss);
         assertThat(field(post("/admin/test-mode/phones", Map.of("phone", "9111111111", "label", "Again"), boss)
                 .body(), "code")).isEqualTo("ALREADY_TEST_PHONE");
-        assertThat(field(post("/admin/team", Map.of("phone", "9111111111"), boss).body(), "code"))
+        assertThat(field(post("/admin/team", newMember("9111111111"), boss).body(), "code"))
                 .isEqualTo("TEST_PHONE");
         // Even if both happened (set by hand), an admin's number still needs the real code
         jdbc.update("INSERT INTO test_phones (phone, label, added_by, added_at) VALUES ('9000000002', 'x', ?, ?)",
@@ -666,35 +677,35 @@ class AdminIntegrationTest {
         shop("SALON", "APPROVED", "Live Cuts", "9200000003");
         UUID sentBack = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000004");
         assertThat(post("/admin/shops/" + sentBack + "/reject", Map.of("version", version(sentBack), "reason",
-                "The shop photo doesn't show the name board."), admin).status()).isEqualTo(200);
+                "The shop photo doesn't show the name board."), boss).status()).isEqualTo(200);
         shop("KIRANA", "SUSPENDED", "Closed Mart", "9200000005");
         shop("KIRANA", "DRAFT", "Unfinished", "9200000006");   // not submitted: in no group
 
-        Map<?, ?> counts = (Map<?, ?>) get("/admin/dashboard", admin).body();
+        Map<?, ?> counts = (Map<?, ?>) get("/admin/dashboard", boss).body();
         assertThat(counts.get("SALON")).isEqualTo(Map.of("FIRST_VISIT", 1, "RECHECK", 1, "SENT_BACK", 0, "LIVE", 1,
                 "SUSPENDED", 0, "CLOSED", 0));
         assertThat(counts.get("KIRANA")).isEqualTo(Map.of("FIRST_VISIT", 0, "RECHECK", 0, "SENT_BACK", 1, "LIVE", 0,
                 "SUSPENDED", 1, "CLOSED", 0));
 
-        List<?> waiting = (List<?>) get("/admin/shops?type=SALON&group=FIRST_VISIT", admin).body();
+        List<?> waiting = (List<?>) get("/admin/shops?type=SALON&group=FIRST_VISIT", boss).body();
         assertThat(waiting).hasSize(1);
         assertThat(field(waiting.get(0), "id")).isEqualTo(first.toString());
         assertThat(field(waiting.get(0), "group")).isEqualTo("FIRST_VISIT");
         assertThat(field(waiting.get(0), "ownerPhone")).isEqualTo("9200000001");
-        assertThat(field(((List<?>) get("/admin/shops?type=SALON&group=RECHECK", admin).body()).get(0), "group"))
+        assertThat(field(((List<?>) get("/admin/shops?type=SALON&group=RECHECK", boss).body()).get(0), "group"))
                 .isEqualTo("RECHECK");
         // Search: name in part, owner phone in part, shop number exactly; LIKE wildcards are plain text
-        assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=cuts", admin).body()).hasSize(1);
-        assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=920000000", admin).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=cuts", boss).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=920000000", boss).body()).hasSize(1);
         long code = jdbc.queryForObject("SELECT shop_code FROM shops WHERE id = ?", Long.class, first);
-        assertThat((List<?>) get("/admin/shops?type=SALON&group=FIRST_VISIT&q=" + code, admin).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/shops?type=SALON&group=FIRST_VISIT&q=" + code, boss).body()).hasSize(1);
         assertThat(get("/admin/dashboard", customer).status()).isEqualTo(403);
         // The older ?status= form is gone: type and group are required
-        Reply old = get("/admin/shops?status=PENDING_VISIT", admin);
+        Reply old = get("/admin/shops?status=PENDING_VISIT", boss);
         assertThat(old.status()).isEqualTo(400);
         assertThat(field(old.body(), "code")).isEqualTo("VALIDATION_FAILED");
         assertThat(field(old.body(), "details")).isEqualTo(Map.of("type", "is required", "group", "is required"));
-        assertThat(field(get("/admin/shops?type=SALON", admin).body(), "details"))
+        assertThat(field(get("/admin/shops?type=SALON", boss).body(), "details"))
                 .isEqualTo(Map.of("group", "is required"));
     }
 
@@ -707,7 +718,7 @@ class AdminIntegrationTest {
                 "latitude", 17.466000, "gstin", "27AAPFU0939F1ZV"), owner);
         assertThat(field(edited.body(), "status")).as(edited.text()).isEqualTo("PENDING_VISIT");
 
-        Reply page = get("/admin/shops/" + salon, admin);
+        Reply page = get("/admin/shops/" + salon, boss);
         assertThat(page.status()).as(page.text()).isEqualTo(200);
         List<?> changes = (List<?>) field(page.body(), "changes");
         assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "location", "gstin");
@@ -717,17 +728,17 @@ class AdminIntegrationTest {
         assertThat(field(page.body(), "salon")).isEqualTo(Map.of("barbers", 0, "services", 0));
         List<?> timeline = (List<?>) field(page.body(), "timeline");
         assertThat(timeline).extracting(e -> field(e, "event")).containsExactly("EDITED", "APPROVED");
-        assertThat(field(timeline.get(1), "byName")).isEqualTo("Field Ravi");
+        assertThat(field(timeline.get(1), "byName")).isEqualTo("Prem");
         assertThat(field(timeline.get(1), "byAdmin")).isEqualTo(true);
 
         // Send back with a checklist, a reason for the owner and a note only admins see
         Reply back = post("/admin/shops/" + salon + "/reject", Map.of("version", version(salon), "reason",
                 "The pin is 100 m away from the shop.", "note", "Owner was not there; called him.",
-                "checklist", List.of("PIN_WRONG", "OTHER")), admin);
+                "checklist", List.of("PIN_WRONG", "OTHER")), boss);
         assertThat(field(back.body(), "group")).as(back.text()).isEqualTo("SENT_BACK");
-        Reply note = post("/admin/shops/" + salon + "/notes", Map.of("note", "Shop is behind the temple."), admin);
+        Reply note = post("/admin/shops/" + salon + "/notes", Map.of("note", "Shop is behind the temple."), boss);
         assertThat(note.status()).isEqualTo(201);
-        timeline = (List<?>) field(get("/admin/shops/" + salon, admin).body(), "timeline");
+        timeline = (List<?>) field(get("/admin/shops/" + salon, boss).body(), "timeline");
         assertThat(timeline).extracting(e -> field(e, "event")).containsExactly("NOTE", "SENT_BACK", "EDITED",
                 "APPROVED");
         assertThat(field(timeline.get(1), "checklist")).isEqualTo(List.of("PIN_WRONG", "OTHER"));
@@ -743,7 +754,7 @@ class AdminIntegrationTest {
                 + "WHERE id = ?", file(salon, owner, "OWNER_PHOTO"), file(salon, owner, "SHOP_PHOTO"), video, salon);
         Reply submitted = post("/shops/me/submit", Map.of("version", version(salon)), owner);
         assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
-        assertThat(field(((List<?>) field(get("/admin/shops/" + salon, admin).body(), "timeline")).get(0), "event"))
+        assertThat(field(((List<?>) field(get("/admin/shops/" + salon, boss).body(), "timeline")).get(0), "event"))
                 .isEqualTo("SUBMITTED");
     }
 
@@ -753,7 +764,7 @@ class AdminIntegrationTest {
         long seen = version(shop);
         approve(shop);
         Reply late = post("/admin/shops/" + shop + "/reject", Map.of("version", seen, "reason", "Pin is wrong"),
-                admin);
+                boss);
         assertThat(field(late.body(), "code")).as(late.text()).isEqualTo("WRONG_STATUS");
         assertThat(field(field(late.body(), "details"), "status")).isEqualTo("APPROVED");
     }
@@ -768,9 +779,9 @@ class AdminIntegrationTest {
         CLOCK.advance(Duration.ofMinutes(1));
         UUID owner = ownerOf(salon);
         patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair Studio"), owner);
-        assertThat(((List<?>) field(get("/admin/shops/" + salon, admin).body(), "changes"))).hasSize(1);
+        assertThat(((List<?>) field(get("/admin/shops/" + salon, boss).body(), "changes"))).hasSize(1);
         moveThePin(salon);
-        List<?> changes = (List<?>) field(get("/admin/shops/" + salon, admin).body(), "changes");
+        List<?> changes = (List<?>) field(get("/admin/shops/" + salon, boss).body(), "changes");
         assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "location");
 
         // The waiting shop sent first stays first, even after its owner fixes a typo (which saves the shop again)
@@ -793,8 +804,8 @@ class AdminIntegrationTest {
 
         // Suspended and reinstated after being live: a re-check
         approve(salon);
-        post("/admin/shops/" + salon + "/suspend", Map.of("version", version(salon), "reason", "Found shut"), admin);
-        Reply back = post("/admin/shops/" + salon + "/reinstate", Map.of("version", version(salon)), admin);
+        post("/admin/shops/" + salon + "/suspend", Map.of("version", version(salon), "reason", "Found shut"), boss);
+        Reply back = post("/admin/shops/" + salon + "/reinstate", Map.of("version", version(salon)), boss);
         assertThat(field(back.body(), "group")).as(back.text()).isEqualTo("RECHECK");
     }
 
@@ -802,22 +813,22 @@ class AdminIntegrationTest {
     void decisionsCheckWhatTheyAreGiven() {
         UUID shop = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000004");
         Reply shortReason = post("/admin/shops/" + shop + "/reject", Map.of("version", version(shop), "reason", "x"),
-                admin);
+                boss);
         assertThat(field(shortReason.body(), "code")).as(shortReason.text()).isEqualTo("VALIDATION_FAILED");
         Reply longNote = post("/admin/shops/" + shop + "/approve", Map.of("version", version(shop), "note",
-                "n".repeat(501)), admin);
+                "n".repeat(501)), boss);
         assertThat(longNote.status()).isEqualTo(400);
         Reply badItem = post("/admin/shops/" + shop + "/suspend", Map.of("version", version(shop), "reason",
-                "Fake shop", "checklist", List.of("NOT_A_THING")), admin);
+                "Fake shop", "checklist", List.of("NOT_A_THING")), boss);
         assertThat(badItem.status()).isEqualTo(400);
-        assertThat(get("/admin/shops/" + UUID.randomUUID(), admin).status()).isEqualTo(404);
-        assertThat(post("/admin/shops/" + shop + "/notes", Map.of("note", " "), admin).status()).isEqualTo(400);
+        assertThat(get("/admin/shops/" + UUID.randomUUID(), boss).status()).isEqualTo(404);
+        assertThat(post("/admin/shops/" + shop + "/notes", Map.of("note", " "), boss).status()).isEqualTo(400);
 
         // Suspended, then reinstated: back for a visit as a re-check only if it was ever approved
         post("/admin/shops/" + shop + "/suspend", Map.of("version", version(shop), "reason", "Found shut twice",
-                "checklist", List.of("SHOP_SHUT")), admin);
+                "checklist", List.of("SHOP_SHUT")), boss);
         Reply back = post("/admin/shops/" + shop + "/reinstate", Map.of("version", version(shop), "note",
-                "Owner says open again"), admin);
+                "Owner says open again"), boss);
         assertThat(field(back.body(), "group")).as(back.text()).isEqualTo("FIRST_VISIT");
         assertThat(count("shop_events WHERE event = 'REINSTATED' AND note = 'Owner says open again'")).isEqualTo(1);
     }
@@ -834,7 +845,7 @@ class AdminIntegrationTest {
         assertThat(first).hasSize(50);
         Object last = first.get(49);
         Reply next = get("/admin/shops?type=SALON&group=FIRST_VISIT&afterSince=" + field(last, "statusSince")
-                + "&afterId=" + field(last, "id"), admin);
+                + "&afterId=" + field(last, "id"), boss);
         assertThat(next.status()).as(next.text()).isEqualTo(200);
         List<Object> both = new java.util.ArrayList<>(first);
         both.addAll((List<?>) next.body());
@@ -843,12 +854,12 @@ class AdminIntegrationTest {
         List<String> since = both.stream().map(x -> (String) field(x, "statusSince")).toList();
         assertThat(since).isSortedAccordingTo(java.util.Comparator.comparing(Instant::parse));
 
-        assertThat(get("/admin/shops?type=SALON&group=FIRST_VISIT&afterId=" + UUID.randomUUID(), admin).status())
+        assertThat(get("/admin/shops?type=SALON&group=FIRST_VISIT&afterId=" + UUID.randomUUID(), boss).status())
                 .isEqualTo(400);
         assertThat(get("/admin/shops?type=SALON&group=FIRST_VISIT&afterSince=yesterday&afterId="
-                + UUID.randomUUID(), admin).status()).isEqualTo(400);
+                + UUID.randomUUID(), boss).status()).isEqualTo(400);
         // The older ?status= form is gone
-        assertThat(get("/admin/shops?status=PENDING_VISIT", admin).status()).isEqualTo(400);
+        assertThat(get("/admin/shops?status=PENDING_VISIT", boss).status()).isEqualTo(400);
     }
 
     @Test
@@ -857,15 +868,15 @@ class AdminIntegrationTest {
         UUID shop = shop("KIRANA", "APPROVED", "Old Code Store", "9300000098");
         Instant later = NOW.plusSeconds(3600);
         jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, true, "
-                + "'APPROVED')", UUID.randomUUID(), shop, Timestamp.from(later), admin);
+                + "'APPROVED')", UUID.randomUUID(), shop, Timestamp.from(later), boss);
         assertThat(jdbc.queryForObject("SELECT ever_approved FROM shops WHERE id = ?", Boolean.class, shop)).isTrue();
         assertThat(jdbc.queryForObject("SELECT status_since FROM shops WHERE id = ?", Timestamp.class, shop)
                 .toInstant()).isEqualTo(later);
         // A note moves nothing; an earlier entry never moves it back
         jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event, note) VALUES (?, ?, ?, ?, "
-                + "true, 'NOTE', 'x')", UUID.randomUUID(), shop, Timestamp.from(later.plusSeconds(60)), admin);
+                + "true, 'NOTE', 'x')", UUID.randomUUID(), shop, Timestamp.from(later.plusSeconds(60)), boss);
         jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, true, "
-                + "'SUSPENDED')", UUID.randomUUID(), shop, Timestamp.from(NOW), admin);
+                + "'SUSPENDED')", UUID.randomUUID(), shop, Timestamp.from(NOW), boss);
         assertThat(jdbc.queryForObject("SELECT status_since FROM shops WHERE id = ?", Timestamp.class, shop)
                 .toInstant()).isEqualTo(later);
     }
@@ -874,14 +885,14 @@ class AdminIntegrationTest {
     void anUnchangedAnswerIsA304WithNoBodyAndAChangeGivesANewOne() {
         UUID shop = shop("SALON", "PENDING_VISIT", "Etag Salon", "9300000099");
         String path = base + "/admin/dashboard";
-        var first = http.get().uri(path).headers(h -> h.setBearerAuth(token(admin)))
+        var first = http.get().uri(path).headers(h -> h.setBearerAuth(token(boss)))
                 .exchange((rq, res) -> java.util.Map.entry(res.getStatusCode().value(),
                         String.valueOf(res.getHeaders().getETag())));
         assertThat(first.getKey()).isEqualTo(200);
         String etag = first.getValue();
         assertThat(etag).startsWith("\"");
         var same = http.get().uri(path).headers(h -> {
-            h.setBearerAuth(token(admin));
+            h.setBearerAuth(token(boss));
             h.setIfNoneMatch(etag);
         }).exchange((rq, res) -> java.util.Map.entry(res.getStatusCode().value(), res.getBody().readAllBytes().length));
         assertThat(same.getKey()).isEqualTo(304);
@@ -889,7 +900,7 @@ class AdminIntegrationTest {
 
         approve(shop);
         var changed = http.get().uri(path).headers(h -> {
-            h.setBearerAuth(token(admin));
+            h.setBearerAuth(token(boss));
             h.setIfNoneMatch(etag);
         }).exchange((rq, res) -> java.util.Map.entry(res.getStatusCode().value(),
                 String.valueOf(res.getHeaders().getETag())));
@@ -902,22 +913,22 @@ class AdminIntegrationTest {
         UUID shop = shop("SALON", "PENDING_VISIT", "Busy Salon", "9300000201");
         for (int i = 0; i < 55; i++) {   // three entries at each moment: only seq orders them
             jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event, note) VALUES (?, ?, ?, ?, "
-                    + "true, 'NOTE', ?)", UUID.randomUUID(), shop, Timestamp.from(NOW.plusSeconds(i / 3)), admin,
+                    + "true, 'NOTE', ?)", UUID.randomUUID(), shop, Timestamp.from(NOW.plusSeconds(i / 3)), boss,
                     "note " + i);
         }
-        Reply page = get("/admin/shops/" + shop, admin);
+        Reply page = get("/admin/shops/" + shop, boss);
         List<?> first = (List<?>) field(page.body(), "timeline");
         assertThat(first).hasSize(50);
         Object next = field(page.body(), "timelineNext");
         assertThat(next).isNotNull();
         assertThat(field(next, "afterAt")).isEqualTo(field(first.get(49), "at"));
         // The same first page from the timeline call
-        Reply again = get("/admin/shops/" + shop + "/timeline", admin);
+        Reply again = get("/admin/shops/" + shop + "/timeline", boss);
         assertThat((List<?>) field(again.body(), "items")).isEqualTo(first);
         assertThat(field(again.body(), "next")).isEqualTo(next);
 
         Reply rest = get("/admin/shops/" + shop + "/timeline?afterAt=" + field(next, "afterAt") + "&afterSeq="
-                + field(next, "afterSeq"), admin);
+                + field(next, "afterSeq"), boss);
         assertThat(rest.status()).as(rest.text()).isEqualTo(200);
         List<?> second = (List<?>) field(rest.body(), "items");
         assertThat(second).hasSize(5);
@@ -929,11 +940,11 @@ class AdminIntegrationTest {
                 .containsExactlyElementsOf(java.util.stream.IntStream.iterate(54, i -> i - 1).limit(55)
                         .mapToObj(i -> "note " + i).toList());
 
-        assertThat(field(get("/admin/shops/" + shop + "/timeline?afterSeq=3", admin).body(), "code"))
+        assertThat(field(get("/admin/shops/" + shop + "/timeline?afterSeq=3", boss).body(), "code"))
                 .isEqualTo("VALIDATION_FAILED");
-        assertThat(field(get("/admin/shops/" + shop + "/timeline?afterAt=" + NOW + "&afterSeq=x", admin).body(),
+        assertThat(field(get("/admin/shops/" + shop + "/timeline?afterAt=" + NOW + "&afterSeq=x", boss).body(),
                 "code")).isEqualTo("BAD_REQUEST");
-        assertThat(get("/admin/shops/" + UUID.randomUUID() + "/timeline", admin).status()).isEqualTo(404);
+        assertThat(get("/admin/shops/" + UUID.randomUUID() + "/timeline", boss).status()).isEqualTo(404);
         assertThat(get("/admin/shops/" + shop + "/timeline", customer).status()).isEqualTo(403);
     }
 
@@ -942,7 +953,7 @@ class AdminIntegrationTest {
         UUID shop = shop("SALON", "PENDING_VISIT", "Raju Hair", "9200000001");
         long code = jdbc.queryForObject("SELECT shop_code FROM shops WHERE id = ?", Long.class, shop);
         for (String q : List.of("R", "Ra", " a ", "_")) {
-            Reply r = get("/admin/shops?type=SALON&group=FIRST_VISIT&q=" + q.strip(), admin);
+            Reply r = get("/admin/shops?type=SALON&group=FIRST_VISIT&q=" + q.strip(), boss);
             assertThat(r.status()).as(q).isEqualTo(400);
             assertThat(field(r.body(), "details")).isEqualTo(Map.of("q", "type at least 3 letters"));
         }
@@ -956,16 +967,16 @@ class AdminIntegrationTest {
     @Test
     void theDashboardIsKept30SecondsInRedisAndADecisionClearsIt() {
         UUID first = shop("SALON", "PENDING_VISIT", "First Salon", "9300000301");
-        Map<?, ?> counts = (Map<?, ?>) get("/admin/dashboard", admin).body();
+        Map<?, ?> counts = (Map<?, ?>) get("/admin/dashboard", boss).body();
         assertThat(field(counts.get("SALON"), "FIRST_VISIT")).isEqualTo(1);
         assertThat(redis.opsForValue().get("admin:dashboard:0")).contains("SALON.FIRST_VISIT=1");
         // A shop arriving by itself shows within 30 seconds (the kept counts are served meanwhile)
         shop("SALON", "PENDING_VISIT", "Second Salon", "9300000302");
-        assertThat(field(((Map<?, ?>) get("/admin/dashboard", admin).body()).get("SALON"), "FIRST_VISIT"))
+        assertThat(field(((Map<?, ?>) get("/admin/dashboard", boss).body()).get("SALON"), "FIRST_VISIT"))
                 .isEqualTo(1);
-        // A decision clears them: the admin sees the new counts at once
+        // A decision clears them: the boss sees the new counts at once
         approve(first);
-        Map<?, ?> after = (Map<?, ?>) get("/admin/dashboard", admin).body();
+        Map<?, ?> after = (Map<?, ?>) get("/admin/dashboard", boss).body();
         assertThat(field(after.get("SALON"), "FIRST_VISIT")).isEqualTo(1);
         assertThat(field(after.get("SALON"), "LIVE")).isEqualTo(1);
         assertThat(redis.opsForValue().get("admin:dashboard:generation")).isEqualTo("1");
@@ -974,10 +985,10 @@ class AdminIntegrationTest {
         redis.opsForValue().set("admin:dashboard:0", "KIRANA.FIRST_VISIT=0;KIRANA.RECHECK=0;KIRANA.SENT_BACK=0;"
                 + "KIRANA.LIVE=0;KIRANA.SUSPENDED=0;SALON.FIRST_VISIT=2;SALON.RECHECK=0;SALON.SENT_BACK=0;"
                 + "SALON.LIVE=0;SALON.SUSPENDED=0");
-        assertThat(field(((Map<?, ?>) get("/admin/dashboard", admin).body()).get("SALON"), "LIVE")).isEqualTo(1);
+        assertThat(field(((Map<?, ?>) get("/admin/dashboard", boss).body()).get("SALON"), "LIVE")).isEqualTo(1);
         // Redis losing the text (or a broken value) just counts again
         redis.opsForValue().set("admin:dashboard:1", "garbage");
-        assertThat(field(((Map<?, ?>) get("/admin/dashboard", admin).body()).get("SALON"), "LIVE")).isEqualTo(1);
+        assertThat(field(((Map<?, ?>) get("/admin/dashboard", boss).body()).get("SALON"), "LIVE")).isEqualTo(1);
     }
 
     // ---------------- own shops ----------------
@@ -986,12 +997,11 @@ class AdminIntegrationTest {
     void anAdminCantDecideOnOrWriteNotesAboutAShopTheyBelongTo() {
         UUID shop = shop("SALON", "PENDING_VISIT", "Ravi's Salon", "9000000050");
         TestData.member(jdbc, shop, admin, "HELPER");
+        assignTo(shop, admin);   // set by hand: the rule never gives a business to someone who works in it
         long v = version(shop);
         List<Reply> refused = List.of(
                 post("/admin/shops/" + shop + "/approve", Map.of("version", v), admin),
                 post("/admin/shops/" + shop + "/reject", Map.of("version", v, "reason", "Board not visible"), admin),
-                post("/admin/shops/" + shop + "/suspend", Map.of("version", v, "reason", "Shut at visit"), admin),
-                post("/admin/shops/" + shop + "/reinstate", Map.of("version", v), admin),   // before its status
                 post("/admin/shops/" + shop + "/notes", Map.of("note", "Looks fine to me"), admin));
         for (Reply r : refused) {
             assertThat(r.status()).as(r.text()).isEqualTo(403);
@@ -999,17 +1009,25 @@ class AdminIntegrationTest {
             assertThat(field(r.body(), "message")).isEqualTo(
                     "You can't decide on a shop you belong to. Ask another admin.");
         }
+        // Suspending and reinstating are for super admins only
+        for (Reply r : List.of(
+                post("/admin/shops/" + shop + "/suspend", Map.of("version", v, "reason", "Shut at visit"), admin),
+                post("/admin/shops/" + shop + "/reinstate", Map.of("version", v), admin))) {
+            assertThat(r.status()).as(r.text()).isEqualTo(403);
+            assertThat(field(r.body(), "code")).isEqualTo("SUPER_ADMIN_ONLY");
+        }
         assertThat(jdbc.queryForObject("SELECT status FROM shops WHERE id = ?", String.class, shop))
                 .isEqualTo("PENDING_VISIT");
         assertThat(count("shop_events WHERE shop_id = '" + shop + "'")).isZero();
 
-        // The super admin too, for a shop they own; another admin decides
+        // A super admin too, for a shop they own; another admin decides
         UUID bossShop = UUID.randomUUID();
         jdbc.update("DELETE FROM shop_members WHERE user_id = ?", boss);
         TestData.salon(jdbc, bossShop, boss);
         jdbc.update("UPDATE shops SET status = 'PENDING_VISIT' WHERE id = ?", bossShop);
         Reply own = post("/admin/shops/" + bossShop + "/approve", Map.of("version", version(bossShop)), boss);
         assertThat(field(own.body(), "code")).as(own.text()).isEqualTo("OWN_SHOP");
+        assignTo(bossShop, admin);
         assertThat(post("/admin/shops/" + bossShop + "/approve", Map.of("version", version(bossShop)), admin)
                 .status()).isEqualTo(200);
         assertThat(post("/admin/shops/" + shop + "/approve", Map.of("version", v), boss).status()).isEqualTo(200);
@@ -1049,7 +1067,7 @@ class AdminIntegrationTest {
     }
 
     private void approve(UUID shop) {
-        Reply r = post("/admin/shops/" + shop + "/approve", Map.of("version", version(shop)), admin);
+        Reply r = post("/admin/shops/" + shop + "/approve", Map.of("version", version(shop)), boss);
         assertThat(r.status()).as(r.text()).isEqualTo(200);
     }
 
@@ -1070,9 +1088,21 @@ class AdminIntegrationTest {
         // As a browser's URLSearchParams does: a space as "+", and "+" itself as %2B
         java.net.URI uri = java.net.URI.create(base + "/admin/shops?type=SALON&group=" + group + (q == null ? ""
                 : "&q=" + java.net.URLEncoder.encode(q, java.nio.charset.StandardCharsets.UTF_8)));
-        Reply r = http.get().uri(uri).headers(h -> h.setBearerAuth(token(admin))).exchange((rq, res) -> read(res));
+        Reply r = http.get().uri(uri).headers(h -> h.setBearerAuth(token(boss))).exchange((rq, res) -> read(res));
         assertThat(r.status()).as(r.text()).isEqualTo(200);
         return (List<?>) r.body();
+    }
+
+    /** What the Team page sends to add a field agent covering 500081. */
+    static Map<String, Object> newMember(String phone) {
+        return Map.of("phone", phone, "email", "agent" + phone.replaceAll("\\D", "") + "@example.com", "name",
+                "New Agent", "role", "ADMIN", "designation", "FIELD_AGENT", "pincodes", List.of("500081"));
+    }
+
+    /** Assigned by hand (as a super admin's assign would leave it), without the log. */
+    private void assignTo(UUID shop, UUID agent) {
+        jdbc.update("UPDATE shops SET assigned_admin_id = ?, assigned_at = ? WHERE id = ?", agent,
+                Timestamp.from(NOW), shop);
     }
 
     private long version(UUID shop) {
