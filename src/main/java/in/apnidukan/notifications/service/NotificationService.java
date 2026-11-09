@@ -108,6 +108,12 @@ public class NotificationService implements Notifications {
 
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
+    public void cancelPending(UUID refId, String type) {
+        jobs.cancelPending(refId, type, clock.instant());
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
     public void replacePending(Notice notice) {
         jobs.rewritePending(clean(notice));
         versions.bumpAfterCommit(List.of(notice.userId()));

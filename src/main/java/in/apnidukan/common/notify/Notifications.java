@@ -26,6 +26,9 @@ public interface Notifications {
     /** Cancels every message about this subject (e.g. a booking) that hasn't gone out yet. */
     void cancelPending(UUID refId);
 
+    /** cancelPending() for the messages of one type only (e.g. a booking's earlier-slot offer, not its reminder). */
+    void cancelPending(UUID refId, String type);
+
     /**
      * Rewrites a message that hasn't gone out yet (same subject and type, e.g. a booking's reminder after the salon
      * moved): the text of each channel still waiting is replaced in place, keeping its place in the queue. Channels

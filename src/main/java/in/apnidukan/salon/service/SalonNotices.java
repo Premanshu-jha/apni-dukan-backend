@@ -12,6 +12,7 @@ import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.repo.AppointmentStore;
+import in.apnidukan.salon.repo.EarlierSlotAlertStore;
 import in.apnidukan.salon.repo.SalonStaffRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
@@ -175,7 +176,7 @@ public class SalonNotices {
                 .toList());
     }
 
-    /** The booking became a no-show (not started 15 minutes after its start): the customer is told. */
+    /** The booking became a no-show (not started 10 minutes after its start): the customer is told. */
     public void noShow(Appointment a, ShopCard salon, Instant now) {
         noShows(List.of(a), shopId -> salon, now);
     }
@@ -191,6 +192,31 @@ public class SalonNotices {
                             + "no-show; 3 within 60 days pause online booking for 30 days.",
                     url(a), Map.of("SALON", salon.name(), "WHEN", DAY_TIME.format(a.startsAt())));
         }).toList());
+    }
+
+    /**
+     * An earlier time opened the same day (EarlierSlotAlerts): each customer who asked is told, in the app and by
+     * push (no SMS template: it is an offer, not news about their booking). Tapping it opens their booking with Move
+     * on that time (?earlier=); whoever moves first gets it. About the booking (refId), so a later change to it
+     * cancels the message if it hasn't gone out yet. Written in one batch.
+     * @param offers each booking told, with the start offered to it
+     */
+    public void earlierSlots(Map<EarlierSlotAlertStore.Candidate, Instant> offers, ShopCard salon, String barber,
+                             Instant now) {
+        notifications.queueAll(offers.entrySet().stream().map(e -> {
+            EarlierSlotAlertStore.Candidate c = e.getKey();
+            Instant t = e.getValue();
+            return new Notice(c.customerId(), "BOOKING_EARLIER_SLOT", c.id(), now,
+                    "Earlier time at " + salon.name(),
+                    DAY_TIME.format(t) + " with " + barber + " just opened up. You're booked for "
+                            + TIME.format(c.startsAt()) + ". Tap to move your booking; the first to move gets it.",
+                    "/bookings/" + c.id() + "?earlier=" + t, Map.of());
+        }).toList());
+    }
+
+    /** The customer switched the alert off: an earlier-slot offer for this booking still waiting isn't sent. */
+    public void withdrawEarlierSlot(UUID bookingId) {
+        notifications.cancelPending(bookingId, "BOOKING_EARLIER_SLOT");
     }
 
     /** A no-show undone by the salon: the customer's "Missed booking" no longer counts. No SMS. */

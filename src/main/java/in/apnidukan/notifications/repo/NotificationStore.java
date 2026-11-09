@@ -78,6 +78,12 @@ public class NotificationStore {
                 + "WHERE ref_id = ? AND status = 'PENDING'", at(now), refId);
     }
 
+    /** cancelPending for one type of message about that subject (through ix_notification_jobs_ref as well). */
+    public int cancelPending(UUID refId, String type, Instant now) {
+        return jdbc.update("UPDATE notification_jobs SET status = 'CANCELLED', finished_at = ? "
+                + "WHERE ref_id = ? AND type = ? AND status = 'PENDING'", at(now), refId, type);
+    }
+
     // ---------- the in-app list ----------
 
     /**
