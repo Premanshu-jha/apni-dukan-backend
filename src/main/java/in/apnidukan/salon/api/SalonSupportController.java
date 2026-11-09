@@ -15,7 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
 
-/** Apni Dukan support only (users.admin); anyone else gets 403. */
+/** Apni Dukan support: super admins only (a field agent gets 403 SUPER_ADMIN_ONLY); anyone else 403. */
 @RestController
 @RequestMapping("/api/v1/admin/salon")
 public class SalonSupportController {
