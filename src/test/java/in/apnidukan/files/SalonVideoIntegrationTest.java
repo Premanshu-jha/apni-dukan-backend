@@ -81,7 +81,7 @@ class SalonVideoIntegrationTest {
         TestData.user(jdbc, BARBER, "9100000003");
         TestData.user(jdbc, CUSTOMER, "9100000004");
         TestData.user(jdbc, ADMIN, "9100000005");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", ADMIN);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", ADMIN);
         TestData.salon(jdbc, SALON, OWNER);
         TestData.member(jdbc, SALON, HELPER, "HELPER");
         TestData.member(jdbc, SALON, BARBER, "BARBER");

@@ -87,6 +87,48 @@ class MigrationUpgradeIntegrationTest {
         }
     }
 
+    @Test
+    void existingAdminsBecomeFieldAgentsWithNoPincodesAndWaitingShopsStayUnassigned() {
+        String name = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
+        JdbcTemplate admin = new JdbcTemplate(new DriverManagerDataSource(TestContainers.jdbcUrl(),
+                TestContainers.DB_USER, TestContainers.DB_PASSWORD));
+        admin.execute("CREATE DATABASE " + name);
+        String url = TestContainers.jdbcUrl().replaceAll("/[^/]+$", "/" + name);
+        DriverManagerDataSource ds = new DriverManagerDataSource(url, TestContainers.DB_USER,
+                TestContainers.DB_PASSWORD);
+        try {
+            flyway(ds, MigrationVersion.fromVersion("29")).migrate();
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+            Timestamp now = Timestamp.from(Instant.parse("2026-11-08T04:30:00Z"));
+            UUID boss = UUID.randomUUID();
+            UUID fieldAdmin = UUID.randomUUID();
+            UUID customer = UUID.randomUUID();
+            jdbc.update("INSERT INTO users (id, phone, name, admin, admin_role, created_at, updated_at) VALUES "
+                    + "(?, '9000000001', 'Prem', true, 'SUPER_ADMIN', ?, ?), (?, '9000000002', 'Ravi', true, 'ADMIN', "
+                    + "?, ?), (?, '9000000003', 'Sita', false, 'NONE', ?, ?)", boss, now, now, fieldAdmin, now, now,
+                    customer, now, now);
+            UUID shop = UUID.randomUUID();
+            jdbc.update("INSERT INTO shops (id, name, owner_name, address_line, area, city, pincode, latitude, "
+                    + "longitude, status, type, version, created_at, updated_at) VALUES (?, 'Raju Hair', 'Owner', "
+                    + "'Shop 4', 'Kondapur', 'Hyderabad', '500084', 17.465, 78.364, 'PENDING_VISIT', 'SALON', 0, ?, ?)",
+                    shop, now, now);
+
+            flyway(ds, MigrationVersion.LATEST).migrate();
+
+            assertThat(jdbc.queryForList("SELECT admin_role || '/' || COALESCE(admin_designation, '-') FROM users "
+                    + "ORDER BY phone", String.class)).containsExactly("SUPER_ADMIN/-", "ADMIN/FIELD_AGENT", "NONE/-");
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM admin_pincodes", Long.class)).isZero();
+            assertThat(jdbc.queryForObject("SELECT assigned_admin_id IS NULL FROM shops", Boolean.class)).isTrue();
+            // More than one super admin is allowed now
+            jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', admin_designation = NULL WHERE id = ?",
+                    fieldAdmin);
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM users WHERE admin_role = 'SUPER_ADMIN'", Long.class))
+                    .isEqualTo(2L);
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
+        }
+    }
+
     /** As the app runs Flyway (application.properties): mixed files, no transactional lock, no statement limit. */
     private static Flyway flyway(DriverManagerDataSource ds, MigrationVersion target) {
         return Flyway.configure().dataSource(ds).locations("classpath:db/migration").target(target).mixed(true)

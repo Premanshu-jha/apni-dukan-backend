@@ -11,7 +11,7 @@ class RefreshGraceSettingTest {
     private static AuthService withGrace(long seconds) {
         return new AuthService(null, null, null, null, null, null,
                 new in.apnidukan.common.security.JwtProperties("test-only-secret-0123456789-abcdefghijkl", 15, 30),
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, seconds);
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, seconds);
     }
 
     @Test

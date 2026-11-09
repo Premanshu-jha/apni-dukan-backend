@@ -37,7 +37,8 @@ class ReleasableEmailTest {
     @Test
     void aTestAccountMadeAnAdminMeanwhileDoesnt() {
         User holder = testAccountWith("qa@gmail.com");
-        holder.makeAdmin(NOW);
+        holder.makeAdmin(in.apnidukan.auth.domain.AdminRole.ADMIN, in.apnidukan.auth.domain.AdminDesignation.FIELD_AGENT,
+                NOW);
         assertThat(AuthService.releasable(holder, "qa@gmail.com")).isFalse();
     }
 

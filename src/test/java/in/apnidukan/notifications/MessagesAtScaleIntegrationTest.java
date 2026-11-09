@@ -174,6 +174,11 @@ class MessagesAtScaleIntegrationTest {
                 }
 
                 @Override
+                public in.apnidukan.common.context.TeamRole teamRole(UUID userId) {
+                    return real.teamRole(userId);
+                }
+
+                @Override
                 public boolean isAdmin(UUID userId) {
                     return real.isAdmin(userId);
                 }

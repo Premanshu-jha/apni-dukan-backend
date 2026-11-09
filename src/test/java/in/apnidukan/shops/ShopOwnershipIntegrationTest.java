@@ -187,7 +187,7 @@ class ShopOwnershipIntegrationTest {
 
         // The field team sees it as CLOSED and can't decide on it
         UUID admin = person("9000000901");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN', admin = true WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', admin = true WHERE id = ?", admin);
         List<?> listed = (List<?>) get("/admin/shops?type=SALON&group=CLOSED", admin).body();
         assertThat(listed).extracting(x -> field(x, "id")).containsExactly(salon.toString());
         assertThat(((Number) field(field(get("/admin/dashboard", admin).body(), "SALON"), "CLOSED")).intValue())
@@ -364,7 +364,7 @@ class ShopOwnershipIntegrationTest {
     @Test
     void suspendingABusySalonIsOneShortRequestAndTheJobCancelsItsBookingsOnceButNotAfterAReinstate() {
         UUID admin = person("9000000901");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN', admin = true WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', admin = true WHERE id = ?", admin);
         Instant first = at("09:00").plus(Duration.ofDays(1));
         for (int i = 0; i < 300; i++) {
             insertBooking(customer, raju, first.plus(Duration.ofDays(i / 24)).plus(Duration.ofMinutes(30L * (i % 24))));
@@ -427,7 +427,7 @@ class ShopOwnershipIntegrationTest {
     @Test
     void aReinstateCommittingWhileTheJobWaitsForTheShopsRowStopsIt() throws Exception {
         UUID admin = person("9000000901");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN', admin = true WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', admin = true WHERE id = ?", admin);
         assertThat(post("/admin/shops/" + salon + "/suspend", Map.of("version", shopVersion(), "reason", "Fake"),
                 admin).status()).isEqualTo(200);
         org.springframework.transaction.support.TransactionTemplate tx =

@@ -1052,7 +1052,7 @@ class SalonBookingIntegrationTest {
         assertThat(withVideo.status()).as(withVideo.text()).isEqualTo(200);
 
         UUID admin = person("9000000099");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", admin);
         assertThat(approve(newSalon, admin).status()).isEqualTo(409);   // DRAFT
         Reply submitted = post("/shops/me/submit", Map.of("version", field(withVideo.body(), "version")), newOwner);
         assertThat(field(submitted.body(), "status")).as(submitted.text()).isEqualTo("PENDING_VISIT");
@@ -1535,7 +1535,7 @@ class SalonBookingIntegrationTest {
                 .contains("WRONG_STATUS").contains("support");
 
         UUID admin = person("9000000999");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", admin);
         assertThat(post("/admin/salon/strikes/lookup", Map.of("phone", "9000000101"), owner).status()).isEqualTo(403);
         Reply list = post("/admin/salon/strikes/lookup", Map.of("phone", "9000000101"), admin);
         assertThat(list.status()).as(list.text()).isEqualTo(200);
@@ -1558,7 +1558,7 @@ class SalonBookingIntegrationTest {
     @Test
     void aSuspendedSalonDisappearsItsUpcomingBookingsAreCancelledAndItCanComeBack() {
         UUID admin = person("9000000999");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", admin);
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
         UUID b2 = id(book(customer2, at("12:00"), List.of(haircut), UUID.randomUUID()));   // Sunil
         UUID tomorrow = id(book(customer, at("12:00").plus(Duration.ofDays(1)), List.of(beard), UUID.randomUUID()));
@@ -1603,7 +1603,7 @@ class SalonBookingIntegrationTest {
     @Test
     void aShopWhoseVisitDidntPassGoesBackToDraftWithTheReason() {
         UUID admin = person("9000000999");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", admin);
         jdbc.update("UPDATE shops SET status = 'PENDING_VISIT' WHERE id = ?", salon);
         assertThat(post("/admin/shops/" + salon + "/reject", Map.of("version", shopVersion(), "reason", "x"), admin)
                 .status()).isEqualTo(400);
@@ -2103,7 +2103,7 @@ class SalonBookingIntegrationTest {
     @Test
     void aSuspensionAlsoCancelsBookingsWhoseCustomerMayStillArrive() {
         UUID admin = person("9000000999");
-        jdbc.update("UPDATE users SET admin_role = 'ADMIN' WHERE id = ?", admin);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", admin);
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
         CLOCK.set(at("12:05"));   // started 5 minutes ago, still held until 12:15
         Reply suspended = post("/admin/shops/" + salon + "/suspend", Map.of("version", shopVersion(), "reason",

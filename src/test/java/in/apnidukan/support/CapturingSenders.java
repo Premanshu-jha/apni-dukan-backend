@@ -19,6 +19,8 @@ public class CapturingSenders {
 
     public static final Map<String, String> LAST_SMS = new ConcurrentHashMap<>();
     public static final Map<String, String> LAST_EMAIL = new ConcurrentHashMap<>();
+    /** How many emails each address got (tests that care clear it). */
+    public static final Map<String, Integer> EMAILS_SENT = new ConcurrentHashMap<>();
     /** Set to make the email provider refuse (as Resend or SMTP do when down): tests reset it. */
     public static volatile boolean emailDown;
 
@@ -47,6 +49,7 @@ public class CapturingSenders {
                         "EMAIL_FAILED", "We couldn't send the email. Please try again in a minute.");
             }
             LAST_EMAIL.put(to, body);
+            EMAILS_SENT.merge(to, 1, Integer::sum);
         };
     }
 
