@@ -511,31 +511,66 @@ For Clozest's own team. Everything here needs an admin's sign-in (the normal pho
 Who is an admin is read from the database on every call, so someone removed is refused at once even with a token
 issued before.
 
-**Roles** (`users.admin_role`): `ADMIN` (field team: visits and support) and `SUPER_ADMIN` (also the team and OTP
-test mode). There is at most one super admin (the database refuses a second). It is set by hand, once, in Neon:
+**Roles** (`users.admin_role`) **and designations** (`users.admin_designation`, V30):
+
+- `ADMIN` always has a designation; today the only one is `FIELD_AGENT`. A field agent covers a list of 6-digit
+  pincodes (`admin_pincodes`) and sees and decides only the businesses assigned to them (see "Field agents and
+  assignment" below). More designations may come later, each with its own allowed actions.
+- `SUPER_ADMIN` has no designation and no pincodes, and does everything: every business, the team, assignments,
+  support and OTP test mode. There may be several. The first is set by hand, once, in Neon:
 
 ```sql
 UPDATE users SET admin_role = 'SUPER_ADMIN', admin = true WHERE phone = '9xxxxxxxxx';
 ```
 
 (Sign in once first, so the account exists. `admin` is the old column, kept in step for a version still running
-during a deploy.) The super admin is never changed from the website and can't delete their account (409
-`SUPER_ADMIN`): without them nobody could manage admins or switch test mode off.
+during a deploy.) After that, super admins add and change each other on the Team page. A super admin can't delete
+their own account (409 `SUPER_ADMIN`): another super admin changes their role first.
 
 | Endpoint | Notes |
 | --- | --- |
-| `GET /admin/me` | Who is signed in: `{userId, name, phone, adminRole, testMode: {on, until}}` (the website shows a red banner while test mode is on) |
+| `GET /admin/me` | Who is signed in: `{userId, name, phone, adminRole, designation, testMode: {on, until}}` (`designation`: `FIELD_AGENT` for an admin, null for a super admin; the website shows a red banner while test mode is on) |
 | `GET /admin/dashboard` | For `KIRANA` and `SALON`, how many shops are in each group: `FIRST_VISIT` (waiting, never approved), `RECHECK` (waiting, approved before: the owner moved the pin or changed a photo, or it was reinstated), `SENT_BACK` (a draft sent back with a reason), `LIVE`, `SUSPENDED`, `CLOSED` (closed by its owner). A draft never submitted is in no group. Counted at most every 30 seconds (kept in Redis); a field-team decision shows at once, an owner's own step (submitting, a moved pin) within 30 seconds |
-| `GET /admin/shops?type=&group=&q=` | A group's shops, longest in it first (`statusSince`: its latest timeline entry other than a note, so an owner fixing a typo doesn't move it), 50 a page (see "Pages" below), each with `group` and `ownerPhone`. `type` and `group` are required (400 `VALIDATION_FAILED`, `details` naming each missing one: `{"type": "is required"}`, `{"group": "is required"}`). `q`: the shop number exactly (`1042` or `#1042`, any length), the owner's phone in part (spaces, `+91` and dashes ignored; at least 3 digits), or the name or owner's name in part. A `q` of 1 or 2 characters that isn't a shop number is 400 `VALIDATION_FAILED` with `details: {"q": "type at least 3 letters"}`; a blank `q` is no search |
+| `GET /admin/shops?type=&group=&q=&assignedTo=&unassigned=` | A field agent gets only the businesses assigned to them (`assignedTo` and `unassigned` are ignored for them); a super admin gets all, or one agent's (`assignedTo=<userId>`), or those waiting with no agent (`unassigned=true`; both: 400 `VALIDATION_FAILED`). Each has `assignedTo` (`{id, name}`, null when unassigned). A group's shops, longest in it first (`statusSince`: its latest timeline entry other than a note, so an owner fixing a typo doesn't move it), 50 a page (see "Pages" below), each with `group` and `ownerPhone`. `type` and `group` are required (400 `VALIDATION_FAILED`, `details` naming each missing one: `{"type": "is required"}`, `{"group": "is required"}`). `q`: the shop number exactly (`1042` or `#1042`, any length), the owner's phone in part (spaces, `+91` and dashes ignored; at least 3 digits), or the name or owner's name in part. A `q` of 1 or 2 characters that isn't a shop number is 400 `VALIDATION_FAILED` with `details: {"q": "type at least 3 letters"}`; a blank `q` is no search |
 | `GET /admin/shops/{id}` | The shop; a salon's barbers and services; `changes` since the moment it was last approved (name, owner, address, area, city, pincode, pin with `pinMovedMetres`, GSTIN, Udyam, photos with the old photo links), so edits a live shop made without needing a visit show up too; the `timeline`, newest first, its first 50 entries, and `timelineNext` (`{afterAt, afterSeq}`, or null when there are no more) |
 | `GET /admin/shops/{id}/timeline?afterAt=&afterSeq=` | The rest of the timeline, 50 a page: `{items: [...], next}` with the same entries as `timeline` and `next` like `timelineNext`. See "Pages" below |
 | `POST /admin/shops/{id}/notes {note}` | A note only admins see (2–500 characters), 201 |
-| own shops | An admin who works in a shop (owner, helper or barber) can't approve, send back, suspend, reinstate or write notes about it: 403 `OWN_SHOP` "You can't decide on a shop you belong to. Ask another admin." The super admin too. Checked before anything else |
+| own shops | An admin who works in a shop (owner, helper or barber) can't approve, send back, suspend, reinstate or write notes about it: 403 `OWN_SHOP` "You can't decide on a shop you belong to. Ask another admin." A super admin too. Checked after who may see it (a field agent: 404 for a business not assigned to them) |
 | decisions | approve, reject (send back), suspend, reinstate as in "How shops work". The status is checked before the version: when another admin decided first, the answer is 409 `WRONG_STATUS` with `details.status`, not `SHOP_CHANGED`. Now with an optional `note` (admins only, up to 500 characters) and, for send back and suspend, an optional `checklist`: `NAME_BOARD_NOT_VISIBLE`, `OWNER_PHOTO_UNCLEAR`, `PIN_WRONG`, `ADDRESS_MISMATCH`, `GST_UDYAM_MISMATCH`, `SHOP_SHUT`, `OTHER`. The owner sees only the `reason` |
-| `GET /admin/team` · `POST /admin/team {phone}` · `DELETE /admin/team/{userId}` | Super admin only (403 `SUPER_ADMIN_ONLY` for an admin). `since` is when they became an admin. Add makes that phone an admin (the account is made if it has none) and ends any session already open on it; 409 `ALREADY_ADMIN`, 409 `TEST_PHONE` (a test number, or an account made in test mode). Remove: their sessions end at once; 409 `CANT_REMOVE_SUPER_ADMIN` |
+| `GET /admin/team` | Super admins only (403 `SUPER_ADMIN_ONLY` for a field agent, as for every Team, assignment, support and test-mode call). Super admins first, then by when they joined: `{userId, name, phone, email, emailVerified, adminRole, designation, pincodes, pendingVisits, since, version}` |
+| `POST /admin/team {phone, email, name, role, designation, pincodes}` | Adds a member, 201 with the member. `role` `ADMIN` needs `designation` `FIELD_AGENT` and 1–300 pincodes (6 digits, not starting with 0; trimmed, each once); for `SUPER_ADMIN` both are ignored. A phone with no account gets one with this name and email; an existing account (a customer's) takes this name and email. Nothing is sent: they sign in with the phone's code, and the email is stored unverified, so they confirm it first thing (an old verified address is told it changed). Their open sessions end. 409 `ALREADY_ADMIN`, `TEST_PHONE` (a test number, or an account made in test mode), `TEST_EMAIL`, `EMAIL_IN_USE` (another account's verified email); 400 `VALIDATION_FAILED` with `details` per field (`phone`, `email`, `name`, `role`, `designation`, `pincodes`) |
+| `PUT /admin/team/{userId} {version, phone, email, name, role, designation, pincodes}` | Changes anything about a member (a super admin too), with the `version` the Team page showed: 409 `MEMBER_CHANGED` if someone changed them since. A new phone or email signs them out everywhere (the email unverified again, the old verified address told); 409 `PHONE_IN_USE`, `EMAIL_IN_USE`, `TEST_PHONE`, `TEST_EMAIL`; 404 if they aren't on the team. Pincodes removed, or made a super admin: their waiting businesses go by the rule below. Logged as `ADMIN_EDITED` with what changed |
+| `DELETE /admin/team/{userId}` | Removes a member (a super admin too, never yourself: 409 `CANT_REMOVE_YOURSELF`); their sessions end at once, their pincodes go, their waiting businesses go by the rule below |
+| `GET /admin/team/coverage` | Every covered pincode with its agents: `[{pincode, agents: [{userId, name, phone}]}]` |
+| `POST /admin/shops/{id}/assign {adminId}` | Super admins: a waiting business to this field agent (any pincode), 204; the same agent again changes nothing. 404; 409 `WRONG_STATUS` (not waiting); 400 `NOT_A_FIELD_AGENT`; 409 `OWN_SHOP` (that agent works there) |
+| `POST /admin/assignments/move {fromAdminId, toAdminId}` | Super admins: every business waiting for one admin goes to a field agent (leave): `{moved, stayed}` (`stayed`: ones the new agent works in, left where they were). 400 `NOT_A_FIELD_AGENT`, `VALIDATION_FAILED` (the same person) |
 | `GET` · `PUT {hours}` · `DELETE /admin/test-mode` | Super admin only. OTP test mode on for 1–8 hours (it switches itself off), or off now |
 | `POST /admin/test-mode/phones {phone, label}` · `DELETE /admin/test-mode/phones/{phone}` | Super admin only. The test numbers. 409 `ADMIN_PHONE` (an admin's number), 409 `REAL_ACCOUNT` (a number that already has a real account), 409 `ALREADY_TEST_PHONE`. Removing one signs its test account out |
 | `POST /admin/test-mode/emails {email, label}` · `DELETE /admin/test-mode/emails/{email}` | Super admin only. The test emails (stored trimmed and in lower case; `GET /admin/test-mode` lists them as `emails`, each with `inUse`). 409 `REAL_ACCOUNT_EMAIL` (already verified by a real account or an admin), 409 `ALREADY_TEST_EMAIL`. Removing one changes nothing else |
+
+**Field agents and assignment.** A business that starts waiting for a visit (submitted; an approved one changed its
+address, photos or video; reinstated) goes to the field agent covering its pincode with the fewest businesses waiting
+(the longest on the team on a tie), never to someone who works in it; if nobody covers it, it is Unassigned and a super
+admin assigns it. A waiting business that changes its pincode goes through the rule again when its agent doesn't cover
+the new one. When an agent stops covering a pincode (removed from their list, made a super admin, taken off the team,
+or their account deleted), their waiting businesses there go through the rule too. A super admin can assign any
+waiting business to any field agent, or move all of one agent's to another. The assignment stays after the decision,
+so an agent still sees the businesses they visited. A field agent sees only their own in the dashboard, the lists and
+search; any other business answers 404 for the page, the timeline, notes and decisions; suspending and reinstating are
+for super admins. Every assignment is logged (`shop_assignments`: from, to, by whom, why) and the new agent gets an
+in-app message ("New visit for you").
+
+Assignments and Team changes take one database lock first (`TeamLock`: exclusive for Team changes, shared for
+assignments), then the rows, so a business is never given to an agent whose pincode is being taken away at that
+moment, and the two never deadlock. A decision locks the business's row before checking who it is assigned to, so a
+reassignment and a decision on the same business wait for each other.
+
+**Known limits (decided):** a super admin can change anything about any member, so adding someone's existing
+account and then changing its phone hands that account over; the old phone and verified email are always told (as
+account recovery tells them), and every change is in `admin_events`. The last super admin can change their own role:
+then one is set again by hand, as the first was. Removing a field agent with thousands of waiting businesses holds the
+team lock while each is reassigned, so owners' submits and edits wait for it (seconds at that size); agents normally
+have far fewer.
 
 **OTP test mode.** The super admin adds test numbers and test emails; while test mode is on, those sign in and
 verify with any 6-digit code, and no SMS or email is sent to them. Everything else always needs the real code.
@@ -745,6 +780,18 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 `customerPhone`, to call someone who is running late.
 
 ### API changes in this version (deploy the backend first, then the apps)
+
+**Field agents and assignment** (V30–V32; the admin website 0.6.0 needs this):
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `GET /admin/me` | `{adminRole, …}` | adds `designation` (`FIELD_AGENT` for an admin, null for a super admin) | admin website: "Admin · Field agent" |
+| `GET /admin/team`, `POST /admin/team` | members by phone only | members with name, email, role, designation, pincodes, `version`; add takes `{phone, email, name, role, designation, pincodes}` (201) | admin website: the Team page and add form |
+| `PUT /admin/team/{id}`, `DELETE /admin/team/{id}`, `GET /admin/team/coverage` | none | new, super admin only: edit with `version` (409 `MEMBER_CHANGED`, `TRY_AGAIN`), remove (409 `CANT_REMOVE_YOURSELF`), pincode → agents | admin website: edit, remove, Coverage tab |
+| `GET /admin/shops` | | adds `assignedTo {id, name}`; takes `assignedTo` / `unassigned`; a field agent gets only their own | admin website: "Visit by", All / Unassigned |
+| `POST /admin/shops/{id}/assign {adminId}`, `POST /admin/assignments/move {fromAdminId, toAdminId}` | none | new, super admin only (409 `OWN_SHOP`, `WRONG_STATUS`; 400 `NOT_A_FIELD_AGENT`) | admin website: Assign / Reassign, Move waiting visits |
+| any `/admin/shops/{id}…` read or decision by a field agent | any business | 404 unless assigned to them | nothing |
+| `/admin/salon/strikes…` (Support) | any admin | super admin only (403 `SUPER_ADMIN_ONLY`) | admin website: Support under super admin |
 
 **OTP test mode has a test email list** (replaces the example.com rule):
 
@@ -1368,7 +1415,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V30__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V33__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
@@ -1395,6 +1442,14 @@ the next start refuses with "Detected failed migration". **Repair (no Flyway CLI
 on a large table is added `NOT VALID` and validated in the next migration, as V22 and V23 do.
 
 **V29** (test emails) adds the empty `test_emails` table and widens the `admin_events` event check (a few rows): quick.
+
+**V30–V32** (field agents): V30 adds nullable columns to `users` and `shops` (no rewrite), turns every `ADMIN` into a
+field agent, drops the one-super-admin index, and adds the empty `admin_pincodes` and `shop_assignments` tables; its
+checks and the new foreign key are `NOT VALID`. V31 builds the two `shops` indexes CONCURRENTLY (see above if it
+fails). V32 validates V30's checks and key. **After deploying:** add each field agent's pincodes on the Team page;
+that picks up the businesses already waiting there, and until then every new business is Unassigned. During the
+rolling deploy a copy still on the old version can't add or remove an admin (V30's designation check refuses its
+write: 500) until every copy runs this version; deploy at a quiet moment.
 
 **Deploying this version.** Run the migrations with **one copy** first (scale Railway to 1 replica for the deploy, then
 back up): V24 builds indexes CONCURRENTLY and can take minutes on a big `appointments`. A second copy starting meanwhile
