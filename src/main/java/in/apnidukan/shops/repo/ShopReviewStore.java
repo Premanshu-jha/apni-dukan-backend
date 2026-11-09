@@ -59,6 +59,14 @@ public class ShopReviewStore {
 
     /** How many shops of each type are in each group (every group present, zeros included). */
     public Map<ShopType, Map<ReviewGroup, Long>> counts() {
+        return counts(null);
+    }
+
+    /**
+     * Like counts(), only the shops assigned to this field agent (index ix_shops_assignee_list: one agent's shops,
+     * a small range, so never kept in Redis). Null: every shop.
+     */
+    public Map<ShopType, Map<ReviewGroup, Long>> counts(UUID assignee) {
         Map<ShopType, Map<ReviewGroup, Long>> out = new EnumMap<>(ShopType.class);
         for (ShopType t : ShopType.values()) {
             Map<ReviewGroup, Long> zero = new EnumMap<>(ReviewGroup.class);
@@ -67,21 +75,30 @@ public class ShopReviewStore {
             }
             out.put(t, zero);
         }
-        jdbc.query("SELECT s.type, " + GROUP + " AS grp, count(*) AS n FROM shops s GROUP BY 1, 2", rs -> {
+        org.springframework.jdbc.core.RowCallbackHandler add = rs -> {
             String grp = rs.getString("grp");
             if (grp != null) {
                 out.get(ShopType.valueOf(rs.getString("type"))).put(ReviewGroup.valueOf(grp), rs.getLong("n"));
             }
-        });
+        };
+        if (assignee == null) {
+            jdbc.query("SELECT s.type, " + GROUP + " AS grp, count(*) AS n FROM shops s GROUP BY 1, 2", add);
+        } else {
+            jdbc.query("SELECT s.type, " + GROUP + " AS grp, count(*) AS n FROM shops s "
+                    + "WHERE s.assigned_admin_id = ? GROUP BY 1, 2", add, assignee);
+        }
         return out;
     }
 
     /**
      * One page of shop ids in a group, longest in it first (status_since, then id), at most PAGE, after the cursor
      * (null: the first page). `q` (optional) matches the shop number exactly ("1042" or "#1042"), the owner's phone in
-     * part (spaces, "+91" and dashes ignored), or the name or owner's name in part.
+     * part (spaces, "+91" and dashes ignored), or the name or owner's name in part. {@code assignee}: only the shops
+     * assigned to this field agent (ix_shops_assignee_list); {@code unassigned}: only those waiting for a visit with no
+     * agent (ix_shops_unassigned); neither: every shop.
      */
-    public List<UUID> search(ShopType type, ReviewGroup group, String q, Cursor after) {
+    public List<UUID> search(ShopType type, ReviewGroup group, String q, Cursor after, UUID assignee,
+                             boolean unassigned) {
         // The group as plain conditions on the shop's columns, so a page is one range of ix_shops_review_list
         StringBuilder sql = new StringBuilder("SELECT s.id FROM shops s WHERE s.type = ? AND ");
         sql.append(switch (group) {
@@ -93,6 +110,13 @@ public class ShopReviewStore {
             case CLOSED -> "s.status = 'CLOSED'";
         });
         List<Object> args = new ArrayList<>(List.of(type.name()));
+        if (assignee != null) {
+            sql.append(" AND s.assigned_admin_id = ?");
+            args.add(assignee);
+        }
+        if (unassigned) {
+            sql.append(" AND s.assigned_admin_id IS NULL");
+        }
         String text = q == null ? "" : q.strip();
         if (!text.isEmpty()) {
             text = text.codePoints().limit(60).collect(StringBuilder::new, StringBuilder::appendCodePoint,

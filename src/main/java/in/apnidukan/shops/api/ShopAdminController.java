@@ -9,6 +9,8 @@ import in.apnidukan.shops.domain.ShopType;
 import in.apnidukan.shops.domain.TimelineCursor;
 import in.apnidukan.shops.domain.VisitIssue;
 import in.apnidukan.shops.service.ShopAdminService;
+import in.apnidukan.shops.service.ShopAssignments;
+import in.apnidukan.shops.service.ShopAssignments.Moved;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -38,10 +40,12 @@ import java.util.UUID;
 public class ShopAdminController {
 
     private final ShopAdminService admin;
+    private final ShopAssignments assignments;
     private final CurrentUserProvider currentUser;
 
-    public ShopAdminController(ShopAdminService admin, CurrentUserProvider currentUser) {
+    public ShopAdminController(ShopAdminService admin, ShopAssignments assignments, CurrentUserProvider currentUser) {
         this.admin = admin;
+        this.assignments = assignments;
         this.currentUser = currentUser;
     }
 
@@ -56,14 +60,18 @@ public class ShopAdminController {
      * VALIDATION_FAILED naming the missing one); `q` searches the shop number, name, owner's name and owner's phone
      * (at least 3 letters, unless it is a shop number: else 400 VALIDATION_FAILED). The next page: `afterSince` and
      * `afterId` = the last shop's statusSince and id (both or neither, else 400 VALIDATION_FAILED); fewer than 50
-     * means it was the last page. The older form `?status=` is gone (no app used it).
+     * means it was the last page. The older form `?status=` is gone (no app used it). A field agent gets only the
+     * businesses assigned to them. A super admin may add `assignedTo` (one agent's) or `unassigned=true` (waiting
+     * with no agent), not both (400 VALIDATION_FAILED).
      */
     @GetMapping("/shops")
     public List<AdminShopResponse> list(@RequestParam(required = false) ShopType type,
                                         @RequestParam(required = false) ReviewGroup group,
                                         @RequestParam(required = false) String q,
                                         @RequestParam(required = false) Instant afterSince,
-                                        @RequestParam(required = false) UUID afterId) {
+                                        @RequestParam(required = false) UUID afterId,
+                                        @RequestParam(required = false) UUID assignedTo,
+                                        @RequestParam(defaultValue = "false") boolean unassigned) {
         Map<String, Object> missing = new LinkedHashMap<>();
         if (type == null) {
             missing.put("type", "is required");
@@ -78,7 +86,16 @@ public class ShopAdminController {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                     Map.of("afterId", "send afterSince and afterId together"));
         }
-        return admin.list(caller(), type, group, q, afterSince, afterId);
+        if (assignedTo != null && unassigned) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("unassigned", "send assignedTo or unassigned, not both"));
+        }
+        if (unassigned && group != ReviewGroup.FIRST_VISIT && group != ReviewGroup.RECHECK) {
+            // "Unassigned" means waiting for a visit with no agent; decided ones never need one
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("unassigned", "only for FIRST_VISIT and RECHECK"));
+        }
+        return admin.list(caller(), type, group, q, afterSince, afterId, assignedTo, unassigned);
     }
 
     /** One shop: what changed since it was last approved, a salon's size, photos and the first 50 timeline entries. */
@@ -146,6 +163,31 @@ public class ShopAdminController {
      * @param version the shop's version on the page the admin checked
      * @param note    optional, for admins only (up to 500 characters)
      */
+    /**
+     * Super admins: give a business waiting for a visit to this field agent (any pincode). 204. 409 WRONG_STATUS
+     * (not waiting), 409 OWN_SHOP (the agent works in it), 400 NOT_A_FIELD_AGENT, 404 if there's no such business.
+     */
+    @PostMapping("/shops/{id}/assign")
+    public ResponseEntity<Void> assign(@PathVariable UUID id, @Valid @RequestBody Assign body) {
+        assignments.assign(caller(), id, body.adminId());
+        return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Super admins: move every business waiting for one admin's visit to a field agent (leave). Answers how many
+     * moved, and how many stayed because the new agent works in them. 400 NOT_A_FIELD_AGENT / VALIDATION_FAILED.
+     */
+    @PostMapping("/assignments/move")
+    public Moved moveAll(@Valid @RequestBody MoveAll body) {
+        return assignments.moveAll(caller(), body.fromAdminId(), body.toAdminId());
+    }
+
+    public record Assign(@NotNull UUID adminId) {
+    }
+
+    public record MoveAll(@NotNull UUID fromAdminId, @NotNull UUID toAdminId) {
+    }
+
     public record Approve(@NotNull Long version, @Size(max = 500) String note) {
     }
 

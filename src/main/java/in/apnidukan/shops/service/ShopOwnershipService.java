@@ -118,10 +118,14 @@ public class ShopOwnershipService implements TestAccountShops {
     private final ShopInvitesService invites;
     private final Clock clock;
 
+    private final ShopAssignments assignments;
+
     public ShopOwnershipService(ShopRepository shops, ShopMemberRepository members, ShopHandoverStore handovers,
                                 ShopReviewStore review, UserDirectory users, Notifications notifications,
                                 List<ShopChangeListener> listeners, SessionRevocations sessions, RateLimiter limits,
-                                DashboardCounts dashboardCounts, ShopInvitesService invites, Clock clock) {
+                                DashboardCounts dashboardCounts, ShopInvitesService invites,
+                                ShopAssignments assignments, Clock clock) {
+        this.assignments = assignments;
         this.invites = invites;
         this.shops = shops;
         this.members = members;
@@ -301,6 +305,7 @@ public class ShopOwnershipService implements TestAccountShops {
     @Transactional
     public ShopResponse accept(UUID userId, UUID handoverId) {
         Handover asked = addressedTo(userId, handoverId);
+        assignments.lockForAssignment();   // before any row: taking the shop over may take it from them (memberJoined)
         Shop shop = shops.lockById(asked.shopId()).orElseThrow();   // the shop's row first, as every step here
         // Then their membership (if any), then their own row: the order leaving and account deletion take them in
         members.lockByUserId(userId);
@@ -351,6 +356,7 @@ public class ShopOwnershipService implements TestAccountShops {
                 "/shops/me", Map.of()));
         notifications.queue(new Notice(userId, "SHOP_HANDOVER_DONE", handoverId, now, "The shop is yours",
                 "You now own " + name + " on Clozest. Check its details and photos.", "/shops/me", Map.of()));
+        assignments.memberJoined(shop.getId(), userId);   // a field agent can't visit a business they work in
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
 
