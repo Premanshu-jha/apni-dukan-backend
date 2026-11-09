@@ -184,7 +184,7 @@ public class SalonDayController {
         return day.finish(me(), id);
     }
 
-    /** No-show, from 15 minutes after the start. Frees the time; an online customer gets a strike. */
+    /** No-show, from 10 minutes after the start. Frees the time; an online customer gets a strike. */
     @PostMapping("/appointments/{id}/no-show")
     public AppointmentView noShow(@PathVariable UUID id) {
         return day.noShow(me(), id);

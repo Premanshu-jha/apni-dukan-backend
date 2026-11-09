@@ -86,7 +86,7 @@ import static in.apnidukan.common.text.TextCleaner.clean;
 public class SalonDayService {
 
     /** A customer may arrive this late and is still served; No-show is allowed only after it. */
-    public static final Duration LATE_ALLOWANCE = Duration.ofMinutes(15);
+    public static final Duration LATE_ALLOWANCE = Duration.ofMinutes(10);
     /** Start is allowed from this long before the planned start. */
     static final Duration EARLY_START = Duration.ofMinutes(15);
     /** No-show can be undone at the salon until this long after the start; after that only support can. */
@@ -585,7 +585,7 @@ public class SalonDayService {
     // ---------- start, no-show, reassign, cancel ----------
 
     /**
-     * CONFIRMED → IN_SERVICE, from 15 minutes before the start until 15 minutes after it (then it is a no-show).
+     * CONFIRMED → IN_SERVICE, from 15 minutes before the start until 10 minutes after it (then it is a no-show).
      * An online booking needs the customer's start code, or withoutCode (owner or helper only). A barber can start only his own appointments.
      */
     @Transactional
@@ -695,7 +695,7 @@ public class SalonDayService {
     }
 
     /**
-     * CONFIRMED → NO_SHOW, from 15 minutes after the start (the automatic no-show does the same within a minute).
+     * CONFIRMED → NO_SHOW, from 10 minutes after the start (the automatic no-show does the same within a minute).
      * Frees the barber's time at once; the customer gets a strike and the same "missed booking" message.
      */
     @Transactional
@@ -725,7 +725,7 @@ public class SalonDayService {
     /**
      * Undo a No-show (owner or helper, within 24 hours of the start): the customer's strike is taken back, the booking
      * is closed as cancelled by the salon ("No-show undone"), and the customer is told the missed booking no longer
-     * counts. It never waits again: its 15 minutes to start are over by the time it can be a no-show.
+     * counts. It never waits again: its 10 minutes to start are over by the time it can be a no-show.
      */
     @Transactional
     public AppointmentView undoNoShow(UUID userId, UUID appointmentId) {
@@ -750,7 +750,7 @@ public class SalonDayService {
     }
 
     /**
-     * The automatic no-show (AutoEndJob, every minute): a booking still not started 15 minutes
+     * The automatic no-show (AutoEndJob, every minute): a booking still not started 10 minutes
      * after its start becomes NO_SHOW, which frees the barber's time. Start needs the customer's code (or the
      * owner's "without code"), so a customer being served is always started by then. An online booking gives the
      * customer a strike, dated at its start, and a message saying so. Safe on two servers at once: each row is

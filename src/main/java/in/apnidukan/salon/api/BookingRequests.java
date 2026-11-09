@@ -24,10 +24,17 @@ public final class BookingRequests {
     /**
      * Book online. Send an Idempotency-Key header (a new UUID per booking attempt; the same one when retrying).
      * @param startAt one of the starts from the availability call
+     * @param earlierAlert optional: true = tell me if an earlier time opens that day (see EarlierSlotAlerts); left
+     *                     out or false = off. Not part of what makes a retry "the same booking"
      */
     public record Book(@NotNull UUID salonId,
                        @NotEmpty @Size(max = 10) List<@NotNull UUID> serviceIds,
-                       @NotNull Instant startAt) {
+                       @NotNull Instant startAt,
+                       Boolean earlierAlert) {
+    }
+
+    /** Switch "tell me if an earlier slot opens" on or off for my booking. */
+    public record EarlierAlert(@NotNull Boolean on) {
     }
 
     /** Move my booking to another start (from the availability call). */

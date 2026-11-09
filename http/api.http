@@ -463,6 +463,13 @@ Content-Type: application/json
 
 { "startAt": "{{startAt}}" }
 
+### 15a. Customer: tell me if an earlier slot opens that day (false = stop). Booking can also send "earlierAlert": true
+PUT {{baseUrl}}/bookings/{{bookingId}}/earlier-alert
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "on": true }
+
 ### 15b. Customer: set my name (salons see it)
 PATCH {{baseUrl}}/auth/me
 Authorization: Bearer {{accessToken}}

@@ -164,7 +164,7 @@ class SalonShopChanges implements ShopChangeListener {
     /**
      * Runs inside the suspension's transaction, after the shop's row was locked (and saved SUSPENDED: no booking or
      * move can be made from now on). As for a closing, the salon is queued for SalonClosingJob, which cancels its
-     * upcoming online bookings a slice at a time (also those whose customer may still be on the way, held 15 minutes:
+     * upcoming online bookings a slice at a time (also those whose customer may still be on the way, held 10 minutes:
      * left open they'd become no-shows) and tells each customer. A big salon's suspension stays one short request.
      * Reinstated before the job is done: the job stops, the bookings not cancelled yet stay.
      */

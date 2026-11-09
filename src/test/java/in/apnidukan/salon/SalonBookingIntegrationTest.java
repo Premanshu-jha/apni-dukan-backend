@@ -346,7 +346,7 @@ class SalonBookingIntegrationTest {
         assertThat((String) field(booked.body(), "bookingNo")).matches("S[A-HJ-NP-Z2-9]{7}");
         assertThat((String) field(booked.body(), "startCode")).matches("[0-9]{4}");
         assertThat(field(booked.body(), "totalPricePaise")).isEqualTo(23000);
-        assertThat(field(booked.body(), "heldUntil")).isEqualTo(at("12:15").toString());
+        assertThat(field(booked.body(), "heldUntil")).isEqualTo(at("12:10").toString());
         UUID bookingId = id(booked);
         // Only Raju does both services
         assertThat(jdbc.queryForObject("SELECT staff_id FROM appointments WHERE id = ?", UUID.class, bookingId))
@@ -714,11 +714,11 @@ class SalonBookingIntegrationTest {
     }
 
     @Test
-    void noShowIsAllowedFifteenMinutesAfterTheStartAndFreesTheTime() {
+    void noShowIsAllowedTenMinutesAfterTheStartAndFreesTheTime() {
         UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));
-        CLOCK.set(at("12:14"));
+        CLOCK.set(at("12:09"));
         assertThat(post("/salon/appointments/" + b + "/no-show", Map.of(), owner).text()).contains("WRONG_STATUS");
-        CLOCK.set(at("12:15"));
+        CLOCK.set(at("12:10"));
         Reply r = post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
         assertThat(field(r.body(), "status")).as(r.text()).isEqualTo("NO_SHOW");
         assertThat(count("customer_strikes")).isEqualTo(1);
@@ -728,18 +728,18 @@ class SalonBookingIntegrationTest {
     }
 
     @Test
-    void appointmentsInServiceEndByThemselvesAndUnstartedOnesBecomeNoShowsAfter15Minutes() {
+    void appointmentsInServiceEndByThemselvesAndUnstartedOnesBecomeNoShowsAfter10Minutes() {
         UUID walk = id(walkIn(owner, List.of(haircut), raju, UUID.randomUUID()));   // 10:00-10:30
         UUID b = id(book(customer, at("11:00"), List.of(haircut), UUID.randomUUID()));   // Raju
         UUID held = id(book(customer2, at("11:00"), List.of(haircut), UUID.randomUUID()));   // Sunil (Raju is taken)
         CLOCK.set(at("10:29"));
         assertThat(autoEnd.runOnce()).isZero();
-        CLOCK.set(at("11:14"));
+        CLOCK.set(at("11:09"));
         assertThat(autoEnd.runOnce()).isEqualTo(1);   // the walk-in in service is done; the others are still held
         assertThat(status(walk)).isEqualTo("COMPLETED");
         assertThat(get("/salon/day", owner).text()).contains("\"notStarted\":true");
-        CLOCK.set(at("11:15"));
-        assertThat(start(b, Map.of("withoutCode", true), owner).text()).contains("WRONG_STATUS");   // held until 11:15
+        CLOCK.set(at("11:10"));
+        assertThat(start(b, Map.of("withoutCode", true), owner).text()).contains("WRONG_STATUS");   // held until 11:10
         assertThat(autoEnd.runOnce()).isEqualTo(2);
         assertThat(autoEnd.runOnce()).isZero();   // running again changes nothing
         assertThat(status(b)).isEqualTo("NO_SHOW");
@@ -1410,7 +1410,7 @@ class SalonBookingIntegrationTest {
                 + "AND type = 'BOOKING_REMINDER'", String.class, id(booked));
         assertThat(body).hasSizeLessThanOrEqualTo(500)
                 .contains("Start code " + field(booked.body(), "startCode"))
-                .contains("Held until 12:15 PM");
+                .contains("Held until 12:10 PM");
     }
 
     @Test
@@ -1938,14 +1938,14 @@ class SalonBookingIntegrationTest {
     @Test
     void aBookingStartedLateRunsItsFullLengthWhenTheBarberIsFree() {
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));   // 12:00-12:30
-        CLOCK.set(at("12:10"));
+        CLOCK.set(at("12:09"));
         Reply started = start(b, Map.of("withoutCode", true), owner);
-        assertThat(field(started.body(), "endsAt")).as(started.text()).isEqualTo(at("12:40").toString());
+        assertThat(field(started.body(), "endsAt")).as(started.text()).isEqualTo(at("12:39").toString());
         // Another one, with the next booking right after it: it keeps its planned end
         UUID c1 = id(book(customer2, at("13:00"), List.of(haircut), UUID.randomUUID()));
         UUID barber = staffOf(c1);
         insertWalkIn(barber, "13:30", 30);
-        CLOCK.set(at("13:10"));
+        CLOCK.set(at("13:09"));
         Reply late = start(c1, Map.of("withoutCode", true), owner);
         assertThat(field(late.body(), "endsAt")).as(late.text()).isEqualTo(at("13:30").toString());
     }
@@ -1979,10 +1979,10 @@ class SalonBookingIntegrationTest {
         Reply early = start(b, Map.of("withoutCode", true), owner);
         assertThat(field(field(early.body(), "details"), "reason")).isEqualTo("TOO_EARLY");
         assertThat(field(field(early.body(), "details"), "startFrom")).isEqualTo(at("11:45").toString());
-        CLOCK.set(at("12:15"));
+        CLOCK.set(at("12:10"));
         Reply late = start(b, Map.of("withoutCode", true), owner);
         assertThat(field(field(late.body(), "details"), "reason")).isEqualTo("HELD_OVER");
-        assertThat(field(field(late.body(), "details"), "heldUntil")).isEqualTo(at("12:15").toString());
+        assertThat(field(field(late.body(), "details"), "heldUntil")).isEqualTo(at("12:10").toString());
         post("/salon/appointments/" + b + "/no-show", Map.of(), owner);
         CLOCK.set(at("12:00").plus(Duration.ofHours(25)));
         Reply tooLate = post("/salon/appointments/" + b + "/undo-no-show", Map.of(), owner);
@@ -2105,7 +2105,7 @@ class SalonBookingIntegrationTest {
         UUID admin = person("9000000999");
         jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", admin);
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
-        CLOCK.set(at("12:05"));   // started 5 minutes ago, still held until 12:15
+        CLOCK.set(at("12:05"));   // started 5 minutes ago, still held until 12:10
         Reply suspended = post("/admin/shops/" + salon + "/suspend", Map.of("version", shopVersion(), "reason",
                 "Fake shop"), admin);
         assertThat(suspended.status()).as(suspended.text()).isEqualTo(200);

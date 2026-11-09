@@ -95,18 +95,19 @@ public final class BookingResponses {
     /**
      * A booking as its customer sees it.
      * @param startCode    the 4 digits to show at the salon; only while the booking is CONFIRMED
-     * @param heldUntil    the salon keeps the booking until this moment (15 minutes after the start)
+     * @param heldUntil    the salon keeps the booking until this moment (10 minutes after the start)
      * @param canChange    true while it can still be cancelled (CONFIRMED, before the start)
      * @param canMove      true while it can also be moved to another time (the salon is approved and not paused,
      *                     and it is more than 1 hour away)
      * @param lateCancelFrom a cancel after this moment counts as late (a strike): 1 hour before the start, or 10
      *                     minutes after booking if that is later
+     * @param earlierAlert true if the customer asked to be told when an earlier time opens that day
      */
     public record BookingView(UUID id, String bookingNo, UUID salonId, String salonName, String salonAddress,
                               String mapLink, List<ServiceLine> services, long totalPricePaise, boolean priceIsFrom,
                               Instant startsAt, Instant endsAt, Instant heldUntil, AppointmentStatus status,
                               String startCode, String cancelReason, boolean canChange,
-                              boolean canMove, Instant createdAt, Instant lateCancelFrom) {
+                              boolean canMove, Instant createdAt, Instant lateCancelFrom, boolean earlierAlert) {
     }
 
     /**

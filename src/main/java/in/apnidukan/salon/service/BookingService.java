@@ -27,6 +27,7 @@ import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.domain.Shift;
 import in.apnidukan.salon.domain.StrikeKind;
 import in.apnidukan.salon.repo.AppointmentStore;
+import in.apnidukan.salon.repo.EarlierSlotAlertStore;
 import in.apnidukan.salon.repo.SalonAccessStore;
 import in.apnidukan.salon.repo.StrikeStore;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -114,6 +115,8 @@ public class BookingService {
     private final RateLimiter limits;
     private final SalonSetups setups;
     private final BookingNumbers numbers;
+    private final EarlierSlotAlertStore alerts;
+    private final EarlierSlotAlerts earlierSlots;
     private final int readsPerMinute;
 
     private static final Logger log = LoggerFactory.getLogger(BookingService.class);
@@ -122,7 +125,10 @@ public class BookingService {
                           StrikeStore strikes, SalonAccessStore salonAccess,
                           StartCodes codes, SalonNotices notices, FileRefs files, UserDirectory users, Clock clock,
                           RateLimiter limits, SalonSetups setups, BookingNumbers numbers,
+                          EarlierSlotAlertStore alerts, EarlierSlotAlerts earlierSlots,
                           @Value("${app.salon.reads-per-minute:60}") int readsPerMinute) {
+        this.alerts = alerts;
+        this.earlierSlots = earlierSlots;
         this.limits = limits;
         this.setups = setups;
         this.numbers = numbers;
@@ -308,6 +314,11 @@ public class BookingService {
                 Appointment a = saved.get();
                 countChange(customerId);
                 appointments.insertServices(a.id(), chosen);
+                // Only while it could be moved: within the last hour nothing could ever be offered
+                if (Boolean.TRUE.equals(in.earlierAlert())
+                        && Duration.between(now, a.startsAt()).compareTo(LATE_CANCEL) >= 0) {
+                    alerts.on(a.id(), salon.id(), a.startsAt(), now);
+                }
                 appointments.event(a.id(), now, customerId, "BOOKED", null);
                 notices.booked(a, salon, chosen, setup, now);
                 return view(a, now);
@@ -355,6 +366,7 @@ public class BookingService {
         }
         appointments.event(a.id(), now, customerId, "CANCELLED_BY_CUSTOMER", late ? "late" : null);
         notices.cancelledByCustomer(a, shops.find(a.shopId()).orElseThrow(), late, now);
+        earlierSlots.freed(a.shopId(), a.staffId(), a.time(), a.id(), customerId);   // offered once this commits
         return new CancelResult(view(appointments.find(a.id()).orElseThrow(), now), late);
     }
 
@@ -432,7 +444,35 @@ public class BookingService {
         }
         countChange(customerId);
         notices.rescheduled(a, moved, salon, now);
+        alerts.moved(a.id(), moved.startsAt());   // its own alert follows it, and may be offered anything earlier again
+        earlierSlots.freed(a.shopId(), a.staffId(), a.time(), a.id(), customerId);   // its old time, once committed
         return view(moved, now);
+    }
+
+    /**
+     * Switches "tell me if an earlier slot opens" on or off for my booking (see EarlierSlotAlerts). On only while it
+     * could still be moved: waiting, and at least 1 hour before its start (409 TOO_LATE_TO_MOVE otherwise: nothing could
+     * be offered); off any time. Setting what is already set changes nothing. Counts towards the salon-page limit
+     * (requireReadsLeft), so a switch flipped in a loop can't keep the database busy.
+     */
+    @Transactional
+    public BookingView earlierAlert(UUID customerId, UUID bookingId, boolean on) {
+        requireReadsLeft(customerId);
+        appointments.lockCustomer(customerId);   // after this person's cancel or move, never in the middle of one
+        Appointment a = mine(customerId, appointments.find(bookingId));
+        Instant now = now();
+        if (!on) {
+            alerts.off(a.id());
+            notices.withdrawEarlierSlot(a.id());   // an offer still waiting to go out (a retry) isn't sent
+            return view(a, now);
+        }
+        requireChangeable(a, now);
+        if (Duration.between(now, a.startsAt()).compareTo(LATE_CANCEL) < 0) {
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_LATE_TO_MOVE",
+                    "Less than 1 hour to go: this booking can't be moved any more, so no earlier time can be offered.");
+        }
+        alerts.on(a.id(), a.shopId(), a.startsAt(), now);
+        return view(a, now);
     }
 
     // ---------- rules ----------
@@ -627,6 +667,7 @@ public class BookingService {
         Set<UUID> shopIds = list.stream().map(Appointment::shopId).collect(Collectors.toSet());
         Map<UUID, ShopCard> salons = shops.findAll(shopIds);
         Map<UUID, Instant> pauses = salonAccess.pausedUntil(shopIds);
+        Set<UUID> alertOn = alerts.switchedOn(list.stream().map(Appointment::id).toList());
         Map<UUID, Boolean> pausedNow = new HashMap<>();
         for (UUID id : shopIds) {
             if (!salons.containsKey(id)) {
@@ -647,7 +688,8 @@ public class BookingService {
                     lines.stream().anyMatch(BookedService::priceIsFrom), a.startsAt(), a.endsAt(),
                     a.startsAt().plus(SalonDayService.LATE_ALLOWANCE), a.status(),
                     a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null,
-                    a.cancelReason(), changeable, movable, a.createdAt(), lateCancelFrom(a));
+                    a.cancelReason(), changeable, movable, a.createdAt(), lateCancelFrom(a),
+                    a.status() == AppointmentStatus.CONFIRMED && alertOn.contains(a.id()));
         }).toList();
     }
 

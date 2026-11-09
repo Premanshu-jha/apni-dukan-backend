@@ -12,7 +12,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery; admin roles (one super admin, admins) and OTP test mode |
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
-| `salon` | Salon setup (services, barbers with optional sign-in and photo, weekly hours, booking settings), online booking, walk-ins, start code, no-show and strikes, breaks, leave, closed days, pause, the automatic end |
+| `salon` | Salon setup (services, barbers with optional sign-in and photo, weekly hours, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
 ## How file handling works
@@ -755,7 +755,9 @@ minute per person: then 429 `TOO_MANY_REQUESTS` with `Retry-After`), `POST /book
 `Idempotency-Key`: a new UUID per attempt, the same one on retry), `GET /me/bookings?when=upcoming|past` (past: 30 a
 page, see "Pages" below),
 `GET /bookings/{id}`, `POST /bookings/{id}/cancel`, `POST /bookings/{id}/reschedule {startAt}` (not in the last hour:
-409 `TOO_LATE_TO_MOVE`, so moving can't dodge a late-cancel strike; `canMove` says when), `PATCH /auth/me {name}`.
+409 `TOO_LATE_TO_MOVE`, so moving can't dodge a late-cancel strike; `canMove` says when),
+`PUT /bookings/{id}/earlier-alert {on}` ("tell me if an earlier slot opens", see "Earlier-slot alerts"),
+`PATCH /auth/me {name}`.
 The customer picks services and a time; the backend picks the barber. Another person's booking is 404.
 
 **Salon (`/api/v1/salon/...`):**
@@ -767,9 +769,9 @@ The customer picks services and a time; the backend picks the barber. Another pe
 | `GET /history?from=&to=&afterStart=&afterId=` | owner, helper | India dates, at most 31 days: bookings and walk-ins latest first, 100 a page with `next` (see "Pages"); how many ended in each status, and what the completed ones were worth at list price (both over the whole range, on the first page only: later pages carry `counts: null, completedPaise: null`, keep the first page's) |
 | `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or when he is next free today (exact minutes, for information). A walk-in always starts now with a barber who is free now (IN_SERVICE at once, no code: the customer is in the chair); there is no booking a walk-in for later. 409 `BARBER_BUSY` with his next free time |
 | `GET /members` · `PUT /members/{userId}/walk-in-access {allowed}` | owner | Who may add walk-ins besides the owner (a helper or barber) |
-| `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before until 15 min after the start (then it is a no-show). A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper). Started early, it holds the barber from now for its length; if someone (or a break) still holds his chair, 409 `BARBER_BUSY` (`reason: STILL_BUSY`). Started late, it runs its full length from now when he is free for that, else keeps its planned end |
+| `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before until 10 min after the start (then it is a no-show). A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper). Started early, it holds the barber from now for its length; if someone (or a break) still holds his chair, 409 `BARBER_BUSY` (`reason: STILL_BUSY`). Started late, it runs its full length from now when he is free for that, else keeps its planned end |
 | `POST /appointments/{id}/finish` | owner, helper; barber: own; and whoever added a walk-in that is still in the chair | Done before the planned end: IN_SERVICE → COMPLETED now, and the rest of the barber's time is free |
-| `POST /appointments/{id}/no-show` | owner, helper; barber: own | From 15 min after the start (the late allowance). Frees the time; a booking gives the customer a strike. Rarely needed: the job below does it within a minute |
+| `POST /appointments/{id}/no-show` | owner, helper; barber: own | From 10 min after the start (the late allowance). Frees the time; a booking gives the customer a strike. Rarely needed: the job below does it within a minute |
 | `POST /appointments/{id}/undo-no-show` | owner, helper | Within 24 h of the start: the strike goes, the booking is closed as cancelled by the salon ("No-show undone"), and the customer is told it no longer counts. Later, only support can remove the strike |
 | `POST /appointments/{id}/reassign {staffId}` · `/cancel {reason}` | owner, helper; and whoever added a walk-in that is still in the chair (while he still has walk-in access) | Another barber who does its services: a booking at the same time; a walk-in already in the chair (added to the wrong barber) continues with him from now for the rest of its time; both barbers and an online customer are told · salon cancel of a booking, a walk-in, or a walk-in in the chair within 15 minutes of it being put in a chair, which a move doesn't reset (later: 409 `IN_CHAIR_TOO_LONG`, finish it instead; the owner and that chair's barber are told when someone else cancels one). A booking's customer and barber are told; no strike |
 | `GET /staff/{id}/blocks/conflicts` · `POST /staff/{id}/blocks` · `DELETE .../blocks/{blockId}` | break: owner, helper, the barber; leave: owner | 409 `BLOCK_CONFLICTS` listing what's in the way; nothing saved. A barber's own breaks: today or tomorrow, at most 4 hours a day in all (longer time off is leave); he removes only breaks he added (`addedByMe` on each appointment says which; on a walk-in it is set only while the viewer may add walk-ins, so it marks what he may fix) and only before they start (409 `WRONG_STATUS`, `reason: STARTED`) |
@@ -780,6 +782,17 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 `customerPhone`, to call someone who is running late.
 
 ### API changes in this version (deploy the backend first, then the apps)
+
+**Earlier-slot alerts and the 10-minute late allowance** (V33; the customer app needs this for the switch, old apps
+keep working):
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /bookings` | `{salonId, serviceIds, startAt}` | also takes `earlierAlert` (optional, default false) | customer app: the switch on the confirm screen |
+| every booking answer (`POST /bookings`, `GET /bookings/{id}`, `/me/bookings`, cancel, reschedule) | | adds `earlierAlert` (true only while the booking is waiting; a booking made less than an hour ahead stays false) | customer app: show the switch's state |
+| `PUT /bookings/{id}/earlier-alert {on}` | none | new: on only while the booking can still be moved (409 `TOO_LATE_TO_MOVE` within the last hour, 409 `WRONG_STATUS` once it can't change); off any time; returns the booking | customer app: the switch on the booking page |
+| messages | | new type `BOOKING_EARLIER_SLOT` (customer list), opening `/bookings/{id}?earlier=<startAt>` | customer app: open Move on that time |
+| `heldUntil` (bookings), `noShowFrom` (salon screens), the reminder's "Held until" | start + 15 min | start + 10 min; Start refused (`HELD_OVER`) and the automatic no-show from then | apps: nothing (they show what the backend sends); words like "15 minutes" in the apps change to 10 |
 
 **Field agents and assignment** (V30–V32; the admin website 0.6.0 needs this):
 
@@ -982,7 +995,7 @@ one back (204; the reason goes into the booking's history as `STRIKE_REMOVED`).
 
 **Lifecycle:** CONFIRMED → IN_SERVICE (Start, with the customer's code) → COMPLETED by itself at its planned end (a
 job every minute), or earlier with Finish. CONFIRMED →
-CANCELLED_BY_CUSTOMER / CANCELLED_BY_SALON. A booking not started 15 minutes after its start becomes
+CANCELLED_BY_CUSTOMER / CANCELLED_BY_SALON. A booking not started 10 minutes after its start becomes
 NO_SHOW by itself (the same job; a customer being served has always been started with their code by then): an online
 booking gives the customer a strike and a "missed booking" message. BLOCKED → REMOVED. Every change is a
 conditional update ("only if still CONFIRMED") and is logged in `appointment_events` with who did it.
@@ -1019,6 +1032,49 @@ own. When the owner or a helper gives a booking to another barber or cancels it,
 the person who did it). Someone who leaves a salon, is removed, or loses their barber sign-in loses its messages
 (`SALON_*`) too: its customers' names aren't theirs to keep. The server only sends to the browsers' real
 push services (Google, Mozilla, Apple, Microsoft), so a device address can't point it anywhere else.
+
+### Earlier-slot alerts
+
+A customer can ask to be told when an earlier time opens the same day ("Tell me if an earlier slot opens": the
+`earlierAlert` switch when booking, or `PUT /bookings/{id}/earlier-alert {on}` later, while the booking can still be
+moved; a booking made for less than an hour ahead stays off, since it can't move). Switching it off also withdraws
+an offer still waiting to go out. A booking shows `earlierAlert: true` only while it is waiting (CONFIRMED). When a
+**customer cancels or moves** a booking, its time is offered, once that change commits, by `EarlierSlotAlerts` on a
+small worker of its own (2 at a time, each in its own transaction): the customer's answer never waits for the offers
+or holds a second database connection for them, and a failure there never undoes the cancel or move (it is logged;
+so is a burst of over 1,000 freed times waiting, whose extra offers are dropped; offers still waiting when a copy of
+the backend stops are lost):
+
+- to that salon's bookings with the switch on, still waiting, starting after the freed time **on the same day** and
+  at least **1 hour** from now (a booking can't be moved later than that), soonest first: the first 10 the time suits
+  (of the 50 soonest);
+- each is offered the earliest quarter-hour start inside the freed time (from the salon's notice, e.g. 30 minutes from
+  now), before its own, where **that barber** does all its services and is free for its whole length (its own time
+  counts as free), **no other barber who does them was free already** (a time anyone could have booked is no news),
+  and that doesn't clash with the customer's other bookings (switched on or not); never to the customer who gave the
+  time up;
+- the same time is never sent to a booking twice in a row (`earlier_slot_alerts.offered_start`), and such a repeat
+  doesn't use up one of the 10 places; another time is sent (the one before may have gone to whoever moved first).
+  Moving the booking clears it. A booking moved, cancelled or started between being read and its offer being recorded
+  is left out (the offer is recorded only against the start it was read with, still CONFIRMED);
+- nothing for a freed time outside the salon's booking window (too soon for its notice, or beyond its last bookable
+  day after it was shortened).
+
+The message (`BOOKING_EARLIER_SLOT`, in the app and by push, no SMS): "Tue 10 Nov, 5:00 PM with Raju just opened up.
+You're booked for 7:00 PM. Tap to move your booking; the first to move gets it." It opens
+`/bookings/{id}?earlier=<startAt>`; the move is the usual `POST /bookings/{id}/reschedule` with all its checks, so
+whoever is second gets 409 `SLOT_TAKEN` with the nearest free times. Nobody is ever moved without tapping.
+
+Nothing is offered for a **salon's** cancel (a barber who can't come has his bookings cancelled before his leave can
+be added, so his time would be offered just before it disappears), a no-show (its time is already too close to book
+online), removed breaks, leave or closed days, or while the salon is paused or not approved. Two cancels of the same
+time on two barbers at the same moment may offer it once or not at all (each sees the other barber free).
+
+Cost: one read of `ix_earlier_slot_alerts_shop_start` (that salon's alerts that day), which ends it when nobody asked
+(most cancels); otherwise the barbers' busy time that day (kept in memory while the salon is unchanged), the
+candidates' services and other bookings, one statement for the offers and one batch of messages. The switch lives in
+its own table, not on `appointments`, so flipping it never moves the salon's change counter or its day-board deltas.
+Rows are deleted a day after their booking's start (the automatic-end round, every minute, in batches).
 
 **In-app message list:** every message is also kept for the app's own list (its PUSH row in `notification_jobs`,
 `read_at` = opened), so people who blocked notifications or missed one can read it in the app. Kept 90 days (the
@@ -1070,8 +1126,8 @@ accepts but its answer times out, or Redis fails right after a send) one SMS can
 | To the salon: moved | `SMS_TEMPLATE_SALON_BOOKING_MOVED` | `##CUSTOMER##`, `##WHEN##` (the new time), `##BARBER##`, `##BOOKING##` |
 | To the salon: cancelled | `SMS_TEMPLATE_SALON_BOOKING_CANCELLED` | `##CUSTOMER##`, `##WHEN##`, `##BARBER##`, `##BOOKING##` |
 
-In the app only (no SMS): `BOOKING_BARBER_CHANGED`, `BOOKING_NO_SHOW_UNDONE`, `SALON_BOOKING_REASSIGNED`,
-`SALON_CANCELLED_BY_SALON`, `SALON_WALK_IN_CANCELLED` (to the owner).
+In the app only (no SMS): `BOOKING_BARBER_CHANGED`, `BOOKING_NO_SHOW_UNDONE`, `BOOKING_EARLIER_SLOT`,
+`SALON_BOOKING_REASSIGNED`, `SALON_CANCELLED_BY_SALON`, `SALON_WALK_IN_CANCELLED` (to the owner).
 
 Example DLT text for the reminder: "Reminder: {#var#} at {#var#} today, {#var#}. Show code {#var#} at the counter.
 Held till {#var#}. - Clozest". The SMS uses the same MSG91 account as the sign-in OTP.
@@ -1142,6 +1198,8 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
     the whole 30 days on purpose: if a thief copied a token and keeps refreshing (r1 → r2 → r3), only the owner's
     phone presenting r1, maybe days later, reveals it and ends every session.
   - 03:40, messages: SMS rows 7 days after they finished (`SMS_MESSAGES_KEEP_DAYS`), every other row after 90 days.
+- **Earlier-slot alert rows** (`earlier_slot_alerts`): deleted a day after their booking's start, by the every-minute
+  automatic-end round (`AutoEndJob`), in batches.
 - **R2 objects of deleted files**: every 5 minutes, `FileDeletionJob` deletes the objects still queued in
   `file_deletions` (see "Delete" under file handling).
   - Bookings, strikes, events and the `*_aud` history stay.
@@ -1415,7 +1473,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V33__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V34__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
@@ -1450,6 +1508,17 @@ fails). V32 validates V30's checks and key. **After deploying:** add each field 
 that picks up the businesses already waiting there, and until then every new business is Unassigned. During the
 rolling deploy a copy still on the old version can't add or remove an admin (V30's designation check refuses its
 write: 500) until every copy runs this version; deploy at a quiet moment.
+
+**V33** (earlier-slot alerts, 10-minute late allowance) adds the empty `earlier_slot_alerts` table with its two
+indexes (built in the migration: the table is new and empty) and no foreign key (appointments are never deleted, and
+one would lock `appointments`). It also rewrites the "Held until" time of every reminder still waiting (in the text
+and the SMS variables) to start + 10 minutes, in one statement. Only the time changes; for a 12:45 start the new time
+is one character longer ("12:55 PM" for "1:00 PM"), so a text already at the column's 500 characters is cut back to
+500 ending in "…", as every cut message is. **Deploy it when no booking starts within the next 75 minutes** (late at
+night): a reminder already sent (60 minutes before) said "Held until" start + 15, and the customer would be marked a
+no-show at + 10; and during the rolling deploy an old copy still writes 15-minute reminders for bookings made through
+it. A booking moved through an old copy keeps its alert's old start (it is skipped until the customer switches the
+alert on again, which puts it right).
 
 **Deploying this version.** Run the migrations with **one copy** first (scale Railway to 1 replica for the deploy, then
 back up): V24 builds indexes CONCURRENTLY and can take minutes on a big `appointments`. A second copy starting meanwhile
