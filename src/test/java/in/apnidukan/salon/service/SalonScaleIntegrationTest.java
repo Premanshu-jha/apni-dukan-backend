@@ -1254,7 +1254,7 @@ class SalonScaleIntegrationTest {
         assertThat(moved.status()).as(moved.text()).isEqualTo(200);
         assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE ref_id = ? AND type = "
                 + "'BOOKING_REMINDER' AND channel = 'PUSH'", String.class, b)).contains("Shop 9, New Market Road")
-                .startsWith("10:00 AM at Test Shop. Start code ").contains(". Held until 10:15 AM. ");
+                .startsWith("10:00 AM at Test Shop. Start code ").contains(". Held until 10:10 AM. ");
     }
 
     // ---------- closed days ----------
