@@ -1,6 +1,7 @@
 package in.apnidukan.salon.service;
 
 import in.apnidukan.salon.repo.AppointmentStore;
+import in.apnidukan.salon.repo.EarlierSlotAlertStore;
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.common.jobs.LongStatements;
 import org.slf4j.Logger;
@@ -19,8 +20,10 @@ import java.time.temporal.ChronoUnit;
  * <ul>
  *   <li>an appointment in service ends by itself at its planned end (there is no Done button). If a service runs
  *       long, the app doesn't know; the next customer may wait;</li>
- *   <li>a booking not started 15 minutes after its start becomes a no-show (see
- *       SalonDayService.markNoShows).</li>
+ *   <li>a booking not started 10 minutes after its start becomes a no-show (see
+ *       SalonDayService.markNoShows);</li>
+ *   <li>"tell me if an earlier slot opens" rows of bookings that started over a day ago are deleted (nothing can be
+ *       offered to them any more; see EarlierSlotAlerts).</li>
  * </ul>
  */
 @Component
@@ -32,16 +35,20 @@ public class AutoEndJob {
     private final int batchSize;
     /** A round never runs longer than this (another server takes over after it). */
     private static final Duration MAX_ROUND = Duration.ofMinutes(5);
+    /** Alert rows are kept this long after their booking's start, then deleted. */
+    static final Duration KEEP_ALERTS = Duration.ofDays(1);
 
     private final AppointmentStore appointments;
+    private final EarlierSlotAlertStore alerts;
     private final SalonDayService day;
     private final JobLeases leases;
     private final LongStatements statements;
     private final Clock clock;
     private final boolean enabled;
 
-    public AutoEndJob(AppointmentStore appointments, SalonDayService day, JobLeases leases, LongStatements statements,
-                      Clock clock, @Value("${app.jobs.enabled:true}") boolean enabled,
+    public AutoEndJob(AppointmentStore appointments, EarlierSlotAlertStore alerts, SalonDayService day,
+                      JobLeases leases, LongStatements statements, Clock clock,
+                      @Value("${app.jobs.enabled:true}") boolean enabled,
                       @Value("${app.jobs.auto-end-batch:500}") int batchSize) {
         if (batchSize < 1) {   // 0 would loop forever (every batch "full"), below 0 fail every minute
             throw new IllegalStateException("app.jobs.auto-end-batch must be at least 1");
@@ -50,6 +57,7 @@ public class AutoEndJob {
         this.leases = leases;
         this.statements = statements;
         this.appointments = appointments;
+        this.alerts = alerts;
         this.day = day;
         this.clock = clock;
         this.enabled = enabled;
@@ -65,7 +73,7 @@ public class AutoEndJob {
 
     /**
      * One round, in batches until nothing is left; returns how many appointments it closed (completed plus
-     * no-shows). Called by tests too.
+     * no-shows; the old alert rows it deletes aren't counted). Called by tests too.
      */
     public int runOnce() {
         Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
@@ -84,6 +92,10 @@ public class AutoEndJob {
         if (done + missed > 0) {
             log.info("Completed {} appointments at their planned end; {} not started became no-shows", done, missed);
         }
+        Instant oldStarts = now.minus(KEEP_ALERTS);
+        do {
+            batch = statements.run(() -> alerts.deleteStartedBefore(oldStarts, batchSize));
+        } while (batch == batchSize);
         return done + missed;
     }
 }

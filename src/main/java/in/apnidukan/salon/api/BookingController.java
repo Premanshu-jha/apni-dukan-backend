@@ -4,6 +4,7 @@ import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.salon.api.BookingRequests.Book;
+import in.apnidukan.salon.api.BookingRequests.EarlierAlert;
 import in.apnidukan.salon.api.BookingRequests.Reschedule;
 import in.apnidukan.salon.api.BookingResponses.BookingView;
 import in.apnidukan.salon.api.BookingResponses.CancelResult;
@@ -20,6 +21,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -119,6 +121,15 @@ public class BookingController {
     @PostMapping("/api/v1/bookings/{id}/reschedule")
     public BookingView reschedule(@PathVariable UUID id, @Valid @RequestBody Reschedule body) {
         return bookings.reschedule(me(), id, body.startAt());
+    }
+
+    /**
+     * "Tell me if an earlier slot opens" on or off. On needs a booking that can still be moved (409 WRONG_STATUS,
+     * TOO_LATE_TO_MOVE); off works any time. Returns the booking.
+     */
+    @PutMapping("/api/v1/bookings/{id}/earlier-alert")
+    public BookingView earlierAlert(@PathVariable UUID id, @Valid @RequestBody EarlierAlert body) {
+        return bookings.earlierAlert(me(), id, body.on());
     }
 
     private UUID me() {
