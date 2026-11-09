@@ -96,6 +96,7 @@ public class AuthService {
     private final SmsBudget smsBudget;
     private final RefreshTokenStore tokenStore;
     private final TestAccountShops testAccountShops;
+    private final AdminTeamService team;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
@@ -106,13 +107,14 @@ public class AuthService {
                        List<SignOutEverywhereListener> signOutListeners,
                        SignInLimits signInLimits, TestModeService testMode,
                        List<PersonDetailsListener> detailsListeners, SmsBudget smsBudget,
-                       RefreshTokenStore tokenStore, TestAccountShops testAccountShops,
+                       RefreshTokenStore tokenStore, TestAccountShops testAccountShops, AdminTeamService team,
                        @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds) {
         if (refreshGraceSeconds < 0 || refreshGraceSeconds > RETRY_GRACE.toSeconds()) {
             // Longer than the retry time would let an old token get new pairs after it should raise the alarm
             throw new IllegalStateException("app.auth.refresh-grace-seconds must be 0 to " + RETRY_GRACE.toSeconds());
         }
         this.refreshGrace = Duration.ofSeconds(refreshGraceSeconds);
+        this.team = team;
         this.testMode = testMode;
         this.smsBudget = smsBudget;
         this.tokenStore = tokenStore;
@@ -600,6 +602,7 @@ public class AuthService {
         otp.verify(OtpPurpose.DELETE_ACCOUNT, me.getPhone(), code, ip);
         tx.executeWithoutResult(status -> {
             requireNotOwner(userId);
+            team.accountDeleting(userId);   // a team member: the team lock first, as every team change takes it
             Instant now = Instant.now(clock);
             // The modules first: they take their own locks (a customer's bookings) before this person's row,
             // the order a booking takes them in too
@@ -612,6 +615,7 @@ public class AuthService {
             refreshTokens.forgetDevices(userId);
             user.anonymise(now);
             users.saveAndFlush(user);
+            team.accountDeleted(userId);   // a field agent's pincodes go, their waiting visits to someone else
         });
         try {
             revocations.revokeAll(userId);   // after the commit: tokens still in use stop working now
@@ -634,10 +638,10 @@ public class AuthService {
             throw new ApiException(HttpStatus.CONFLICT, "SHOP_OWNER",
                     "You own a shop on Clozest. Close it or hand it over before deleting your account.");
         }
-        // Without the super admin nobody could manage admins or switch test mode off until the database is edited
+        // The last super admin gone, nobody could manage admins or switch test mode off until the database is edited
         if (users.findById(userId).map(User::getAdminRole).orElse(AdminRole.NONE) == AdminRole.SUPER_ADMIN) {
             throw new ApiException(HttpStatus.CONFLICT, "SUPER_ADMIN",
-                    "You are the super admin. Hand the role to someone else in the database first.");
+                    "You are a super admin. Ask another super admin to change your role on the Team page first.");
         }
     }
 
