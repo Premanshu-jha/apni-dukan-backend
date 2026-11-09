@@ -51,8 +51,11 @@ public interface UserDirectory {
         }
     }
 
-    /** True only for the Apni Dukan field team (users.admin). */
+    /** True only for the Apni Dukan team (users.admin): field agents and super admins. */
     boolean isAdmin(UUID userId);
+
+    /** What this person may do on the admin website (NONE for an unknown or deleted account). */
+    TeamRole teamRole(UUID userId);
 
     record Person(UUID id, String name, String phone) {
     }
