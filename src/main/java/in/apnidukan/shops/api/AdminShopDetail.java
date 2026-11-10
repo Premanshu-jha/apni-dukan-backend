@@ -1,5 +1,7 @@
 package in.apnidukan.shops.api;
 
+import in.apnidukan.common.context.SalonFacts;
+import in.apnidukan.shops.domain.RegistrationDocType;
 import in.apnidukan.shops.domain.ShopEventType;
 import in.apnidukan.shops.domain.VisitIssue;
 
@@ -14,13 +16,14 @@ import java.util.List;
  * @param previousOwnerPhotoUrl  the approved owner photo, only when it has been replaced since
  * @param previousShopPhotoUrl   the approved shop photo, only when it has been replaced since
  * @param videoUrl               a link to the salon video (valid at least 15 more minutes); null if none
+ * @param registrationDoc        a salon's registration document; null if none
  * @param timeline               newest first, the first 50 entries
  * @param timelineNext           where the next 50 start (GET /admin/shops/{id}/timeline with these); null when the
  *                               timeline has no more
  */
 public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> changes, Long pinMovedMetres,
                               String previousOwnerPhotoUrl, String previousShopPhotoUrl, String videoUrl,
-                              List<TimelineEntry> timeline,
+                              RegistrationDoc registrationDoc, List<TimelineEntry> timeline,
                               TimelineNext timelineNext) {
 
     public AdminShopDetail {
@@ -40,13 +43,37 @@ public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> 
         }
     }
 
-    public record Salon(int barbers, int services) {
+    /**
+     * A salon's size and setup.
+     * @param serviceList   its active services, in its order
+     * @param hours         its open days, Monday first; empty until set
+     * @param ratings       how many customers rated it
+     * @param ratingAverage average stars to one decimal; null with no ratings
+     */
+    public record Salon(int barbers, int services, List<SalonFacts.Service> serviceList, List<SalonFacts.Day> hours,
+                        int ratings, Double ratingAverage) {
+
+        public Salon {
+            serviceList = List.copyOf(serviceList);
+            hours = List.copyOf(hours);
+        }
+    }
+
+    /**
+     * A salon's registration document, for the field team only.
+     * @param type  SHOPS_ESTABLISHMENT, TRADE_LICENCE or UDYAM
+     * @param label how to name it, e.g. "Trade licence"
+     * @param url   a link to the photo or PDF (valid at least 15 more minutes); null if the file is gone
+     * @param checkedAt when the field team checked this document (customers then see "Registered"); null: not yet
+     */
+    public record RegistrationDoc(RegistrationDocType type, String label, String url, java.time.Instant checkedAt) {
     }
 
     /**
      * @param field  name, ownerName, addressLine, area, city, pincode, location, gstin, udyamNumber, ownerPhoto,
-     *               shopPhoto, shopVideo
-     * @param before the approved value (null for photos and the video: see the links)
+     *               shopPhoto, shopVideo, registrationDoc
+     * @param before the approved value (null for photos and the video: see the links; the document's type for the
+     *               registration document)
      * @param after  the value now
      */
     public record Change(String field, String label, String before, String after) {

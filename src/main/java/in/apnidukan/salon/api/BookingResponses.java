@@ -7,6 +7,7 @@ import in.apnidukan.salon.domain.AppointmentKind;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.domain.BlockType;
 import in.apnidukan.salon.domain.BookedService;
+import in.apnidukan.salon.domain.RatingTag;
 import in.apnidukan.salon.domain.SalonTime;
 
 import java.math.BigDecimal;
@@ -36,23 +37,71 @@ public final class BookingResponses {
     // ---------- customer side ----------
 
     /**
-     * A salon in the list near the customer.
-     * @param photoUrl the salon's photo, a link valid for at least 15 more minutes; null if none
+     * A salon in the list near the customer: everything its card shows.
+     * @param photoUrl      the salon's photo, a link valid for at least 15 more minutes; null if none
+     * @param rating        its customers' ratings (average only from 5 ratings on: the card shows "New" before)
+     * @param topServices   its first 3 services (the salon's order) that a barber does, with prices
+     * @param serviceCount  how many such services in all (the card shows "+5 more")
+     * @param today         today's opening hours; null if closed today or the salon hasn't set hours
+     * @param openNow       true while open right now; false if closed now (or all day); null if no hours are set
+     * @param closedToday   true on its weekly off or a closed day (holiday)
+     * @param registered    true if the salon has its registration document (shops and establishments certificate,
+     *                      trade licence or Udyam), checked by the field team; the card says "Registered", else
+     *                      "Unregistered"
      */
-    public record SalonSummary(UUID id, String name, String area, String city, double distanceKm, String photoUrl,
-                               double distanceMetres) {
+    public record SalonSummary(UUID id, String name, String addressLine, String area, String city, double distanceKm,
+                               String photoUrl, double distanceMetres, RatingSummary rating,
+                               List<PriceLine> topServices, int serviceCount, DayHours today, Boolean openNow,
+                               boolean closedToday, boolean registered) {
 
-        public static SalonSummary from(ShopCard card, String photoUrl) {
-            return new SalonSummary(card.id(), card.name(), card.area(), card.city(),
-                    card.distanceKm() == null ? 0 : card.distanceKm(), photoUrl,
-                    card.distanceMetres() == null ? 0 : card.distanceMetres());
+        public SalonSummary {
+            topServices = List.copyOf(topServices);
         }
+
+        public static SalonSummary from(ShopCard card, String photoUrl, CardFacts facts) {
+            return new SalonSummary(card.id(), card.name(), card.addressLine(), card.area(), card.city(),
+                    card.distanceKm() == null ? 0 : card.distanceKm(), photoUrl,
+                    card.distanceMetres() == null ? 0 : card.distanceMetres(), facts.rating(), facts.topServices(),
+                    facts.serviceCount(), facts.today(), facts.openNow(), facts.closedToday(), facts.registered());
+        }
+    }
+
+    /** What a salon card shows besides the salon's own details (see SalonSummary). */
+    public record CardFacts(RatingSummary rating, List<PriceLine> topServices, int serviceCount, DayHours today,
+                            Boolean openNow, boolean closedToday, boolean registered) {
+
+        public CardFacts {
+            topServices = List.copyOf(topServices);
+        }
+    }
+
+    /** A service's name and price on a salon card ("from ₹150" when priceIsFrom). */
+    public record PriceLine(String name, long pricePaise, boolean priceIsFrom) {
+    }
+
+    /**
+     * A salon's ratings as customers see them.
+     * @param count   how many customers rated it
+     * @param average average stars to one decimal; null until it has 5 ratings ("New"), so one early rating can't
+     *                define it
+     * @param tags    what customers said went well, most mentioned first; only tags someone ticked
+     */
+    public record RatingSummary(int count, Double average, List<TagCount> tags) {
+
+        public RatingSummary {
+            tags = List.copyOf(tags);
+        }
+    }
+
+    public record TagCount(RatingTag tag, String label, int count) {
     }
 
     /**
      * One salon's page.
-     * @param hours per weekday (1 = Monday), the earliest start and latest end of any barber; a day without
-     *              barbers is left out
+     * @param hours per weekday (1 = Monday), the salon's opening hours; a day left out is its weekly off. (A salon
+     *              that hasn't set them yet: the earliest start and latest end of any barber that day)
+     * @param closedDates its closed days (holidays) from today to the end of its booking window
+     * @param rating      its customers' ratings
      * @param pausedUntil set while the salon has paused online bookings
      * @param photoUrl    the salon's photo, a link valid for at least 60 more minutes; null if none
      * @param maxDaysAhead how many days after today it takes online bookings (1 to 30, the owner's setting): the app
@@ -60,9 +109,16 @@ public final class BookingResponses {
      */
     public record SalonDetails(UUID id, String name, String addressLine, String area, String city, String pincode,
                                BigDecimal latitude, BigDecimal longitude, String mapLink, List<DayHours> hours,
-                               Instant pausedUntil, String photoUrl, int maxDaysAhead) {
+                               Instant pausedUntil, String photoUrl, int maxDaysAhead, List<LocalDate> closedDates,
+                               RatingSummary rating) {
+
+        public SalonDetails {
+            hours = List.copyOf(hours);
+            closedDates = List.copyOf(closedDates);
+        }
     }
 
+    /** An open day: weekday 1 = Monday ... 7 = Sunday, "HH:mm" in salon time ("24:00" = midnight). */
     public record DayHours(int weekday, String open, String close) {
     }
 
@@ -102,12 +158,64 @@ public final class BookingResponses {
      * @param lateCancelFrom a cancel after this moment counts as late (a strike): 1 hour before the start, or 10
      *                     minutes after booking if that is later
      * @param earlierAlert true if the customer asked to be told when an earlier time opens that day
+     * @param rating       the customer's rating of this visit; null if not rated
+     * @param rateUntil    while set, the customer can rate the visit (or change the rating) until this moment:
+     *                     completed online bookings, for 14 days after the visit; null otherwise
      */
     public record BookingView(UUID id, String bookingNo, UUID salonId, String salonName, String salonAddress,
                               String mapLink, List<ServiceLine> services, long totalPricePaise, boolean priceIsFrom,
                               Instant startsAt, Instant endsAt, Instant heldUntil, AppointmentStatus status,
                               String startCode, String cancelReason, boolean canChange,
-                              boolean canMove, Instant createdAt, Instant lateCancelFrom, boolean earlierAlert) {
+                              boolean canMove, Instant createdAt, Instant lateCancelFrom, boolean earlierAlert,
+                              MyRating rating, Instant rateUntil) {
+    }
+
+    /**
+     * A customer's rating of one visit.
+     * @param comment only the salon sees it; null if none
+     */
+    public record MyRating(int stars, List<RatingTag> tags, String comment, Instant ratedAt, Instant updatedAt) {
+
+        public MyRating {
+            tags = List.copyOf(tags);
+        }
+    }
+
+    /** The customer's salon preferences. */
+    public record SalonPreferencesView(boolean comeBackReminders) {
+    }
+
+    // ---------- ratings on the salon's side ----------
+
+    /**
+     * A page of the salon's ratings, newest first.
+     * @param summary all of the salon's ratings (with the average from the first rating on); first page only (null on
+     *                later ones: keep the first page's)
+     * @param next    the next page's query values (afterAt, afterId); null on the last page
+     */
+    public record RatingsPage(RatingSummary summary, List<SalonRating> items, RatingsNext next) {
+
+        public RatingsPage {
+            items = List.copyOf(items);
+        }
+    }
+
+    /**
+     * One customer's rating of a visit, as the salon sees it.
+     * @param customerName who rated it ("Customer" if they have no name: never set, or the account was deleted)
+     * @param comment      null if none (or the account was deleted)
+     * @param visitAt      when the booking started
+     */
+    public record SalonRating(UUID bookingId, String bookingNo, int stars, List<RatingTag> tags, String comment,
+                              List<String> services, String customerName, Instant visitAt, Instant ratedAt) {
+
+        public SalonRating {
+            tags = List.copyOf(tags);
+            services = List.copyOf(services);
+        }
+    }
+
+    public record RatingsNext(Instant afterAt, UUID afterId) {
     }
 
     /**

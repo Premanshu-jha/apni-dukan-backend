@@ -18,13 +18,19 @@ public final class SalonResponses {
     private SalonResponses() {
     }
 
+    /**
+     * A service as the salon sets it up.
+     * @param returnAfterDays days after a visit the customer is reminded to come back for it; 0 = no reminder
+     */
     public record ServiceResponse(UUID id, String name, int durationMinutes, long pricePaise, boolean priceIsFrom,
-                                  boolean active, int sortOrder, long version, Instant createdAt, Instant updatedAt) {
+                                  boolean active, int sortOrder, int returnAfterDays, long version, Instant createdAt,
+                                  Instant updatedAt) {
 
         public static ServiceResponse from(SalonServiceItem item) {
             ServiceDetails d = item.details();
             return new ServiceResponse(item.getId(), d.name(), d.durationMin(), d.pricePaise(), d.priceIsFrom(),
-                    d.active(), d.sortOrder(), item.getVersion(), item.getCreatedAt(), item.getUpdatedAt());
+                    d.active(), d.sortOrder(), d.returnAfterDays(), item.getVersion(), item.getCreatedAt(),
+                    item.getUpdatedAt());
         }
     }
 
@@ -60,6 +66,32 @@ public final class SalonResponses {
     }
 
     /**
+     * The salon's opening hours.
+     * @param version send it back with PUT /salon/hours; null while none are set
+     * @param days    the open days, Monday first; a weekday missing is closed. Empty while none are set
+     */
+    public record HoursResponse(String version, List<BookingResponses.DayHours> days) {
+
+        public HoursResponse {
+            days = List.copyOf(days);
+        }
+    }
+
+    /**
+     * A barber whose hours fall outside the salon's new hours (409 STAFF_HOURS_OUTSIDE lists them).
+     */
+    public record StaffOutside(UUID staffId, String name) {
+    }
+
+    /**
+     * A common service the owner can tick at registration, with a suggested time and come-back interval; the owner
+     * sets the price (and may change the rest).
+     */
+    public record CatalogService(String name, int durationMinutes, int returnAfterDays) {
+    }
+
+    /**
+     * The salon's booking settings.
      * @param version   null while the defaults are in use (nothing saved yet)
      * @param updatedAt null while the defaults are in use
      */
