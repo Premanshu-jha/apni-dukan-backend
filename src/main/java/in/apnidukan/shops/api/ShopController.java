@@ -30,6 +30,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -206,8 +207,29 @@ public class ShopController {
     }
 
     /**
+     * Set a salon's registration document (owner): its type and a REG_DOC upload (photo or PDF). Send the version
+     * from GET /shops/me. Optional; an approved salon stays live, and customers see "Registered" once the field team
+     * has checked the new document.
+     */
+    @PutMapping("/me/registration-document")
+    public ShopResponse setRegistrationDoc(@Valid @RequestBody ShopRequests.SetRegistrationDoc body) {
+        return shops.setRegistrationDoc(currentUser.get().userId(), body);
+    }
+
+    /**
+     * Remove a salon's registration document (owner): `?version=` from GET /shops/me (409 SHOP_CHANGED if stale).
+     * Customers see "Unregistered" from now on; the salon stays as it is. 409 NOT_A_SALON for a kirana.
+     */
+    @DeleteMapping("/me/registration-document")
+    public ShopResponse removeRegistrationDoc(@RequestParam long version) {
+        return shops.removeRegistrationDoc(currentUser.get().userId(), version);
+    }
+
+    /**
      * Registration step 2 (owner): ask for the field team's visit. DRAFT → PENDING_VISIT.
-     * 409 PHOTOS_REQUIRED until both photos and the salon video are set.
+     * 409 PHOTOS_REQUIRED until both photos and the salon video are set; then, for a salon, 409
+     * REGISTRATION_INCOMPLETE until at least one service and its opening hours are set (the registration document is
+     * optional).
      */
     @PostMapping("/me/submit")
     public ShopResponse submit(@Valid @RequestBody Submit body) {

@@ -149,6 +149,30 @@ public class ShopAdminController {
         return admin.reinstate(caller(), id, body.version(), body.note());
     }
 
+    /** Live salons with a new registration document to check (super admins), oldest change first, at most 100. */
+    @GetMapping("/shops/documents-to-check")
+    public List<AdminShopResponse> documentsToCheck() {
+        return admin.documentsToCheck(caller());
+    }
+
+    /**
+     * The salon's registration document is checked: customers see "Registered". {"version", "note"?}. 409
+     * NO_DOCUMENT, SHOP_CHANGED (the owner changed the shop since: maybe a new document), WRONG_STATUS (closed).
+     */
+    @PostMapping("/shops/{id}/registration-document/check")
+    public AdminShopResponse checkDocument(@PathVariable UUID id, @Valid @RequestBody Approve body) {
+        return admin.markDocumentChecked(caller(), id, body.version(), body.note());
+    }
+
+    /**
+     * Take a wrong or expired registration document off the salon, with the reason the owner is told. {"version",
+     * "reason"}. The salon's status doesn't change. 409 NO_DOCUMENT, SHOP_CHANGED, WRONG_STATUS.
+     */
+    @PostMapping("/shops/{id}/registration-document/remove")
+    public AdminShopResponse removeDocument(@PathVariable UUID id, @Valid @RequestBody RemoveDocument body) {
+        return admin.removeDocument(caller(), id, body.version(), body.reason());
+    }
+
     /** A note for admins only on the shop's timeline. */
     @PostMapping("/shops/{id}/notes")
     public ResponseEntity<TimelineEntry> note(@PathVariable UUID id, @Valid @RequestBody Note body) {
@@ -201,5 +225,9 @@ public class ShopAdminController {
     }
 
     public record Note(@NotBlank @Size(max = 500) String note) {
+    }
+
+    /** @param reason what the owner is told, e.g. "The licence expired in March." */
+    public record RemoveDocument(@NotNull Long version, @NotBlank @Size(max = 200) String reason) {
     }
 }

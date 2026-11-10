@@ -3,6 +3,8 @@ package in.apnidukan.salon.api;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.salon.api.BookingRequests.LinkLogin;
 import in.apnidukan.salon.api.SalonRequests.CreateService;
+import in.apnidukan.salon.api.SalonRequests.CreateServices;
+import in.apnidukan.salon.api.SalonRequests.SetSalonHours;
 import in.apnidukan.salon.api.SalonRequests.CreateStaff;
 import in.apnidukan.salon.api.SalonRequests.SetHours;
 import in.apnidukan.salon.api.SalonRequests.SetServices;
@@ -10,6 +12,8 @@ import in.apnidukan.salon.api.SalonRequests.StaffPhoto;
 import in.apnidukan.salon.api.SalonRequests.UpdateService;
 import in.apnidukan.salon.api.SalonRequests.UpdateSettings;
 import in.apnidukan.salon.api.SalonRequests.UpdateStaff;
+import in.apnidukan.salon.api.SalonResponses.CatalogService;
+import in.apnidukan.salon.api.SalonResponses.HoursResponse;
 import in.apnidukan.salon.api.SalonResponses.ServiceResponse;
 import in.apnidukan.salon.api.SalonResponses.SettingsResponse;
 import in.apnidukan.salon.api.SalonResponses.StaffResponse;
@@ -59,6 +63,38 @@ public class SalonController {
         return setup.addService(me(), body);
     }
 
+    /**
+     * Add several services at once, all or none (registration). 201 with them in the order sent. 409
+     * SERVICE_NAME_TAKEN or TOO_MANY_SERVICES as for one; 400 if the list has a name twice.
+     */
+    @PostMapping("/services/batch")
+    @ResponseStatus(HttpStatus.CREATED)
+    public List<ServiceResponse> addServices(@Valid @RequestBody CreateServices body) {
+        return setup.addServices(me(), body.services());
+    }
+
+    /** Common services to tick at registration, each with a suggested time and come-back interval (no price). */
+    @GetMapping("/service-catalog")
+    public List<CatalogService> catalog() {
+        return setup.catalog(me());
+    }
+
+    /** The salon's opening hours (open days; a day left out is its weekly off), with the version to send back. */
+    @GetMapping("/hours")
+    public HoursResponse hours() {
+        return setup.hours(me());
+    }
+
+    /**
+     * Replace the salon's opening hours (owner). 409 HOURS_CHANGED if the version is stale, 409 STAFF_HOURS_OUTSIDE
+     * naming barbers who work outside them (unless trimStaffHours), 409 BOOKINGS_IN_THE_WAY if cutting a barber's
+     * hours would strand an upcoming booking.
+     */
+    @PutMapping("/hours")
+    public HoursResponse setSalonHours(@Valid @RequestBody SetSalonHours body) {
+        return setup.setSalonHours(me(), body);
+    }
+
     /** Edit a service or switch it off/on. Send the version you read; 409 SERVICE_CHANGED if it's stale. */
     @PatchMapping("/services/{id}")
     public ServiceResponse updateService(@PathVariable UUID id, @Valid @RequestBody UpdateService body) {
@@ -82,6 +118,27 @@ public class SalonController {
     @PatchMapping("/staff/{id}")
     public StaffResponse updateStaff(@PathVariable UUID id, @Valid @RequestBody UpdateStaff body) {
         return setup.updateStaff(me(), id, body);
+    }
+
+    /**
+     * The owner also cuts hair here: adds him as a barber, linked to his own sign-in, doing every active service in
+     * the salon's opening hours. 201. 409 ALREADY_A_BARBER, 409 TOO_MANY_STAFF.
+     */
+    @PostMapping("/staff/me")
+    @ResponseStatus(HttpStatus.CREATED)
+    public StaffResponse addMeAsBarber() {
+        return setup.addOwnerAsBarber(me());
+    }
+
+    /**
+     * Remove a barber for good (owner): out of the salon's lists, his sign-in goes, his past bookings keep his name.
+     * 204. 409 STAFF_HAS_BOOKINGS while he has upcoming bookings; 404 if there's no such barber (or he was removed).
+     * Switching him off (PATCH active false) instead keeps him for when he comes back.
+     */
+    @DeleteMapping("/staff/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void removeStaff(@PathVariable UUID id) {
+        setup.removeStaff(me(), id);
     }
 
     /** Give the barber his own sign-in with his phone (he then sees his own day). */
