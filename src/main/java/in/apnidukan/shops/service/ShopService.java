@@ -1,5 +1,6 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.context.SalonFacts;
 import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.context.ShopChangeListener;
 import in.apnidukan.common.context.ShopMemberships;
@@ -74,11 +75,13 @@ public class ShopService implements ShopMemberships {
     private final Clock clock;
     private final ShopInvitesService invites;
     private final ShopAssignments assignments;
+    private final SalonFacts salons;
 
     public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files, UserDirectory users,
                        List<ShopChangeListener> listeners, ShopReviewStore review, Clock clock,
                        ShopInvitesService invites,
-                       ShopAssignments assignments) {
+                       ShopAssignments assignments, SalonFacts salons) {
+        this.salons = salons;
         this.invites = invites;
         this.assignments = assignments;
         this.review = review;
@@ -261,9 +264,56 @@ public class ShopService implements ShopMemberships {
     }
 
     /**
+     * Sets a salon's registration document (owner only; 409 NOT_A_SALON for a kirana): its type and a REG_DOC file of
+     * this shop (a photo or a PDF); otherwise 400 naming fileId. The salon stays as it is (an approved one stays
+     * live): the document is optional, and the new one waits for the field team's check (customers see "Registered"
+     * once it is checked). The document it replaces stays as an upload the owner can delete.
+     */
+    @Transactional
+    public ShopResponse setRegistrationDoc(UUID userId, ShopRequests.SetRegistrationDoc in) {
+        Shop shop = ownedShop(userId, in.version());
+        if (shop.getType() != ShopType.SALON) {
+            throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The registration document is only for salons.");
+        }
+        UUID doc = files.find(in.fileId())
+                .filter(x -> x.shopId().equals(shop.getId()) && "REG_DOC".equals(x.purpose()))
+                .map(FileRef::id)
+                .orElseThrow(() -> invalid("fileId", "must be a photo or PDF uploaded with purpose REG_DOC"));
+        if (doc.equals(shop.getRegistrationDocFileId()) && in.type() == shop.getRegistrationDocType()) {
+            return ShopResponse.from(shop, ShopRole.OWNER);
+        }
+        shop.setRegistrationDoc(in.type(), doc, now());
+        try {
+            saveShop(shop);
+        } catch (DataIntegrityViolationException deletedMeanwhile) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("fileId", "may have just been deleted; upload it again"));
+        }
+        return ShopResponse.from(shop, ShopRole.OWNER);
+    }
+
+    /**
+     * Removes a salon's registration document (owner only): customers see "Unregistered" from now on. The salon
+     * stays as it is. The upload stays, for the owner to delete. Nothing to remove: the shop as it is.
+     */
+    @Transactional
+    public ShopResponse removeRegistrationDoc(UUID userId, long version) {
+        Shop shop = ownedShop(userId, version);
+        if (shop.getType() != ShopType.SALON) {
+            throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The registration document is only for salons.");
+        }
+        if (shop.getRegistrationDocFileId() != null) {
+            shop.setRegistrationDoc(null, null, now());
+            saveShop(shop);
+        }
+        return ShopResponse.from(shop, ShopRole.OWNER);
+    }
+
+    /**
      * Registration step 2: the owner asks for the field team's visit. DRAFT → PENDING_VISIT. Needs the owner's and
-     * the shop's photo, and a salon's video (409 PHOTOS_REQUIRED, naming what is missing); from any other status, 409
-     * WRONG_STATUS.
+     * the shop's photo, and a salon's video (409 PHOTOS_REQUIRED, naming what is missing); then a salon also
+     * needs at least one active service and its opening hours (409 REGISTRATION_INCOMPLETE, naming what is
+     * missing). The registration document is optional. From any other status, 409 WRONG_STATUS.
      */
     @Transactional
     public ShopResponse submitForVisit(UUID userId, long version) {
@@ -288,6 +338,9 @@ public class ShopService implements ShopMemberships {
                     ? "Add the owner's photo, a photo of the shop and a short video of the salon first."
                     : "Add the owner's photo and a photo of the shop first.", missing);
         }
+        if (shop.getType() == ShopType.SALON) {
+            requireSalonSetUp(shop);
+        }
         shop.submitForVisit(now());
         saveShop(shop);
         review.addEvent(shop.getId(), now(), userId, false, ShopEventType.SUBMITTED, null, null, List.of());
@@ -295,12 +348,36 @@ public class ShopService implements ShopMemberships {
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
 
-    /** True if this file is the owner's or the shop's photo, or the salon video, of some shop (then it stays). */
+    /**
+     * What a salon needs besides its photos and video before the field team's visit: at least one active service
+     * (with its time) and its opening hours. 409 REGISTRATION_INCOMPLETE naming each missing one (services, hours).
+     * The registration document is optional (many salons aren't registered): customers see "Registered" only for a
+     * salon that has one.
+     */
+    private void requireSalonSetUp(Shop shop) {
+        Map<String, Object> missing = new java.util.LinkedHashMap<>();
+        if (salons.size(shop.getId()).services() == 0) {
+            missing.put("services", "add the services the salon offers");
+        }
+        if (!salons.hasOpeningHours(shop.getId())) {
+            missing.put("hours", "set the salon's opening hours");
+        }
+        if (!missing.isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT, "REGISTRATION_INCOMPLETE",
+                    "Add the salon's services and its opening hours first.", missing);
+        }
+    }
+
+    /**
+     * True if this file is the owner's or the shop's photo, the salon video or the registration document of some shop
+     * (then it stays).
+     */
     @Transactional(readOnly = true)
     public boolean usesFile(UUID fileId) {
         // A photo of the last approved version stays too: the field team compares it with the new one. An old video
         // doesn't: it is replaced, not compared, and too big to keep for nothing
         return shops.existsByOwnerPhotoFileIdOrShopPhotoFileIdOrShopVideoFileId(fileId, fileId, fileId)
+                || shops.existsByRegistrationDocFileId(fileId)
                 || review.isLastApprovedPhoto(fileId);
     }
 
@@ -374,6 +451,17 @@ public class ShopService implements ShopMemberships {
     @Transactional(readOnly = true)
     public Map<UUID, String> waitingBarberInvites(UUID shopId) {
         return invites.waitingBarbers(shopId);
+    }
+
+    @Override
+    @Transactional
+    public boolean lockOwner(UUID shopId, UUID userId) {
+        // The shop's row first (shared), as a hand-over or closing takes it before the member rows: our later insert
+        // of a barber profile needs a key lock on it, so taking it last could deadlock with them
+        if (shops.findForShare(shopId).isEmpty()) {
+            return false;
+        }
+        return members.lockRole(shopId, userId).filter(ShopRole.OWNER.name()::equals).isPresent();
     }
 
     @Override

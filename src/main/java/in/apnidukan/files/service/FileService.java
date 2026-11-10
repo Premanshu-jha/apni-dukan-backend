@@ -82,6 +82,7 @@ public class FileService {
             throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE",
                     "The salon video is sent with an upload link (POST /files/video-uploads), not here");
         }
+        requireOwnerFor(user, purpose);
 
         if (upload == null || upload.isEmpty()) {
             throw ApiException.badRequest("EMPTY_FILE", "The file is empty");
@@ -113,7 +114,10 @@ public class FileService {
         // Photos of people and shops are drawn again as a smaller JPEG without the phone's hidden details (EXIF);
         // bills and receipts are stored exactly as they came
         byte[] cleaned = null;
-        if (isPhotoPurpose(purpose)) {
+        // A registration document may be a PDF (stored as it came) or a photo (cleaned like the others: it may carry
+        // where it was taken)
+        boolean photoDocument = purpose == FilePurpose.REG_DOC && type != FileType.PDF;
+        if (isPhotoPurpose(purpose) || photoDocument) {
             if (type != FileType.JPEG && type != FileType.PNG) {
                 throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE", "Photos must be JPEG or PNG");
             }
@@ -157,7 +161,7 @@ public class FileService {
         CurrentUser user = shopStaff();
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
-        requireOwnerForVideo(user, file);
+        requireOwnerFor(user, file.getPurpose());
         String downloadName = download ? downloadName(file) : null;
         String url = storage.signedLink(file.getStorageKey(), linkValidity, downloadName);
         return new FileLink(url, Instant.now(clock).plus(linkValidity));
@@ -185,7 +189,7 @@ public class FileService {
     private String deleteRow(CurrentUser user, UUID fileId) {
         StoredFile file = repository.findByIdAndShopId(fileId, user.shopId())
                 .orElseThrow(() -> ApiException.notFound("File"));
-        requireOwnerForVideo(user, file);
+        requireOwnerFor(user, file.getPurpose());
         if (usageCheckers.stream().anyMatch(checker -> checker.isInUse(file))
                 || attachedElsewhere.stream().anyMatch(module -> module.isAttached(file.getId()))) {
             throw new ApiException(HttpStatus.CONFLICT, "FILE_IN_USE",
@@ -220,10 +224,17 @@ public class FileService {
         return user;
     }
 
-    /** The salon video is the owner's (and the field team's, on their own pages): 403 OWNER_ONLY for a helper. */
-    private static void requireOwnerForVideo(CurrentUser user, StoredFile file) {
-        if (file.getPurpose() == FilePurpose.SHOP_VIDEO && !"OWNER".equals(user.role())) {
+    /**
+     * The salon video and the registration document are the owner's (and the field team's, on their own pages): 403
+     * OWNER_ONLY for a helper.
+     */
+    private static void requireOwnerFor(CurrentUser user, FilePurpose purpose) {
+        if (purpose == FilePurpose.SHOP_VIDEO && !"OWNER".equals(user.role())) {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can open the salon video.");
+        }
+        if (purpose == FilePurpose.REG_DOC && !"OWNER".equals(user.role())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY",
+                    "Only the shop owner can add or open the registration document.");
         }
     }
 

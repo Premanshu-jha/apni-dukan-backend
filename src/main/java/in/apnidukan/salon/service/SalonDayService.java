@@ -46,6 +46,7 @@ import in.apnidukan.salon.repo.SalonStaffRepository;
 import in.apnidukan.salon.repo.SalonVersionStore;
 import in.apnidukan.salon.repo.StaffShiftRepository;
 import in.apnidukan.salon.repo.StrikeStore;
+import in.apnidukan.salon.repo.VisitFollowUpStore;
 import in.apnidukan.salon.service.SalonAccess.Caller;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.PessimisticLockingFailureException;
@@ -135,13 +136,15 @@ public class SalonDayService {
     private final SalonEtags etags;
     private final SalonSetups setups;
     private final SalonVersionStore versions;
+    private final VisitFollowUpStore followUps;
     private final Clock clock;
 
     public SalonDayService(SalonAccess access, SalonCalendar calendar, AppointmentStore appointments,
                            StrikeStore strikes, SalonStaffRepository staff, StaffShiftRepository shifts,
                            SalonAccessStore salonAccess, StartCodes codes, SalonNotices notices, ShopDirectory shops,
                            ShopMemberships memberships, UserDirectory users, SalonEtags etags, SalonSetups setups,
-                           SalonVersionStore versions, Clock clock) {
+                           SalonVersionStore versions, VisitFollowUpStore followUps, Clock clock) {
+        this.followUps = followUps;
         this.etags = etags;
         this.setups = setups;
         this.versions = versions;
@@ -691,6 +694,7 @@ public class SalonDayService {
             throw changed();
         }
         appointments.event(a.id(), now, c.userId(), "FINISHED", null);
+        followUps.addFinished(a.id(), now);   // an online booking: its rating request and come-back reminder
         return salonView(c, appointments.find(a.id()).orElseThrow());
     }
 
@@ -960,8 +964,10 @@ public class SalonDayService {
     // ---------- closed days ----------
 
     /**
-     * Closes the salon for a whole day: one CLOSED block per active barber, sharing a closure id, all or nothing.
-     * Anything already on that day (bookings, walk-ins, breaks): 409 BLOCK_CONFLICTS listing it.
+     * Closes the salon for a whole day (a festival holiday): the salon's closed day, and one CLOSED block per active
+     * barber sharing its id, all or nothing. Works before any barber exists (during registration); barbers added or
+     * switched on later get it too (SalonSetupService.joinClosedDays). Anything already on that day (bookings,
+     * walk-ins, breaks): 409 BLOCK_CONFLICTS listing it. The day already closed: 409 ALREADY_CLOSED.
      */
     @Transactional
     public ClosureView addClosure(UUID userId, AddClosure in) {
@@ -974,16 +980,21 @@ public class SalonDayService {
         }
         List<SalonStaff> barbers = staff.findByShopIdOrderByCreatedAtAscIdAsc(c.shopId()).stream()
                 .filter(SalonStaff::isActive).toList();
-        if (barbers.isEmpty()) {
-            throw new ApiException(HttpStatus.CONFLICT, "NO_ACTIVE_BARBERS", "Add a barber first.");
-        }
         Interval day = new Interval(Availability.dayStart(in.date()), Availability.dayStart(in.date().plusDays(1)));
-        List<UUID> ids = barbers.stream().map(SalonStaff::getId).toList();
-        List<Appointment> inTheWay = appointments.holding(ids, day.start(), day.end(), null);
-        if (!inTheWay.isEmpty()) {
-            throw blockConflicts(inTheWay);
-        }
+        // The day first: an already closed one would otherwise show up below as its own blocks in the way
         UUID closureId = UUID.randomUUID();
+        if (!appointments.addClosedDay(closureId, c.shopId(), in.date(), day.start(), day.end(), c.userId(), now)) {
+            throw new ApiException(HttpStatus.CONFLICT, "ALREADY_CLOSED", "The salon is already closed that day.");
+        }
+        // Blocks an older server copy wrote for this day without its row join it (and aren't "in the way")
+        Set<UUID> covered = appointments.adoptClosedBlocks(c.shopId(), closureId, day.start(), day.end(), now);
+        barbers = barbers.stream().filter(b -> !covered.contains(b.getId())).toList();
+        List<UUID> ids = barbers.stream().map(SalonStaff::getId).toList();
+        List<Appointment> inTheWay = ids.isEmpty() ? List.of()
+                : appointments.holding(ids, day.start(), day.end(), null);
+        if (!inTheWay.isEmpty()) {
+            throw blockConflicts(inTheWay);   // rolls the day back too
+        }
         for (SalonStaff b : barbers) {
             Appointment block = block(c, b.getId(), BlockType.CLOSED, closureId, day, now);
             if (!appointments.insertIfFree(block)) {   // something was added in between: undo all of it
@@ -991,7 +1002,7 @@ public class SalonDayService {
             }
             appointments.event(block.id(), now, c.userId(), "CLOSED_DAY_ADDED", in.date().toString());
         }
-        return new ClosureView(closureId, in.date(), barbers.size());
+        return new ClosureView(closureId, in.date(), barbers.size() + covered.size());
     }
 
     /** Upcoming closed days. */
@@ -1011,8 +1022,10 @@ public class SalonDayService {
         Caller c = access.owner(userId);
         appointments.lockSalonCalendar(c.shopId());   // a barber joining this closed day right now can't be missed
         Instant now = now();
+        boolean day = appointments.removeClosedDay(c.shopId(), closureId, now);
+        // Blocks without a day row too (closed by an older server copy during a deploy): they still go
         List<UUID> removed = appointments.removeClosure(c.shopId(), closureId, now);
-        if (removed.isEmpty()) {
+        if (!day && removed.isEmpty()) {
             throw notFound();
         }
         for (UUID id : removed) {

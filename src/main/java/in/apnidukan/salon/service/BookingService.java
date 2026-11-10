@@ -1,20 +1,31 @@
 package in.apnidukan.salon.service;
 
 import in.apnidukan.common.context.ShopDirectory;
-import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.context.ShopDirectory.ShopCard;
+import in.apnidukan.common.context.ShopMemberships;
+import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.FileRefs;
+import in.apnidukan.common.notify.Notifications;
+import in.apnidukan.common.text.TextCleaner;
+import in.apnidukan.common.text.TextCleaner.TextField;
 import in.apnidukan.salon.api.BookingRequests.Book;
+import in.apnidukan.salon.api.BookingRequests.RateVisit;
 import in.apnidukan.salon.api.BookingResponses.BookingView;
 import in.apnidukan.salon.api.BookingResponses.CancelResult;
+import in.apnidukan.salon.api.BookingResponses.CardFacts;
 import in.apnidukan.salon.api.BookingResponses.DayHours;
+import in.apnidukan.salon.api.BookingResponses.MyRating;
+import in.apnidukan.salon.api.BookingResponses.PriceLine;
+import in.apnidukan.salon.api.BookingResponses.RatingSummary;
 import in.apnidukan.salon.api.BookingResponses.SalonDetails;
+import in.apnidukan.salon.api.BookingResponses.SalonPreferencesView;
 import in.apnidukan.salon.api.BookingResponses.SalonService;
 import in.apnidukan.salon.api.BookingResponses.SalonSummary;
 import in.apnidukan.salon.api.BookingResponses.ServiceLine;
 import in.apnidukan.salon.api.BookingResponses.Slot;
 import in.apnidukan.salon.api.BookingResponses.Slots;
+import in.apnidukan.salon.api.BookingResponses.TagCount;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.domain.AppointmentKind;
@@ -23,11 +34,16 @@ import in.apnidukan.salon.domain.Availability;
 import in.apnidukan.salon.domain.Availability.BarberDay;
 import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.Interval;
+import in.apnidukan.salon.domain.RatingTag;
 import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.domain.Shift;
 import in.apnidukan.salon.domain.StrikeKind;
 import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.salon.repo.EarlierSlotAlertStore;
+import in.apnidukan.salon.repo.RatingStore;
+import in.apnidukan.salon.repo.SalonCardStore;
+import in.apnidukan.salon.repo.SalonOpenDayRepository;
+import in.apnidukan.salon.repo.VisitFollowUpStore;
 import in.apnidukan.salon.repo.SalonAccessStore;
 import in.apnidukan.salon.repo.StrikeStore;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -46,6 +62,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -101,6 +118,11 @@ public class BookingService {
      * with 31^7 numbers a clash is already rare, five in a row never happens).
      */
     static final int BOOKING_NO_TRIES = 5;
+    /** A completed visit can be rated (and the rating changed) for this long after it ended. */
+    static final Duration RATE_FOR = Duration.ofDays(14);
+    /** Customers see a salon's average only from this many ratings on ("New" before). */
+    static final int RATINGS_FOR_AVERAGE = 5;
+    static final TextField COMMENT = new TextField("comment", 1, 300);
 
     private final ShopDirectory shops;
     private final SalonCalendar calendar;
@@ -117,6 +139,12 @@ public class BookingService {
     private final BookingNumbers numbers;
     private final EarlierSlotAlertStore alerts;
     private final EarlierSlotAlerts earlierSlots;
+    private final RatingStore ratings;
+    private final SalonCardStore cards;
+    private final SalonOpenDayRepository openDays;
+    private final VisitFollowUpStore followUps;
+    private final Notifications notifications;
+    private final ShopMemberships memberships;
     private final int readsPerMinute;
 
     private static final Logger log = LoggerFactory.getLogger(BookingService.class);
@@ -125,8 +153,16 @@ public class BookingService {
                           StrikeStore strikes, SalonAccessStore salonAccess,
                           StartCodes codes, SalonNotices notices, FileRefs files, UserDirectory users, Clock clock,
                           RateLimiter limits, SalonSetups setups, BookingNumbers numbers,
-                          EarlierSlotAlertStore alerts, EarlierSlotAlerts earlierSlots,
+                          EarlierSlotAlertStore alerts, EarlierSlotAlerts earlierSlots, RatingStore ratings,
+                          SalonCardStore cards, SalonOpenDayRepository openDays, VisitFollowUpStore followUps,
+                          Notifications notifications, ShopMemberships memberships,
                           @Value("${app.salon.reads-per-minute:60}") int readsPerMinute) {
+        this.memberships = memberships;
+        this.ratings = ratings;
+        this.cards = cards;
+        this.openDays = openDays;
+        this.followUps = followUps;
+        this.notifications = notifications;
         this.alerts = alerts;
         this.earlierSlots = earlierSlots;
         this.limits = limits;
@@ -149,8 +185,8 @@ public class BookingService {
 
     /**
      * Approved salons within 2 km, nearest first, leaving out those that paused online bookings, one page at a time:
-     * `after` is the last salon of the previous page (null for the first). Two database reads per page however
-     * many salons there are: the page (PostGIS), and the photos' links.
+     * `after` is the last salon of the previous page (null for the first). Three database reads per page however
+     * many salons there are: the page (PostGIS), the photos' links, and the cards' ratings, services and hours.
      */
     @Transactional(readOnly = true)
     public List<SalonSummary> salonsNear(BigDecimal latitude, BigDecimal longitude, ShopDirectory.Cursor after) {
@@ -161,36 +197,87 @@ public class BookingService {
         List<ShopCard> page = shops.nearby("SALON", latitude, longitude, RADIUS_METRES, SALONS_PAGE, after, true);
         Map<UUID, String> photos = files.links(page.stream().map(ShopCard::shopPhotoFileId)
                 .filter(java.util.Objects::nonNull).toList());
+        Instant now = now();
+        LocalDate today = LocalDate.ofInstant(now, SalonTime.ZONE);
+        Map<UUID, SalonCardStore.Facts> facts = cards.facts(page.stream().map(ShopCard::id).toList(),
+                today.getDayOfWeek().getValue(), Availability.dayStart(today), Availability.dayStart(today.plusDays(1)));
+        int minuteNow = LocalTime.ofInstant(now, SalonTime.ZONE).toSecondOfDay() / 60;
         return page.stream()
                 .map(card -> SalonSummary.from(card, card.shopPhotoFileId() == null ? null
-                        : photos.get(card.shopPhotoFileId())))
+                        : photos.get(card.shopPhotoFileId()), cardFacts(facts.get(card.id()), today, minuteNow)))
                 .toList();
     }
 
+    /** A card's facts as customers see them (see SalonSummary). */
+    static CardFacts cardFacts(SalonCardStore.Facts f, LocalDate today, int minuteNow) {
+        if (f == null) {
+            return new CardFacts(ratingSummary(RatingStore.Totals.NONE, false), List.of(), 0, null, null, false, false);
+        }
+        // No working barber that day: closed, whatever the salon's hours say (nobody can be booked)
+        boolean openToday = f.openMin() != null && !f.closedDay() && f.worksToday();
+        boolean closedToday = f.closedDay() || (f.hasHours() && !openToday);
+        DayHours hours = openToday ? new DayHours(today.getDayOfWeek().getValue(), SalonTime.format(f.openMin()),
+                SalonTime.format(f.closeMin())) : null;
+        Boolean openNow = !f.hasHours() ? null
+                : openToday && minuteNow >= f.openMin() && minuteNow < f.closeMin();
+        return new CardFacts(ratingSummary(new RatingStore.Totals(f.ratings(), f.starsSum(), Map.of()), false),
+                f.top().stream().map(t -> new PriceLine(t.name(), t.pricePaise(), t.priceIsFrom())).toList(),
+                f.services(), hours, openNow, closedToday, f.registered());
+    }
+
     /**
-     * A salon's page: address, map link, opening hours (from its barbers' weekly hours, from the setup kept in
-     * memory: SalonSetups, read with the pause) and how many days ahead it takes bookings (the app's day chips).
+     * Ratings as customers see them: the average only from RATINGS_FOR_AVERAGE ratings on, and (when asked) the tags
+     * someone ticked, most mentioned first.
+     */
+    static RatingSummary ratingSummary(RatingStore.Totals t, boolean withTags) {
+        List<TagCount> tags = !withTags ? List.of() : t.tagCounts().entrySet().stream()
+                .filter(e -> e.getValue() > 0)
+                .sorted(Map.Entry.<RatingTag, Integer>comparingByValue().reversed()
+                        .thenComparing(Map.Entry.<RatingTag, Integer>comparingByKey()))
+                .map(e -> new TagCount(e.getKey(), e.getKey().label(), e.getValue()))
+                .toList();
+        return new RatingSummary(t.ratings(), t.ratings() >= RATINGS_FOR_AVERAGE ? t.average() : null, tags);
+    }
+
+    /**
+     * A salon's page: address, map link, opening hours (the salon's own; one that hasn't set them yet: from its
+     * barbers' weekly hours, from the setup kept in memory: SalonSetups, read with the pause), its closed days within
+     * its booking window, its ratings, and how many days ahead it takes bookings (the app's day chips).
      */
     @Transactional(readOnly = true)
     public SalonDetails salon(UUID customerId, UUID salonId) {
         requireReadsLeft(customerId);
         ShopCard card = visible(salonId);
         SalonSetups.Current current = setups.current(salonId);
-        Map<Integer, int[]> byDay = new HashMap<>();
-        for (SalonSetups.Barber b : current.setup().barbers()) {
-            for (Shift sh : b.week()) {
-                byDay.merge(sh.weekday(), new int[] {sh.startMin(), sh.endMin()},
-                        (x, y) -> new int[] {Math.min(x[0], y[0]), Math.max(x[1], y[1])});
-            }
-        }
-        List<DayHours> hours = byDay.entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .map(e -> new DayHours(e.getKey(), SalonTime.format(e.getValue()[0]), SalonTime.format(e.getValue()[1])))
+        List<DayHours> hours = openDays.findByShopIdOrderByWeekdayAsc(salonId).stream()
+                .map(d -> new DayHours(d.day().weekday(), SalonTime.format(d.day().startMin()),
+                        SalonTime.format(d.day().endMin())))
                 .toList();
+        if (hours.isEmpty()) {
+            Map<Integer, int[]> byDay = new HashMap<>();
+            for (SalonSetups.Barber b : current.setup().barbers()) {
+                for (Shift sh : b.week()) {
+                    byDay.merge(sh.weekday(), new int[] {sh.startMin(), sh.endMin()},
+                            (x, y) -> new int[] {Math.min(x[0], y[0]), Math.max(x[1], y[1])});
+                }
+            }
+            hours = byDay.entrySet().stream()
+                    .sorted(Map.Entry.comparingByKey())
+                    .map(e -> new DayHours(e.getKey(), SalonTime.format(e.getValue()[0]),
+                            SalonTime.format(e.getValue()[1])))
+                    .toList();
+        }
         Instant now = now();
+        Instant windowEnd = calendar.window(current.setup(), now).end();
+        List<LocalDate> closed = appointments.closures(salonId, now).stream()
+                .filter(c -> c.startsAt().isBefore(windowEnd))
+                .map(c -> LocalDate.ofInstant(c.startsAt(), SalonTime.ZONE))
+                .distinct()
+                .toList();
         return new SalonDetails(card.id(), card.name(), card.addressLine(), card.area(), card.city(), card.pincode(),
                 card.latitude(), card.longitude(), SalonNotices.mapLink(card), hours,
-                current.pausedAt(now) ? current.pausedUntil() : null, photo(card), current.setup().maxDaysAhead());
+                current.pausedAt(now) ? current.pausedUntil() : null, photo(card), current.setup().maxDaysAhead(),
+                closed, ratingSummary(ratings.totals(salonId), true));
     }
 
     /** The salon's active services that at least one active barber does, in the salon's order. */
@@ -254,6 +341,64 @@ public class BookingService {
             log.warn("Redis didn't answer the salon-read count ({}); letting it through",
                     redisDown.getClass().getSimpleName());
         }
+    }
+
+    // ---------- ratings and come-back reminders ----------
+
+    /**
+     * Rates my completed visit, or changes my rating (the stars, the tags and the comment all replace the earlier
+     * ones). Until 14 days after the visit ended (rateUntil on the booking): later, 409 RATING_CLOSED. A booking that
+     * isn't completed (still to come, cancelled, missed): 409 NOT_RATEABLE. Someone working in that salon (owner,
+     * helper, barber): 409 OWN_SALON. Someone else's booking: 404. A rating
+     * request still waiting to go out isn't sent. Returns the booking with the rating.
+     */
+    @Transactional
+    public BookingView rate(UUID customerId, UUID bookingId, RateVisit in) {
+        appointments.lockCustomer(customerId);   // two saves of the same rating (a double tap) run one after the other
+        requireLiveAccount(customerId);
+        Appointment a = mine(customerId, appointments.find(bookingId));
+        Instant now = now();
+        if (a.status() != AppointmentStatus.COMPLETED) {
+            throw new ApiException(HttpStatus.CONFLICT, "NOT_RATEABLE", "You can rate a visit once it's done.");
+        }
+        if (memberships.find(customerId).filter(m -> m.shopId().equals(a.shopId())).isPresent()) {
+            // The owner, a helper or a barber booking his own salon from his customer account
+            throw new ApiException(HttpStatus.CONFLICT, "OWN_SALON", "You can't rate the salon you work in.");
+        }
+        if (!now.isBefore(rateUntil(a))) {
+            throw new ApiException(HttpStatus.CONFLICT, "RATING_CLOSED",
+                    "Visits can be rated for " + RATE_FOR.toDays() + " days. This one can't be rated any more.");
+        }
+        String comment = in.comment() == null || in.comment().isBlank() ? null
+                : TextCleaner.clean(COMMENT, in.comment());
+        int tags = RatingTag.mask(in.tags() == null ? List.of() : in.tags());
+        Optional<RatingStore.Rating> before = ratings.find(a.id());
+        RatingStore.Rating rating = new RatingStore.Rating(a.id(), a.shopId(), customerId, in.stars(), tags, comment,
+                before.map(RatingStore.Rating::createdAt).orElse(now), now);
+        ratings.save(rating, before.orElse(null));
+        followUps.ratedNow(a.id());   // waits for a round about to queue the request, so the cancel below sees it
+        notifications.cancelPending(a.id(), VisitFollowUpJob.RATE_TYPE);
+        return view(a, now);
+    }
+
+    /** When this visit can no longer be rated: 14 days after it ended. */
+    static Instant rateUntil(Appointment a) {
+        return a.endsAt().plus(RATE_FOR);
+    }
+
+    /** My salon preferences: whether I get come-back reminders (on unless switched off). */
+    @Transactional(readOnly = true)
+    public SalonPreferencesView preferences(UUID customerId) {
+        return new SalonPreferencesView(followUps.wantsReminders(customerId));
+    }
+
+    /** Switches my come-back reminders on or off (reminders already due are checked against this when sent). */
+    @Transactional
+    public SalonPreferencesView setPreferences(UUID customerId, boolean comeBackReminders) {
+        appointments.lockCustomer(customerId);   // after an account deletion that ran meanwhile, not a new row
+        requireLiveAccount(customerId);
+        followUps.setWantsReminders(customerId, comeBackReminders, now());
+        return new SalonPreferencesView(comeBackReminders);
     }
 
     // ---------- booking ----------
@@ -668,6 +813,11 @@ public class BookingService {
         Map<UUID, ShopCard> salons = shops.findAll(shopIds);
         Map<UUID, Instant> pauses = salonAccess.pausedUntil(shopIds);
         Set<UUID> alertOn = alerts.switchedOn(list.stream().map(Appointment::id).toList());
+        Map<UUID, RatingStore.Rating> rated = ratings.forAppointments(list.stream()
+                .filter(a -> a.status() == AppointmentStatus.COMPLETED).map(Appointment::id).toList());
+        // A customer's own list: the salon they work in, if any, isn't offered for rating (409 OWN_SALON)
+        UUID worksAt = list.isEmpty() || list.get(0).customerId() == null ? null
+                : memberships.find(list.get(0).customerId()).map(ShopMemberships.Membership::shopId).orElse(null);
         Map<UUID, Boolean> pausedNow = new HashMap<>();
         for (UUID id : shopIds) {
             if (!salons.containsKey(id)) {
@@ -689,8 +839,16 @@ public class BookingService {
                     a.startsAt().plus(SalonDayService.LATE_ALLOWANCE), a.status(),
                     a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null,
                     a.cancelReason(), changeable, movable, a.createdAt(), lateCancelFrom(a),
-                    a.status() == AppointmentStatus.CONFIRMED && alertOn.contains(a.id()));
+                    a.status() == AppointmentStatus.CONFIRMED && alertOn.contains(a.id()),
+                    myRating(rated.get(a.id())),
+                    a.status() == AppointmentStatus.COMPLETED && now.isBefore(rateUntil(a))
+                            && !a.shopId().equals(worksAt) ? rateUntil(a) : null);
         }).toList();
+    }
+
+    private static MyRating myRating(RatingStore.Rating r) {
+        return r == null ? null
+                : new MyRating(r.stars(), RatingTag.of(r.tags()), r.comment(), r.createdAt(), r.updatedAt());
     }
 
     private static ApiException outsideWindow(String message) {

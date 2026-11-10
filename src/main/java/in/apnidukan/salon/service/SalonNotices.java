@@ -263,8 +263,10 @@ public class SalonNotices {
      */
     public void walkInCancelled(Appointment a, String reason, UUID by, Instant now) {
         String barber = barberName(a.staffId());
+        Set<UUID> told = new LinkedHashSet<>();
         for (var m : memberships.members(a.shopId())) {
             if ("OWNER".equals(m.role()) && !m.userId().equals(by)) {
+                told.add(m.userId());
                 notifications.queue(new Notice(m.userId(), "SALON_WALK_IN_CANCELLED", null, now,
                         "Walk-in cancelled, " + TIME.format(a.startsAt()),
                         guestName(a) + " with " + barber + " at " + TIME.format(a.startsAt())
@@ -272,9 +274,16 @@ public class SalonNotices {
                         dayUrl(a), Map.of(), null));
             }
         }
-        // And the barber whose chair it was in (in the app; not if he did it himself)
-        tellBarbers(a, List.of(a.staffId()), "SALON_WALK_IN_CANCELLED", "Walk-in cancelled, " + TIME.format(a.startsAt()),
-                guestName(a) + " at " + TIME.format(a.startsAt()) + " was cancelled: " + reason, null, by, now);
+        // And the barber whose chair it was in (in the app; not if he did it himself, nor again if he is the owner)
+        Set<UUID> barberLogin = logins(List.of(a.staffId()));
+        barberLogin.removeAll(told);
+        barberLogin.remove(by);
+        for (UUID person : barberLogin) {
+            notifications.queue(new Notice(person, "SALON_WALK_IN_CANCELLED", null, now,
+                    "Walk-in cancelled, " + TIME.format(a.startsAt()),
+                    guestName(a) + " at " + TIME.format(a.startsAt()) + " was cancelled: " + reason, dayUrl(a),
+                    Map.of(), null));
+        }
     }
 
     /** Someone left the salon or lost their sign-in: their salon messages go. */
@@ -319,7 +328,8 @@ public class SalonNotices {
      * To the salon's owner, its helpers and the given barbers' sign-ins, each person once, written in one batch. The
      * barbers also get the SMS (when a template is set for the type); the owner only when
      * app.notifications.owner-booking-sms is on (off by default: a busy salon's owner would get an SMS per booking, and
-     * the app's push and list already tell them); helpers in the app only (they run the front desk).
+     * the app's push and list already tell them), also when he is one of the barbers; helpers in the app only (they run
+     * the front desk).
      * @param about the customer the text names, so their account deletion blanks it (null when it names nobody)
      */
     private void tellSalon(Appointment a, List<UUID> barbers, String type, String title, String body,
@@ -333,7 +343,12 @@ public class SalonNotices {
         Set<UUID> appOnly = new LinkedHashSet<>();
         for (var m : memberships.members(a.shopId())) {
             if ("OWNER".equals(m.role())) {
-                (ownerBookingSms ? withSms : appOnly).add(m.userId());
+                if (ownerBookingSms) {
+                    withSms.add(m.userId());
+                } else {
+                    withSms.remove(m.userId());   // his own chair too: the owner's setting decides
+                    appOnly.add(m.userId());
+                }
             } else if ("HELPER".equals(m.role())) {
                 appOnly.add(m.userId());
             }
