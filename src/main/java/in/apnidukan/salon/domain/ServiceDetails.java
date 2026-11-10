@@ -6,7 +6,12 @@ package in.apnidukan.salon.domain;
  * @param pricePaise  whole paise: ₹150 is 15000
  * @param priceIsFrom shown as "from ₹150" when the final price can vary (e.g. hair colour by length)
  * @param sortOrder   position in the salon's list, lowest first
+ * @param returnAfterDays days after a visit to remind the customer to come back for it (1-180), or 0 for never
  */
 public record ServiceDetails(String name, int durationMin, long pricePaise, boolean priceIsFrom, boolean active,
-                             int sortOrder) {
+                             int sortOrder, int returnAfterDays) {
+
+    /** Used when the owner doesn't say: two weeks. */
+    public static final int DEFAULT_RETURN_AFTER_DAYS = 14;
+    public static final int MAX_RETURN_AFTER_DAYS = 180;
 }

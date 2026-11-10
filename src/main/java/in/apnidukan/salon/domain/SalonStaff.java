@@ -44,6 +44,10 @@ public class SalonStaff {
     @Column(nullable = false)
     private boolean active;
 
+    /** When the owner removed him for good (switched off, out of the salon's lists); null if not removed. */
+    @Column(name = "removed_at")
+    private Instant removedAt;
+
     @Version
     @Column(nullable = false)
     private long version;
@@ -71,6 +75,15 @@ public class SalonStaff {
         this.active = active;
         this.updatedAt = now;
     }
+
+    /** Removed for good by the owner: switched off and out of the salon's lists (his past bookings keep his name). */
+    public void remove(Instant now) {
+        this.active = false;
+        this.removedAt = now;
+        this.updatedAt = now;
+    }
+
+    public boolean isRemoved() { return removedAt != null; }
 
     /** Sets or clears (null) his photo. */
     public void setPhoto(UUID photoFileId, Instant now) {

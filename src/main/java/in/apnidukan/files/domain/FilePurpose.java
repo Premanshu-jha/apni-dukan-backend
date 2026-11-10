@@ -10,6 +10,11 @@ public enum FilePurpose {
     STAFF_PHOTO("staff"),
     /** A short video of the salon for the field team (registration); customers never see it. */
     SHOP_VIDEO("videos"),
+    /**
+     * A salon's registration document (Shops and Establishments certificate, trade licence or Udyam certificate), a
+     * photo or a PDF, for the field team only. Only the owner uploads, opens or deletes it.
+     */
+    REG_DOC("documents"),
     BILL("bills"),
     RECEIPT("receipts");
 
