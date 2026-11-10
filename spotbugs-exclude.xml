@@ -46,6 +46,7 @@
             <Class name="in.apnidukan.notifications.service.MessageCleanupJob"/>
             <Class name="in.apnidukan.notifications.service.NotificationSendJob"/>
             <Class name="in.apnidukan.salon.service.AutoEndJob"/>
+            <Class name="in.apnidukan.salon.service.VisitFollowUpJob"/>
             <Class name="in.apnidukan.files.service.FileRefService"/>
             <Class name="in.apnidukan.notifications.service.AccountWipeJob"/>
             <Class name="in.apnidukan.files.service.PhotoCleaning"/>

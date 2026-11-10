@@ -3,6 +3,9 @@ package in.apnidukan.salon.api;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.salon.api.BookingRequests.RateVisit;
+import in.apnidukan.salon.api.BookingRequests.SalonPreferences;
+import in.apnidukan.salon.api.BookingResponses.SalonPreferencesView;
 import in.apnidukan.salon.api.BookingRequests.Book;
 import in.apnidukan.salon.api.BookingRequests.EarlierAlert;
 import in.apnidukan.salon.api.BookingRequests.Reschedule;
@@ -130,6 +133,27 @@ public class BookingController {
     @PutMapping("/api/v1/bookings/{id}/earlier-alert")
     public BookingView earlierAlert(@PathVariable UUID id, @Valid @RequestBody EarlierAlert body) {
         return bookings.earlierAlert(me(), id, body.on());
+    }
+
+    /**
+     * Rate my completed visit, or change my rating: {stars 1-5, tags?, comment?}. Until rateUntil on the booking (14
+     * days after the visit): then 409 RATING_CLOSED. 409 NOT_RATEABLE if the visit isn't completed. Returns the
+     * booking with its rating.
+     */
+    @PostMapping("/api/v1/bookings/{id}/rating")
+    public BookingView rate(@PathVariable UUID id, @Valid @RequestBody RateVisit body) {
+        return bookings.rate(me(), id, body);
+    }
+
+    /** My salon preferences: {comeBackReminders} ("Time for your next haircut?"; on unless switched off). */
+    @GetMapping("/api/v1/me/salon-preferences")
+    public SalonPreferencesView preferences() {
+        return bookings.preferences(me());
+    }
+
+    @PutMapping("/api/v1/me/salon-preferences")
+    public SalonPreferencesView setPreferences(@Valid @RequestBody SalonPreferences body) {
+        return bookings.setPreferences(me(), body.comeBackReminders());
     }
 
     private UUID me() {

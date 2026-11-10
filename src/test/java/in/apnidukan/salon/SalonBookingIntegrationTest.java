@@ -1054,6 +1054,7 @@ class SalonBookingIntegrationTest {
         UUID admin = person("9000000099");
         jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", admin);
         assertThat(approve(newSalon, admin).status()).isEqualTo(409);   // DRAFT
+        TestData.setUpForVisit(jdbc, newSalon, newOwner);   // document, services, hours (SalonRegistrationIntegrationTest)
         Reply submitted = post("/shops/me/submit", Map.of("version", field(withVideo.body(), "version")), newOwner);
         assertThat(field(submitted.body(), "status")).as(submitted.text()).isEqualTo("PENDING_VISIT");
 

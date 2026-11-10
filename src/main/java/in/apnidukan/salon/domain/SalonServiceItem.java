@@ -47,6 +47,9 @@ public class SalonServiceItem {
     @Column(name = "sort_order", nullable = false)
     private int sortOrder;
 
+    @Column(name = "return_after_days", nullable = false)
+    private int returnAfterDays;
+
     @Version
     @Column(nullable = false)
     private long version;
@@ -74,11 +77,12 @@ public class SalonServiceItem {
         this.priceIsFrom = details.priceIsFrom();
         this.active = details.active();
         this.sortOrder = details.sortOrder();
+        this.returnAfterDays = details.returnAfterDays();
         this.updatedAt = now;
     }
 
     public ServiceDetails details() {
-        return new ServiceDetails(name, durationMin, pricePaise, priceIsFrom, active, sortOrder);
+        return new ServiceDetails(name, durationMin, pricePaise, priceIsFrom, active, sortOrder, returnAfterDays);
     }
 
     public UUID getId() { return id; }

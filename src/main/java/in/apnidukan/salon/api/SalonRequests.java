@@ -26,13 +26,23 @@ public final class SalonRequests {
      * @param pricePaise      whole paise, ₹150 = 15000; up to ₹1,00,000
      * @param priceIsFrom     optional, false if left out; true shows "from ₹150"
      * @param sortOrder       optional, 0 if left out; lower comes first in the list
+     * @param returnAfterDays optional, 14 if left out: days after a visit to remind the customer to come back for
+     *                        it (1 to 180), or 0 for no reminder
      */
     public record CreateService(
             @NotBlank @Size(min = 2, max = 60) String name,
             @NotNull @Min(5) @Max(480) Integer durationMinutes,
             @NotNull @Min(0) @Max(10_000_000) Long pricePaise,
             Boolean priceIsFrom,
-            @Min(0) @Max(999) Integer sortOrder) {
+            @Min(0) @Max(999) Integer sortOrder,
+            @Min(0) @Max(180) Integer returnAfterDays) {
+    }
+
+    /**
+     * Add several services at once (registration: the ones ticked from the list, plus any typed in), all or none.
+     * Each as for one; two with the same name (capitals ignored) are refused.
+     */
+    public record CreateServices(@NotNull @Size(min = 1, max = 30) List<@NotNull @Valid CreateService> services) {
     }
 
     /**
@@ -46,7 +56,8 @@ public final class SalonRequests {
             @Min(0) @Max(10_000_000) Long pricePaise,
             Boolean priceIsFrom,
             Boolean active,
-            @Min(0) @Max(999) Integer sortOrder) {
+            @Min(0) @Max(999) Integer sortOrder,
+            @Min(0) @Max(180) Integer returnAfterDays) {
     }
 
     /**
@@ -85,6 +96,33 @@ public final class SalonRequests {
     public record SetHours(
             @NotNull Long version,
             @NotNull @Size(max = 50) List<@NotNull @Valid ShiftIn> hours) {
+    }
+
+    /**
+     * The salon's whole week of opening hours; replaces it. A weekday left out is closed (the weekly off); at least
+     * one day must be open. Every barber's hours must stay inside these.
+     * @param version        the version you last read (GET /salon/hours; null while none are set); if someone saved in
+     *                       between you get 409 HOURS_CHANGED
+     * @param trimStaffHours optional: true cuts barbers' hours that fall outside the new hours to fit (else 409
+     *                       STAFF_HOURS_OUTSIDE names them); upcoming bookings that wouldn't fit any more are still
+     *                       refused (409 BOOKINGS_IN_THE_WAY)
+     */
+    public record SetSalonHours(
+            String version,
+            @NotNull @Size(min = 1, max = 7) List<@NotNull @Valid SalonDayIn> days,
+            Boolean trimStaffHours) {
+    }
+
+    /**
+     * One open day of the salon.
+     * @param weekday 1 = Monday ... 7 = Sunday, each at most once
+     * @param open    "HH:mm" on a 15-minute step, e.g. "10:00"
+     * @param close   "HH:mm" after open, up to "24:00"
+     */
+    public record SalonDayIn(
+            @NotNull @Min(1) @Max(7) Integer weekday,
+            @NotBlank String open,
+            @NotBlank String close) {
     }
 
     /**

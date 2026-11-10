@@ -11,8 +11,8 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `common` | Error format, security (JWT check, CORS), current user/shop, clock |
 | `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery; admin roles (one super admin, admins) and OTP test mode |
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
-| `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
-| `salon` | Salon setup (services, barbers with optional sign-in and photo, weekly hours, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end |
+| `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and registration document, Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
+| `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
 ## How file handling works
@@ -365,7 +365,12 @@ sequenceDiagram
 | `GET /api/v1/shops/me/invites` · `DELETE /api/v1/shops/me/invites/{id}` | Owner. The shop's invitations still waiting (helpers and barbers), by the phone typed, never a name: `[{id, phone, role, staffId, createdAt, expiresAt}]`. `DELETE`: cancel one (204; 404 `INVITE_NOT_FOUND` for another shop's) |
 | `GET /api/v1/me/invites` · `POST /api/v1/me/invites/{id}/accept` · `.../decline` | Anyone signed in: invitations waiting for their phone, `[{id, shopId, shopCode, shopName, type, area, city, role, createdAt, expiresAt}]`. Accept: 200 with the shop (`myRole` HELPER or BARBER), then `POST /auth/refresh`. Decline: 204 (the owner is told). 404 `INVITE_NOT_FOUND` (not for your phone), 409 `INVITE_GONE` with `details.status` (`ACCEPTED`, `DECLINED`, `CANCELLED`, `EXPIRED`, `CLOSED`, `CHANGED`, `STAFF_CHANGED`), 409 `ALREADY_IN_A_SHOP` (leave your shop first), 409 `TOO_MANY_HELPERS` |
 | `POST /api/v1/shops/me/leave` | A helper or barber leaves the shop (204), e.g. a phone added without asking. A barber's profile, hours and bookings stay with the salon; only his sign-in goes. 409 `OWNER_CANT_LEAVE` |
-| `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos are set |
+| `PUT /api/v1/shops/me/registration-document` | A salon's owner (403 `OWNER_ONLY`; 409 `NOT_A_SALON` for a kirana). Optional (many salons aren't registered), and the owner can add, replace or remove it at any time: the salon's card says "Registered" only while it has one that the field team checked, else "Unregistered". `{version, type, fileId}`: `type` `SHOPS_ESTABLISHMENT`, `TRADE_LICENCE` or `UDYAM` (any one will do), `fileId` a `POST /files` upload with purpose `REG_DOC` (a photo, cleaned like the others, or a PDF; only the owner uploads, opens or deletes it). 200 with the shop (`registrationDocType`, `registrationDocFileId`, `registrationDocCheckedAt`: the owner's only). The salon's status doesn't change (an approved one stays live); a new document, or a new kind for the same file, waits for the field team's check. 400 `VALIDATION_FAILED` naming `fileId`, 409 `SHOP_CHANGED` |
+| `DELETE /api/v1/shops/me/registration-document?version=` | The owner removes it: customers see "Unregistered"; the status doesn't change; the upload stays for him to delete. 409 `SHOP_CHANGED`, 409 `NOT_A_SALON` |
+| `GET /api/v1/admin/shops/documents-to-check` | Super admins: live salons whose document was added or changed since the last check, oldest change first, at most 100 (`ix_shops_registration_doc_to_check`) |
+| `POST /api/v1/admin/shops/{id}/registration-document/check` | `{version, note?}`: checked, customers see "Registered" (approving a salon after its visit checks the document there too). Any status but CLOSED; a field agent only for a business assigned to them. 409 `NO_DOCUMENT`, `SHOP_CHANGED`, `WRONG_STATUS` |
+| `POST /api/v1/admin/shops/{id}/registration-document/remove` | `{version, reason}`: a wrong or expired one comes off; the owner gets `SHOP_DOCUMENT_REMOVED` with the reason; a note on the timeline. Same rules |
+| `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos (and a salon's video) are set; then, for a salon, 409 `REGISTRATION_INCOMPLETE` with `details` naming each of `services` (at least one active), `hours` (the opening hours) still missing. The registration document is optional |
 | `POST /api/v1/shops/me/close` | Owner. `{version, reason?}` (reason 2–200 characters, for the field team): closes the shop for good, see "Closing a shop or handing it over". 200 with the shop (`status: CLOSED`). 409 `SHOP_CHANGED` for a stale version, 403 `OWNER_ONLY` |
 | `POST /api/v1/shops/me/handover` · `GET` · `DELETE` | Owner. `{phone, version}`: asks the person with that phone to take the shop over. 202 `{message, handover: {id, phone, createdAt, expiresAt}}`, the same `message` for any number. 409 `HANDOVER_PENDING` while one waits, 429 `TOO_MANY_REQUESTS` after 5 a day, 400 `INVALID_PHONE` / `VALIDATION_FAILED` (`details.phone`: your own number). `GET`: the waiting one (404 `NO_HANDOVER`). `DELETE`: cancel it (204, also when none waits) |
 | `GET /api/v1/me/handover` · `POST /api/v1/me/handover/{id}/accept` · `.../decline` | Anyone signed in: requests waiting for their phone, `[{id, shopId, shopCode, shopName, type, area, city, ownerName, createdAt, expiresAt}]`. Accept: 200 with the shop (`myRole: OWNER`), then `POST /auth/refresh`. Decline: 204. 404 `HANDOVER_NOT_FOUND` (not for your phone), 409 `HANDOVER_GONE` with `details.status` (`ACCEPTED`, `DECLINED`, `CANCELLED`, `EXPIRED`, `CLOSED`, `OWNER_CHANGED`), 409 `ALREADY_IN_A_SHOP` (you work in another shop: leave it first), 403 `PROFILE_INCOMPLETE` |
@@ -609,15 +614,20 @@ are worked out from exactly these. Anyone in the salon can read the setup; only 
 
 | Call | What it does |
 | --- | --- |
-| `GET` / `POST /api/v1/salon/services` | List (by `sortOrder`, then name) / add: `name`, `durationMinutes` (5–480, steps of 5), `pricePaise`, `priceIsFrom`, `sortOrder` |
+| `GET` / `POST /api/v1/salon/services` | List (by `sortOrder`, then name) / add: `name`, `durationMinutes` (5–480, steps of 5), `pricePaise`, `priceIsFrom`, `sortOrder`, `returnAfterDays` (0–180: days after a visit to remind the customer to come back for it, 0 = never; 14 when left out) |
+| `POST /api/v1/salon/services/batch` | `{services: [...]}` (1–30, each as for one): all or none, 201 with them in the order sent; without `sortOrder` they go after the salon's services in that order (also for one added alone), so lists and cards show them as added, not alphabetically. The same name twice in the list: 400 `VALIDATION_FAILED` naming `services[i].name`; one an active service already has: 409 `SERVICE_NAME_TAKEN`; the limit counts them all (409 `TOO_MANY_SERVICES`) |
+| `GET /api/v1/salon/service-catalog` | Anyone in the salon: the common services to tick at registration, `[{name, durationMinutes, returnAfterDays}]` (suggestions only; the owner sets the prices) |
+| `GET` / `PUT /api/v1/salon/hours` | The salon's opening hours: `{version, days: [{weekday, open, close}]}`, a weekday left out is closed (its weekly off), `version` null while none are set. `PUT {version, days, trimStaffHours?}` (owner) replaces the week: one block a day on 15-minute steps, close after open (up to `"24:00"`), at least one day; 409 `HOURS_CHANGED` for a stale version. Barbers whose hours fall outside: 409 `STAFF_HOURS_OUTSIDE` with `details.staff [{staffId, name}]`, or with `trimStaffHours: true` their hours are cut to fit (409 `BOOKINGS_IN_THE_WAY`, nothing saved, if that would strand an upcoming booking). Festival holidays are closed days (`/salon/closures`) |
 | `PATCH /api/v1/salon/services/{id}` | Edit, or `"active": false` to switch off (kept for old bookings). Send `version`; 409 `SERVICE_CHANGED` if stale |
 | `GET` / `POST /api/v1/salon/staff` | Barbers with their `serviceIds`, `hours`, `loginPhone`, `photoFileId` / add one: `name`, and optionally `phone` to give him his own sign-in |
 | `PATCH /api/v1/salon/staff/{id}` | Rename, or `"active": false` when a barber leaves (409 `STAFF_HAS_BOOKINGS` while he has upcoming ones; his sign-in is removed). Switching back on: 409
-`BLOCK_CONFLICTS` if a leave of his runs into a closed day (remove it, switch him on, add it again around that day). Send `version`; 409 `STAFF_CHANGED` if stale |
+`BLOCK_CONFLICTS` if a leave of his runs into a closed day (remove it, switch him on, add it again around that day). Switched back on, his hours are cut to the salon's. Send `version`; 409 `STAFF_CHANGED` if stale. Switching off is the way to pause a contract barber who comes and goes |
+| `POST /api/v1/salon/staff/me` | The owner also cuts hair: a barber profile for him, linked to his own sign-in at once (he stays the owner), doing every active service in the salon's opening hours, with its closed days. 201. 409 `ALREADY_A_BARBER`, 409 `TOO_MANY_STAFF` (he counts like any barber). His own profile keeps his sign-in while switched off (switch it on again; `ALREADY_A_BARBER` meanwhile) and lets go of it only when removed; `DELETE .../login` on it is 409 `OWNER_PROFILE`. Booking messages for his own chair follow the owner's SMS setting (`OWNER_BOOKING_SMS`), each message once. A barber who becomes the owner (hand-over) stays a barber; an owner who hands over leaves the salon like a barber who leaves (his profile loses the sign-in; the new owner switches it off or removes it) |
+| `DELETE /api/v1/salon/staff/{id}` | The owner removes a barber for good (one who won't come back): switched off, his sign-in and any waiting invitation go, he leaves the list (`removed_at`) and can't be edited or switched on again (404); his past bookings keep his name. 204. 409 `STAFF_HAS_BOOKINGS` while he has upcoming ones |
 | `PUT` / `DELETE /api/v1/salon/staff/{id}/login` | `{phone}`: his sign-in becomes a BARBER member of the salon (409 `ALREADY_IN_A_SHOP` if that phone works in a shop). Delete: membership and walk-in access go, his sessions end at once |
 | `PUT /api/v1/salon/staff/{id}/photo` | Optional photo: `{fileId}` of a `STAFF_PHOTO` upload, or `{"fileId": null}` to remove |
 | `PUT /api/v1/salon/staff/{id}/services` | `{"version": 3, "serviceIds": [...]}` replaces what he does; newly added ones must be active services of this salon. 409 `BOOKINGS_IN_THE_WAY` (listing them) if an upcoming booking of his uses a service he'd drop |
-| `PUT /api/v1/salon/staff/{id}/hours` | `{"version": 3, "hours": [{"weekday": 1, "start": "10:00", "end": "14:00"}, ...]}` replaces his week. 409 `BOOKINGS_IN_THE_WAY` (listing them) if an upcoming booking of his would fall outside the new hours: reassign or cancel it first |
+| `PUT /api/v1/salon/staff/{id}/hours` | `{"version": 3, "hours": [{"weekday": 1, "start": "10:00", "end": "14:00"}, ...]}` replaces his week. Once the salon has set its opening hours, every block must lie inside them (400 `VALIDATION_FAILED` naming `hours`: "… is outside the salon's hours (10:00-21:00)", "the salon is closed on Sundays"). 409 `BOOKINGS_IN_THE_WAY` (listing them) if an upcoming booking of his would fall outside the new hours: reassign or cancel it first |
 | `GET` / `PATCH /api/v1/salon/settings` | Earliest booking (`minLeadMinutes`, default 30) and latest (`maxDaysAhead`, default 7). `version` is null until the first save |
 
 **Database:** V4 runs `CREATE EXTENSION IF NOT EXISTS btree_gist` (needed by the no-overlap rule). Neon and the
@@ -642,6 +652,38 @@ capitals ignored: 409 `SERVICE_NAME_TAKEN`. Another salon's ids: 404 `SERVICE_NO
 `serviceIds`. A stale settings save is 409 `SETTINGS_CHANGED`. The limits are a guard against runaway lists, not
 exact: two adds at the very same moment could both pass at 99.
 Separately, one request carries at most 200 `serviceIds` and 50 blocks of `hours` (more is 400 `VALIDATION_FAILED`).
+
+## Ratings, the salon list's cards and the messages after a visit
+
+**Ratings.** A customer rates a completed online booking (a walk-in has no customer account), and may change it until
+14 days after the visit (`rateUntil` on the booking; null otherwise). `POST /api/v1/bookings/{id}/rating
+{stars 1-5, tags?, comment?}` returns the booking with `rating {stars, tags, comment, ratedAt, updatedAt}`. Tags:
+`ON_TIME`, `CLEAN`, `FRIENDLY`, `SKILLED`, `GOOD_VALUE`. The comment (up to 300 characters) is for the salon only.
+409 `NOT_RATEABLE` before the visit is done, 409 `RATING_CLOSED` after 14 days, 409 `OWN_SALON` for someone working
+in that salon (owner, helper or barber booking it from a customer account), 404 for someone else's booking. Each
+salon's running totals (`salon_rating_totals`) move in the same transaction, so lists never count ratings. Customers
+see the average from 5 ratings on (`average: null` before: the app shows "New"); the salon sees it from the first.
+`GET /api/v1/salon/ratings?afterAt=&afterId=` (owner and helpers; 403 `NOT_ALLOWED` for barbers): 30 a page, newest
+first, the first page with the `summary`. A deleted account's comments go; its stars stay in the totals.
+
+**The salon list's cards.** Each salon in `GET /salons` also carries `addressLine`, `rating {count, average, tags: []}`,
+`topServices` (its first 3 services a barber does, with prices), `serviceCount`, `today` (its hours today, null when
+closed or not set), `openNow` (null when no hours are set), `closedToday` (weekly off, a closed day, or no working barber has hours that day) and
+`registered` (it has its registration document, checked by the field team: "Registered", else "Unregistered"). One more
+query per page however many salons (`SalonCardStore`). The salon's page (`GET /salons/{id}`) shows the salon's own
+hours (a salon without any yet: from its barbers, as before), `closedDates` within its booking window and its
+`rating` with the tags customers ticked most.
+
+**After a visit** (`VisitFollowUpJob`, every minute; rows in `visit_follow_ups`, written in the same statement that
+completes the booking, by the automatic end or Finish):
+
+| Message | When | Not sent if | Opens |
+| --- | --- | --- | --- |
+| `BOOKING_RATE_VISIT` "How was your visit?" | 10 minutes after the end; only between 9:00 and 21:00 (a visit ending later: the next morning) | rated already (rating takes it off the queue); the customer works in the salon; over a day late (the job was down) | `/bookings/{id}?rate=1` |
+| `BOOKING_COME_BACK` "Time for your next Haircut?" | 10:00 India time, the shortest `returnAfterDays` of the visit's services (0s left out) after the visit's day; only between 9:00 and 21:00. Names and picks only the services due on the day it was scheduled for (all of them if the owner lengthened an interval since, so it isn't lost), at most 5 (the link fits `notification_jobs.url`) | the customer switched these off, has a booking coming up, completed another online booking since, the salon isn't live, or it offers none of those services any more | `/salons/{salonId}?services=a,b` |
+
+Both are push and in-app messages of the customer app (`BOOKING_` types), never SMS unless a template is set for the
+type. `GET` / `PUT /api/v1/me/salon-preferences {comeBackReminders}`: on until switched off.
 
 ## Run it on your laptop
 
@@ -775,13 +817,40 @@ The customer picks services and a time; the backend picks the barber. Another pe
 | `POST /appointments/{id}/undo-no-show` | owner, helper | Within 24 h of the start: the strike goes, the booking is closed as cancelled by the salon ("No-show undone"), and the customer is told it no longer counts. Later, only support can remove the strike |
 | `POST /appointments/{id}/reassign {staffId}` · `/cancel {reason}` | owner, helper; and whoever added a walk-in that is still in the chair (while he still has walk-in access) | Another barber who does its services: a booking at the same time; a walk-in already in the chair (added to the wrong barber) continues with him from now for the rest of its time; both barbers and an online customer are told · salon cancel of a booking, a walk-in, or a walk-in in the chair within 15 minutes of it being put in a chair, which a move doesn't reset (later: 409 `IN_CHAIR_TOO_LONG`, finish it instead; the owner and that chair's barber are told when someone else cancels one). A booking's customer and barber are told; no strike |
 | `GET /staff/{id}/blocks/conflicts` · `POST /staff/{id}/blocks` · `DELETE .../blocks/{blockId}` | break: owner, helper, the barber; leave: owner | 409 `BLOCK_CONFLICTS` listing what's in the way; nothing saved. A barber's own breaks: today or tomorrow, at most 4 hours a day in all (longer time off is leave); he removes only breaks he added (`addedByMe` on each appointment says which; on a walk-in it is set only while the viewer may add walk-ins, so it marks what he may fix) and only before they start (409 `WRONG_STATUS`, `reason: STARTED`) |
-| `GET /closures` · `POST /closures {date}` · `DELETE /closures/{id}` | read: anyone in the salon; change: owner | A whole day closed for every barber, all or nothing; barbers added or switched on later get it too |
+| `GET /closures` · `POST /closures {date}` · `DELETE /closures/{id}` | read: anyone in the salon; change: owner | A festival holiday: the salon's own closed day (`salon_closed_days`), set even before any barber exists (during registration), with a CLOSED block for every working barber, all or nothing; barbers added or switched on later get it too. 409 `ALREADY_CLOSED` for a day already closed, 409 `BLOCK_CONFLICTS` listing bookings in the way. Blocks an old copy wrote during a deploy without a day row: closing that day again adopts them, and delete removes them too. The weekly off is the salon's opening hours; leave and breaks stay per barber |
 | `GET /pause` · `POST /pause {until?}` · `POST /resume` | read: anyone in the salon; change: owner, helper | Stop new online bookings (default: until midnight) |
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
 ### API changes in this version (deploy the backend first, then the apps)
+
+**Salon registration, opening hours, ratings and come-back reminders** (V34–V36; partner app 0.9.0, customer app
+0.4.0 and admin website 0.7.0 use them; old apps keep working except where said):
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /shops/me/submit` (salons) | 200 once photos and video are set | also 409 `REGISTRATION_INCOMPLETE` until a service and the opening hours are set (the registration document is optional) | partner app: the new registration steps (an old partner app can't register a salon any more) |
+| `PUT`/`DELETE /shops/me/registration-document`, `POST /files?purpose=REG_DOC` | none | new; the salon stays live, the card shows "Registered" once checked | partner app: the document card, More → Salon → Registration document |
+| shop answers (`GET /shops/me`, …) | | add `registrationDocType`, `registrationDocFileId`, `registrationDocCheckedAt` (the owner's only) | partner app types |
+| `DELETE /salon/staff/{id}` | none | new: remove a barber for good | partner app: "Remove barber" |
+| `POST /salon/staff/me` | none | new: the owner as a barber | partner app: registration question, "Add me as a barber" |
+| `POST /salon/closures` | 409 `NO_ACTIVE_BARBERS` without barbers | the salon's closed day even without barbers; 409 `ALREADY_CLOSED` | partner app: holidays at registration |
+| hand-over to a barber | his barber sign-in went | he stays a barber | none |
+| `POST /salon/services`, `/services/batch` without `sortOrder` | 0 (lists alphabetical) | after the salon's services, in the order sent | none |
+| `GET /admin/shops/documents-to-check`, `POST /admin/shops/{id}/registration-document/check`, `/remove` | none | new | admin website: the document section, Businesses → Salon |
+| messages | | new `SHOP_DOCUMENT_REMOVED` (shop owner) | partner app: inbox icon |
+| `POST /salon/services/batch`, `GET /salon/service-catalog`, `GET`/`PUT /salon/hours` | none | new | partner app: registration steps, Setup → Opening hours |
+| service answers and `POST`/`PATCH /salon/services` | | add `returnAfterDays` (14 when left out) | partner app: the field on the service sheet |
+| `PUT /salon/staff/{id}/hours` | any hours | inside the salon's hours once set (400 `VALIDATION_FAILED` `hours`) | partner app shows the reason; "Use the salon's hours" |
+| `GET /salons` | `{id, name, area, city, distanceKm, photoUrl, distanceMetres}` | adds `addressLine`, `rating`, `topServices`, `serviceCount`, `today`, `openNow`, `closedToday`, `registered` | customer app: the cards |
+| `GET /salons/{id}` | `hours` from the barbers | the salon's own hours; adds `closedDates`, `rating` | customer app |
+| booking answers | | add `rating`, `rateUntil` | customer app: the rating card |
+| `POST /bookings/{id}/rating`, `GET`/`PUT /me/salon-preferences`, `GET /salon/ratings` | none | new | customer app: rating, the switch on Profile; partner app: Ratings |
+| messages | | new types `BOOKING_RATE_VISIT`, `BOOKING_COME_BACK` (customer list) | customer app: open `?rate=1`, and `?services=` on a salon's page |
+| `GET /admin/shops/{id}` | `salon {barbers, services}` | `salon` adds `serviceList`, `hours`, `ratings`, `ratingAverage`; adds `registrationDoc {type, label, url, checkedAt}`; a change `registrationDoc` | admin website: the salon's setup and document |
+
+### API changes in the previous version
 
 **Earlier-slot alerts and the 10-minute late allowance** (V33; the customer app needs this for the switch, old apps
 keep working):
@@ -872,7 +941,7 @@ Old app versions keep working against this backend; everything new is optional f
 | messages | | new types `SHOP_HANDOVER_REQUEST`, `SHOP_HANDOVER_ACCEPTED`, `SHOP_HANDOVER_DECLINED`, `SHOP_HANDOVER_DONE` (partner app list) | show them like other `SHOP_*` messages |
 | `POST /auth/otp/send` (and other code SMS) | 503 `SMS_PAUSED` only at the daily limit | also for numbers without a sign-in in 30 days from 80% of the budget or past the hourly cap | unchanged: show the message, retry after `Retry-After` |
 
-### API changes in the previous version
+### API changes in an earlier version
 
 Old app versions keep working against this backend, with these differences until they are updated:
 
@@ -1473,7 +1542,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V34__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V37__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
@@ -1508,6 +1577,29 @@ fails). V32 validates V30's checks and key. **After deploying:** add each field 
 that picks up the businesses already waiting there, and until then every new business is Unassigned. During the
 rolling deploy a copy still on the old version can't add or remove an admin (V30's designation check refuses its
 write: 500) until every copy runs this version; deploy at a quiet moment.
+
+**V34–V36** (salon registration, opening hours, ratings, follow-ups): V34 adds `return_after_days` to
+`salon_services` (a constant default: no rewrite; its check `NOT VALID`), the nullable `registration_doc_type` and
+`registration_doc_file_id` to `shops` (their check and foreign key `NOT VALID`), and the new tables `salon_hours` (with
+its history table), `salon_ratings`, `salon_rating_totals`, `visit_follow_ups` and `salon_customer_prefs` (their indexes
+built in the migration: new, empty). It fills `salon_hours` for salons registered before: each weekday from the
+earliest start to the latest end of their working barbers' hours, so every working barber's hours are inside the
+salon's, as the new rule wants, and customers don't see days open that nobody works (a switched-off barber's hours are
+cut to the salon's when he is switched on again); a salon whose working barbers have no hours gets none (the partner
+app asks for them). It creates `salon_closed_days` and fills it from the closed days already there (one row per
+closure id of the barbers' CLOSED blocks; a second id for the same salon and day is merged into the first). It also adds `shops.registration_doc_checked_at` and `salon_staff.removed_at` (nullable; their
+checks `NOT VALID`). The new tables and the backfill come first, and everything that locks a busy existing table
+(`shops`, `salon_services`, `salon_staff`, and `revinfo` through the new tables' keys) last, so those locks are held
+only until the commit right after. V35 builds the `shops` indexes for the document CONCURRENTLY (see above if it
+fails) and drops `ix_appointments_shop_closures` (V18) CONCURRENTLY, no longer read now that closed days have their own table; V36 validates V34's checks and key.
+
+**Deploying V34–V36: one copy at a time is not enough, run a single instance for the switch-over.** While an old copy
+and a new one run side by side: an old copy completes bookings without follow-up rows (those visits get no rating
+request or reminder; they can still be rated from the booking's page), accepts barber hours outside the salon's
+hours, and writes `shops_aud` rows without the document columns (the field team's "what changed" may then show a
+document change that didn't happen, history only), and closes days with blocks only and no `salon_closed_days` row
+(the day then isn't listed or shown to customers, though nobody can book it; it can still be opened again by its id). An old partner app can't submit a salon (it has no screens for
+services and hours).
 
 **V33** (earlier-slot alerts, 10-minute late allowance) adds the empty `earlier_slot_alerts` table with its two
 indexes (built in the migration: the table is new and empty) and no foreign key (appointments are never deleted, and

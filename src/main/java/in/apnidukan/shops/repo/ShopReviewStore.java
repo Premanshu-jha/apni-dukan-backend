@@ -91,6 +91,16 @@ public class ShopReviewStore {
     }
 
     /**
+     * Live salons with a registration document not checked yet, oldest change first
+     * (ix_shops_registration_doc_to_check).
+     */
+    public List<UUID> documentsToCheck(int limit) {
+        return jdbc.queryForList("SELECT id FROM shops WHERE registration_doc_file_id IS NOT NULL "
+                + "AND registration_doc_checked_at IS NULL AND status = 'APPROVED' ORDER BY updated_at, id LIMIT ?",
+                UUID.class, limit);
+    }
+
+    /**
      * One page of shop ids in a group, longest in it first (status_since, then id), at most PAGE, after the cursor
      * (null: the first page). `q` (optional) matches the shop number exactly ("1042" or "#1042"), the owner's phone in
      * part (spaces, "+91" and dashes ignored), or the name or owner's name in part. {@code assignee}: only the shops
@@ -268,14 +278,15 @@ public class ShopReviewStore {
                 rs.getString("area"), rs.getString("city"), rs.getString("pincode"), rs.getBigDecimal("latitude"),
                 rs.getBigDecimal("longitude"), rs.getString("gstin"), rs.getString("udyam_number"),
                 rs.getObject("owner_photo_file_id", UUID.class), rs.getObject("shop_photo_file_id", UUID.class),
-                rs.getObject("shop_video_file_id", UUID.class));
+                rs.getObject("shop_video_file_id", UUID.class), rs.getString("registration_doc_type"),
+                rs.getObject("registration_doc_file_id", UUID.class));
     }
 
     /** A shop's details at one point in its history. */
     public record Snapshot(String name, String ownerName, String addressLine, String area, String city,
                            String pincode, BigDecimal latitude, BigDecimal longitude, String gstin,
                            String udyamNumber, UUID ownerPhotoFileId, UUID shopPhotoFileId,
-                           UUID shopVideoFileId) {
+                           UUID shopVideoFileId, String registrationDocType, UUID registrationDocFileId) {
     }
 
     /**

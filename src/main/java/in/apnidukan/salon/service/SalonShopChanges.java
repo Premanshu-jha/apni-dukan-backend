@@ -71,12 +71,14 @@ class SalonShopChanges implements ShopChangeListener {
         unlinkBarber(shopId, userId);
     }
 
-    /** Still in the salon, now as its owner: his messages stay; walk-in access and a barber's sign-in go. */
+    /**
+     * Still in the salon, now as its owner: his messages stay; his walk-in access goes (an owner may add walk-ins
+     * anyway). A barber who becomes the owner stays a barber: an owner may cut hair too (his profile keeps its sign-in).
+     */
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public void becameOwner(UUID shopId, UUID userId) {
         access.revokeWalkIns(shopId, userId);
-        unlinkBarber(shopId, userId);
     }
 
     /**

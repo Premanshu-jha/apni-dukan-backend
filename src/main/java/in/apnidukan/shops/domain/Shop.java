@@ -80,6 +80,19 @@ public class Shop {
     @Column(name = "shop_video_file_id")
     private UUID shopVideoFileId;
 
+    /** Which registration document the salon added (optional); null if none (kiranas never have one). */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "registration_doc_type", length = 20)
+    private RegistrationDocType registrationDocType;
+
+    /** The registration document (a REG_DOC upload: a photo or a PDF), for the field team only; null if none. */
+    @Column(name = "registration_doc_file_id")
+    private UUID registrationDocFileId;
+
+    /** When the field team checked this document; null until then (customers see "Registered" only once checked). */
+    @Column(name = "registration_doc_checked_at")
+    private Instant registrationDocCheckedAt;
+
     /** Why the field team sent it back to DRAFT or suspended it (shown to the owner); null otherwise. */
     @Column(name = "status_reason", length = 200)
     private String statusReason;
@@ -138,6 +151,28 @@ public class Shop {
         this.updatedAt = now;
     }
 
+    /**
+     * Sets the registration document (both set, or both null to remove it). Not checked yet: the field team checks
+     * it at the next visit or with "Mark as checked". A change of its kind alone counts as new too.
+     */
+    public void setRegistrationDoc(RegistrationDocType type, UUID fileId, Instant now) {
+        if ((type == null) != (fileId == null)) {
+            throw new IllegalArgumentException("A registration document needs both its type and its file");
+        }
+        this.registrationDocType = type;
+        this.registrationDocFileId = fileId;
+        this.registrationDocCheckedAt = null;
+        this.updatedAt = now;
+    }
+
+    /** The field team checked the document now there. Does nothing without one. */
+    public void markRegistrationDocChecked(Instant now) {
+        if (registrationDocFileId != null) {
+            this.registrationDocCheckedAt = now;
+            this.updatedAt = now;
+        }
+    }
+
     /** What the field team needs before a visit: both photos, and for a salon its video too. */
     public boolean readyForVisit() {
         return hasBothPhotos() && (type != ShopType.SALON || shopVideoFileId != null);
@@ -174,6 +209,9 @@ public class Shop {
         this.status = ShopStatus.APPROVED;
         this.statusReason = null;
         this.updatedAt = now;
+        if (registrationDocFileId != null && registrationDocCheckedAt == null) {
+            this.registrationDocCheckedAt = now;   // the visit checked the document there
+        }
     }
 
     /**
@@ -239,6 +277,9 @@ public class Shop {
     public UUID getOwnerPhotoFileId() { return ownerPhotoFileId; }
     public UUID getShopPhotoFileId() { return shopPhotoFileId; }
     public UUID getShopVideoFileId() { return shopVideoFileId; }
+    public RegistrationDocType getRegistrationDocType() { return registrationDocType; }
+    public UUID getRegistrationDocFileId() { return registrationDocFileId; }
+    public Instant getRegistrationDocCheckedAt() { return registrationDocCheckedAt; }
     public long getVersion() { return version; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }

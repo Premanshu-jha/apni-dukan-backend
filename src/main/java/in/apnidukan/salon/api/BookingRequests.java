@@ -1,6 +1,9 @@
 package in.apnidukan.salon.api;
 
 import in.apnidukan.salon.domain.BlockType;
+import in.apnidukan.salon.domain.RatingTag;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -35,6 +38,21 @@ public final class BookingRequests {
 
     /** Switch "tell me if an earlier slot opens" on or off for my booking. */
     public record EarlierAlert(@NotNull Boolean on) {
+    }
+
+    /**
+     * Rate my completed visit (or change my rating, until rateUntil).
+     * @param stars   1 to 5
+     * @param tags    optional: what went well (ON_TIME, CLEAN, FRIENDLY, SKILLED, GOOD_VALUE); left out = none
+     * @param comment optional, up to 300 characters; only the salon sees it. Blank or left out = none
+     */
+    public record RateVisit(@NotNull @Min(1) @Max(5) Integer stars,
+                            @Size(max = 5) List<@NotNull RatingTag> tags,
+                            @Size(max = 300) String comment) {
+    }
+
+    /** My choice about come-back reminders ("Time for your next haircut?"). */
+    public record SalonPreferences(@NotNull Boolean comeBackReminders) {
     }
 
     /** Move my booking to another start (from the availability call). */

@@ -283,7 +283,7 @@ class ShopOwnershipIntegrationTest {
     }
 
     @Test
-    void aHelperDeclinesThenARequestRunsOutThenTheBarberTakesOverAndLosesHisBarberSignIn() {
+    void aHelperDeclinesThenARequestRunsOutThenTheBarberTakesOverAndStaysABarber() {
         UUID first = handOverTo("9000000301");
         assertThat(post("/me/handover/" + first + "/decline", null, helper).status()).isEqualTo(204);
         assertThat(count("notification_jobs WHERE user_id = '" + owner + "' AND type = 'SHOP_HANDOVER_DECLINED'"))
@@ -307,14 +307,24 @@ class ShopOwnershipIntegrationTest {
                 .isEqualTo("ALREADY_IN_A_SHOP");
         assertThat(delete("/shops/me/handover", owner).status()).isEqualTo(204);
 
-        // The barber with his own sign-in takes over: the same membership becomes OWNER, his barber sign-in goes
+        // The owner cuts hair too; when he hands over and leaves, his profile lets go of his sign-in (like a barber who
+        // leaves: the new owner switches it off or removes it)
+        Reply me = post("/salon/staff/me", Map.of(), owner);
+        assertThat(me.status()).as(me.text()).isEqualTo(201);
+        UUID ownersChair = UUID.fromString((String) field(me.body(), "id"));
+
+        // The barber with his own sign-in takes over: the same membership becomes OWNER, and he stays a barber (an
+        // owner may cut hair too)
         UUID membership = jdbc.queryForObject("SELECT id FROM shop_members WHERE user_id = ?", UUID.class, rajuUser);
         UUID third = handOverTo("9000000201");
         Reply took = post("/me/handover/" + third + "/accept", null, rajuUser);
         assertThat(took.status()).as(took.text()).isEqualTo(200);
         assertThat(jdbc.queryForObject("SELECT role FROM shop_members WHERE id = ?", String.class, membership))
                 .isEqualTo("OWNER");
-        assertThat(jdbc.queryForObject("SELECT user_id FROM salon_staff WHERE id = ?", UUID.class, raju)).isNull();
+        assertThat(jdbc.queryForObject("SELECT user_id FROM salon_staff WHERE id = ?", UUID.class, raju))
+                .isEqualTo(rajuUser);
+        assertThat(jdbc.queryForObject("SELECT user_id FROM salon_staff WHERE id = ?", UUID.class, ownersChair))
+                .isNull();
         assertThat(count("shop_members WHERE shop_id = '" + salon + "'")).isEqualTo(2);   // he and the helper
         assertThat(count("shop_members_aud WHERE id = '" + membership + "'")).isEqualTo(2);   // its history
     }

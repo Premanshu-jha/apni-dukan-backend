@@ -1,5 +1,6 @@
 package in.apnidukan.shops.api;
 
+import in.apnidukan.shops.domain.RegistrationDocType;
 import in.apnidukan.shops.domain.ShopType;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
@@ -88,6 +89,14 @@ public final class ShopRequests {
      * @param version the version you last read (GET /shops/me); 409 SHOP_CHANGED if someone saved in between
      */
     public record SetVideo(@NotNull Long version, @NotNull UUID fileId) {
+    }
+
+    /**
+     * Set a salon's registration document: its type and a file uploaded with POST /files, purpose REG_DOC (a photo or
+     * a PDF).
+     * @param version the version you last read (GET /shops/me); 409 SHOP_CHANGED if someone saved in between
+     */
+    public record SetRegistrationDoc(@NotNull Long version, @NotNull RegistrationDocType type, @NotNull UUID fileId) {
     }
 
     /** Registration done: ask for the field team's visit. Needs both photos and the salon video. */

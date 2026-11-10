@@ -120,6 +120,7 @@ class SalonVideoIntegrationTest {
 
         // Not ready for a visit without it
         setPhotos();
+        TestData.setUpForVisit(jdbc, SALON, OWNER);   // all it needs to submit besides the photos and the video
         Reply early = post("/shops/me/submit", Map.of("version", version()), OWNER);
         assertThat(early.status()).isEqualTo(409);
         assertThat(early.body().get("code")).isEqualTo("PHOTOS_REQUIRED");
@@ -494,6 +495,7 @@ class SalonVideoIntegrationTest {
         String first = uploadedVideo();
         call(HttpMethod.PUT, "/shops/me/video", Map.of("version", version(), "fileId", first), OWNER);
         setPhotos();
+        TestData.setUpForVisit(jdbc, SALON, OWNER);
         Reply submitted = post("/shops/me/submit", Map.of("version", version()), OWNER);
         assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
         Reply approved = post("/admin/shops/" + SALON + "/approve", Map.of("version", version()), ADMIN);

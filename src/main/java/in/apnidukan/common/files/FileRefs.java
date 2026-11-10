@@ -37,7 +37,7 @@ public interface FileRefs {
     void release(UUID fileId);
 
     /**
-     * @param purpose     SHOP_PHOTO, OWNER_PHOTO, STAFF_PHOTO, SHOP_VIDEO, BILL or RECEIPT
+     * @param purpose     SHOP_PHOTO, OWNER_PHOTO, STAFF_PHOTO, SHOP_VIDEO, REG_DOC, BILL or RECEIPT
      * @param contentType e.g. image/jpeg
      */
     record FileRef(UUID id, UUID shopId, String purpose, String contentType) {

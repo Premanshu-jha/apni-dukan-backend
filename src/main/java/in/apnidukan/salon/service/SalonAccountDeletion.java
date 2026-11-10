@@ -5,10 +5,12 @@ import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.repo.AppointmentStore;
+import in.apnidukan.salon.repo.RatingStore;
 import in.apnidukan.salon.repo.SalonAccessStore;
 import in.apnidukan.salon.repo.SalonStaffRepository;
 import in.apnidukan.salon.repo.SalonVersionStore;
 import in.apnidukan.salon.repo.StrikeStore;
+import in.apnidukan.salon.repo.VisitFollowUpStore;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.salon.domain.SalonTime;
 import org.springframework.http.HttpStatus;
@@ -30,7 +32,9 @@ import java.util.UUID;
  *   <li>as a customer: every booking still waiting (CONFIRMED) is cancelled, with no strike, and the salon is
  *       told the time is free;</li>
  *   <li>as a barber with a sign-in: the sign-in is unlinked (his name, hours and history stay for the salon);</li>
- *   <li>any walk-in access goes.</li>
+ *   <li>any walk-in access goes;</li>
+ *   <li>the comments of their ratings go (the stars and tags stay in the salons' totals), and no rating request or
+ *       come-back reminder is sent any more.</li>
  * </ul>
  * Past bookings and strikes stay as they are.
  *
@@ -51,13 +55,17 @@ class SalonAccountDeletion implements AccountDeletionListener {
     private final SalonNotices notices;
     private final StrikeStore strikes;
     private final SalonVersionStore versions;
+    private final RatingStore ratings;
+    private final VisitFollowUpStore followUps;
 
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH)
             .withZone(SalonTime.ZONE);
 
     SalonAccountDeletion(AppointmentStore appointments, SalonStaffRepository staff, SalonAccessStore access,
                          ShopMemberships memberships, SalonNotices notices, StrikeStore strikes,
-                         SalonVersionStore versions) {
+                         SalonVersionStore versions, RatingStore ratings, VisitFollowUpStore followUps) {
+        this.ratings = ratings;
+        this.followUps = followUps;
         this.strikes = strikes;
         this.versions = versions;
         this.appointments = appointments;
@@ -114,5 +122,7 @@ class SalonAccountDeletion implements AccountDeletionListener {
             staff.saveAndFlush(barber);
         });
         access.revokeAllWalkIns(userId);
+        ratings.forgetComments(userId);
+        followUps.forget(userId);
     }
 }

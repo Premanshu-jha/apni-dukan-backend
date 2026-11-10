@@ -639,7 +639,9 @@ class AdminIntegrationTest {
         assertThat(post("/admin/team", newMember("9000000003"), boss).status()).isEqualTo(201);
         assertThat(get("/auth/me", held).status()).isEqualTo(401);
         List<?> team = (List<?>) get("/admin/team", boss).body();
-        assertThat(field(team.get(team.size() - 1), "since")).isEqualTo(NOW.toString());
+        // Found by phone: the list is ordered by when each joined, and the others' accounts are made at the real time
+        assertThat(team.stream().filter(m -> "9000000003".equals(field(m, "phone"))).map(m -> field(m, "since")))
+                .containsExactly(NOW.toString());
     }
 
     @Test
@@ -725,7 +727,12 @@ class AdminIntegrationTest {
         assertThat(field(changes.get(0), "before")).isEqualTo("Sharma Salon");
         assertThat(field(changes.get(0), "after")).isEqualTo("Sharma Hair Studio");
         assertThat(((Number) field(page.body(), "pinMovedMetres")).longValue()).isBetween(105L, 120L);
-        assertThat(field(page.body(), "salon")).isEqualTo(Map.of("barbers", 0, "services", 0));
+        Map<?, ?> salonFacts = (Map<?, ?>) field(page.body(), "salon");
+        assertThat(salonFacts.get("barbers")).isEqualTo(0);
+        assertThat(salonFacts.get("services")).isEqualTo(0);
+        assertThat(salonFacts.get("serviceList")).isEqualTo(List.of());
+        assertThat(salonFacts.get("hours")).isEqualTo(List.of());
+        assertThat(salonFacts.get("ratings")).isEqualTo(0);
         List<?> timeline = (List<?>) field(page.body(), "timeline");
         assertThat(timeline).extracting(e -> field(e, "event")).containsExactly("EDITED", "APPROVED");
         assertThat(field(timeline.get(1), "byName")).isEqualTo("Prem");
@@ -752,6 +759,7 @@ class AdminIntegrationTest {
         jdbc.update("UPDATE files SET content_type = 'video/mp4' WHERE id = ?", video);
         jdbc.update("UPDATE shops SET owner_photo_file_id = ?, shop_photo_file_id = ?, shop_video_file_id = ? "
                 + "WHERE id = ?", file(salon, owner, "OWNER_PHOTO"), file(salon, owner, "SHOP_PHOTO"), video, salon);
+        TestData.setUpForVisit(jdbc, salon, owner);
         Reply submitted = post("/shops/me/submit", Map.of("version", version(salon)), owner);
         assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
         assertThat(field(((List<?>) field(get("/admin/shops/" + salon, boss).body(), "timeline")).get(0), "event"))
@@ -866,7 +874,9 @@ class AdminIntegrationTest {
     void anyTimelineEntryKeepsTheListColumnsEvenFromCodeThatDoesntKnowThem() {
         // As a copy of the backend on the previous version would write it, straight into the timeline
         UUID shop = shop("KIRANA", "APPROVED", "Old Code Store", "9300000098");
-        Instant later = NOW.plusSeconds(3600);
+        // After the shop's own status_since, which the test data sets from the real clock (NOW is a fixed day, so
+        // NOW + 1 hour would be in the past once the real time passes it)
+        Instant later = Instant.now().plusSeconds(3600).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event) VALUES (?, ?, ?, ?, true, "
                 + "'APPROVED')", UUID.randomUUID(), shop, Timestamp.from(later), boss);
         assertThat(jdbc.queryForObject("SELECT ever_approved FROM shops WHERE id = ?", Boolean.class, shop)).isTrue();

@@ -16,6 +16,7 @@ import in.apnidukan.shops.api.AdminShopDetail.TimelineEntry;
 import in.apnidukan.shops.api.AdminShopDetail.TimelineNext;
 import in.apnidukan.shops.api.AdminShopDetail.TimelinePage;
 import in.apnidukan.shops.api.AdminShopResponse;
+import in.apnidukan.shops.domain.RegistrationDocType;
 import in.apnidukan.shops.domain.ReviewGroup;
 import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopDetails;
@@ -164,17 +165,29 @@ public class ShopAdminService {
             if (!Objects.equals(approved.shopVideoFileId(), shop.getShopVideoFileId())) {
                 changes.add(new Change("shopVideo", "Salon video", null, null));
             }
+            if (!Objects.equals(approved.registrationDocFileId(), shop.getRegistrationDocFileId())
+                    || !Objects.equals(approved.registrationDocType(),
+                            shop.getRegistrationDocType() == null ? null : shop.getRegistrationDocType().name())) {
+                changes.add(new Change("registrationDoc", "Registration document",
+                        docLabel(approved.registrationDocType()), docLabel(shop.getRegistrationDocType())));
+            }
         }
         AdminShopDetail.Salon salon = null;
         if (shop.getType() == ShopType.SALON) {
             SalonFacts.Size size = salons.size(shopId);
-            salon = new AdminShopDetail.Salon(size.barbers(), size.services());
+            SalonFacts.Profile profile = salons.profile(shopId);
+            salon = new AdminShopDetail.Salon(size.barbers(), size.services(), profile.services(), profile.hours(),
+                    profile.ratings(), profile.ratingAverage());
         }
+        AdminShopDetail.RegistrationDoc doc = shop.getRegistrationDocType() == null ? null
+                : new AdminShopDetail.RegistrationDoc(shop.getRegistrationDocType(),
+                        shop.getRegistrationDocType().label(), existingLink(shop.getRegistrationDocFileId()),
+                        shop.getRegistrationDocCheckedAt());
         TimelinePage timeline = timelinePage(shopId, null);
         // The salon video only here (the field team's shop page), never in lists or anything customers see
         String video = shop.getShopVideoFileId() == null ? null : existingLink(shop.getShopVideoFileId());
         return new AdminShopDetail(views(List.of(shop)).get(0), salon, changes, moved, oldOwnerPhoto, oldShopPhoto,
-                video, timeline.items(), timeline.next());
+                video, doc, timeline.items(), timeline.next());
     }
 
     /**
@@ -227,6 +240,64 @@ public class ShopAdminService {
         String by = users.find(Set.of(adminId)).values().stream().map(UserDirectory.Person::name).findFirst()
                 .orElse(null);
         return new TimelineEntry(now, ShopEventType.NOTE, by, true, null, note, List.of());
+    }
+
+    /**
+     * Live salons whose registration document was added or replaced since the field team last checked one (super
+     * admins only), oldest change first, at most 100. Salons waiting for a visit aren't listed: the visit checks it.
+     */
+    @Transactional(readOnly = true)
+    public List<AdminShopResponse> documentsToCheck(UUID adminId) {
+        assignments.requireSuperAdmin(adminId);
+        List<UUID> ids = review.documentsToCheck(100);
+        Map<UUID, Shop> byId = shops.findAllById(ids).stream().collect(Collectors.toMap(Shop::getId,
+                Function.identity()));
+        return views(ids.stream().map(byId::get).filter(Objects::nonNull).toList());
+    }
+
+    /**
+     * The field team checked the salon's registration document: customers see "Registered" from now on. Any status
+     * but CLOSED (a field agent only for a business assigned to them). 409 NO_DOCUMENT without one, 409 SHOP_CHANGED
+     * if the owner changed the shop since the page was loaded (maybe a new document).
+     */
+    @Transactional
+    public AdminShopResponse markDocumentChecked(UUID adminId, UUID shopId, long version, String noteInput) {
+        Shop shop = checked(adminId, shopId, version, "changed", false, ShopStatus.DRAFT, ShopStatus.PENDING_VISIT,
+                ShopStatus.APPROVED, ShopStatus.SUSPENDED);
+        if (shop.getRegistrationDocFileId() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "NO_DOCUMENT", "This salon has no registration document.");
+        }
+        String note = optionalNote(noteInput);
+        shop.markRegistrationDocChecked(now());
+        save(shop);
+        review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null,
+                "Registration document checked (" + shop.getRegistrationDocType().label() + ")"
+                        + (note == null ? "" : ": " + note), List.of());
+        return view(shop);
+    }
+
+    /**
+     * Takes a wrong, someone else's or expired registration document off the salon, with the reason the owner is told:
+     * customers see "Unregistered". The salon's status doesn't change. Same rules as markDocumentChecked.
+     */
+    @Transactional
+    public AdminShopResponse removeDocument(UUID adminId, UUID shopId, long version, String reasonInput) {
+        Shop shop = checked(adminId, shopId, version, "changed", false, ShopStatus.DRAFT, ShopStatus.PENDING_VISIT,
+                ShopStatus.APPROVED, ShopStatus.SUSPENDED);
+        if (shop.getRegistrationDocFileId() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "NO_DOCUMENT", "This salon has no registration document.");
+        }
+        String reason = TextCleaner.clean(REASON, reasonInput);
+        String label = shop.getRegistrationDocType().label();
+        shop.setRegistrationDoc(null, null, now());
+        save(shop);
+        review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null,
+                "Registration document removed (" + label + "): " + reason, List.of());
+        tellOwner(shop, "SHOP_DOCUMENT_REMOVED", "Registration document removed",
+                "We removed the " + label.toLowerCase(java.util.Locale.ROOT) + " from " + shop.details().name() + ": "
+                        + reason + " Add the right one in More → Salon → Registration document.",
+                "/setup/document");
+        return view(shop);
     }
 
     /**
@@ -343,10 +414,15 @@ public class ShopAdminService {
 
     /** A message to the shop's owner, in the same transaction as the decision. */
     private void tellOwner(Shop shop, String type, String title, String body) {
+        tellOwner(shop, type, title, body, "/shops/me");
+    }
+
+    /** @param url the partner app's page the message opens */
+    private void tellOwner(Shop shop, String type, String title, String body, String url) {
         members.findByShopIdOrderByCreatedAtAscIdAsc(shop.getId()).stream()
                 .filter(m -> m.getRole() == ShopRole.OWNER)
                 .forEach(m -> notifications.queue(new Notice(m.getUserId(), type, null, shop.getUpdatedAt(), title,
-                        body, "/shops/me", Map.of())));
+                        body, url, Map.of())));
     }
 
     private Instant now() {
@@ -380,6 +456,22 @@ public class ShopAdminService {
         }
         UserDirectory.Person p = agents.get(id);
         return new AdminShopResponse.Assignee(id, p == null ? null : p.name());
+    }
+
+    /** A stored document type ("TRADE_LICENCE") as the field team reads it; null for none or an unknown one. */
+    private static String docLabel(String type) {
+        if (type == null) {
+            return null;
+        }
+        try {
+            return RegistrationDocType.valueOf(type).label();
+        } catch (IllegalArgumentException unknown) {
+            return type;
+        }
+    }
+
+    private static String docLabel(RegistrationDocType type) {
+        return type == null ? null : type.label();
     }
 
     private static void change(List<Change> out, String field, String label, String before, String after) {
