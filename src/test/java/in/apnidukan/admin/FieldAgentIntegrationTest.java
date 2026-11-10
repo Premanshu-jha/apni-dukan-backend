@@ -913,6 +913,7 @@ class FieldAgentIntegrationTest {
         UUID video = file(id, owner, "SHOP_VIDEO", "video/mp4");
         jdbc.update("UPDATE shops SET owner_photo_file_id = ?, shop_photo_file_id = ?, shop_video_file_id = ? "
                 + "WHERE id = ?", ownerPhoto, shopPhoto, video, id);
+        TestData.setUpForVisit(jdbc, id, owner);
         return id;
     }
 

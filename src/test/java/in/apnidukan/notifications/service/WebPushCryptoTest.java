@@ -77,7 +77,11 @@ class WebPushCryptoTest {
         assertThat(B64.decode(parts[2])).hasSize(64);   // raw r||s, as JWT wants
         ECPublicKey publicKey = WebPushCrypto.publicKey(B64.decode(AS_PUBLIC));
         assertThat(WebPushCrypto.verify(token, publicKey)).isTrue();
-        assertThat(WebPushCrypto.verify(token.substring(0, token.length() - 2) + "AA", publicKey)).isFalse();
+        // One signature character changed (not the last ones: they may be "AA" already, or carry padding bits only)
+        int at = token.length() - 10;
+        char other = token.charAt(at) == 'B' ? 'C' : 'B';
+        String tampered = token.substring(0, at) + other + token.substring(at + 1);
+        assertThat(WebPushCrypto.verify(tampered, publicKey)).isFalse();
     }
 
     @Test

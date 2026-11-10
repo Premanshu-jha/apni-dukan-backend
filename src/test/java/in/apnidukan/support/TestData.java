@@ -15,10 +15,12 @@ public final class TestData {
     /** Empties every table the tests write to (children first). */
     public static void clean(JdbcTemplate jdbc) {
         // Photos point at files and files point at shops: let go of the photos first
-        jdbc.update("UPDATE shops SET owner_photo_file_id = NULL, shop_photo_file_id = NULL, shop_video_file_id = NULL");
+        jdbc.update("UPDATE shops SET owner_photo_file_id = NULL, shop_photo_file_id = NULL, shop_video_file_id = NULL, "
+                + "registration_doc_type = NULL, registration_doc_file_id = NULL, registration_doc_checked_at = NULL");
         jdbc.update("UPDATE salon_staff SET photo_file_id = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
-        for (String table : new String[] {"earlier_slot_alerts", "shop_assignments", "admin_pincodes", "video_uploads", "shop_invites", "salon_closings", "salon_message_purges", "shop_handovers", "job_leases", "account_wipes", "file_deletions", "shop_events", "admin_events", "test_emails", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
+        for (String table : new String[] {"salon_ratings", "salon_rating_totals", "visit_follow_ups",
+                "salon_customer_prefs", "salon_hours_aud", "salon_hours", "salon_closed_days", "earlier_slot_alerts", "shop_assignments", "admin_pincodes", "video_uploads", "shop_invites", "salon_closings", "salon_message_purges", "shop_handovers", "job_leases", "account_wipes", "file_deletions", "shop_events", "admin_events", "test_emails", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
                 "appointments", "walk_in_access", "salon_pauses", "notification_jobs", "push_subscriptions",
                 "staff_hours_aud", "staff_services_aud", "salon_staff_aud",
                 "salon_services_aud", "salon_settings_aud", "shop_members_aud", "shops_aud", "revinfo", "staff_hours",
@@ -67,6 +69,27 @@ public final class TestData {
                         + "'DRAFT', ?, 0, ?, ?)",
                 shopId, type, now, now);
         member(jdbc, shopId, ownerId, "OWNER");
+    }
+
+    /**
+     * What a salon needs besides its photos and video before Submit for visit, written directly: a registration
+     * document (a REG_DOC photo), one service (Haircut, 30 min, ₹150) and opening hours all day, every day (so no
+     * barber's hours fall outside them).
+     */
+    public static void setUpForVisit(JdbcTemplate jdbc, UUID shopId, UUID ownerId) {
+        UUID doc = UUID.randomUUID();
+        jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
+                + "uploaded_by, created_at) VALUES (?, ?, 'REG_DOC', ?, 'image/jpeg', 10, ?, ?, now())", doc, shopId,
+                "test/" + doc + ".jpg", doc.toString().replace("-", "") + "0".repeat(32), ownerId);
+        jdbc.update("UPDATE shops SET registration_doc_type = 'TRADE_LICENCE', registration_doc_file_id = ? "
+                + "WHERE id = ?", doc, shopId);
+        jdbc.update("INSERT INTO salon_services (id, shop_id, name, duration_min, price_paise, price_is_from, active, "
+                + "sort_order, version, created_at, updated_at) VALUES (?, ?, 'Haircut', 30, 15000, false, true, 0, 0, "
+                + "now(), now())", UUID.randomUUID(), shopId);
+        for (int day = 1; day <= 7; day++) {
+            jdbc.update("INSERT INTO salon_hours (id, shop_id, weekday, open_min, close_min, updated_at) "
+                    + "VALUES (?, ?, ?, 0, 1440, now())", UUID.randomUUID(), shopId, day);
+        }
     }
 
     public static void member(JdbcTemplate jdbc, UUID shopId, UUID userId, String role) {
