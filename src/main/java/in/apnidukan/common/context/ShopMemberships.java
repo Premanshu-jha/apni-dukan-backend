@@ -32,6 +32,13 @@ public interface ShopMemberships {
     /** The salon's waiting barber invitations: profile → the phone invited. */
     Map<UUID, String> waitingBarberInvites(UUID shopId);
 
+    /**
+     * Whether this person is still the shop's owner, read with the shop's row (FOR SHARE) and then their membership
+     * row (FOR UPDATE) locked until the transaction ends, in that order, as a hand-over or closing takes them: one
+     * being accepted at this moment either finished first (false) or waits for us.
+     */
+    boolean lockOwner(UUID shopId, UUID userId);
+
     /** Removes a person from a shop (never the owner). Does nothing if they aren't a member of it. */
     void removeMember(UUID shopId, UUID userId);
 
