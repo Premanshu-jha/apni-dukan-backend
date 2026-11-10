@@ -18,10 +18,12 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -250,6 +252,27 @@ public class AppointmentStore {
                 + "WHERE id = ? AND status = 'BLOCKED'", at(now), id) == 1;
     }
 
+    /**
+     * Opens a closed day that hasn't ended yet again: its row goes (false if there is none) and so do its barbers'
+     * blocks (removeClosure).
+     */
+    public boolean removeClosedDay(UUID shopId, UUID closureId, Instant now) {
+        return jdbc.update("DELETE FROM salon_closed_days WHERE shop_id = ? AND id = ? AND ends_at > ?", shopId,
+                closureId, at(now)) == 1;
+    }
+
+    /**
+     * CLOSED blocks of that whole day already there under another closure id with no day row (written by an older
+     * server copy during a deploy): they join this closed day. Returns the barbers they belong to.
+     */
+    public Set<UUID> adoptClosedBlocks(UUID shopId, UUID closureId, Instant start, Instant end, Instant now) {
+        return new HashSet<>(jdbc.query("UPDATE appointments a SET closure_id = ?, updated_at = ? WHERE a.shop_id = ? "
+                        + "AND a.status = 'BLOCKED' AND a.block_type = 'CLOSED' AND a.closure_id IS NOT NULL "
+                        + "AND a.closure_id <> ? AND a.starts_at = ? AND a.ends_at = ? AND NOT EXISTS (SELECT 1 FROM "
+                        + "salon_closed_days d WHERE d.id = a.closure_id) RETURNING a.staff_id",
+                (rs, i) -> rs.getObject(1, UUID.class), closureId, at(now), shopId, closureId, at(start), at(end)));
+    }
+
     /** Removes every block of a closed day that hasn't ended yet (past days keep their history); returns their ids. */
     public List<UUID> removeClosure(UUID shopId, UUID closureId, Instant now) {
         return jdbc.query("UPDATE appointments SET status = 'REMOVED', updated_at = ? WHERE shop_id = ? "
@@ -269,8 +292,9 @@ public class AppointmentStore {
 
     /**
      * The automatic end: up to `limit` IN_SERVICE appointments whose planned end has passed become COMPLETED, each
-     * with an event, in one statement (through ix_appointments_in_service). Safe on two servers at once: locked rows
-     * are skipped and a row already completed no longer matches.
+     * with an event and, for an online booking, its follow-ups (the rating request and the come-back reminder:
+     * VisitFollowUpStore), in one statement (through ix_appointments_in_service). Safe on two servers at once: locked
+     * rows are skipped and a row already completed no longer matches.
      * @return how many were completed
      */
     public int completeEnded(Instant now, int limit) {
@@ -284,9 +308,12 @@ public class AppointmentStore {
                             RETURNING id),
                         logged AS (
                             INSERT INTO appointment_events (appointment_id, happened_at, by_user, event)
-                            SELECT id, ?, NULL, 'COMPLETED' FROM done)
+                            SELECT id, ?, NULL, 'COMPLETED' FROM done),
+                        followed AS (
+                            """ + VisitFollowUpStore.FOR_DONE + """
+                        )
                         SELECT count(*) FROM done""",
-                Integer.class, at(now), limit, at(now), at(now));
+                Integer.class, at(now), limit, at(now), at(now), at(now), at(now));
         return count == null ? 0 : count;
     }
 
@@ -674,9 +701,10 @@ public class AppointmentStore {
     public record Closure(UUID closureId, Instant startsAt, Instant endsAt, int barbers) {
     }
 
-    private static final String CLOSURES = "SELECT closure_id, min(starts_at) AS starts_at, min(ends_at) AS ends_at, "
-            + "count(*) AS barbers FROM appointments WHERE shop_id = ? AND closure_id IS NOT NULL AND status = 'BLOCKED' "
-            + "AND ends_at > ? GROUP BY closure_id";
+    /** The salon's own closed days (salon_closed_days, V34), each with how many barbers' CLOSED blocks it has. */
+    private static final String CLOSURES = "SELECT d.id AS closure_id, d.starts_at, d.ends_at, "
+            + "(SELECT count(*) FROM appointments a WHERE a.shop_id = d.shop_id AND a.closure_id = d.id "
+            + "AND a.status = 'BLOCKED') AS barbers FROM salon_closed_days d WHERE d.shop_id = ? AND d.ends_at > ?";
 
     private static Closure closure(ResultSet rs, int row) throws SQLException {
         return new Closure(rs.getObject("closure_id", UUID.class), instant(rs, "starts_at"), instant(rs, "ends_at"),
@@ -684,8 +712,7 @@ public class AppointmentStore {
     }
 
     /**
-     * The salon's closed days not over yet, earliest first, grouped in the database (one row per day, not one per
-     * barber), through ix_appointments_shop_closures (V18).
+     * The salon's closed days not over yet, earliest first (ix_salon_closed_days_shop), with or without barbers.
      */
     public List<Closure> closures(UUID shopId, Instant from) {
         return jdbc.query(CLOSURES + " ORDER BY 2, 1", AppointmentStore::closure, shopId, at(from));
@@ -693,8 +720,20 @@ public class AppointmentStore {
 
     /** closures() that this barber has no CLOSED row in yet (he is joining the salon's closed days). */
     public List<Closure> closuresWithout(UUID shopId, UUID staffId, Instant from) {
-        return jdbc.query(CLOSURES + " HAVING bool_and(staff_id <> ?) ORDER BY 2, 1", AppointmentStore::closure,
-                shopId, at(from), staffId);
+        return jdbc.query(CLOSURES + " AND NOT EXISTS (SELECT 1 FROM appointments b WHERE b.shop_id = d.shop_id "
+                        + "AND b.closure_id = d.id AND b.staff_id = ? AND b.status = 'BLOCKED') ORDER BY 2, 1",
+                AppointmentStore::closure, shopId, at(from), staffId);
+    }
+
+    /**
+     * Records a closed day of the salon (the caller holds the salon's calendar lock); false if that day is already
+     * closed.
+     */
+    public boolean addClosedDay(UUID id, UUID shopId, java.time.LocalDate day, Instant start, Instant end, UUID by,
+                                Instant now) {
+        return jdbc.update("INSERT INTO salon_closed_days (id, shop_id, day, starts_at, ends_at, created_by, "
+                + "created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT ON CONSTRAINT ux_salon_closed_days_day "
+                + "DO NOTHING", id, shopId, day, at(start), at(end), by, at(now)) == 1;
     }
 
     /** One time range (of a list) and what holds the barber's time in it. */

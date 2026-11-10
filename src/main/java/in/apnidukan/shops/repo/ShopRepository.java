@@ -35,4 +35,7 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     /** Whether a file is some shop's owner or shop photo, or its salon video. */
     boolean existsByOwnerPhotoFileIdOrShopPhotoFileIdOrShopVideoFileId(UUID ownerPhotoFileId, UUID shopPhotoFileId,
                                                                        UUID shopVideoFileId);
+
+    /** Whether a file is some shop's registration document. */
+    boolean existsByRegistrationDocFileId(UUID registrationDocFileId);
 }
