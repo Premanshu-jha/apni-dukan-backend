@@ -45,6 +45,18 @@ public final class AuthRequests {
                                    @NotBlank @Size(max = 10) String phoneCode, @Size(max = 200) String device) {
     }
 
+    /** Changing your phone number, step 1: the new number (10 digits; +91 or a leading 0 are fine). */
+    public record SendPhoneChangeCode(@NotBlank @Size(max = 20) String newPhone) {
+    }
+
+    /**
+     * Step 2: the code sent to the new number, and the second code (sent to your verified email, or without one to the
+     * number you have now; step 1 says which).
+     */
+    public record ChangePhone(@NotBlank @Size(max = 20) String newPhone, @NotBlank @Size(max = 10) String phoneCode,
+                              @NotBlank @Size(max = 10) String secondCode, @Size(max = 200) String device) {
+    }
+
     /** Your name as salons and shops see it, e.g. "Ravi". 2 to 60 characters after cleaning. */
     public record UpdateMe(@NotBlank @Size(min = 2, max = 60) String name) {
     }

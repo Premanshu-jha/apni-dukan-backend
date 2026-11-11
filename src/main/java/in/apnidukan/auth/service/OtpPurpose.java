@@ -11,7 +11,13 @@ public enum OtpPurpose {
     /** Code to the person's own phone, needed to replace an already verified email. */
     CHANGE_EMAIL(Duration.ofMinutes(10)),
     /** Code to the person's own phone, to confirm deleting their account. */
-    DELETE_ACCOUNT(Duration.ofMinutes(10));
+    DELETE_ACCOUNT(Duration.ofMinutes(10)),
+    /** Signed in, changing the phone number: code to the new number (target: user id and the new number). */
+    CHANGE_PHONE(Duration.ofMinutes(10)),
+    /** Signed in, changing the phone number: the second code, to the verified email (target: user, email, new number). */
+    CHANGE_PHONE_EMAIL(Duration.ofMinutes(10)),
+    /** The second code without a verified email: to the number the account has now (target: user, it, new number). */
+    CHANGE_PHONE_CURRENT(Duration.ofMinutes(10));
 
     private final Duration validFor;
 
