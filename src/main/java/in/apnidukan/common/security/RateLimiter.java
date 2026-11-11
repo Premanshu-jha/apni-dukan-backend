@@ -40,12 +40,12 @@ public class RateLimiter {
 
     /**
      * Takes back one hit counted by {@link #hit} or {@link #tryHit} for something that was refused further on (so a
-     * refusal doesn't use up an allowance). Never below 0; the window stays as it was.
+     * refusal doesn't use up an allowance). Never below 0 (a counter that had expired meanwhile stays gone); the window stays as it was.
      */
     public void giveBack(String key) {
         Long left = redis.opsForValue().decrement("rl:" + key);
         if (left != null && left < 0) {
-            redis.opsForValue().increment("rl:" + key);
+            redis.delete("rl:" + key);   // it had gone (expired meanwhile): don't leave a counter with no window
         }
     }
 
