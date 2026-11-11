@@ -301,6 +301,32 @@ coming back counts as copied; an old device retrying a signed-out token just get
 | `POST /email/verify` `{email, code}` | Marks the email verified |
 | `POST /recover/start` `{email, newPhone, captchaToken}` | Lost phone: a code to the verified email and one to the new phone |
 | `POST /recover/complete` | Both codes right: moves the account to the new phone and ends every old session |
+| `POST /me/phone/send-code` `{newPhone}` | Signed in, changing the number: a code to the new number and a second code, to the verified email or (without one) to the number the account has now. 200 `{secondCodeTo: EMAIL\|PHONE, sentTo}` (masked). 400 `INVALID_PHONE`, `SAME_PHONE`; 403 `ADMIN_PHONE`; 409 `PHONE_IN_USE`, `TEST_ACCOUNT`, `TEST_PHONE`; 429 `TOO_MANY_CODES` after 5 tries a day per account |
+| `POST /me/phone` `{newPhone, phoneCode, secondCode, device}` | Both codes right: the same account moves to the new number, every other device is signed out, this one gets new tokens (200 as `otp/verify`). 400 `SEND_CODES_AGAIN` (the account's email changed since), the code errors, 409 `PHONE_IN_USE` (taken meanwhile) |
+
+### Changing the phone number (signed in)
+
+The customer and partner apps both have it (Profile / More → Mobile → Change). It works like recovery, but signed in:
+
+1. `POST /me/phone/send-code`. Refused first: the same number; an admin (changed on the Team page, whose edits carry
+   a version); a test account (it can't become someone's real account this way); a number on the test list. Then
+   the try is counted (5 a day per account, `tryHit`, so parallel calls can't pass it), and only then a number that
+   already has an account is refused: at most 5 numbers a day can be asked about. The code to the new number and the
+   second code are each bound to this account and that new number (another account's code, or the code sent for
+   another number, doesn't work). The second code goes to the verified email, or, without one, by SMS to the
+   account's current number, so a borrowed phone with the app open can't move the account alone.
+2. `POST /me/phone`: both codes are checked first. Then, under the user row's lock, everything is checked again (the
+   refusals above, the number still free, the second code still the right kind: an email verified meanwhile answers
+   `SEND_CODES_AGAIN`). The number is set; shop invitations and hand-over requests waiting for the old number are
+   cancelled, so its next holder never sees them and the shops never see the new number (they can ask again; also
+   one from the person's own shop to the new number: `PhoneChangeListener`, `ShopPhoneChange`);
+   every refresh token is revoked, access tokens stop at once (Redis) and devices stop getting messages
+   (`SignOutEverywhereListener`; the app registers this device again); salons' screens showing the customer's number
+   are told first (`PersonDetailsListener`). The codes are used up last, in the same transaction, so a refusal or a
+   failure on the way keeps them for another try. It is the same account: bookings, a shop, ratings and history all
+   stay. Afterwards the old number gets an SMS ("moved to a number ending …", not under the daily SMS cap, when
+   `app.sms.account-moved.enabled` is on) and the email a notice. The old number can sign up again later as a new
+   account.
 
 ### Finishing sign-up
 
@@ -822,6 +848,12 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
+
+### API changes for changing the phone number (no migration; customer app and partner app use them)
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /auth/me/phone/send-code`, `POST /auth/me/phone` | none | new: change the number while signed in | both apps: Profile → Mobile → Change; save the new tokens |
 
 ### API changes in this version (deploy the backend first, then the apps)
 
