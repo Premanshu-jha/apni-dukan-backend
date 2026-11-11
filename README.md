@@ -13,6 +13,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and registration document, Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
+| `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
 ## How file handling works
@@ -418,9 +419,14 @@ sequenceDiagram
   (OVER_QUERY_LIMIT, REQUEST_DENIED, ...), a non-200 answer, an unreadable answer, a timeout (2 s to connect, 4 s for
   the whole answer, headers and body, no retries) or no network is 503 `GEOCODING_UNAVAILABLE` ("use your location").
 - **Who:** someone registering (no shop yet) or a shop's owner. Helpers and barbers get 403 `OWNER_ONLY`. Customers
-  can't be told apart from someone about to register, so the per-person daily limit below covers them.
+  setting a saved place search through their own endpoints (see "Customers' saved places"), with the same limits.
 - **Cost guard:** at most 280 calls to Google a day for the whole backend, under the 300 a day set as the quota in
-  Google Cloud (Google's free allowance is 10,000 a month). The day is Google's: it starts at midnight Pacific time
+  Google Cloud (Google's free allowance is 10,000 a month). Customers' saved places may use at most 100 of them
+  between all customers (`geocode-day-customers:` counter), so owners registering keep at least 180 from the
+  customer app's searches. (Someone registering can't be told apart from a customer, so an account calling
+  `/shops/geocode` directly counts as registering; the per-person limits still hold it to 10 lookups a day.) A search
+  refused by a later cap gives back what it counted on the way (`RateLimiter.giveBack`), so a refusal never uses up a
+  person's allowance. The day is Google's: it starts at midnight Pacific time
   (12:30 IST in summer, 13:30 IST in winter), the moment Google's own quota resets. Per person: 20 searches an hour
   and 10 calls to Google a day (only new addresses count, and not once everyone's day is used up), so one account
   can't use up everyone's day. Answers are
@@ -439,6 +445,30 @@ street (route), `area` = sublocality_level_1, else sublocality, else neighborhoo
 district (administrative_area_level_2), `pincode` = the postal code only when it is a 6-digit Indian pincode. Answers
 are kept by the rounded point, 30 days (nothing there: 6 hours). It shares everything with the forward search: who may
 ask, the per-person limits and the day's Google cap, timeouts, key safety and the Redis rules.
+
+### Customers' saved places
+
+The customer app finds salons near the phone's GPS point, or near a saved place: Home, Work, or another with a name
+of its own ("Gym", "Mom's place"), up to 10 a person, one Home and one Work. Each is set exactly like a salon's
+address at registration: the four address fields, then a pin from the typed address (`POST /me/places/geocode`) or at
+the phone's GPS point (`POST /me/places/reverse-geocode` fills the empty fields), which the customer drags onto the
+building. Only the customer ever reads them; salons never see them, and deleting the account deletes them
+(`PlacesAccountDeletion`).
+
+| Call | Answer |
+| --- | --- |
+| `GET /api/v1/me/places` | Home, Work, then the others in the order saved: `[{id, kind: HOME\|WORK\|OTHER, name, addressLine, area, city, pincode, latitude, longitude, updatedAt}]` (`name` only for OTHER) |
+| `POST /api/v1/me/places {kind, name?, addressLine, area, city, pincode, latitude, longitude}` | 201 the place. 400 `VALIDATION_FAILED` (OTHER needs a `name` of 2–30; addressLine 2–200, area 2–100, city 2–60, a 6-digit pincode, the pin in India); 409 `PLACE_KIND_TAKEN` (a Home or Work already: `details.placeId`); 409 `TOO_MANY_PLACES` (`details.max` 10) |
+| `PUT /api/v1/me/places/{id}` (the whole place) | 200 the place; 404 `PLACE_NOT_FOUND` (not this person's, or deleted); 409 `PLACE_KIND_TAKEN`; 400 |
+| `DELETE /api/v1/me/places/{id}` | 204, also when it was gone already |
+| `POST /api/v1/me/places/geocode {addressLine, area, city, pincode}` | as `POST /shops/geocode` (same cache and per-person limits), for anyone signed in; 503 `GEOCODING_UNAVAILABLE` also once customers have used their 100 lookups of the day |
+| `POST /api/v1/me/places/reverse-geocode {latitude, longitude}` | as `POST /shops/reverse-geocode`, with the same customer rules |
+
+Text is cleaned like a shop's address (`TextCleaner`); the pin is kept to 6 decimals. Adds and changes of one person
+take an advisory lock (`pg_advisory_xact_lock(7104, …)`), so two phones adding at once can't pass 10 or save two
+Homes; the unique index on `(user_id, kind)` for Home and Work backs it up. The places module reaches the address
+search through `common.context.AddressSearch` (implemented in shops by `CustomerAddressSearch`), so the modules stay
+independent.
 
 ### Closing a shop or handing it over
 
@@ -882,6 +912,14 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
+
+### API changes for saved places (V40; customer app 0.11.0 uses them, old apps are unaffected)
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `GET`/`POST /me/places`, `PUT`/`DELETE /me/places/{id}` | none | new: a customer's saved places | customer app: the place list and the address form |
+| `POST /me/places/geocode`, `/me/places/reverse-geocode` | none | new: address search for customers | customer app: "Find on map", "Use current location" |
+| `POST /shops/geocode`, `/shops/reverse-geocode` | | unchanged (owners now have at least 180 of the day's 280 Google lookups to themselves) | none |
 
 ### API changes in this version (deploy the backend first, then the apps)
 
@@ -1617,7 +1655,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V40__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V41__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
@@ -1684,6 +1722,10 @@ hours, and writes `shops_aud` rows without the document columns (the field team'
 document change that didn't happen, history only), and closes days with blocks only and no `salon_closed_days` row
 (the day then isn't listed or shown to customers, though nobody can book it; it can still be opened again by its id). An old partner app can't submit a salon (it has no screens for
 services and hours).
+
+**V40** (customers' saved places) only creates the empty `customer_places` table with its two indexes and a key to
+`users` (a short lock on `users`, nothing to check). A rolling deploy is fine. It comes after V37–V39 (salon offers):
+merge and deploy that first.
 
 **V33** (earlier-slot alerts, 10-minute late allowance) adds the empty `earlier_slot_alerts` table with its two
 indexes (built in the migration: the table is new and empty) and no foreign key (appointments are never deleted, and
