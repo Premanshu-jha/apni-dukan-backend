@@ -57,6 +57,11 @@ import java.util.UUID;
  * The other way round, {@link #describe} (POST /shops/reverse-geocode) gives the address at the phone's GPS point, to
  * fill the form's empty fields. Same people, same limits and the same counters (one budget for both), its answers
  * kept by the point rounded to 4 decimals (about 11 m): found 30 days, nothing there {@value #NOT_FOUND_HOURS} hours.
+ *
+ * Customers set their saved places the same way (POST /me/places/geocode and /reverse-geocode, {@link Asker#CUSTOMER}):
+ * anyone signed in, with the same per-person limits and cache, but at most {@value #CUSTOMER_DAILY_CAP} of the day's
+ * calls to Google between all of them, so owners registering always have the rest of the day's
+ * {@value #DAILY_CAP}.
  */
 @Service
 public class AddressLocator {
@@ -65,12 +70,19 @@ public class AddressLocator {
     static final int PER_USER_PER_HOUR = 20;
     static final int PER_USER_GOOGLE_PER_DAY = 10;
     static final int DAILY_CAP = 280;
+    /** Of {@link #DAILY_CAP}, what customers may use between them (their saved places). */
+    static final int CUSTOMER_DAILY_CAP = 100;
     static final int CACHE_DAYS = 30;
     static final int NOT_FOUND_HOURS = 6;
     /** Google's quota day. */
     static final ZoneId GOOGLE_ZONE = ZoneId.of("America/Los_Angeles");
     /** Kept in the cache for an address Google doesn't know. */
     static final String NOT_FOUND = "NONE";
+
+    /** Who is searching: an owner registering (or someone about to), or a customer saving a place. */
+    public enum Asker {
+        OWNER, CUSTOMER
+    }
 
     /** Where the typed address is: the pin to show, how exact it is, and Google's tidy form of the address. */
     public record Located(double latitude, double longitude, Precision precision, String formattedAddress) {
@@ -117,12 +129,12 @@ public class AddressLocator {
      * Where this address is. 503 GEOCODING_OFF (no key), 403 OWNER_ONLY (a helper or barber), 429 TRY_LATER (this
      * person's limits), 404 ADDRESS_NOT_FOUND, 503 GEOCODING_UNAVAILABLE (Google failed, or the day's cap is used).
      */
-    public Located locate(UUID userId, String addressLine, String area, String city, String pincode) {
+    public Located locate(Asker asker, UUID userId, String addressLine, String area, String city, String pincode) {
         if (google == null) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "GEOCODING_OFF",
                     "Address search isn't available. Use your location.");
         }
-        guard(userId);
+        guard(asker, userId);
 
         String address = tidy(addressLine) + ", " + tidy(area) + ", " + tidy(city) + " " + pincode.strip();
         String cacheKey = "geocode:" + sha256(address.toLowerCase(Locale.ROOT));
@@ -135,7 +147,7 @@ public class AddressLocator {
             return kept.get();
         }
 
-        beforeGoogle(userId);
+        beforeGoogle(asker, userId);
         Optional<Found> answer = google.find(address, pincode.strip());
         if (answer.isEmpty()) {
             keep(cacheKey, NOT_FOUND, Duration.ofHours(NOT_FOUND_HOURS));
@@ -152,12 +164,12 @@ public class AddressLocator {
      * GEOCODING_OFF, 403 OWNER_ONLY, 429 TRY_LATER, 404 ADDRESS_NOT_FOUND, 503 GEOCODING_UNAVAILABLE as for
      * {@link #locate}.
      */
-    public Described describe(UUID userId, BigDecimal latitude, BigDecimal longitude) {
+    public Described describe(Asker asker, UUID userId, BigDecimal latitude, BigDecimal longitude) {
         if (google == null) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "GEOCODING_OFF",
                     "Address search isn't available. Use your location.");
         }
-        guard(userId);
+        guard(asker, userId);
         String lat = latitude.setScale(4, RoundingMode.HALF_UP).toPlainString();
         String lng = longitude.setScale(4, RoundingMode.HALF_UP).toPlainString();
         String cacheKey = "geocode-at:" + lat + "," + lng;
@@ -170,7 +182,7 @@ public class AddressLocator {
             return kept.get();
         }
 
-        beforeGoogle(userId);
+        beforeGoogle(asker, userId);
         Optional<Place> answer = google.describe(lat, lng);
         if (answer.isEmpty()) {
             keep(cacheKey, NOT_FOUND, Duration.ofHours(NOT_FOUND_HOURS));
@@ -182,24 +194,35 @@ public class AddressLocator {
         return described;
     }
 
-    /** Only someone without a shop or its owner; then this person's searches this hour (cache hits included). */
-    private void guard(UUID userId) {
-        if (members.findByUserId(userId).filter(m -> m.getRole() != ShopRole.OWNER).isPresent()) {
+    /**
+     * An owner's search: only someone without a shop or its owner (a customer's: anyone signed in); then this person's
+     * searches this hour (cache hits included), one count whichever app asks.
+     */
+    private void guard(Asker asker, UUID userId) {
+        if (asker == Asker.OWNER && members.findByUserId(userId).filter(m -> m.getRole() != ShopRole.OWNER).isPresent()) {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can set its location.");
         }
         requireUnder("geocode-user:" + userId, PER_USER_PER_HOUR, Duration.ofHours(1));
     }
 
     /**
-     * Before each call to Google: if everyone's lookups for Google's day are already used up, 503 without touching
-     * this person's allowance; then this person's lookups today; then counts everyone's.
+     * Before each call to Google: if everyone's lookups for Google's day are already used up (or, for a customer,
+     * customers' share of them), 503 without touching this person's allowance; then this person's lookups today; then
+     * counts customers' (a customer) and everyone's.
      */
-    private void beforeGoogle(UUID userId) {
+    private void beforeGoogle(Asker asker, UUID userId) {
         String dayKey = "geocode-day:" + googleDay();
-        if (limits.current(dayKey) >= DAILY_CAP) {
+        String customersKey = "geocode-day-customers:" + googleDay();
+        if (limits.current(dayKey) >= DAILY_CAP
+                || asker == Asker.CUSTOMER && limits.current(customersKey) >= CUSTOMER_DAILY_CAP) {
             throw GoogleGeocoder.unavailable();
         }
         requireUnder("geocode-user-day:" + userId, PER_USER_GOOGLE_PER_DAY, Duration.ofHours(24));
+        if (asker == Asker.CUSTOMER && limits.hit(customersKey, Duration.ofHours(25)) > CUSTOMER_DAILY_CAP) {
+            log.warn("Address search: customers' {} Google lookups for today are used up; customers get 503 until "
+                    + "midnight Pacific time", CUSTOMER_DAILY_CAP);
+            throw GoogleGeocoder.unavailable();
+        }
         if (limits.hit(dayKey, Duration.ofHours(25)) > DAILY_CAP) {
             log.warn("Address search: today's {} Google lookups are used up; answering 503 until midnight Pacific "
                     + "time", DAILY_CAP);

@@ -5,6 +5,7 @@ import in.apnidukan.common.security.RateLimiter;
 import in.apnidukan.shops.domain.ShopMember;
 import in.apnidukan.shops.domain.ShopRole;
 import in.apnidukan.shops.repo.ShopMemberRepository;
+import in.apnidukan.shops.service.AddressLocator.Asker;
 import in.apnidukan.shops.service.AddressLocator.Located;
 import in.apnidukan.shops.service.GoogleGeocoder.Found;
 import in.apnidukan.shops.service.GoogleGeocoder.Precision;
@@ -65,7 +66,7 @@ class AddressLocatorTest {
     }
 
     private Located locate() {
-        return locator.locate(OWNER, "  12,  MG   Road ", "Ameerpet", "Hyderabad", "500016");
+        return locator.locate(Asker.OWNER, OWNER, "  12,  MG   Road ", "Ameerpet", "Hyderabad", "500016");
     }
 
     private void googleFinds(Precision precision, boolean partial) {
@@ -83,7 +84,7 @@ class AddressLocatorTest {
     void withoutAKeyItIsOffAndNothingIsCounted() {
         AddressLocator off = new AddressLocator(null, limits, redis, members, CLOCK);
         assertThat(off.enabled()).isFalse();
-        assertThatThrownBy(() -> off.locate(OWNER, "12, MG Road", "Ameerpet", "Hyderabad", "500016"))
+        assertThatThrownBy(() -> off.locate(Asker.OWNER, OWNER, "12, MG Road", "Ameerpet", "Hyderabad", "500016"))
                 .isInstanceOfSatisfying(ApiException.class, e -> {
                     assertThat(e.getCode()).isEqualTo("GEOCODING_OFF");
                     assertThat(e.getStatus().value()).isEqualTo(503);
@@ -140,7 +141,7 @@ class AddressLocatorTest {
     void theSameAddressTypedDifferentlyHitsTheSameCacheEntry() {
         String a = AddressLocator.sha256("12, MG Road, Ameerpet, Hyderabad 500016".toLowerCase(java.util.Locale.ROOT));
         when(values.get("geocode:" + a)).thenReturn("17.0|78.0|AREA|x");
-        assertThat(locator.locate(OWNER, "12, mg road", " AMEERPET ", "hyderabad", "500016").precision())
+        assertThat(locator.locate(Asker.OWNER, OWNER, "12, mg road", " AMEERPET ", "hyderabad", "500016").precision())
                 .isEqualTo(Precision.AREA);
         verify(google, never()).find(anyString(), anyString());
     }
@@ -247,11 +248,45 @@ class AddressLocatorTest {
         assertThat(locate().precision()).isEqualTo(Precision.EXACT);
     }
 
+    @Test
+    void aCustomerMaySearchEvenAsABarberAndCountsInCustomersShare() {
+        when(members.findByUserId(OWNER)).thenReturn(Optional.of(memberAs(ShopRole.BARBER)));
+        googleFinds(Precision.STREET, false);
+        assertThat(locator.locate(Asker.CUSTOMER, OWNER, "12, MG Road", "Ameerpet", "Hyderabad", "500016").precision())
+                .isEqualTo(Precision.STREET);
+        verify(limits).tryHit("geocode-user:" + OWNER, 20, Duration.ofHours(1));
+        verify(limits).tryHit("geocode-user-day:" + OWNER, 10, Duration.ofHours(24));
+        verify(limits).hit("geocode-day-customers:2026-11-07", Duration.ofHours(25));
+        verify(limits).hit("geocode-day:2026-11-07", Duration.ofHours(25));
+    }
+
+    @Test
+    void customersShareOfTheDayLeavesTheRestToOwners() {
+        // Customers have used their 100: a customer is refused before anything is counted, an owner still searches
+        when(limits.current("geocode-day-customers:2026-11-07")).thenReturn(100L);
+        assertThatThrownBy(() -> locator.describe(Asker.CUSTOMER, OWNER, new java.math.BigDecimal("28.6215"),
+                new java.math.BigDecimal("77.3652"))).isInstanceOfSatisfying(ApiException.class,
+                e -> assertThat(e.getCode()).isEqualTo("GEOCODING_UNAVAILABLE"));
+        verify(limits, never()).tryHit(startsWith("geocode-user-day:"), anyInt(), any());
+        verify(google, never()).describe(anyString(), anyString());
+        googleFinds(Precision.EXACT, false);
+        assertThat(locate().precision()).isEqualTo(Precision.EXACT);
+        verify(limits, never()).hit(startsWith("geocode-day-customers:"), any());
+
+        // Two customers at once past the share: the one counted 101st is refused, and the day's count isn't touched
+        when(limits.current("geocode-day-customers:2026-11-07")).thenReturn(99L);
+        when(limits.hit(startsWith("geocode-day-customers:"), any())).thenReturn(101L);
+        assertThatThrownBy(() -> locator.locate(Asker.CUSTOMER, OWNER, "12, MG Road", "Ameerpet", "Hyderabad",
+                "500017")).isInstanceOfSatisfying(ApiException.class,
+                e -> assertThat(e.getCode()).isEqualTo("GEOCODING_UNAVAILABLE"));
+        verify(google).find(anyString(), anyString());   // only the owner's
+    }
+
     private static final AddressLocator.Described NOIDA =
             new AddressLocator.Described("Ithum Tower, Sector 62 Road", "Sector 62", "Noida", "201309", "Ithum Tower, Noida");
 
     private AddressLocator.Described describe(String lat, String lng) {
-        return locator.describe(OWNER, new java.math.BigDecimal(lat), new java.math.BigDecimal(lng));
+        return locator.describe(Asker.OWNER, OWNER, new java.math.BigDecimal(lat), new java.math.BigDecimal(lng));
     }
 
     @Test
@@ -293,7 +328,7 @@ class AddressLocatorTest {
     @Test
     void theAddressAtAPointHasTheSameGuards() {
         AddressLocator off = new AddressLocator(null, limits, redis, members, CLOCK);
-        assertThatThrownBy(() -> off.describe(OWNER, java.math.BigDecimal.ONE, java.math.BigDecimal.ONE))
+        assertThatThrownBy(() -> off.describe(Asker.OWNER, OWNER, java.math.BigDecimal.ONE, java.math.BigDecimal.ONE))
                 .isInstanceOfSatisfying(ApiException.class, e -> assertThat(e.getCode()).isEqualTo("GEOCODING_OFF"));
 
         when(limits.tryHit(eq("geocode-user-day:" + OWNER), eq(10), any())).thenReturn(false);
