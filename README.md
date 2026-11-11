@@ -13,6 +13,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and registration document, Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
+| `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
 ## How file handling works
@@ -444,9 +445,14 @@ sequenceDiagram
   (OVER_QUERY_LIMIT, REQUEST_DENIED, ...), a non-200 answer, an unreadable answer, a timeout (2 s to connect, 4 s for
   the whole answer, headers and body, no retries) or no network is 503 `GEOCODING_UNAVAILABLE` ("use your location").
 - **Who:** someone registering (no shop yet) or a shop's owner. Helpers and barbers get 403 `OWNER_ONLY`. Customers
-  can't be told apart from someone about to register, so the per-person daily limit below covers them.
+  setting a saved place search through their own endpoints (see "Customers' saved places"), with the same limits.
 - **Cost guard:** at most 280 calls to Google a day for the whole backend, under the 300 a day set as the quota in
-  Google Cloud (Google's free allowance is 10,000 a month). The day is Google's: it starts at midnight Pacific time
+  Google Cloud (Google's free allowance is 10,000 a month). Customers' saved places may use at most 100 of them
+  between all customers (`geocode-day-customers:` counter), so owners registering keep at least 180 from the
+  customer app's searches. (Someone registering can't be told apart from a customer, so an account calling
+  `/shops/geocode` directly counts as registering; the per-person limits still hold it to 10 lookups a day.) A search
+  refused by a later cap gives back what it counted on the way (`RateLimiter.giveBack`), so a refusal never uses up a
+  person's allowance. The day is Google's: it starts at midnight Pacific time
   (12:30 IST in summer, 13:30 IST in winter), the moment Google's own quota resets. Per person: 20 searches an hour
   and 10 calls to Google a day (only new addresses count, and not once everyone's day is used up), so one account
   can't use up everyone's day. Answers are
@@ -465,6 +471,30 @@ street (route), `area` = sublocality_level_1, else sublocality, else neighborhoo
 district (administrative_area_level_2), `pincode` = the postal code only when it is a 6-digit Indian pincode. Answers
 are kept by the rounded point, 30 days (nothing there: 6 hours). It shares everything with the forward search: who may
 ask, the per-person limits and the day's Google cap, timeouts, key safety and the Redis rules.
+
+### Customers' saved places
+
+The customer app finds salons near the phone's GPS point, or near a saved place: Home, Work, or another with a name
+of its own ("Gym", "Mom's place"), up to 10 a person, one Home and one Work. Each is set exactly like a salon's
+address at registration: the four address fields, then a pin from the typed address (`POST /me/places/geocode`) or at
+the phone's GPS point (`POST /me/places/reverse-geocode` fills the empty fields), which the customer drags onto the
+building. Only the customer ever reads them; salons never see them, and deleting the account deletes them
+(`PlacesAccountDeletion`).
+
+| Call | Answer |
+| --- | --- |
+| `GET /api/v1/me/places` | Home, Work, then the others in the order saved: `[{id, kind: HOME\|WORK\|OTHER, name, addressLine, area, city, pincode, latitude, longitude, updatedAt}]` (`name` only for OTHER) |
+| `POST /api/v1/me/places {kind, name?, addressLine, area, city, pincode, latitude, longitude}` | 201 the place. 400 `VALIDATION_FAILED` (OTHER needs a `name` of 2–30; addressLine 2–200, area 2–100, city 2–60, a 6-digit pincode, the pin in India); 409 `PLACE_KIND_TAKEN` (a Home or Work already: `details.placeId`); 409 `TOO_MANY_PLACES` (`details.max` 10) |
+| `PUT /api/v1/me/places/{id}` (the whole place) | 200 the place; 404 `PLACE_NOT_FOUND` (not this person's, or deleted); 409 `PLACE_KIND_TAKEN`; 400 |
+| `DELETE /api/v1/me/places/{id}` | 204, also when it was gone already |
+| `POST /api/v1/me/places/geocode {addressLine, area, city, pincode}` | as `POST /shops/geocode` (same cache and per-person limits), for anyone signed in; 503 `GEOCODING_UNAVAILABLE` also once customers have used their 100 lookups of the day |
+| `POST /api/v1/me/places/reverse-geocode {latitude, longitude}` | as `POST /shops/reverse-geocode`, with the same customer rules |
+
+Text is cleaned like a shop's address (`TextCleaner`); the pin is kept to 6 decimals. Adds and changes of one person
+take an advisory lock (`pg_advisory_xact_lock(7104, …)`), so two phones adding at once can't pass 10 or save two
+Homes; the unique index on `(user_id, kind)` for Home and Work backs it up. The places module reaches the address
+search through `common.context.AddressSearch` (implemented in shops by `CustomerAddressSearch`), so the modules stay
+independent.
 
 ### Closing a shop or handing it over
 
@@ -709,7 +739,67 @@ completes the booking, by the automatic end or Finish):
 | `BOOKING_COME_BACK` "Time for your next Haircut?" | 10:00 India time, the shortest `returnAfterDays` of the visit's services (0s left out) after the visit's day; only between 9:00 and 21:00. Names and picks only the services due on the day it was scheduled for (all of them if the owner lengthened an interval since, so it isn't lost), at most 5 (the link fits `notification_jobs.url`) | the customer switched these off, has a booking coming up, completed another online booking since, the salon isn't live, or it offers none of those services any more | `/salons/{salonId}?services=a,b` |
 
 Both are push and in-app messages of the customer app (`BOOKING_` types), never SMS unless a template is set for the
-type. `GET` / `PUT /api/v1/me/salon-preferences {comeBackReminders}`: on until switched off.
+type. `GET` / `PUT /api/v1/me/salon-preferences {comeBackReminders?, salonOffers?}` (either or both; neither: 400): each
+on until switched off.
+
+## Salon offers
+
+A discount the owner publishes whenever he likes (nothing is automatic, and there is no limit on how often): 5 to 50%
+off all the salon's services or some, from a first to a last day (India dates, at most 90 days ahead) and, if he
+likes, only from one time to another each day (15-minute steps). Bookings that **start** inside it are priced with it
+(`SalonOffer.price`: each covered service, to the rupee, half up, never below ₹1); the booking keeps that price
+(`appointment_services.list_price_paise` and `offer_id`), whatever happens to the offer later. A **move** prices the
+booking again for its new time, from the prices it was booked at before any offer: the offer there if one applies,
+the price without one if not (so an offer's days and hours can't be carried to any time by moving). Walk-ins are at
+the list price (the salon gives a discount in person if it likes). Publishing or ending an offer takes the shop's row
+against bookings (like a pause): a booking in progress finishes first, and one after it sees the change.
+
+| Call | Who | What |
+| --- | --- | --- |
+| `GET /api/v1/salon/offers` | owner, helpers (403 `NOT_ALLOWED` for barbers) | every running or coming offer first (so each can be ended), then the newest ended ones, up to 100 in all: `{offer, state RUNNING/UPCOMING/ENDED, createdAt, endedAt, notified, bookings}` |
+| `POST /api/v1/salon/offers/preview` | owner | `{percentOff, serviceIds (empty: all), startsOn, endsOn, from?, until?}` → `{services [{serviceId, name, pricePaise, offerPricePaise, priceIsFrom}], customers}` after every check below |
+| `POST /api/v1/salon/offers` | owner | the same body → 201, and the message goes at once (see below) |
+| `POST /api/v1/salon/offers/{id}/end` | owner | ends it now: new bookings at the normal price; messages still waiting aren't sent. 409 `OFFER_OVER` if it already ended; 404 `OFFER_NOT_FOUND` |
+| `PUT /api/v1/salons/{id}/offer-messages {on}` | a customer | stops (or allows again) one salon's offer messages |
+
+Checks, in order: the request's own limits (400 `VALIDATION_FAILED`: `percentOff` 5–50, both dates, up to 100
+services); the salon is live (409 `SALON_NOT_LIVE`); the times (`from`/`until` both or neither, on 15-minute steps,
+`until` after `from`) and the dates (first day today or later, last day on or after it and at most 90 days ahead) (400
+naming the field); the salon has services (409 `NO_SERVICES`) and these are among its active ones (400 `serviceIds`);
+the first day inside the salon's booking window (409 `OFFER_TOO_FAR`, "Customers can book up to 7 days ahead, so start
+the offer by 17 Nov.", `details.lastStart`: a message about days nobody can book yet would only disappoint); online
+bookings not paused over its first moment (409 `SALON_PAUSED`); opening hours set (409 `NO_SALON_HOURS`: a salon
+registered before V34 that never set them, sent to Setup → Opening hours); the daily hours inside the salon's opening
+hours on **every open day** in the dates (409 `OFFER_OUTSIDE_HOURS`, the message and `details.days` name each such day
+with its hours; weekly offs and closed days are skipped, not refused); some opening time left in the dates (409
+`NO_OPEN_TIME`, e.g. only closed days, or today's hours already over); no running or coming offer on the same service
+at the same time (409 `OFFER_OVERLAPS` with `details.offerId`; another service at the same time is fine, and an offer
+whose services were all switched off since is not in the way).
+Publishing runs under the salon's calendar lock, so two at once are checked one after the other, and a double tap is
+refused as an overlap (nobody is told twice). Later changes to the opening hours are allowed: the offer simply covers
+the slots that remain.
+
+**The message** (type `BOOKING_OFFER`: push, and in the customer app's message list; no SMS template) goes when he
+publishes, at whatever time, with no limit on how often (the owner's choice; customers stop a salon's offers on its
+page), to the
+salon's past customers: anyone who completed an online booking there, whose account isn't deleted, who doesn't work in
+the salon, and who hasn't switched offer messages off (for every salon: `salon_customer_prefs.salon_offers`; for this
+one: `salon_offer_mutes`). "20% off at Sharma Hair", "Haircut · 12 Nov – 14 Nov, 12:00–16:00. Book in the app.", opening
+`/salons/{salonId}?offer={offerId}` (the app picks the services it covers). `notified` keeps how many. Who to tell is
+read before the salon's locks are taken, through `ix_appointments_completed_customers` (V38), so a big salon's
+publish doesn't hold up its day.
+
+**Customers see it** on the salon's card (`offer {percentOff, startsOn, endsOn}`: the soonest running or coming, the
+biggest of those starting the same day; an offer whose services are all switched off is left out everywhere), on its
+page (`offers`, and `offerMessages`: null until they completed a visit
+there, then whether they get its messages), on each service (`offerPricePaise`: the price in its best offer), on each
+free time (`pricePaise`, and `listPricePaise` when an offer applies at that start) and on the booking
+(`totalListPricePaise`, each service's `listPricePaise`).
+
+**No extra reads on the hot path:** the offers travel with the salon's setup kept in memory (`SalonSetups`), and
+publishing or ending one moves the salon's `setup_version` (triggers in V37, like a change to its services), so every
+server prices free times and bookings with the current offers at its next read. The cards read the badge in their
+one query per page (`SalonCardStore`). A deleted account's mutes go (`SalonAccountDeletion`).
 
 ## Run it on your laptop
 
@@ -855,7 +945,30 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 | --- | --- | --- | --- |
 | `POST /auth/me/phone/send-code`, `POST /auth/me/phone` | none | new: change the number while signed in | both apps: Profile → Mobile → Change; save the new tokens |
 
+### API changes for saved places (V40; customer app 0.11.0 uses them, old apps are unaffected)
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `GET`/`POST /me/places`, `PUT`/`DELETE /me/places/{id}` | none | new: a customer's saved places | customer app: the place list and the address form |
+| `POST /me/places/geocode`, `/me/places/reverse-geocode` | none | new: address search for customers | customer app: "Find on map", "Use current location" |
+| `POST /shops/geocode`, `/shops/reverse-geocode` | | unchanged (owners now have at least 180 of the day's 280 Google lookups to themselves) | none |
+
 ### API changes in this version (deploy the backend first, then the apps)
+
+**Salon offers** (V37–V39; partner app 0.10.0 and customer app 0.10.0 use them; old apps keep working, without offers):
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `GET`/`POST /salon/offers`, `POST /salon/offers/preview`, `POST /salon/offers/{id}/end` | none | new | partner app: More → Offers |
+| `PUT /salons/{id}/offer-messages` | none | new | customer app: the switch on a visited salon's page |
+| `GET`/`PUT /me/salon-preferences` | `{comeBackReminders}`, required | adds `salonOffers`; PUT takes either or both (neither: 400) | customer app: the second switch on Profile |
+| `GET /salons` | | cards add `offer` (null if none) | customer app: the badge |
+| `GET /salons/{id}`, `/services`, `/availability` | | add `offers` and `offerMessages`; `offerPricePaise`; each start's `pricePaise` and `listPricePaise` | customer app: offer prices, "%" on times, Confirm's price |
+| booking answers (customer and salon) | | services add `listPricePaise`; the customer's booking adds `totalListPricePaise`; `totalPricePaise` and `pricePaise` are what is paid | customer app: both prices on the booking |
+| `POST /bookings/{id}/reschedule` | kept the booked prices | prices again for the new time (an offer there, or none) | customer app: the move screen shows each time's price |
+| messages | | new type `BOOKING_OFFER` (customer list) | customer app: opens `/salons/{id}?offer=` |
+
+### API changes in the previous version
 
 **Salon registration, opening hours, ratings and come-back reminders** (V34–V36; partner app 0.9.0, customer app
 0.4.0 and admin website 0.7.0 use them; old apps keep working except where said):
@@ -882,7 +995,7 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 | messages | | new types `BOOKING_RATE_VISIT`, `BOOKING_COME_BACK` (customer list) | customer app: open `?rate=1`, and `?services=` on a salon's page |
 | `GET /admin/shops/{id}` | `salon {barbers, services}` | `salon` adds `serviceList`, `hours`, `ratings`, `ratingAverage`; adds `registrationDoc {type, label, url, checkedAt}`; a change `registrationDoc` | admin website: the salon's setup and document |
 
-### API changes in the previous version
+### API changes in an earlier version
 
 **Earlier-slot alerts and the 10-minute late allowance** (V33; the customer app needs this for the switch, old apps
 keep working):
@@ -1574,7 +1687,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V37__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V41__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
@@ -1625,6 +1738,15 @@ checks `NOT VALID`). The new tables and the backfill come first, and everything 
 only until the commit right after. V35 builds the `shops` indexes for the document CONCURRENTLY (see above if it
 fails) and drops `ix_appointments_shop_closures` (V18) CONCURRENTLY, no longer read now that closed days have their own table; V36 validates V34's checks and key.
 
+**V37–V39** (salon offers): V37 adds the empty `salon_offers`, `salon_offer_services` and `salon_offer_mutes` (their
+keys to shops, users and services added NOT VALID at the end, as in V34), the setup_version triggers on
+`salon_offers`, `salon_customer_prefs.salon_offers` (a constant default: no rewrite), and `appointment_services.offer_id`
+and `list_price_paise` (nullable, with a check and a key NOT VALID), the keys before the two busy tables so nothing
+waits on them while their locks are held; V38 builds `ix_appointment_services_offer` and
+`ix_appointments_completed_customers` CONCURRENTLY (see above if it fails); V39 validates V37's checks and keys. **Deploying V37–V39:** a rolling deploy is
+fine. While an old copy serves next to a new one, bookings made through it are at the normal price even inside an
+offer, its moves keep the booked price, and its `PUT /me/salon-preferences` still needs `comeBackReminders`.
+
 **Deploying V34–V36: one copy at a time is not enough, run a single instance for the switch-over.** While an old copy
 and a new one run side by side: an old copy completes bookings without follow-up rows (those visits get no rating
 request or reminder; they can still be rated from the booking's page), accepts barber hours outside the salon's
@@ -1632,6 +1754,10 @@ hours, and writes `shops_aud` rows without the document columns (the field team'
 document change that didn't happen, history only), and closes days with blocks only and no `salon_closed_days` row
 (the day then isn't listed or shown to customers, though nobody can book it; it can still be opened again by its id). An old partner app can't submit a salon (it has no screens for
 services and hours).
+
+**V40** (customers' saved places) only creates the empty `customer_places` table with its two indexes and a key to
+`users` (a short lock on `users`, nothing to check). A rolling deploy is fine. It comes after V37–V39 (salon offers):
+merge and deploy that first.
 
 **V33** (earlier-slot alerts, 10-minute late allowance) adds the empty `earlier_slot_alerts` table with its two
 indexes (built in the migration: the table is new and empty) and no foreign key (appointments are never deleted, and

@@ -6,6 +6,7 @@ import org.springframework.stereotype.Repository;
 import java.sql.Array;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -34,9 +35,13 @@ public class SalonCardStore {
      * @param registered the salon has a registration document (optional) and the field team has checked it
      * @param worksToday a working barber has hours on today's weekday (none: the salon is closed today, whatever its
      *                   opening hours say)
+     * @param offer      its offer running today or coming next (not ended early, its last day today or later, some
+     *                   of its services still on): the soonest, the biggest of those starting the same day; null if
+     *                   none
      */
     public record Facts(int ratings, long starsSum, boolean hasHours, Integer openMin, Integer closeMin,
-                        boolean closedDay, int services, List<Top> top, boolean registered, boolean worksToday) {
+                        boolean closedDay, int services, List<Top> top, boolean registered, boolean worksToday,
+                        Offer offer) {
 
         public Facts {
             top = List.copyOf(top);
@@ -44,6 +49,9 @@ public class SalonCardStore {
     }
 
     public record Top(String name, long pricePaise, boolean priceIsFrom) {
+    }
+
+    public record Offer(int percentOff, LocalDate startsOn, LocalDate endsOn) {
     }
 
     private static final String SQL = """
@@ -56,7 +64,7 @@ public class SalonCardStore {
                         AND r.registration_doc_checked_at IS NOT NULL) AS registered,
                 EXISTS (SELECT 1 FROM salon_staff w JOIN staff_hours wh ON wh.staff_id = w.id
                         WHERE w.shop_id = u.id AND w.active AND wh.weekday = h.weekday) AS works_today,
-                sv.n, sv.names, sv.prices, sv.froms
+                sv.n, sv.names, sv.prices, sv.froms, f.percent_off, f.starts_on, f.ends_on
             FROM unnest(?::uuid[]) AS u(id)
             LEFT JOIN salon_rating_totals t ON t.shop_id = u.id
             LEFT JOIN salon_hours h ON h.shop_id = u.id AND h.weekday = ?
@@ -68,7 +76,13 @@ public class SalonCardStore {
                 FROM salon_services o
                 WHERE o.shop_id = u.id AND o.active AND o.id IN (
                     SELECT k.service_id FROM salon_staff st JOIN staff_services k ON k.staff_id = st.id
-                    WHERE st.shop_id = u.id AND st.active)) sv ON true""";
+                    WHERE st.shop_id = u.id AND st.active)) sv ON true
+            LEFT JOIN LATERAL (
+                SELECT o.percent_off, o.starts_on, o.ends_on FROM salon_offers o
+                WHERE o.shop_id = u.id AND o.ended_at IS NULL AND o.ends_on >= ?
+                  AND (o.all_services OR EXISTS (SELECT 1 FROM salon_offer_services x JOIN salon_services s
+                       ON s.id = x.service_id WHERE x.offer_id = o.id AND s.active))
+                ORDER BY o.starts_on, o.percent_off DESC LIMIT 1) f ON true""";
 
     private final JdbcTemplate jdbc;
 
@@ -81,8 +95,10 @@ public class SalonCardStore {
      * @param weekday  that day's weekday (1 = Monday)
      * @param dayStart that day's first moment
      * @param dayEnd   the next day's first moment
+     * @param today    that day's date (offers lasting until it or later)
      */
-    public Map<UUID, Facts> facts(Collection<UUID> shopIds, int weekday, Instant dayStart, Instant dayEnd) {
+    public Map<UUID, Facts> facts(Collection<UUID> shopIds, int weekday, Instant dayStart, Instant dayEnd,
+                                  LocalDate today) {
         Map<UUID, Facts> out = new HashMap<>();
         if (shopIds.isEmpty()) {
             return out;
@@ -92,6 +108,7 @@ public class SalonCardStore {
             ps.setObject(2, AppointmentStore.at(dayEnd));
             ps.setArray(3, ps.getConnection().createArrayOf("uuid", shopIds.toArray()));
             ps.setInt(4, weekday);
+            ps.setObject(5, today);
         }, rs -> {
             List<Top> top = new ArrayList<>();
             Object[] names = array(rs.getArray("names"));
@@ -103,7 +120,9 @@ public class SalonCardStore {
             out.put(rs.getObject("id", UUID.class), new Facts(rs.getInt("ratings"), rs.getLong("stars_sum"),
                     rs.getBoolean("has_hours"), (Integer) rs.getObject("open_min"), (Integer) rs.getObject("close_min"),
                     rs.getBoolean("closed_day"), rs.getInt("n"), top, rs.getBoolean("registered"),
-                    rs.getBoolean("works_today")));
+                    rs.getBoolean("works_today"), rs.getObject("percent_off") == null ? null
+                            : new Offer(rs.getInt("percent_off"), rs.getObject("starts_on", LocalDate.class),
+                                    rs.getObject("ends_on", LocalDate.class))));
         });
         return out;
     }
