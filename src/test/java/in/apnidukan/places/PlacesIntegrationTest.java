@@ -150,7 +150,7 @@ class PlacesIntegrationTest {
         assertThat(home.status()).isEqualTo(201);
 
         // Home, Work, then the others
-        assertThat(list(ravi)).extracting(p -> p.get("kind")).containsExactly("HOME", "WORK", "OTHER");
+        assertThat(kinds(ravi)).containsExactly("HOME", "WORK", "OTHER");
         assertThat(list(meera)).isEmpty();
 
         // Changing: the whole place; another person's is not found and stays as it was
@@ -168,7 +168,7 @@ class PlacesIntegrationTest {
         // Deleting, twice (a second tap): 204 both times
         assertThat(call(HttpMethod.DELETE, "/me/places/" + homeId, null, ravi).status()).isEqualTo(204);
         assertThat(call(HttpMethod.DELETE, "/me/places/" + homeId, null, ravi).status()).isEqualTo(204);
-        assertThat(list(ravi)).extracting(p -> p.get("kind")).containsExactly("WORK", "OTHER");
+        assertThat(kinds(ravi)).containsExactly("WORK", "OTHER");
         assertThat(call(HttpMethod.PUT, "/me/places/" + homeId, moved, ravi).status()).isEqualTo(404);
         assertThat(call(HttpMethod.GET, "/me/places", null, null).status()).isEqualTo(401);
     }
@@ -273,6 +273,10 @@ class PlacesIntegrationTest {
         assertThat(call(HttpMethod.POST, "/shops/geocode", Map.of("addressLine", "Shop 9, Lake View", "area",
                 "Kondapur", "city", "Hyderabad", "pincode", "500084"), token(MEERA)).status()).isEqualTo(200);
         assertThat(call(HttpMethod.POST, "/me/places/geocode", typed, null).status()).isEqualTo(401);
+    }
+
+    private List<Object> kinds(String token) {
+        return list(token).stream().map(p -> (Object) p.get("kind")).toList();
     }
 
     private List<Map<?, ?>> list(String token) {
