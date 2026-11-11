@@ -578,7 +578,7 @@ class AuthIntegrationTest {
         String code = codeSentTo(LAST_SMS, later);
         String own = codeSentTo(LAST_SMS, PHONE);
         java.util.UUID squatter = java.util.UUID.randomUUID();
-        TestData.user(jdbc, squatter, later);
+        in.apnidukan.support.TestData.user(jdbc, squatter, later);
         Reply raced = post("/auth/me/phone", Map.of("newPhone", later, "phoneCode", code, "secondCode", own), access);
         assertThat(raced.status()).isEqualTo(409);
         assertThat(raced.body().get("code")).isEqualTo("PHONE_IN_USE");
@@ -638,8 +638,8 @@ class AuthIntegrationTest {
         String raviAccess = (String) ravi.body().get("accessToken");
         java.util.UUID owner = java.util.UUID.randomUUID();
         java.util.UUID shop = java.util.UUID.randomUUID();
-        TestData.user(jdbc, owner, "9700000021");
-        TestData.shop(jdbc, shop, owner);
+        in.apnidukan.support.TestData.user(jdbc, owner, "9700000021");
+        in.apnidukan.support.TestData.shop(jdbc, shop, owner);
         jdbc.update("INSERT INTO shop_handovers (id, shop_id, from_user, to_phone, status, created_at, expires_at) "
                 + "VALUES (?, ?, ?, '9700000020', 'PENDING', now(), now() + interval '7 days')",
                 java.util.UUID.randomUUID(), shop, owner);
