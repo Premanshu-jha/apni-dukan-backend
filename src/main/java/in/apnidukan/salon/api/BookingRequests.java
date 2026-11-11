@@ -51,8 +51,11 @@ public final class BookingRequests {
                             @Size(max = 300) String comment) {
     }
 
-    /** My choice about come-back reminders ("Time for your next haircut?"). */
-    public record SalonPreferences(@NotNull Boolean comeBackReminders) {
+    /**
+     * My salon preferences: come-back reminders ("Time for your next haircut?") and offer messages from salons I
+     * visited. Leave one out (or null) to keep it; at least one is needed (400).
+     */
+    public record SalonPreferences(Boolean comeBackReminders, Boolean salonOffers) {
     }
 
     /** Move my booking to another start (from the availability call). */
