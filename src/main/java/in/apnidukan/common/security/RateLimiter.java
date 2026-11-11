@@ -38,6 +38,17 @@ public class RateLimiter {
         return incrementWithExpiry(redis, "rl:" + key, window);
     }
 
+    /**
+     * Takes back one hit counted by {@link #hit} or {@link #tryHit} for something that was refused further on (so a
+     * refusal doesn't use up an allowance). Never below 0; the window stays as it was.
+     */
+    public void giveBack(String key) {
+        Long left = redis.opsForValue().decrement("rl:" + key);
+        if (left != null && left < 0) {
+            redis.opsForValue().increment("rl:" + key);
+        }
+    }
+
     /** Seconds until this counter's window ends (for Retry-After); 1 if unknown. */
     public long secondsLeft(String key) {
         Long ttl = redis.getExpire("rl:" + key);

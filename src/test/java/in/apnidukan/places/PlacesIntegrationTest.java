@@ -196,7 +196,13 @@ class PlacesIntegrationTest {
         Map<String, Object> london = place("OTHER", "Abroad", "Baker Street");
         london.put("latitude", 51.5);
         london.put("longitude", -0.12);
-        assertThat(call(HttpMethod.POST, "/me/places", london, ravi).status()).isEqualTo(400);
+        Reply abroad = call(HttpMethod.POST, "/me/places", london, ravi);
+        assertThat(abroad.status()).isEqualTo(400);
+        assertThat(abroad.body().get("code")).isEqualTo("VALIDATION_FAILED");
+        // A Home's name is ignored, however long
+        Reply named = call(HttpMethod.PUT, "/me/places/" + workId, place("WORK", "x".repeat(40), "Cyber Towers"), ravi);
+        assertThat(named.status()).isEqualTo(200);
+        assertThat(named.body().get("name")).isNull();
         Map<String, Object> badPin = place("OTHER", "Gym", "Road 2");
         badPin.put("pincode", "05008");
         assertThat(call(HttpMethod.POST, "/me/places", badPin, ravi).status()).isEqualTo(400);
@@ -232,6 +238,45 @@ class PlacesIntegrationTest {
             pool.shutdownNow();
         }
         assertThat(list(ravi)).hasSize(10);
+    }
+
+    @Test
+    void twoPhonesAddingOthersAtOnceAtNinePlacesSaveExactlyOne() throws Exception {
+        String ravi = token(RAVI);
+        for (int i = 0; i < 9; i++) {
+            call(HttpMethod.POST, "/me/places", place("OTHER", "Place " + i, "Road " + i), ravi);
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            List<Callable<Reply>> tries = new ArrayList<>();
+            for (int i = 0; i < 4; i++) {
+                int n = i;
+                tries.add(() -> call(HttpMethod.POST, "/me/places", place("OTHER", "Gym " + n, "Road 9" + n), ravi));
+            }
+            List<Reply> replies = new ArrayList<>();
+            for (Future<Reply> f : pool.invokeAll(tries)) {
+                replies.add(f.get());
+            }
+            assertThat(replies).extracting(Reply::status).containsOnlyOnce(201).containsOnly(201, 409);
+            assertThat(replies.stream().filter(r -> r.status() == 409).map(r -> r.body().get("code")))
+                    .containsOnly("TOO_MANY_PLACES");
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(list(ravi)).hasSize(10);
+    }
+
+    @Test
+    void aTokenStillWorkingAfterTheAccountWasDeletedSavesNothing() {
+        String ravi = token(RAVI);
+        String id = (String) call(HttpMethod.POST, "/me/places", place("HOME", null, "Flat 4B"), ravi).body().get("id");
+        // As if Redis missed the sign-out at deletion: the account is gone, the token not yet
+        jdbc.update("UPDATE users SET deleted_at = now(), phone = NULL WHERE phone = ?", RAVI);
+        Reply add = call(HttpMethod.POST, "/me/places", place("WORK", null, "Cyber Towers"), ravi);
+        assertThat(add.status()).isEqualTo(401);
+        assertThat(call(HttpMethod.PUT, "/me/places/" + id, place("HOME", null, "Flat 9"), ravi).status())
+                .isEqualTo(401);
+        assertThat(jdbc.queryForObject("SELECT address_line FROM customer_places", String.class)).isEqualTo("Flat 4B");
     }
 
     @Test

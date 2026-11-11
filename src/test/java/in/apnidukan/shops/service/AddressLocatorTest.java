@@ -274,13 +274,26 @@ class AddressLocatorTest {
         assertThat(locate().precision()).isEqualTo(Precision.EXACT);
         verify(limits, never()).hit(startsWith("geocode-day-customers:"), any());
 
-        // Two customers at once past the share: the one counted 101st is refused, and the day's count isn't touched
+        // Two customers at once past the share: the one counted 101st is refused, its own allowance is given back,
+        // and the day's count isn't touched (one hit: the owner's above)
         when(limits.current("geocode-day-customers:2026-11-07")).thenReturn(99L);
         when(limits.hit(startsWith("geocode-day-customers:"), any())).thenReturn(101L);
         assertThatThrownBy(() -> locator.locate(Asker.CUSTOMER, OWNER, "12, MG Road", "Ameerpet", "Hyderabad",
                 "500017")).isInstanceOfSatisfying(ApiException.class,
                 e -> assertThat(e.getCode()).isEqualTo("GEOCODING_UNAVAILABLE"));
+        verify(limits).giveBack("geocode-user-day:" + OWNER);
+        verify(limits, org.mockito.Mockito.times(1)).hit(eq("geocode-day:2026-11-07"), any());
         verify(google).find(anyString(), anyString());   // only the owner's
+    }
+
+    @Test
+    void pastTheDaysCapARefusedSearchGivesBackWhatItCounted() {
+        when(limits.hit(startsWith("geocode-day:"), any())).thenReturn(281L);
+        assertThatThrownBy(() -> locator.locate(Asker.CUSTOMER, OWNER, "12, MG Road", "Ameerpet", "Hyderabad",
+                "500016")).isInstanceOf(ApiException.class);
+        verify(limits).giveBack("geocode-user-day:" + OWNER);
+        verify(limits).giveBack("geocode-day-customers:2026-11-07");
+        verify(google, never()).find(anyString(), anyString());
     }
 
     private static final AddressLocator.Described NOIDA =

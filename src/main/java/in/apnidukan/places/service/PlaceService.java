@@ -1,5 +1,6 @@
 package in.apnidukan.places.service;
 
+import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.text.TextCleaner.TextField;
 import in.apnidukan.places.api.PlaceRequests.SavePlace;
@@ -38,10 +39,16 @@ public class PlaceService {
     static final TextField CITY = new TextField("city", 2, 60);
 
     private final PlaceStore places;
+    private final UserDirectory users;
     private final Clock clock;
 
-    public PlaceService(PlaceStore places, Clock clock) {
+    /**
+     * @param users whether the account is still there, checked under the person's lock (a token can outlive a
+     *              deleted account by a few minutes)
+     */
+    public PlaceService(PlaceStore places, UserDirectory users, Clock clock) {
         this.places = places;
+        this.users = users;
         this.clock = clock;
     }
 
@@ -58,7 +65,7 @@ public class PlaceService {
     @Transactional
     public PlaceView add(UUID userId, SavePlace in) {
         Fields f = fields(in);
-        places.lockPerson(userId);   // two phones adding at once: one after the other
+        lockLivePerson(userId);   // two phones adding at once: one after the other
         if (places.count(userId) >= MAX_PLACES) {
             throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_PLACES", "You can save up to " + MAX_PLACES
                     + " places. Delete one you don't use, then add this one.", Map.of("max", MAX_PLACES));
@@ -76,7 +83,7 @@ public class PlaceService {
     @Transactional
     public PlaceView update(UUID userId, UUID id, SavePlace in) {
         Fields f = fields(in);
-        places.lockPerson(userId);
+        lockLivePerson(userId);
         Place old = places.find(userId, id).orElseThrow(PlaceService::notFound);
         requireKindFree(userId, in.kind(), id);
         Place p = new Place(id, userId, in.kind(), f.name(), f.addressLine(), f.area(), f.city(), f.pincode(),
@@ -91,6 +98,17 @@ public class PlaceService {
     @Transactional
     public void delete(UUID userId, UUID id) {
         places.delete(userId, id);
+    }
+
+    /**
+     * The person's lock, then their row, the order deleting the account takes them in (PlacesAccountDeletion first,
+     * then the users row): a deleted account gets 401 NOT_SIGNED_IN and saves nothing.
+     */
+    private void lockLivePerson(UUID userId) {
+        places.lockPerson(userId);
+        if (!users.lockIfActive(userId)) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "NOT_SIGNED_IN", "Sign in first.");
+        }
     }
 
     private record Fields(String name, String addressLine, String area, String city, String pincode) {

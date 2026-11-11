@@ -10,7 +10,11 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.UUID;
 
-/** Someone deleted their account: their saved places (home and work addresses) go with it. */
+/**
+ * Someone deleted their account: their saved places (home and work addresses) go with it. The person's lock first, as
+ * an add takes it: a place being saved at this moment commits first and is deleted here, and one after this finds
+ * the account gone (PlaceService checks it under the same lock).
+ */
 @Component
 @Order(20)
 class PlacesAccountDeletion implements AccountDeletionListener {
@@ -24,6 +28,7 @@ class PlacesAccountDeletion implements AccountDeletionListener {
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public void accountDeleted(UUID userId, Instant now) {
+        places.lockPerson(userId);
         places.deleteAll(userId);
     }
 }

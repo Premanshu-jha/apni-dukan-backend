@@ -19,12 +19,12 @@ public final class PlaceRequests {
     /**
      * A place to save, or a saved one's new details (the whole place each time).
      *
-     * @param name      only for OTHER, 2 to 30 letters ("Mom's place"); ignored for HOME and WORK
+     * @param name      only for OTHER, 2 to 30 letters ("Mom's place", checked when cleaned); ignored for HOME and WORK
      * @param latitude  the pin, as the customer left it on the map (inside India)
      */
     public record SavePlace(
             @NotNull Kind kind,
-            @Size(max = 30) String name,
+            String name,
             @NotBlank @Size(min = 2, max = 200) String addressLine,
             @NotBlank @Size(min = 2, max = 100) String area,
             @NotBlank @Size(min = 2, max = 60) String city,

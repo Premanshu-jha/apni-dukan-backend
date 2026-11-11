@@ -217,13 +217,21 @@ public class AddressLocator {
                 || asker == Asker.CUSTOMER && limits.current(customersKey) >= CUSTOMER_DAILY_CAP) {
             throw GoogleGeocoder.unavailable();
         }
-        requireUnder("geocode-user-day:" + userId, PER_USER_GOOGLE_PER_DAY, Duration.ofHours(24));
+        String personKey = "geocode-user-day:" + userId;
+        requireUnder(personKey, PER_USER_GOOGLE_PER_DAY, Duration.ofHours(24));
+        // Two at once past the pre-check: the one counted over a cap is refused, and what it counted on the way is
+        // given back (its person's allowance, customers' share), so a refusal never uses anything up
         if (asker == Asker.CUSTOMER && limits.hit(customersKey, Duration.ofHours(25)) > CUSTOMER_DAILY_CAP) {
+            limits.giveBack(personKey);
             log.warn("Address search: customers' {} Google lookups for today are used up; customers get 503 until "
                     + "midnight Pacific time", CUSTOMER_DAILY_CAP);
             throw GoogleGeocoder.unavailable();
         }
         if (limits.hit(dayKey, Duration.ofHours(25)) > DAILY_CAP) {
+            limits.giveBack(personKey);
+            if (asker == Asker.CUSTOMER) {
+                limits.giveBack(customersKey);
+            }
             log.warn("Address search: today's {} Google lookups are used up; answering 503 until midnight Pacific "
                     + "time", DAILY_CAP);
             throw GoogleGeocoder.unavailable();
