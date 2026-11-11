@@ -11,9 +11,9 @@ import java.time.Clock;
 import java.util.UUID;
 
 /**
- * A person moved their account to a new number: invitations and hand-over requests waiting for the old number move
- * with them (or are cancelled where they would now point at their own shop). The old number's next holder never sees
- * them, and the notices already in the person's inbox still lead to them.
+ * A person moved their account to a new number: invitations and hand-over requests waiting for the old number are
+ * cancelled, so the old number's next holder never sees them, and the shops that sent them never see the new number
+ * (they can send them again). One from the person's own shop to the new number is cancelled too.
  */
 @Component
 class ShopPhoneChange implements PhoneChangeListener {
@@ -31,7 +31,7 @@ class ShopPhoneChange implements PhoneChangeListener {
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public void phoneChanged(UUID userId, String oldPhone, String newPhone) {
-        invites.readdress(userId, oldPhone, newPhone, clock.instant());
-        handovers.readdress(userId, oldPhone, newPhone, clock.instant());
+        invites.cancelForPhoneChange(userId, oldPhone, newPhone, clock.instant());
+        handovers.cancelForPhoneChange(userId, oldPhone, newPhone, clock.instant());
     }
 }

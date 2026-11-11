@@ -84,21 +84,15 @@ public class ShopInviteStore {
     }
 
     /**
-     * The person moved from oldPhone to newPhone: invitations waiting for the old number now wait for the new one.
-     * Cancelled instead: one to a shop the person already works in (the new number may have been invited there), and
-     * one whose shop already invited the new number (one waiting per shop and number). Returns how many moved.
+     * The person moved from oldPhone to newPhone: invitations waiting for the old number are cancelled (moving them
+     * would show the inviting shop the new number; it can invite again), and so is one from a shop the person already
+     * works in to the new number. Returns how many were cancelled.
      */
-    public int readdress(UUID userId, String oldPhone, String newPhone, Instant now) {
-        jdbc.update("UPDATE shop_invites i SET status = 'CANCELLED', decided_at = ? WHERE status = 'PENDING' "
-                        + "AND to_phone IN (?, ?) AND EXISTS (SELECT 1 FROM shop_members m WHERE m.user_id = ? "
-                        + "AND m.shop_id = i.shop_id)",
+    public int cancelForPhoneChange(UUID userId, String oldPhone, String newPhone, Instant now) {
+        return jdbc.update("UPDATE shop_invites i SET status = 'CANCELLED', decided_at = ? WHERE status = 'PENDING' "
+                        + "AND (to_phone = ? OR (to_phone = ? AND EXISTS (SELECT 1 FROM shop_members m "
+                        + "WHERE m.user_id = ? AND m.shop_id = i.shop_id)))",
                 at(now), oldPhone, newPhone, userId);
-        jdbc.update("UPDATE shop_invites i SET status = 'CANCELLED', decided_at = ? WHERE status = 'PENDING' "
-                        + "AND to_phone = ? AND EXISTS (SELECT 1 FROM shop_invites j WHERE j.shop_id = i.shop_id "
-                        + "AND j.to_phone = ? AND j.status = 'PENDING')",
-                at(now), oldPhone, newPhone);
-        return jdbc.update("UPDATE shop_invites SET to_phone = ? WHERE to_phone = ? AND status = 'PENDING'",
-                newPhone, oldPhone);
     }
 
     public Optional<Invite> find(UUID id) {

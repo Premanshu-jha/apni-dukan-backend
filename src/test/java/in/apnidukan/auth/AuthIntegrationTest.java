@@ -633,7 +633,7 @@ class AuthIntegrationTest {
     }
 
     @Test
-    void invitationsAndHandOversWaitingForTheOldNumberMoveToTheNewOne() {
+    void invitationsAndHandOversWaitingForTheOldNumberAreCancelled() {
         Reply ravi = signIn("9700000020");
         String raviAccess = (String) ravi.body().get("accessToken");
         java.util.UUID owner = java.util.UUID.randomUUID();
@@ -651,13 +651,14 @@ class AuthIntegrationTest {
         Reply done = post("/auth/me/phone", Map.of("newPhone", "9700000022", "phoneCode",
                 codeSentTo(LAST_SMS, "9700000022"), "secondCode", codeSentTo(LAST_SMS, "9700000020")), raviAccess);
         assertThat(done.status()).as(done.body().toString()).isEqualTo(200);
-        assertThat(jdbc.queryForObject("SELECT to_phone FROM shop_handovers", String.class)).isEqualTo("9700000022");
-        assertThat(jdbc.queryForObject("SELECT to_phone FROM shop_invites", String.class)).isEqualTo("9700000022");
+        // Cancelled: the shop doesn't learn the new number, and can ask again
+        assertThat(jdbc.queryForObject("SELECT status FROM shop_handovers", String.class)).isEqualTo("CANCELLED");
+        assertThat(jdbc.queryForObject("SELECT status FROM shop_invites", String.class)).isEqualTo("CANCELLED");
         // Whoever gets the old number next finds nothing waiting for it
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM shop_handovers WHERE to_phone = '9700000020'",
-                Integer.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM shop_invites WHERE to_phone = '9700000020'",
-                Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM shop_handovers WHERE to_phone = '9700000020' "
+                + "AND status = 'PENDING'", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM shop_invites WHERE to_phone = '9700000020' "
+                + "AND status = 'PENDING'", Integer.class)).isZero();
     }
 
     @Test

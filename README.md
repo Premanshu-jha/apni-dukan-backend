@@ -317,8 +317,9 @@ The customer and partner apps both have it (Profile / More → Mobile → Change
    account's current number, so a borrowed phone with the app open can't move the account alone.
 2. `POST /me/phone`: both codes are checked first. Then, under the user row's lock, everything is checked again (the
    refusals above, the number still free, the second code still the right kind: an email verified meanwhile answers
-   `SEND_CODES_AGAIN`). The number is set; shop invitations and hand-over requests waiting for the old number move to
-   the new one (cancelled where they would point at the person's own shop: `PhoneChangeListener`, `ShopPhoneChange`);
+   `SEND_CODES_AGAIN`). The number is set; shop invitations and hand-over requests waiting for the old number are
+   cancelled, so its next holder never sees them and the shops never see the new number (they can ask again; also
+   one from the person's own shop to the new number: `PhoneChangeListener`, `ShopPhoneChange`);
    every refresh token is revoked, access tokens stop at once (Redis) and devices stop getting messages
    (`SignOutEverywhereListener`; the app registers this device again); salons' screens showing the customer's number
    are told first (`PersonDetailsListener`). The codes are used up last, in the same transaction, so a refusal or a
