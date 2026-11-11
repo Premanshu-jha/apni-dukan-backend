@@ -2,12 +2,14 @@ package in.apnidukan.auth.api;
 
 import in.apnidukan.common.web.ClientAddress;
 
+import in.apnidukan.auth.api.AuthRequests.ChangePhone;
 import in.apnidukan.auth.api.AuthRequests.CompleteRecovery;
 import in.apnidukan.auth.api.AuthRequests.DeleteAccount;
 import in.apnidukan.auth.api.AuthRequests.Logout;
 import in.apnidukan.auth.api.AuthRequests.Refresh;
 import in.apnidukan.auth.api.AuthRequests.SendEmailCode;
 import in.apnidukan.auth.api.AuthRequests.SendOtp;
+import in.apnidukan.auth.api.AuthRequests.SendPhoneChangeCode;
 import in.apnidukan.auth.api.AuthRequests.StartRecovery;
 import in.apnidukan.auth.api.AuthRequests.UpdateMe;
 import in.apnidukan.auth.api.AuthRequests.VerifyEmail;
@@ -106,6 +108,28 @@ public class AuthController {
     public ResponseEntity<Void> deleteAccount(@Valid @RequestBody DeleteAccount body, HttpServletRequest request) {
         auth.deleteAccount(currentUser.get().userId(), body.code(), client.of(request));
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Changing your phone number, step 1: a code to the new number, and one to your verified email if you have one.
+     * 202. 400 INVALID_PHONE, 400 SAME_PHONE, 409 PHONE_IN_USE (another account has it), 429.
+     */
+    @PostMapping("/me/phone/send-code")
+    public ResponseEntity<Void> sendPhoneChangeCode(@Valid @RequestBody SendPhoneChangeCode body,
+                                                    HttpServletRequest request) {
+        auth.sendPhoneChangeCode(currentUser.get().userId(), body.newPhone(), client.of(request));
+        return ResponseEntity.accepted().build();
+    }
+
+    /**
+     * Step 2: with the codes, the account moves to the new number (the same account: bookings, shop and history
+     * stay), every other device is signed out, and this one gets new tokens. 400 EMAIL_CODE_REQUIRED, the code
+     * errors, 409 PHONE_IN_USE.
+     */
+    @PostMapping("/me/phone")
+    public TokenResponse changePhone(@Valid @RequestBody ChangePhone body, HttpServletRequest request) {
+        return TokenResponse.from(auth.changePhone(currentUser.get().userId(), body.newPhone(), body.phoneCode(),
+                body.emailCode(), body.device(), client.of(request)));
     }
 
     /** Signed in, replacing an already verified email: first a code to your own phone. 202. */

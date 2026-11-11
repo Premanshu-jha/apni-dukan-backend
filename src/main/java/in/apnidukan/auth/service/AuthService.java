@@ -563,6 +563,110 @@ public class AuthService {
                 .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
     }
 
+    // ---------------- changing the phone number (signed in) ----------------
+
+    /** Phone-change codes one account may ask for a day (each SMS goes to a number of their choosing). */
+    static final int PHONE_CHANGES_PER_ACCOUNT_PER_DAY = 5;
+
+    /**
+     * Step 1: a code to the new number, and a code to the verified email if there is one, so a borrowed phone with
+     * the app open can't move the account on its own. 400 INVALID_PHONE; 400 SAME_PHONE (already this account's);
+     * 409 PHONE_IN_USE (another account has it: refused here, before an SMS is spent, and again at step 2);
+     * 429 TOO_MANY_REQUESTS past {@value #PHONE_CHANGES_PER_ACCOUNT_PER_DAY} a day, and the usual code limits.
+     */
+    public void sendPhoneChangeCode(UUID userId, String newPhoneInput, String ip) {
+        User user = me(userId);
+        String newPhone = PhoneNumbers.normalize(newPhoneInput);
+        if (newPhone.equals(user.getPhone())) {
+            throw ApiException.badRequest("SAME_PHONE", "This is already your number.");
+        }
+        if (users.findByPhone(newPhone).isPresent()) {
+            throw phoneInUse();
+        }
+        limitSends(ip);
+        String dayKey = "phone-change-user:" + userId;
+        if (limits.current(dayKey) >= PHONE_CHANGES_PER_ACCOUNT_PER_DAY) {
+            throw tooManyRequests(limits.secondsLeft(dayKey));
+        }
+        SmsBudget.To to = SmsBudget.To.recovery(newPhone);   // a number new to us: counted as new
+        smsBudget.requireRoom(to);
+        String phoneCode = otp.issue(OtpPurpose.CHANGE_PHONE, userId + ":" + newPhone, ip);
+        String address = user.isEmailVerified() ? user.getEmail() : null;
+        String emailCode = address == null ? null : otp.issue(OtpPurpose.CHANGE_PHONE_EMAIL, userId + ":" + address, ip);
+        limits.hit(dayKey, Duration.ofHours(24));
+        if (address != null) {
+            String ending = newPhone.substring(6);
+            background.run("phone-change email", () -> email.send(address, "Change your Clozest phone number",
+                    "Your code to move your Clozest account to the phone number ending " + ending + " is " + emailCode
+                            + ".\n\nIt works for 10 minutes. If you didn't ask for this, don't share it with anyone "
+                            + "and contact Clozest support."));
+        }
+        sendSms(to, () -> sms.sendOtp(newPhone, phoneCode));
+    }
+
+    /**
+     * Step 2: both codes right → the account (its bookings, shop and history: the same account) moves to the new
+     * number, every other device is signed out, and this one gets new tokens. The old number and the email are told
+     * afterwards. 400 EMAIL_CODE_REQUIRED (a verified email and no emailCode); the code errors (WRONG_CODE,
+     * CODE_EXPIRED, TOO_MANY_ATTEMPTS); 409 PHONE_IN_USE (taken meanwhile); 400 SAME_PHONE.
+     */
+    public AuthTokens changePhone(UUID userId, String newPhoneInput, String phoneCode, String emailCode, String device,
+                                  String ip) {
+        String newPhone = PhoneNumbers.normalize(newPhoneInput);
+        limitVerifies(ip);
+        User me = me(userId);
+        String address = me.isEmailVerified() ? me.getEmail() : null;
+        if (address != null && (emailCode == null || emailCode.isBlank())) {
+            throw ApiException.badRequest("EMAIL_CODE_REQUIRED", "Enter the code we emailed you too.");
+        }
+        // Both checked before either is used up: a typo in one keeps the other for the next try
+        otp.check(OtpPurpose.CHANGE_PHONE, userId + ":" + newPhone, phoneCode, ip);
+        if (address != null) {
+            otp.check(OtpPurpose.CHANGE_PHONE_EMAIL, userId + ":" + address, emailCode, ip);
+        }
+        otp.consume(OtpPurpose.CHANGE_PHONE, userId + ":" + newPhone);
+        if (address != null) {
+            otp.consume(OtpPurpose.CHANGE_PHONE_EMAIL, userId + ":" + address);
+        }
+        String[] oldPhone = new String[1];
+        AuthTokens tokens = tx.execute(status -> {
+            // Others' screens (a salon's customer details) are told before the row lock (PersonDetailsListener)
+            detailsListeners.forEach(l -> l.detailsChanging(userId));
+            User user = users.lockById(userId).filter(u -> !u.isDeleted())
+                    .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+            if (newPhone.equals(user.getPhone())) {
+                throw ApiException.badRequest("SAME_PHONE", "This is already your number.");
+            }
+            users.findByPhone(newPhone).filter(other -> !other.getId().equals(userId)).ifPresent(other -> {
+                throw phoneInUse();
+            });
+            oldPhone[0] = user.getPhone();
+            Instant now = Instant.now(clock);
+            user.changePhone(newPhone, now);
+            user.becomeRealAccount(now);   // proved with a real code to a real phone (if a test account)
+            try {
+                users.saveAndFlush(user);
+            } catch (DataIntegrityViolationException e) {
+                throw phoneInUse();   // taken by a sign-up at this very moment
+            }
+            refreshTokens.revokeAllForUser(userId, now);
+            signOutListeners.forEach(l -> l.signedOutEverywhere(userId));   // the old phone stops getting messages
+            revocations.revokeAll(userId);
+            return issueTokens(user, device, false);
+        });
+        String ending = newPhone.substring(6);
+        String previousPhone = oldPhone[0];
+        // Not under the daily SMS cap: this warning must get out
+        background.runAlways("phone-changed SMS", () -> sms.sendAccountMoved(previousPhone, ending));
+        if (address != null) {
+            background.runAlways("phone-changed email", () -> email.send(address,
+                    "Your Clozest account moved to a new phone",
+                    "Your account now uses the phone number ending " + ending + ". Every other device was signed out."
+                            + "\n\nIf this wasn't you, contact Clozest support immediately."));
+        }
+        return tokens;
+    }
+
     // ---------------- deleting the account ----------------
 
     /**

@@ -301,6 +301,23 @@ coming back counts as copied; an old device retrying a signed-out token just get
 | `POST /email/verify` `{email, code}` | Marks the email verified |
 | `POST /recover/start` `{email, newPhone, captchaToken}` | Lost phone: a code to the verified email and one to the new phone |
 | `POST /recover/complete` | Both codes right: moves the account to the new phone and ends every old session |
+| `POST /me/phone/send-code` `{newPhone}` | Signed in, changing the number: a code to the new number, and one to the verified email if there is one. 400 `INVALID_PHONE`, 400 `SAME_PHONE`, 409 `PHONE_IN_USE`, 429 after 5 a day per account (and the usual code limits) |
+| `POST /me/phone` `{newPhone, phoneCode, emailCode?, device}` | Both codes right: the same account moves to the new number, every other device is signed out, this one gets new tokens (200 as `otp/verify`). 400 `EMAIL_CODE_REQUIRED`, the code errors, 409 `PHONE_IN_USE` (taken meanwhile) |
+
+### Changing the phone number (signed in)
+
+The customer and partner apps both have it (Profile → Mobile → Change). It works like recovery, but signed in:
+
+1. `POST /me/phone/send-code`: a number already on another account is refused here (before an SMS is spent) and
+   again when changing. The code to the new number is bound to this account and that number (another account's
+   code for the same number doesn't work). A verified email gets a code too, so a borrowed phone with the app open
+   can't move the account alone. At most 5 a day per account (each SMS goes to a number of the person's choosing).
+2. `POST /me/phone`: both codes are checked before either is used up (a typo in one keeps the other). Then, under the
+   user row's lock: the number is set, a test account becomes a real one, every refresh token is revoked, access
+   tokens stop at once (Redis), and devices stop getting messages (`SignOutEverywhereListener`); salons' screens
+   showing the customer's number are told first (`PersonDetailsListener`). It is the same account: bookings, a shop,
+   ratings and history all stay. Afterwards the old number gets an SMS ("moved to a number ending …", not under the
+   daily SMS cap) and the email a notice. The old number can sign up again later as a new account.
 
 ### Finishing sign-up
 
