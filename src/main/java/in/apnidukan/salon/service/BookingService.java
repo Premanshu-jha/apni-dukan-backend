@@ -16,6 +16,8 @@ import in.apnidukan.salon.api.BookingResponses.CancelResult;
 import in.apnidukan.salon.api.BookingResponses.CardFacts;
 import in.apnidukan.salon.api.BookingResponses.DayHours;
 import in.apnidukan.salon.api.BookingResponses.MyRating;
+import in.apnidukan.salon.api.BookingResponses.OfferBadge;
+import in.apnidukan.salon.api.BookingResponses.OfferMessagesView;
 import in.apnidukan.salon.api.BookingResponses.PriceLine;
 import in.apnidukan.salon.api.BookingResponses.RatingSummary;
 import in.apnidukan.salon.api.BookingResponses.SalonDetails;
@@ -26,6 +28,7 @@ import in.apnidukan.salon.api.BookingResponses.ServiceLine;
 import in.apnidukan.salon.api.BookingResponses.Slot;
 import in.apnidukan.salon.api.BookingResponses.Slots;
 import in.apnidukan.salon.api.BookingResponses.TagCount;
+import in.apnidukan.salon.api.SalonOfferResponses.OfferView;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.domain.AppointmentKind;
@@ -35,6 +38,7 @@ import in.apnidukan.salon.domain.Availability.BarberDay;
 import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.Interval;
 import in.apnidukan.salon.domain.RatingTag;
+import in.apnidukan.salon.domain.SalonOffer;
 import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.domain.Shift;
 import in.apnidukan.salon.domain.StrikeKind;
@@ -42,6 +46,7 @@ import in.apnidukan.salon.repo.AppointmentStore;
 import in.apnidukan.salon.repo.EarlierSlotAlertStore;
 import in.apnidukan.salon.repo.RatingStore;
 import in.apnidukan.salon.repo.SalonCardStore;
+import in.apnidukan.salon.repo.SalonOfferStore;
 import in.apnidukan.salon.repo.SalonOpenDayRepository;
 import in.apnidukan.salon.repo.VisitFollowUpStore;
 import in.apnidukan.salon.repo.SalonAccessStore;
@@ -65,6 +70,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -145,6 +151,7 @@ public class BookingService {
     private final VisitFollowUpStore followUps;
     private final Notifications notifications;
     private final ShopMemberships memberships;
+    private final SalonOfferStore offers;
     private final int readsPerMinute;
 
     private static final Logger log = LoggerFactory.getLogger(BookingService.class);
@@ -155,9 +162,10 @@ public class BookingService {
                           RateLimiter limits, SalonSetups setups, BookingNumbers numbers,
                           EarlierSlotAlertStore alerts, EarlierSlotAlerts earlierSlots, RatingStore ratings,
                           SalonCardStore cards, SalonOpenDayRepository openDays, VisitFollowUpStore followUps,
-                          Notifications notifications, ShopMemberships memberships,
+                          Notifications notifications, ShopMemberships memberships, SalonOfferStore offers,
                           @Value("${app.salon.reads-per-minute:60}") int readsPerMinute) {
         this.memberships = memberships;
+        this.offers = offers;
         this.ratings = ratings;
         this.cards = cards;
         this.openDays = openDays;
@@ -200,7 +208,8 @@ public class BookingService {
         Instant now = now();
         LocalDate today = LocalDate.ofInstant(now, SalonTime.ZONE);
         Map<UUID, SalonCardStore.Facts> facts = cards.facts(page.stream().map(ShopCard::id).toList(),
-                today.getDayOfWeek().getValue(), Availability.dayStart(today), Availability.dayStart(today.plusDays(1)));
+                today.getDayOfWeek().getValue(), Availability.dayStart(today), Availability.dayStart(today.plusDays(1)),
+                today);
         int minuteNow = LocalTime.ofInstant(now, SalonTime.ZONE).toSecondOfDay() / 60;
         return page.stream()
                 .map(card -> SalonSummary.from(card, card.shopPhotoFileId() == null ? null
@@ -211,7 +220,8 @@ public class BookingService {
     /** A card's facts as customers see them (see SalonSummary). */
     static CardFacts cardFacts(SalonCardStore.Facts f, LocalDate today, int minuteNow) {
         if (f == null) {
-            return new CardFacts(ratingSummary(RatingStore.Totals.NONE, false), List.of(), 0, null, null, false, false);
+            return new CardFacts(ratingSummary(RatingStore.Totals.NONE, false), List.of(), 0, null, null, false, false,
+                    null);
         }
         // No working barber that day: closed, whatever the salon's hours say (nobody can be booked)
         boolean openToday = f.openMin() != null && !f.closedDay() && f.worksToday();
@@ -222,7 +232,8 @@ public class BookingService {
                 : openToday && minuteNow >= f.openMin() && minuteNow < f.closeMin();
         return new CardFacts(ratingSummary(new RatingStore.Totals(f.ratings(), f.starsSum(), Map.of()), false),
                 f.top().stream().map(t -> new PriceLine(t.name(), t.pricePaise(), t.priceIsFrom())).toList(),
-                f.services(), hours, openNow, closedToday, f.registered());
+                f.services(), hours, openNow, closedToday, f.registered(), f.offer() == null ? null
+                        : new OfferBadge(f.offer().percentOff(), f.offer().startsOn(), f.offer().endsOn()));
     }
 
     /**
@@ -242,7 +253,8 @@ public class BookingService {
     /**
      * A salon's page: address, map link, opening hours (the salon's own; one that hasn't set them yet: from its
      * barbers' weekly hours, from the setup kept in memory: SalonSetups, read with the pause), its closed days within
-     * its booking window, its ratings, and how many days ahead it takes bookings (the app's day chips).
+     * its booking window, its ratings, how many days ahead it takes bookings (the app's day chips), its offers running
+     * or to come, and whether this customer gets its offer messages (null if they never completed a visit there).
      */
     @Transactional(readOnly = true)
     public SalonDetails salon(UUID customerId, UUID salonId) {
@@ -274,10 +286,13 @@ public class BookingService {
                 .map(c -> LocalDate.ofInstant(c.startsAt(), SalonTime.ZONE))
                 .distinct()
                 .toList();
+        List<OfferView> running = current.setup().offersFrom(LocalDate.ofInstant(now, SalonTime.ZONE)).stream()
+                .map(OfferView::of).toList();
+        Boolean offerMessages = !offers.visited(customerId, salonId) ? null : !offers.muted(customerId, salonId);
         return new SalonDetails(card.id(), card.name(), card.addressLine(), card.area(), card.city(), card.pincode(),
                 card.latitude(), card.longitude(), SalonNotices.mapLink(card), hours,
                 current.pausedAt(now) ? current.pausedUntil() : null, photo(card), current.setup().maxDaysAhead(),
-                closed, ratingSummary(ratings.totals(salonId), true));
+                closed, ratingSummary(ratings.totals(salonId), true), running, offerMessages);
     }
 
     /** The salon's active services that at least one active barber does, in the salon's order. */
@@ -288,15 +303,20 @@ public class BookingService {
         SalonSetups.Setup setup = setups.of(salonId);
         Set<UUID> offered = setup.barbers().stream().flatMap(b -> b.serviceIds().stream())
                 .collect(Collectors.toSet());
+        List<SalonOffer> running = setup.offersFrom(LocalDate.ofInstant(now(), SalonTime.ZONE));
         return setup.services().stream()
                 .filter(s -> offered.contains(s.serviceId()))
-                .map(s -> new SalonService(s.serviceId(), s.name(), s.durationMin(), s.pricePaise(), s.priceIsFrom()))
+                .map(s -> new SalonService(s.serviceId(), s.name(), s.durationMin(), s.pricePaise(), s.priceIsFrom(),
+                        running.stream().filter(o -> o.covers(s.serviceId()))
+                                .max(Comparator.comparingInt(SalonOffer::percentOff))
+                                .map(o -> o.priceOf(s.pricePaise())).orElse(null)))
                 .toList();
     }
 
     /**
      * The start times free for these services on this date (India), each on a quarter hour, inside the salon's
-     * booking window. 409 NO_BARBER_FOR_SERVICES if no single barber does them all.
+     * booking window, each with what the services cost at that start (the salon's offer, where one applies). 409
+     * NO_BARBER_FOR_SERVICES if no single barber does them all.
      * @param moving one of the customer's own bookings being moved (or null): its own time counts as free, so a
      *               move by a few minutes onto it is offered. 404 if it isn't theirs.
      */
@@ -320,8 +340,13 @@ public class BookingService {
         List<Instant> starts = day == null ? List.of()
                 : Availability.starts(except == null ? calendar.setupDays(current, barbers, date)
                         : calendar.setupDays(barbers, date, except), length, day.start(), day.end());
+        List<SalonOffer> running = setup.offersFrom(date);   // from memory with the setup: no read
+        // A booking being moved is priced as the move will price it: from the prices it was booked at
+        List<BookedService> base = except == null ? chosen
+                : listPrices(appointments.services(List.of(except)).getOrDefault(except, chosen));
         return new Slots(date, (int) length.toMinutes(), (int) FREE_CANCEL_AFTER_BOOKING.toMinutes(),
-                starts.stream().map(t -> Slot.of(t, t.minus(LATE_CANCEL))).toList());
+                starts.stream().map(t -> Slot.of(t, t.minus(LATE_CANCEL), SalonOffer.price(base, running, t)))
+                        .toList());
     }
 
     /**
@@ -381,24 +406,55 @@ public class BookingService {
         return view(a, now);
     }
 
+    /** A booking's services at the prices they were booked at before any offer (a move prices them again). */
+    static List<BookedService> listPrices(List<BookedService> booked) {
+        return booked.stream().map(s -> new BookedService(s.serviceId(), s.name(), s.durationMin(),
+                s.listPricePaise() == null ? s.pricePaise() : s.listPricePaise(), s.priceIsFrom())).toList();
+    }
+
     /** When this visit can no longer be rated: 14 days after it ended. */
     static Instant rateUntil(Appointment a) {
         return a.endsAt().plus(RATE_FOR);
     }
 
-    /** My salon preferences: whether I get come-back reminders (on unless switched off). */
+    /** My salon preferences: come-back reminders and offer messages (each on unless switched off). */
     @Transactional(readOnly = true)
     public SalonPreferencesView preferences(UUID customerId) {
-        return new SalonPreferencesView(followUps.wantsReminders(customerId));
+        return new SalonPreferencesView(followUps.wantsReminders(customerId), offers.wantsOffers(customerId));
     }
 
-    /** Switches my come-back reminders on or off (reminders already due are checked against this when sent). */
+    /**
+     * Switches my come-back reminders and/or offer messages on or off (null keeps one; both null: 400). Reminders
+     * already due are checked against this when sent.
+     */
     @Transactional
-    public SalonPreferencesView setPreferences(UUID customerId, boolean comeBackReminders) {
+    public SalonPreferencesView setPreferences(UUID customerId, Boolean comeBackReminders, Boolean salonOffers) {
+        if (comeBackReminders == null && salonOffers == null) {
+            throw SalonCalendar.invalid("comeBackReminders", "send comeBackReminders, salonOffers or both");
+        }
         appointments.lockCustomer(customerId);   // after an account deletion that ran meanwhile, not a new row
         requireLiveAccount(customerId);
-        followUps.setWantsReminders(customerId, comeBackReminders, now());
-        return new SalonPreferencesView(comeBackReminders);
+        Instant now = now();
+        if (comeBackReminders != null) {
+            followUps.setWantsReminders(customerId, comeBackReminders, now);
+        }
+        if (salonOffers != null) {
+            offers.setWantsOffers(customerId, salonOffers, now);
+        }
+        return preferences(customerId);
+    }
+
+    /**
+     * Stops (on = false) or allows again this salon's offer messages for me. Its offers still show on its card and
+     * page. 404 if the salon isn't live.
+     */
+    @Transactional
+    public OfferMessagesView setOfferMessages(UUID customerId, UUID salonId, boolean on) {
+        appointments.lockCustomer(customerId);
+        requireLiveAccount(customerId);
+        visible(salonId);
+        offers.setMuted(customerId, salonId, !on, now());
+        return new OfferMessagesView(on);
     }
 
     // ---------- booking ----------
@@ -432,15 +488,18 @@ public class BookingService {
         SalonSetups.Current current = setups.current(salon.id());
         requireNotPaused(current, now);
         SalonSetups.Setup setup = current.setup();
-        List<BookedService> chosen = calendar.chosenServices(setup, in.serviceIds());
-        Duration length = SalonCalendar.length(chosen);
-        List<SalonSetups.Barber> barbers = calendar.barbersFor(setup, SalonDayService.ids(chosen));
+        List<BookedService> listed = calendar.chosenServices(setup, in.serviceIds());
+        Duration length = SalonCalendar.length(listed);
+        List<SalonSetups.Barber> barbers = calendar.barbersFor(setup, SalonDayService.ids(listed));
         Interval window = calendar.window(setup, now);
         Instant start = in.startAt();
         requireInWindow(start, window);
         Interval slot = Interval.of(start, length);
         requireNoOverlap(customerId, slot, null);
         LocalDate date = LocalDate.ofInstant(start, SalonTime.ZONE);
+        // Priced now, with the salon's offers as they stand: publishing or ending one waits for this booking (the shop's
+        // row, held above) and moves the setup's version, so the setup read after it has them. Kept as booked
+        List<BookedService> chosen = SalonOffer.price(listed, setup.offersFrom(date), start);
         List<BarberDay> days = calendar.setupDays(current, barbers, date);
         List<UUID> serviceIds = SalonDayService.ids(chosen);
         for (UUID barberId : Availability.barbersFor(days, slot)) {
@@ -580,6 +639,13 @@ public class BookingService {
             throw e;
         } catch (PessimisticLockingFailureException e) {
             throw SalonDayService.tryAgain();   // two moves into each other's time: the database broke the tie
+        }
+        // Priced again for its new time, from the prices it was booked at before any offer: the salon's offer there if
+        // one applies (moved into it), the price without one if not (moved out of it: an offer's days and hours can't
+        // be carried to any time by moving)
+        List<BookedService> repriced = SalonOffer.price(listPrices(booked), current.setup().offersFrom(date), newStart);
+        if (!repriced.equals(booked)) {
+            appointments.reprice(a.id(), repriced);
         }
         Appointment moved = appointments.find(a.id()).orElseThrow();
         appointments.event(a.id(), now, customerId, "RESCHEDULED", a.startsAt() + " -> " + newStart);
@@ -835,6 +901,8 @@ public class BookingService {
             return new BookingView(a.id(), a.bookingNo(), s.id(), s.name(),
                     s.addressLine() + ", " + s.area() + ", " + s.city() + " " + s.pincode(), SalonNotices.mapLink(s),
                     ServiceLine.from(lines), lines.stream().mapToLong(BookedService::pricePaise).sum(),
+                    lines.stream().noneMatch(l -> l.offerId() != null) ? null : lines.stream()
+                            .mapToLong(l -> l.listPricePaise() == null ? l.pricePaise() : l.listPricePaise()).sum(),
                     lines.stream().anyMatch(BookedService::priceIsFrom), a.startsAt(), a.endsAt(),
                     a.startsAt().plus(SalonDayService.LATE_ALLOWANCE), a.status(),
                     a.status() == AppointmentStatus.CONFIRMED ? a.startCode() : null,

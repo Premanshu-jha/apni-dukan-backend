@@ -6,6 +6,7 @@ import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.domain.AppointmentKind;
 import in.apnidukan.salon.domain.AppointmentStatus;
 import in.apnidukan.salon.domain.BlockType;
+import in.apnidukan.salon.api.SalonOfferResponses.OfferView;
 import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.RatingTag;
 import in.apnidukan.salon.domain.SalonTime;
@@ -23,13 +24,18 @@ public final class BookingResponses {
     private BookingResponses() {
     }
 
+    /**
+     * A service of a booking or walk-in, as booked.
+     * @param pricePaise     what the customer pays (with an offer: the offer price)
+     * @param listPricePaise the price before the salon's offer; null if it was booked without one
+     */
     public record ServiceLine(UUID serviceId, String name, int durationMinutes, long pricePaise,
-                              boolean priceIsFrom) {
+                              boolean priceIsFrom, Long listPricePaise) {
 
         public static List<ServiceLine> from(List<BookedService> services) {
             return services.stream()
                     .map(s -> new ServiceLine(s.serviceId(), s.name(), s.durationMin(), s.pricePaise(),
-                            s.priceIsFrom()))
+                            s.priceIsFrom(), s.listPricePaise()))
                     .toList();
         }
     }
@@ -48,11 +54,12 @@ public final class BookingResponses {
      * @param registered    true if the salon has its registration document (shops and establishments certificate,
      *                      trade licence or Udyam), checked by the field team; the card says "Registered", else
      *                      "Unregistered"
+     * @param offer         the salon's offer running now or coming next (the card's badge); null if none
      */
     public record SalonSummary(UUID id, String name, String addressLine, String area, String city, double distanceKm,
                                String photoUrl, double distanceMetres, RatingSummary rating,
                                List<PriceLine> topServices, int serviceCount, DayHours today, Boolean openNow,
-                               boolean closedToday, boolean registered) {
+                               boolean closedToday, boolean registered, OfferBadge offer) {
 
         public SalonSummary {
             topServices = List.copyOf(topServices);
@@ -62,13 +69,18 @@ public final class BookingResponses {
             return new SalonSummary(card.id(), card.name(), card.addressLine(), card.area(), card.city(),
                     card.distanceKm() == null ? 0 : card.distanceKm(), photoUrl,
                     card.distanceMetres() == null ? 0 : card.distanceMetres(), facts.rating(), facts.topServices(),
-                    facts.serviceCount(), facts.today(), facts.openNow(), facts.closedToday(), facts.registered());
+                    facts.serviceCount(), facts.today(), facts.openNow(), facts.closedToday(), facts.registered(),
+                    facts.offer());
         }
+    }
+
+    /** A salon card's offer badge: "20% off · till 16 Nov" (or "from 14 Nov" while still to come). */
+    public record OfferBadge(int percentOff, LocalDate startsOn, LocalDate endsOn) {
     }
 
     /** What a salon card shows besides the salon's own details (see SalonSummary). */
     public record CardFacts(RatingSummary rating, List<PriceLine> topServices, int serviceCount, DayHours today,
-                            Boolean openNow, boolean closedToday, boolean registered) {
+                            Boolean openNow, boolean closedToday, boolean registered, OfferBadge offer) {
 
         public CardFacts {
             topServices = List.copyOf(topServices);
@@ -106,15 +118,19 @@ public final class BookingResponses {
      * @param photoUrl    the salon's photo, a link valid for at least 60 more minutes; null if none
      * @param maxDaysAhead how many days after today it takes online bookings (1 to 30, the owner's setting): the app
      *                     draws today plus this many day chips
+     * @param offers       its offers running now or still to come, soonest first
+     * @param offerMessages whether this customer gets its offer messages: null if they haven't completed a visit
+     *                     there (they don't get them anyway); otherwise false once they stopped them for this salon
      */
     public record SalonDetails(UUID id, String name, String addressLine, String area, String city, String pincode,
                                BigDecimal latitude, BigDecimal longitude, String mapLink, List<DayHours> hours,
                                Instant pausedUntil, String photoUrl, int maxDaysAhead, List<LocalDate> closedDates,
-                               RatingSummary rating) {
+                               RatingSummary rating, List<OfferView> offers, Boolean offerMessages) {
 
         public SalonDetails {
             hours = List.copyOf(hours);
             closedDates = List.copyOf(closedDates);
+            offers = List.copyOf(offers);
         }
     }
 
@@ -122,8 +138,13 @@ public final class BookingResponses {
     public record DayHours(int weekday, String open, String close) {
     }
 
-    /** A service as customers see it. */
-    public record SalonService(UUID id, String name, int durationMinutes, long pricePaise, boolean priceIsFrom) {
+    /**
+     * A service as customers see it.
+     * @param offerPricePaise its price in the salon's best offer for it that is running or still to come (only at
+     *                        that offer's days and hours: the free times give each start's price); null if none
+     */
+    public record SalonService(UUID id, String name, int durationMinutes, long pricePaise, boolean priceIsFrom,
+                               Long offerPricePaise) {
     }
 
     /**
@@ -139,12 +160,18 @@ public final class BookingResponses {
      * @param lateCancelFrom 1 hour before the start: a cancel after this moment counts as late (a strike), unless
      *                       it comes within freeCancelMinutes of booking. The confirm screen warns when it is less
      *                       than freeCancelMinutes away (the booking can be cancelled free only for those minutes)
+     * @param pricePaise     what the chosen services cost at this start (with the salon's offer, if one applies)
+     * @param listPricePaise their price without the offer; null when no offer applies at this start
      */
-    public record Slot(Instant startAt, String time, Instant lateCancelFrom) {
+    public record Slot(Instant startAt, String time, Instant lateCancelFrom, long pricePaise, Long listPricePaise) {
 
-        public static Slot of(Instant t, Instant lateCancelFrom) {
+        public static Slot of(Instant t, Instant lateCancelFrom, List<BookedService> priced) {
+            long price = priced.stream().mapToLong(BookedService::pricePaise).sum();
+            boolean offer = priced.stream().anyMatch(s -> s.offerId() != null);
+            long list = priced.stream()
+                    .mapToLong(s -> s.listPricePaise() == null ? s.pricePaise() : s.listPricePaise()).sum();
             return new Slot(t, SalonTime.format(t.atZone(SalonTime.ZONE).toLocalTime().toSecondOfDay() / 60),
-                    lateCancelFrom);
+                    lateCancelFrom, price, offer ? list : null);
         }
     }
 
@@ -161,9 +188,11 @@ public final class BookingResponses {
      * @param rating       the customer's rating of this visit; null if not rated
      * @param rateUntil    while set, the customer can rate the visit (or change the rating) until this moment:
      *                     completed online bookings, for 14 days after the visit; null otherwise
+     * @param totalListPricePaise the total before the salon's offer; null if booked without one
      */
     public record BookingView(UUID id, String bookingNo, UUID salonId, String salonName, String salonAddress,
-                              String mapLink, List<ServiceLine> services, long totalPricePaise, boolean priceIsFrom,
+                              String mapLink, List<ServiceLine> services, long totalPricePaise,
+                              Long totalListPricePaise, boolean priceIsFrom,
                               Instant startsAt, Instant endsAt, Instant heldUntil, AppointmentStatus status,
                               String startCode, String cancelReason, boolean canChange,
                               boolean canMove, Instant createdAt, Instant lateCancelFrom, boolean earlierAlert,
@@ -181,8 +210,16 @@ public final class BookingResponses {
         }
     }
 
-    /** The customer's salon preferences. */
-    public record SalonPreferencesView(boolean comeBackReminders) {
+    /**
+     * The customer's salon preferences.
+     * @param comeBackReminders "Time for your next haircut?" after a visit
+     * @param salonOffers       offer messages from salons they visited (each salon can also be muted on its page)
+     */
+    public record SalonPreferencesView(boolean comeBackReminders, boolean salonOffers) {
+    }
+
+    /** Whether the customer gets this salon's offer messages. */
+    public record OfferMessagesView(boolean on) {
     }
 
     // ---------- ratings on the salon's side ----------

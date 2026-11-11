@@ -805,6 +805,246 @@ class SalonVisitsIntegrationTest {
                 OffsetDateTime.class, b).toInstant()).isEqualTo(at("11:30"));
     }
 
+    // ---------- offers ----------
+
+    @Test
+    void anOfferTellsPastCustomersWhoWantItAndPricesBookingsInsideIt() {
+        UUID alice = person();
+        UUID bob = person();
+        UUID carol = person();
+        UUID dave = person();   // never visited
+        UUID erin = person();   // visited, then deleted her account
+        UUID frank = person();  // visited, then started working here
+        completedVisit(alice, at("11:00"));
+        completedVisit(bob, at("12:00"));
+        completedVisit(carol, at("13:00"));
+        completedVisit(erin, at("14:00"));
+        completedVisit(frank, at("15:00"));
+        CLOCK.set(TUESDAY_10_00);
+        jdbc.update("UPDATE users SET deleted_at = now(), phone = NULL WHERE id = ?", erin);
+        TestData.member(jdbc, salon, frank, "HELPER");
+        // Bob stops this salon's offers; Carol stops every salon's
+        Reply muted = put("/salons/" + salon + "/offer-messages", Map.of("on", false), bob);
+        assertThat(muted.status()).as(muted.text()).isEqualTo(200);
+        Reply off = put("/me/salon-preferences", Map.of("salonOffers", false), carol);
+        assertThat(off.body()).isEqualTo(Map.of("comeBackReminders", true, "salonOffers", false));
+        assertThat(put("/me/salon-preferences", Map.of(), carol).status()).isEqualTo(400);
+
+        // Thursday to Saturday, 12:00-16:00, 20% off the haircut
+        Map<String, Object> offer = offer(20, List.of(haircut), "2026-11-12", "2026-11-14", "12:00", "16:00");
+        Reply preview = post("/salon/offers/preview", offer, owner);
+        assertThat(preview.status()).as(preview.text()).isEqualTo(200);
+        assertThat(field(preview.body(), "customers")).isEqualTo(1);   // Alice only
+        assertThat(field(preview.body(), "services")).isEqualTo(List.of(Map.of("serviceId", haircut.toString(),
+                "name", "Haircut", "pricePaise", 15000, "offerPricePaise", 12000, "priceIsFrom", false)));
+        assertThat(post("/salon/offers/preview", offer, alice).status()).isEqualTo(404);   // not in a salon
+
+        Reply published = post("/salon/offers", offer, owner);
+        assertThat(published.status()).as(published.text()).isEqualTo(201);
+        assertThat(field(published.body(), "state")).isEqualTo("UPCOMING");
+        assertThat(field(published.body(), "notified")).isEqualTo(1);
+        UUID offerId = UUID.fromString((String) field(field(published.body(), "offer"), "id"));
+        assertThat(jdbc.queryForList("SELECT user_id FROM notification_jobs WHERE type = 'BOOKING_OFFER' AND channel = 'PUSH'",
+                UUID.class)).containsExactly(alice);
+        assertThat(jdbc.queryForObject("SELECT title FROM notification_jobs WHERE type = 'BOOKING_OFFER' AND channel = 'PUSH'",
+                String.class)).isEqualTo("20% off at Sharma Hair");
+        assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE type = 'BOOKING_OFFER' AND channel = 'PUSH'",
+                String.class)).isEqualTo("Haircut · 12 Nov – 14 Nov, 12:00–16:00. Book in the app.");
+        assertThat(jdbc.queryForObject("SELECT url FROM notification_jobs WHERE type = 'BOOKING_OFFER' AND channel = 'PUSH'",
+                String.class)).isEqualTo("/salons/" + salon + "?offer=" + offerId);
+        assertThat(count("notification_jobs WHERE type = 'BOOKING_OFFER' AND channel = 'SMS'")).isZero();
+        // In Alice's list in the customer app too, not only as a push
+        List<?> inbox = (List<?>) field(get("/me/notifications?app=customer", alice).body(), "items");
+        assertThat(inbox.stream().map(m -> field(m, "title"))).contains("20% off at Sharma Hair");
+        // A helper sees the list but can't publish; a barber can't see it
+        assertThat(get("/salon/offers", frank).status()).isEqualTo(200);
+        assertThat(field(post("/salon/offers/preview", offer, frank).body(), "code")).isEqualTo("OWNER_ONLY");
+        // A double tap: refused as overlapping, nobody told twice
+        Reply again = post("/salon/offers", offer, owner);
+        assertThat(again.status()).isEqualTo(409);
+        assertThat(field(again.body(), "code")).isEqualTo("OFFER_OVERLAPS");
+        assertThat(count("notification_jobs WHERE type = 'BOOKING_OFFER'")).isEqualTo(1);
+        // Another service at the same time is fine
+        assertThat(post("/salon/offers", offer(10, List.of(beard), "2026-11-12", "2026-11-12", null, null), owner)
+                .status()).isEqualTo(201);
+
+        // Customers: the card's badge, the page's offers and switch, the services' offer prices
+        assertThat(field(card(), "offer")).isEqualTo(Map.of("percentOff", 20, "startsOn", "2026-11-12",
+                "endsOn", "2026-11-14"));
+        Reply page = get("/salons/" + salon, alice);
+        assertThat((List<?>) field(page.body(), "offers")).hasSize(2);
+        assertThat(field(page.body(), "offerMessages")).isEqualTo(true);
+        assertThat(field(get("/salons/" + salon, bob).body(), "offerMessages")).isEqualTo(false);
+        assertThat(field(get("/salons/" + salon, dave).body(), "offerMessages")).isNull();
+        List<?> services = (List<?>) get("/salons/" + salon + "/services", dave).body();
+        assertThat(field(services.get(0), "offerPricePaise")).isEqualTo(12000);
+        assertThat(field(services.get(1), "offerPricePaise")).isEqualTo(7200);
+
+        // Free times on Thursday: the offer price only inside its hours
+        Reply slots = get("/salons/" + salon + "/availability?services=" + haircut + "&date=2026-11-12", dave);
+        Map<String, Map<?, ?>> byTime = new HashMap<>();
+        for (Object s : (List<?>) field(slots.body(), "starts")) {
+            byTime.put((String) field(s, "time"), (Map<?, ?>) s);
+        }
+        assertThat(field(byTime.get("12:00"), "pricePaise")).isEqualTo(12000);
+        assertThat(field(byTime.get("12:00"), "listPricePaise")).isEqualTo(15000);
+        assertThat(field(byTime.get("15:45"), "pricePaise")).isEqualTo(12000);
+        assertThat(field(byTime.get("11:45"), "pricePaise")).isEqualTo(15000);
+        assertThat(field(byTime.get("11:45"), "listPricePaise")).isNull();
+        assertThat(field(byTime.get("16:00"), "listPricePaise")).isNull();
+
+        // Dave books a haircut and beard trim at 12:00 Thursday: both offers apply
+        Instant thursdayNoon = LocalDate.of(2026, 11, 12).atTime(12, 0).atZone(INDIA).toInstant();
+        Reply booked = book(dave, thursdayNoon, haircut, beard);
+        assertThat(booked.status()).as(booked.text()).isEqualTo(201);
+        assertThat(field(booked.body(), "totalPricePaise")).isEqualTo(12000 + 7200);
+        assertThat(field(booked.body(), "totalListPricePaise")).isEqualTo(23000);
+        assertThat(field(((List<?>) field(booked.body(), "services")).get(0), "listPricePaise")).isEqualTo(15000);
+        UUID daves = id(booked);
+
+        // The owner's list counts it; he ends the offer: new bookings pay the normal price, Dave's keeps the offer
+        List<?> list = (List<?>) get("/salon/offers", owner).body();
+        Map<?, ?> mine = (Map<?, ?>) list.stream().filter(o -> offerId.toString().equals(field(field(o, "offer"), "id")))
+                .findFirst().orElseThrow();
+        assertThat(mine.get("bookings")).isEqualTo(1);
+        Reply ended = post("/salon/offers/" + offerId + "/end", Map.of(), owner);
+        assertThat(ended.status()).as(ended.text()).isEqualTo(200);
+        assertThat(field(ended.body(), "state")).isEqualTo("ENDED");
+        assertThat(field(ended.body(), "bookings")).isEqualTo(1);
+        assertThat(field(post("/salon/offers/" + offerId + "/end", Map.of(), owner).body(), "code"))
+                .isEqualTo("OFFER_OVER");
+        // Its message, if it hadn't gone out yet, doesn't any more
+        assertThat(count("notification_jobs WHERE ref_id = '" + offerId + "' AND status = 'PENDING'")).isZero();
+        assertThat(field(get("/bookings/" + daves, dave).body(), "totalPricePaise")).isEqualTo(19200);
+        Reply later = book(alice, thursdayNoon.plus(Duration.ofHours(1)), haircut);
+        assertThat(field(later.body(), "totalPricePaise")).isEqualTo(15000);
+        assertThat(field(later.body(), "totalListPricePaise")).isNull();
+        assertThat(field(card(), "offer")).isEqualTo(Map.of("percentOff", 10, "startsOn", "2026-11-12",
+                "endsOn", "2026-11-12"));
+
+        // The move screen's prices are the move's: from what Dave booked at, even after the salon raised the haircut
+        assertThat(call(HttpMethod.PATCH, "/salon/services/" + haircut, Map.of("version", 0, "pricePaise", 25000),
+                owner, null).status()).isEqualTo(200);
+        Reply moving = get("/salons/" + salon + "/availability?services=" + haircut + "&services=" + beard
+                + "&date=2026-11-12&moving=" + daves, dave);
+        Object at17 = ((List<?>) field(moving.body(), "starts")).stream()
+                .filter(s -> "17:00".equals(field(s, "time"))).findFirst().orElseThrow();
+        assertThat(field(at17, "pricePaise")).isEqualTo(15000 + 7200);
+        // Moved out of the haircut's offer hours: the haircut at its own price again, the beard trim's offer (all
+        // Thursday) still applies; an offer can't be carried to any time by moving
+        Reply moved = post("/bookings/" + daves + "/reschedule", Map.of("startAt",
+                thursdayNoon.plus(Duration.ofHours(5)).toString()), dave);
+        assertThat(moved.status()).as(moved.text()).isEqualTo(200);
+        assertThat(field(moved.body(), "totalPricePaise")).isEqualTo(15000 + 7200);
+        assertThat(field(moved.body(), "totalListPricePaise")).isEqualTo(23000);
+        // Moved to Friday, outside every offer: the normal prices
+        Reply friday = post("/bookings/" + daves + "/reschedule", Map.of("startAt",
+                thursdayNoon.plus(Duration.ofDays(1)).toString()), dave);
+        assertThat(field(friday.body(), "totalPricePaise")).isEqualTo(23000);
+        assertThat(field(friday.body(), "totalListPricePaise")).isNull();
+
+        // Switches back on; a deleted account's choices go
+        assertThat(put("/salons/" + salon + "/offer-messages", Map.of("on", true), bob).body())
+                .isEqualTo(Map.of("on", true));
+        assertThat(count("salon_offer_mutes")).isZero();
+        put("/salons/" + salon + "/offer-messages", Map.of("on", false), bob);
+        tx.executeWithoutResult(t -> deletionListeners.forEach(l -> l.accountDeleted(bob, CLOCK.instant())));
+        assertThat(count("salon_offer_mutes")).isZero();
+    }
+
+    @Test
+    void anOffersHoursMustFitTheSalonsOpeningHoursOnItsOpenDays() {
+        // Before opening on Thursday and Friday: refused, naming those days
+        Reply early = post("/salon/offers", offer(15, List.of(), "2026-11-12", "2026-11-13", "09:00", "12:00"), owner);
+        assertThat(early.status()).isEqualTo(409);
+        assertThat(field(early.body(), "code")).isEqualTo("OFFER_OUTSIDE_HOURS");
+        assertThat(field(early.body(), "message")).isEqualTo("The offer's hours must be inside your opening hours: "
+                + "Thursday 10:00–21:00, Friday 10:00–21:00.");
+        assertThat((List<?>) field(field(early.body(), "details"), "days")).hasSize(2);
+        // A closed day is skipped: nothing left to offer on it
+        assertThat(post("/salon/closures", Map.of("date", "2026-11-13"), owner).status()).isEqualTo(201);
+        Reply closed = post("/salon/offers", offer(15, List.of(), "2026-11-13", "2026-11-13", "09:00", "12:00"), owner);
+        assertThat(field(closed.body(), "code")).isEqualTo("NO_OPEN_TIME");
+        // Today's hours already over
+        CLOCK.set(at("10:30"));
+        Reply over = post("/salon/offers", offer(15, List.of(), "2026-11-10", "2026-11-10", "10:00", "10:30"), owner);
+        assertThat(field(over.body(), "code")).isEqualTo("NO_OPEN_TIME");
+        // The fields
+        assertThat(field(field(post("/salon/offers", offer(15, List.of(), "2026-11-09", "2026-11-10", null, null),
+                owner).body(), "details"), "startsOn")).isNotNull();
+        assertThat(field(field(post("/salon/offers", offer(15, List.of(), "2026-11-10", "2027-03-01", null, null),
+                owner).body(), "details"), "endsOn")).isNotNull();
+        assertThat(field(field(post("/salon/offers", offer(15, List.of(), "2026-11-11", "2026-11-11", "12:00", null),
+                owner).body(), "details"), "until")).isNotNull();
+        assertThat(post("/salon/offers", offer(60, List.of(), "2026-11-11", "2026-11-11", null, null), owner).status())
+                .isEqualTo(400);
+        assertThat(field(field(post("/salon/offers", offer(15, List.of(UUID.randomUUID()), "2026-11-11",
+                "2026-11-11", null, null), owner).body(), "details"), "serviceIds")).isNotNull();
+        assertThat(field(field(post("/salon/offers", offer(15, List.of(), "2026-11-12", "2026-11-11", null, null),
+                owner).body(), "details"), "endsOn")).isNotNull();
+        assertThat(field(field(post("/salon/offers", offer(15, List.of(), "2026-11-11", "2026-11-11", "12:10", "14:00"),
+                owner).body(), "details"), "from")).isNotNull();
+        // Customers can book a week ahead (the default): an offer must start inside that
+        Reply far = post("/salon/offers", offer(15, List.of(), "2026-11-18", "2026-11-19", null, null), owner);
+        assertThat(field(far.body(), "code")).isEqualTo("OFFER_TOO_FAR");
+        assertThat(field(far.body(), "message")).isEqualTo("Customers can book up to 7 days ahead, so start the offer "
+                + "by 17 Nov.");
+        // Its last day up to 90 days ahead, not 91
+        assertThat(post("/salon/offers/preview", offer(15, List.of(), "2026-11-11", "2027-02-08", null, null), owner)
+                .status()).isEqualTo(200);
+        assertThat(field(field(post("/salon/offers/preview", offer(15, List.of(), "2026-11-11", "2027-02-09", null,
+                null), owner).body(), "details"), "endsOn")).isNotNull();
+        // A switched-off service can't be in an offer
+        Reply off = call(HttpMethod.PATCH, "/salon/services/" + facial, Map.of("version", 0, "active", false), owner,
+                null);
+        assertThat(off.status()).as(off.text()).isEqualTo(200);
+        assertThat(field(field(post("/salon/offers", offer(15, List.of(facial), "2026-11-11", "2026-11-11", null, null),
+                owner).body(), "details"), "serviceIds")).isNotNull();
+        // Paused over its start: refused; starting after the pause: fine
+        assertThat(post("/salon/pause", Map.of("until", at("12:00").plus(Duration.ofDays(1)).toString()), owner)
+                .status()).isEqualTo(200);
+        assertThat(field(post("/salon/offers/preview", offer(15, List.of(), "2026-11-11", "2026-11-11", "10:00",
+                "21:00"), owner).body(), "code")).isEqualTo("SALON_PAUSED");
+        assertThat(post("/salon/offers/preview", offer(15, List.of(), "2026-11-11", "2026-11-11", "12:00", "21:00"),
+                owner).status()).isEqualTo(200);
+        assertThat(post("/salon/resume", Map.of(), owner).status()).isEqualTo(200);
+        // Inside the hours, every service, one day: published (no past customers: nobody told)
+        Reply ok = post("/salon/offers", offer(15, List.of(), "2026-11-11", "2026-11-11", "10:00", "21:00"), owner);
+        assertThat(ok.status()).as(ok.text()).isEqualTo(201);
+        assertThat(field(ok.body(), "notified")).isEqualTo(0);
+        assertThat(count("notification_jobs WHERE type = 'BOOKING_OFFER'")).isZero();
+        // A beard-trim offer whose only service is then switched off: no badge, and not in the way of a new offer
+        assertThat(post("/salon/offers", offer(30, List.of(beard), "2026-11-12", "2026-11-12", null, null), owner)
+                .status()).isEqualTo(201);
+        assertThat(field(post("/salon/offers/preview", offer(15, List.of(), "2026-11-12", "2026-11-12", null, null),
+                owner).body(), "code")).isEqualTo("OFFER_OVERLAPS");
+        assertThat(call(HttpMethod.PATCH, "/salon/services/" + beard, Map.of("version", 0, "active", false), owner,
+                null).status()).isEqualTo(200);
+        assertThat(post("/salon/offers/preview", offer(15, List.of(), "2026-11-12", "2026-11-12", null, null), owner)
+                .status()).isEqualTo(200);
+        assertThat(((Map<?, ?>) field(card(), "offer")).get("percentOff")).isEqualTo(15);   // the 15% of today
+        // A salon not live can't publish one
+        jdbc.update("UPDATE shops SET status = 'SUSPENDED' WHERE id = ?", salon);
+        assertThat(field(post("/salon/offers", offer(15, List.of(), "2026-11-12", "2026-11-12", null, null), owner)
+                .body(), "code")).isEqualTo("SALON_NOT_LIVE");
+    }
+
+    private static Map<String, Object> offer(int percent, List<UUID> services, String from, String to, String start,
+                                             String end) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("percentOff", percent);
+        body.put("serviceIds", services.stream().map(UUID::toString).toList());
+        body.put("startsOn", from);
+        body.put("endsOn", to);
+        if (start != null) {
+            body.put("from", start);
+        }
+        if (end != null) {
+            body.put("until", end);
+        }
+        return body;
+    }
+
     // ---------- helpers ----------
 
     /** A booking of these services (default: a haircut) at this start, started at its time and ended by the job. */
