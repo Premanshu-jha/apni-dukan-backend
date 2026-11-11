@@ -16,6 +16,11 @@ import java.util.List;
 public class RateLimiter {
 
     /** INCR, and on the first hit start the expiry timer: both in one atomic step. */
+    /** One less, only if the counter is there and above 0. */
+    private static final DefaultRedisScript<Long> GIVE_BACK = new DefaultRedisScript<>(
+            "if (tonumber(redis.call('GET', KEYS[1])) or 0) > 0 then return redis.call('DECR', KEYS[1]) end return 0",
+            Long.class);
+
     private static final DefaultRedisScript<Long> INCREMENT_WITH_EXPIRY = new DefaultRedisScript<>("""
             local n = redis.call('INCR', KEYS[1])
             if n == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
@@ -40,13 +45,10 @@ public class RateLimiter {
 
     /**
      * Takes back one hit counted by {@link #hit} or {@link #tryHit} for something that was refused further on (so a
-     * refusal doesn't use up an allowance). Never below 0 (a counter that had expired meanwhile stays gone); the window stays as it was.
+     * refusal doesn't use up an allowance). Atomic: only an existing count above 0 goes down (one that expired meanwhile stays gone, never a counter without a window).
      */
     public void giveBack(String key) {
-        Long left = redis.opsForValue().decrement("rl:" + key);
-        if (left != null && left < 0) {
-            redis.delete("rl:" + key);   // it had gone (expired meanwhile): don't leave a counter with no window
-        }
+        redis.execute(GIVE_BACK, List.of("rl:" + key));
     }
 
     /** Seconds until this counter's window ends (for Retry-After); 1 if unknown. */
