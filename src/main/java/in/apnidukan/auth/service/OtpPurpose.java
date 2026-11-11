@@ -14,8 +14,10 @@ public enum OtpPurpose {
     DELETE_ACCOUNT(Duration.ofMinutes(10)),
     /** Signed in, changing the phone number: code to the new number (target: user id and the new number). */
     CHANGE_PHONE(Duration.ofMinutes(10)),
-    /** Signed in, changing the phone number: code to the verified email, when there is one. */
-    CHANGE_PHONE_EMAIL(Duration.ofMinutes(10));
+    /** Signed in, changing the phone number: the second code, to the verified email (target: user, email, new number). */
+    CHANGE_PHONE_EMAIL(Duration.ofMinutes(10)),
+    /** The second code without a verified email: to the number the account has now (target: user, it, new number). */
+    CHANGE_PHONE_CURRENT(Duration.ofMinutes(10));
 
     private final Duration validFor;
 

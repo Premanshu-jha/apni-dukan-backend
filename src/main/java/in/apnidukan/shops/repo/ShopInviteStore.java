@@ -83,6 +83,24 @@ public class ShopInviteStore {
                 + "AND expires_at > ? ORDER BY created_at DESC LIMIT 20", ROW, phone, at(now));
     }
 
+    /**
+     * The person moved from oldPhone to newPhone: invitations waiting for the old number now wait for the new one.
+     * Cancelled instead: one to a shop the person already works in (the new number may have been invited there), and
+     * one whose shop already invited the new number (one waiting per shop and number). Returns how many moved.
+     */
+    public int readdress(UUID userId, String oldPhone, String newPhone, Instant now) {
+        jdbc.update("UPDATE shop_invites i SET status = 'CANCELLED', decided_at = ? WHERE status = 'PENDING' "
+                        + "AND to_phone IN (?, ?) AND EXISTS (SELECT 1 FROM shop_members m WHERE m.user_id = ? "
+                        + "AND m.shop_id = i.shop_id)",
+                at(now), oldPhone, newPhone, userId);
+        jdbc.update("UPDATE shop_invites i SET status = 'CANCELLED', decided_at = ? WHERE status = 'PENDING' "
+                        + "AND to_phone = ? AND EXISTS (SELECT 1 FROM shop_invites j WHERE j.shop_id = i.shop_id "
+                        + "AND j.to_phone = ? AND j.status = 'PENDING')",
+                at(now), oldPhone, newPhone);
+        return jdbc.update("UPDATE shop_invites SET to_phone = ? WHERE to_phone = ? AND status = 'PENDING'",
+                newPhone, oldPhone);
+    }
+
     public Optional<Invite> find(UUID id) {
         return jdbc.query("SELECT " + COLUMNS + " FROM shop_invites WHERE id = ?", ROW, id).stream().findFirst();
     }

@@ -493,19 +493,26 @@ class AuthIntegrationTest {
         String access = (String) here.body().get("accessToken");
         Object id = ((Map<?, ?>) here.body().get("user")).get("id");
         String newPhone = "9700000003";
-        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "+91 97000 00003"), access).status())
-                .isEqualTo(202);
-        // No verified email: only the new number's code
-        Reply wrong = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode", "000000"), access);
+        LAST_SMS.clear();
+        Reply sent = post("/auth/me/phone/send-code", Map.of("newPhone", "+91 97000 00003"), access);
+        assertThat(sent.status()).as(sent.body().toString()).isEqualTo(200);
+        // No verified email: the second code goes to the number the account has now
+        assertThat(sent.body().get("secondCodeTo")).isEqualTo("PHONE");
+        assertThat(sent.body().get("sentTo")).isEqualTo("ending 2345");
+        String newCode = codeSentTo(LAST_SMS, newPhone);
+        String ownCode = codeSentTo(LAST_SMS, PHONE);
+        Reply wrong = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode", "000000", "secondCode", ownCode),
+                access);
         assertThat(wrong.body().get("code")).isEqualTo("WRONG_CODE");
-        Reply done = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode",
-                codeSentTo(LAST_SMS, newPhone), "device", "Phone"), access);
+        Reply done = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode", newCode, "secondCode", ownCode,
+                "device", "Phone"), access);
         assertThat(done.status()).as(done.body().toString()).isEqualTo(200);
         Map<?, ?> user = (Map<?, ?>) done.body().get("user");
         assertThat(user.get("phone")).isEqualTo(newPhone);
         assertThat(user.get("id")).isEqualTo(id);   // the same account: bookings, shop and history stay
-        // Every earlier session ends, this device's included (it carries on with the new tokens)
+        // Every earlier session ends, this device's old tokens included (it carries on with the new ones)
         assertThat(get("/auth/me", (String) other.body().get("accessToken")).body().get("code")).isEqualTo("SIGNED_OUT");
+        assertThat(get("/auth/me", access).body().get("code")).isEqualTo("SIGNED_OUT");
         assertThat(post("/auth/refresh", Map.of("refreshToken", other.body().get("refreshToken")), null).status())
                 .isEqualTo(401);
         assertThat(get("/auth/me", (String) done.body().get("accessToken")).status()).isEqualTo(200);
@@ -516,22 +523,31 @@ class AuthIntegrationTest {
     }
 
     @Test
-    void withAVerifiedEmailItsCodeIsNeededTooAndATypoInOneKeepsTheOther() {
+    void withAVerifiedEmailTheSecondCodeGoesThereAndBothCodesAreBoundToTheNewNumber() {
         Reply here = signIn(PHONE);
         verifyEmail(here, "shop@gmail.com");
         String access = (String) here.body().get("accessToken");
         LAST_EMAIL.clear();
+        LAST_SMS.clear();
+        // Codes asked for number A, then for B: A's email code doesn't move the account to B
+        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "9700000014"), access).status()).isEqualTo(200);
+        String emailForA = codeSentTo(LAST_EMAIL, "shop@gmail.com");
+        LAST_EMAIL.clear();
         String newPhone = "9700000004";
-        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", newPhone), access).status()).isEqualTo(202);
+        Reply sent = post("/auth/me/phone/send-code", Map.of("newPhone", newPhone), access);
+        assertThat(sent.body().get("secondCodeTo")).isEqualTo("EMAIL");
+        assertThat(sent.body().get("sentTo")).isEqualTo("s***@gmail.com");
         String phoneCode = codeSentTo(LAST_SMS, newPhone);
         String emailCode = codeSentTo(LAST_EMAIL, "shop@gmail.com");
+        assertThat(LAST_SMS).doesNotContainKey(PHONE);   // the email is the second code, not the own phone
         Reply missing = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode", phoneCode), access);
         assertThat(missing.status()).isEqualTo(400);
-        assertThat(missing.body().get("code")).isEqualTo("EMAIL_CODE_REQUIRED");
-        Reply typo = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode", phoneCode, "emailCode",
-                "000000"), access);
-        assertThat(typo.body().get("code")).isEqualTo("WRONG_CODE");
-        Reply done = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode", phoneCode, "emailCode",
+        if (!emailForA.equals(emailCode)) {
+            Reply crossed = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode", phoneCode, "secondCode",
+                    emailForA), access);
+            assertThat(crossed.body().get("code")).isEqualTo("WRONG_CODE");
+        }
+        Reply done = post("/auth/me/phone", Map.of("newPhone", newPhone, "phoneCode", phoneCode, "secondCode",
                 emailCode), access);
         assertThat(done.status()).as(done.body().toString()).isEqualTo(200);
         long until = System.currentTimeMillis() + 3000;
@@ -543,7 +559,7 @@ class AuthIntegrationTest {
     }
 
     @Test
-    void aTakenSameOrInvalidNumberIsRefusedAndAnotherPersonsCodeDoesntWork() {
+    void aTakenSameOrInvalidNumberIsRefusedAndARefusalKeepsTheCodes() {
         String access = (String) signIn(PHONE).body().get("accessToken");
         String taken = "9700000005";
         signIn(taken);
@@ -555,36 +571,91 @@ class AuthIntegrationTest {
         assertThat(inUse.status()).isEqualTo(409);
         assertThat(inUse.body().get("code")).isEqualTo("PHONE_IN_USE");
 
-        // Free when the code was sent, taken before it was entered: refused, the account stays on its number
+        // Free when the codes were sent, taken before they were entered: refused, the account stays, the codes stay
         String later = "9700000006";
-        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", later), access).status()).isEqualTo(202);
+        LAST_SMS.clear();
+        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", later), access).status()).isEqualTo(200);
         String code = codeSentTo(LAST_SMS, later);
-        signIn(later);
-        Reply raced = post("/auth/me/phone", Map.of("newPhone", later, "phoneCode", code), access);
+        String own = codeSentTo(LAST_SMS, PHONE);
+        java.util.UUID squatter = java.util.UUID.randomUUID();
+        TestData.user(jdbc, squatter, later);
+        Reply raced = post("/auth/me/phone", Map.of("newPhone", later, "phoneCode", code, "secondCode", own), access);
         assertThat(raced.status()).isEqualTo(409);
         assertThat(raced.body().get("code")).isEqualTo("PHONE_IN_USE");
         assertThat(get("/auth/me", access).body().get("phone")).isEqualTo(PHONE);
-
-        // A code sent for someone else's change doesn't move this account
-        String mine = "9700000007";
-        String otherAccess = (String) signIn("9700000008").body().get("accessToken");
-        post("/auth/me/phone/send-code", Map.of("newPhone", mine), otherAccess);
-        Reply stolen = post("/auth/me/phone", Map.of("newPhone", mine, "phoneCode", codeSentTo(LAST_SMS, mine)),
-                access);
-        assertThat(stolen.status()).isEqualTo(400);
-        assertThat(get("/auth/me", access).body().get("phone")).isEqualTo(PHONE);
+        // The number is freed (that account deleted): the same codes still work
+        jdbc.update("UPDATE users SET deleted_at = now(), phone = NULL WHERE id = ?", squatter);
+        assertThat(post("/auth/me/phone", Map.of("newPhone", later, "phoneCode", code, "secondCode", own), access)
+                .status()).isEqualTo(200);
     }
 
     @Test
-    void fivePhoneChangeCodesADayAtMost() {
+    void anotherAccountsCodeDoesntWorkAndAdminsTestAccountsAndTestNumbersAreRefused() {
         String access = (String) signIn(PHONE).body().get("accessToken");
-        for (int i = 0; i < 5; i++) {
+        String mine = "9700000007";
+        String otherAccess = (String) signIn("9700000008").body().get("accessToken");
+        LAST_SMS.clear();
+        post("/auth/me/phone/send-code", Map.of("newPhone", mine), otherAccess);
+        Reply stolen = post("/auth/me/phone", Map.of("newPhone", mine, "phoneCode", codeSentTo(LAST_SMS, mine),
+                "secondCode", codeSentTo(LAST_SMS, "9700000008")), access);
+        assertThat(stolen.status()).isEqualTo(400);
+        assertThat(get("/auth/me", access).body().get("phone")).isEqualTo(PHONE);
+
+        jdbc.update("INSERT INTO test_phones (phone, label, added_by, added_at) SELECT '9700000009', 'tester', id, now() "
+                + "FROM users WHERE phone = ?", PHONE);
+        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "9700000009"), access).body().get("code"))
+                .isEqualTo("TEST_PHONE");
+        jdbc.update("UPDATE users SET test_account = true WHERE phone = ?", PHONE);
+        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "9700000010"), access).body().get("code"))
+                .isEqualTo("TEST_ACCOUNT");
+        jdbc.update("UPDATE users SET test_account = false, admin_role = 'ADMIN', admin = true WHERE phone = ?", PHONE);
+        Reply admin = post("/auth/me/phone/send-code", Map.of("newPhone", "9700000010"), access);
+        assertThat(admin.status()).isEqualTo(403);
+        assertThat(admin.body().get("code")).isEqualTo("ADMIN_PHONE");
+    }
+
+    @Test
+    void fivePhoneChangeTriesADayAtMostTakenNumbersIncluded() {
+        String access = (String) signIn(PHONE).body().get("accessToken");
+        signIn("9700000019");
+        for (int i = 0; i < 4; i++) {
             assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "970000001" + i), access).status())
-                    .isEqualTo(202);
+                    .isEqualTo(200);
         }
-        Reply sixth = post("/auth/me/phone/send-code", Map.of("newPhone", "9700000019"), access);
+        // A number with an account counts too: nobody can ask about numbers freely
+        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "9700000019"), access).body().get("code"))
+                .isEqualTo("PHONE_IN_USE");
+        Reply sixth = post("/auth/me/phone/send-code", Map.of("newPhone", "9700000018"), access);
         assertThat(sixth.status()).isEqualTo(429);
-        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "9700000019"), null).status()).isEqualTo(401);
+        assertThat(sixth.body().get("code")).isEqualTo("TOO_MANY_CODES");
+        assertThat(sixth.body().get("message").toString()).contains("5 times today");
+        assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "9700000017"), null).status()).isEqualTo(401);
+    }
+
+    @Test
+    void invitationsAndHandOversWaitingForTheOldNumberMoveToTheNewOne() {
+        Reply ravi = signIn("9700000020");
+        String raviAccess = (String) ravi.body().get("accessToken");
+        java.util.UUID owner = java.util.UUID.randomUUID();
+        java.util.UUID shop = java.util.UUID.randomUUID();
+        TestData.user(jdbc, owner, "9700000021");
+        TestData.shop(jdbc, shop, owner);
+        jdbc.update("INSERT INTO shop_handovers (id, shop_id, from_user, to_phone, status, created_at, expires_at) "
+                + "VALUES (?, ?, ?, '9700000020', 'PENDING', now(), now() + interval '7 days')",
+                java.util.UUID.randomUUID(), shop, owner);
+        jdbc.update("INSERT INTO shop_invites (id, shop_id, role, to_phone, invited_by, status, created_at, expires_at) "
+                + "VALUES (?, ?, 'HELPER', '9700000020', ?, 'PENDING', now(), now() + interval '7 days')",
+                java.util.UUID.randomUUID(), shop, owner);
+        LAST_SMS.clear();
+        post("/auth/me/phone/send-code", Map.of("newPhone", "9700000022"), raviAccess);
+        Reply done = post("/auth/me/phone", Map.of("newPhone", "9700000022", "phoneCode",
+                codeSentTo(LAST_SMS, "9700000022"), "secondCode", codeSentTo(LAST_SMS, "9700000020")), raviAccess);
+        assertThat(done.status()).as(done.body().toString()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT to_phone FROM shop_handovers", String.class)).isEqualTo("9700000022");
+        assertThat(jdbc.queryForObject("SELECT to_phone FROM shop_invites", String.class)).isEqualTo("9700000022");
+        // Whoever gets the old number next finds nothing waiting
+        String next = (String) signIn("9700000020").body().get("accessToken");
+        assertThat(get("/shops/me/handover", next).body().toString()).doesNotContain(shop.toString());
     }
 
     @Test

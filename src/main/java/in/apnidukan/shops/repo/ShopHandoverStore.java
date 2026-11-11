@@ -63,6 +63,19 @@ public class ShopHandoverStore {
                 + "AND expires_at > ? ORDER BY created_at DESC LIMIT 10", ROW, phone, Timestamp.from(now));
     }
 
+    /**
+     * The person moved from oldPhone to newPhone: requests to take over a shop waiting for the old number now wait for
+     * the new one. Cancelled instead: one from the person's own shop (to either number: nobody takes over their own
+     * shop). Returns how many moved.
+     */
+    public int readdress(UUID userId, String oldPhone, String newPhone, Instant now) {
+        jdbc.update("UPDATE shop_handovers SET status = 'CANCELLED', decided_at = ?, decided_by = ? "
+                + "WHERE status = 'PENDING' AND to_phone IN (?, ?) AND from_user = ?",
+                Timestamp.from(now), userId, oldPhone, newPhone, userId);
+        return jdbc.update("UPDATE shop_handovers SET to_phone = ? WHERE to_phone = ? AND status = 'PENDING'",
+                newPhone, oldPhone);
+    }
+
     /** The request, its row locked (FOR UPDATE) until the transaction ends. */
     public Optional<Handover> lock(UUID id) {
         return jdbc.query("SELECT " + COLUMNS + " FROM shop_handovers WHERE id = ? FOR UPDATE", ROW, id)

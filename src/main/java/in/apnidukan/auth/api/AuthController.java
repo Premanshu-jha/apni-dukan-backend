@@ -17,6 +17,7 @@ import in.apnidukan.auth.api.AuthRequests.VerifyOtp;
 import in.apnidukan.auth.api.AuthResponses.TokenResponse;
 import in.apnidukan.auth.api.AuthResponses.UserResponse;
 import in.apnidukan.auth.service.AuthService;
+import in.apnidukan.auth.service.AuthService.PhoneChangeSent;
 import in.apnidukan.common.context.CurrentUserProvider;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -111,25 +112,25 @@ public class AuthController {
     }
 
     /**
-     * Changing your phone number, step 1: a code to the new number, and one to your verified email if you have one.
-     * 202. 400 INVALID_PHONE, 400 SAME_PHONE, 409 PHONE_IN_USE (another account has it), 429.
+     * Changing your phone number, step 1: a code to the new number, and a second code to your verified email (or,
+     * without one, to the number you have now). 200 {secondCodeTo: EMAIL|PHONE, sentTo} (masked). 400 INVALID_PHONE,
+     * SAME_PHONE; 403 ADMIN_PHONE; 409 PHONE_IN_USE, TEST_ACCOUNT, TEST_PHONE; 429 TOO_MANY_CODES.
      */
     @PostMapping("/me/phone/send-code")
-    public ResponseEntity<Void> sendPhoneChangeCode(@Valid @RequestBody SendPhoneChangeCode body,
-                                                    HttpServletRequest request) {
-        auth.sendPhoneChangeCode(currentUser.get().userId(), body.newPhone(), client.of(request));
-        return ResponseEntity.accepted().build();
+    public PhoneChangeSent sendPhoneChangeCode(@Valid @RequestBody SendPhoneChangeCode body,
+                                               HttpServletRequest request) {
+        return auth.sendPhoneChangeCode(currentUser.get().userId(), body.newPhone(), client.of(request));
     }
 
     /**
-     * Step 2: with the codes, the account moves to the new number (the same account: bookings, shop and history
-     * stay), every other device is signed out, and this one gets new tokens. 400 EMAIL_CODE_REQUIRED, the code
-     * errors, 409 PHONE_IN_USE.
+     * Step 2: with both codes, the account moves to the new number (the same account: bookings, shop and history
+     * stay), every other device is signed out, and this one gets new tokens. 400 SEND_CODES_AGAIN, the code errors,
+     * 409 PHONE_IN_USE.
      */
     @PostMapping("/me/phone")
     public TokenResponse changePhone(@Valid @RequestBody ChangePhone body, HttpServletRequest request) {
         return TokenResponse.from(auth.changePhone(currentUser.get().userId(), body.newPhone(), body.phoneCode(),
-                body.emailCode(), body.device(), client.of(request)));
+                body.secondCode(), body.device(), client.of(request)));
     }
 
     /** Signed in, replacing an already verified email: first a code to your own phone. 202. */
