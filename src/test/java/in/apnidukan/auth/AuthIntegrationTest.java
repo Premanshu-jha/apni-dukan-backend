@@ -608,7 +608,7 @@ class AuthIntegrationTest {
         jdbc.update("UPDATE users SET test_account = true WHERE phone = ?", PHONE);
         assertThat(post("/auth/me/phone/send-code", Map.of("newPhone", "9700000010"), access).body().get("code"))
                 .isEqualTo("TEST_ACCOUNT");
-        jdbc.update("UPDATE users SET test_account = false, admin_role = 'ADMIN', admin = true WHERE phone = ?", PHONE);
+        jdbc.update("UPDATE users SET test_account = false, admin_role = 'ADMIN', admin = true, admin_designation = 'FIELD_AGENT' WHERE phone = ?", PHONE);
         Reply admin = post("/auth/me/phone/send-code", Map.of("newPhone", "9700000010"), access);
         assertThat(admin.status()).isEqualTo(403);
         assertThat(admin.body().get("code")).isEqualTo("ADMIN_PHONE");
