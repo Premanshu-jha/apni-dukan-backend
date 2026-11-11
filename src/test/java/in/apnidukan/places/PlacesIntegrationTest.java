@@ -258,7 +258,7 @@ class PlacesIntegrationTest {
                 replies.add(f.get());
             }
             assertThat(replies).extracting(Reply::status).containsOnlyOnce(201).containsOnly(201, 409);
-            assertThat(replies.stream().filter(r -> r.status() == 409).map(r -> r.body().get("code")))
+            assertThat(replies.stream().filter(r -> r.status() == 409).map(r -> (Object) r.body().get("code")).toList())
                     .containsOnly("TOO_MANY_PLACES");
         } finally {
             pool.shutdownNow();
