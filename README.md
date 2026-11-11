@@ -840,6 +840,12 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### API changes for changing the phone number (no migration; customer app and partner app use them)
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /auth/me/phone/send-code`, `POST /auth/me/phone` | none | new: change the number while signed in | both apps: Profile → Mobile → Change; save the new tokens |
+
 ### API changes in this version (deploy the backend first, then the apps)
 
 **Salon registration, opening hours, ratings and come-back reminders** (V34–V36; partner app 0.9.0, customer app
