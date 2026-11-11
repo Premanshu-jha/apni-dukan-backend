@@ -422,7 +422,11 @@ sequenceDiagram
   setting a saved place search through their own endpoints (see "Customers' saved places"), with the same limits.
 - **Cost guard:** at most 280 calls to Google a day for the whole backend, under the 300 a day set as the quota in
   Google Cloud (Google's free allowance is 10,000 a month). Customers' saved places may use at most 100 of them
-  between all customers (`geocode-day-customers:` counter), so owners registering always have at least 180. The day is Google's: it starts at midnight Pacific time
+  between all customers (`geocode-day-customers:` counter), so owners registering keep at least 180 from the
+  customer app's searches. (Someone registering can't be told apart from a customer, so an account calling
+  `/shops/geocode` directly counts as registering; the per-person limits still hold it to 10 lookups a day.) A search
+  refused by a later cap gives back what it counted on the way (`RateLimiter.giveBack`), so a refusal never uses up a
+  person's allowance. The day is Google's: it starts at midnight Pacific time
   (12:30 IST in summer, 13:30 IST in winter), the moment Google's own quota resets. Per person: 20 searches an hour
   and 10 calls to Google a day (only new addresses count, and not once everyone's day is used up), so one account
   can't use up everyone's day. Answers are
