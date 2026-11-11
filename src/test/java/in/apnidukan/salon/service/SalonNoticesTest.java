@@ -67,7 +67,7 @@ class SalonNoticesTest {
         ShopCard card = new ShopCard(salon, "Sharma Hair", "Shop 4", "Kondapur", "Hyderabad", "500084",
                 new BigDecimal("17.465000"), new BigDecimal("78.364000"), "APPROVED", "SALON", null, null, null);
         SalonSetups.Setup setup = new SalonSetups.Setup(1, List.of(new SalonSetups.Barber(raju, "Raju", NOW,
-                Set.of(), List.of(), rajuLogin)), List.of(), 0, 7);
+                Set.of(), List.of(), rajuLogin)), List.of(), 0, 7, List.of());
         notices.booked(a, card, List.of(new BookedService(UUID.randomUUID(), "Haircut", 30, 15000, false)), setup,
                 NOW);
         @SuppressWarnings("unchecked")
