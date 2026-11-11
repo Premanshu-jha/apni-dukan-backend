@@ -653,9 +653,11 @@ class AuthIntegrationTest {
         assertThat(done.status()).as(done.body().toString()).isEqualTo(200);
         assertThat(jdbc.queryForObject("SELECT to_phone FROM shop_handovers", String.class)).isEqualTo("9700000022");
         assertThat(jdbc.queryForObject("SELECT to_phone FROM shop_invites", String.class)).isEqualTo("9700000022");
-        // Whoever gets the old number next finds nothing waiting
-        String next = (String) signIn("9700000020").body().get("accessToken");
-        assertThat(get("/shops/me/handover", next).body().toString()).doesNotContain(shop.toString());
+        // Whoever gets the old number next finds nothing waiting for it
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM shop_handovers WHERE to_phone = '9700000020'",
+                Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM shop_invites WHERE to_phone = '9700000020'",
+                Integer.class)).isZero();
     }
 
     @Test
