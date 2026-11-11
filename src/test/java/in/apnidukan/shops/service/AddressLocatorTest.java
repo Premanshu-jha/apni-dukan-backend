@@ -250,7 +250,8 @@ class AddressLocatorTest {
 
     @Test
     void aCustomerMaySearchEvenAsABarberAndCountsInCustomersShare() {
-        when(members.findByUserId(OWNER)).thenReturn(Optional.of(memberAs(ShopRole.BARBER)));
+        ShopMember barber = memberAs(ShopRole.BARBER);
+        when(members.findByUserId(OWNER)).thenReturn(Optional.of(barber));
         googleFinds(Precision.STREET, false);
         assertThat(locator.locate(Asker.CUSTOMER, OWNER, "12, MG Road", "Ameerpet", "Hyderabad", "500016").precision())
                 .isEqualTo(Precision.STREET);
