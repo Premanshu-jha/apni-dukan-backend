@@ -5,7 +5,9 @@ import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.salon.api.BookingRequests.RateVisit;
 import in.apnidukan.salon.api.BookingRequests.SalonPreferences;
+import in.apnidukan.salon.api.BookingResponses.OfferMessagesView;
 import in.apnidukan.salon.api.BookingResponses.SalonPreferencesView;
+import in.apnidukan.salon.api.SalonOfferRequests.OfferMessages;
 import in.apnidukan.salon.api.BookingRequests.Book;
 import in.apnidukan.salon.api.BookingRequests.EarlierAlert;
 import in.apnidukan.salon.api.BookingRequests.Reschedule;
@@ -145,7 +147,10 @@ public class BookingController {
         return bookings.rate(me(), id, body);
     }
 
-    /** My salon preferences: {comeBackReminders} ("Time for your next haircut?"; on unless switched off). */
+    /**
+     * My salon preferences: {comeBackReminders, salonOffers} ("Time for your next haircut?", and offer messages from
+     * salons I visited; each on unless switched off).
+     */
     @GetMapping("/api/v1/me/salon-preferences")
     public SalonPreferencesView preferences() {
         return bookings.preferences(me());
@@ -153,7 +158,16 @@ public class BookingController {
 
     @PutMapping("/api/v1/me/salon-preferences")
     public SalonPreferencesView setPreferences(@Valid @RequestBody SalonPreferences body) {
-        return bookings.setPreferences(me(), body.comeBackReminders());
+        return bookings.setPreferences(me(), body.comeBackReminders(), body.salonOffers());
+    }
+
+    /**
+     * Stops ({on: false}) or allows again one salon's offer messages for me; its offers still show on its card and
+     * page. 404 SALON_NOT_FOUND if it isn't live.
+     */
+    @PutMapping("/api/v1/salons/{id}/offer-messages")
+    public OfferMessagesView offerMessages(@PathVariable UUID id, @Valid @RequestBody OfferMessages body) {
+        return bookings.setOfferMessages(me(), id, body.on());
     }
 
     private UUID me() {
