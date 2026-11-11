@@ -11,6 +11,7 @@ import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.async.BackgroundTasks;
 import in.apnidukan.common.context.AccountDeletionListener;
 import in.apnidukan.common.context.PersonDetailsListener;
+import in.apnidukan.common.context.PhoneChangeListener;
 import in.apnidukan.common.context.SignOutEverywhereListener;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.context.TestAccountShops;
@@ -91,6 +92,7 @@ public class AuthService {
     /** See refresh(): how long a swapped token may come back for a new pair while its successor is unused. */
     private final Duration refreshGrace;
     private final List<SignOutEverywhereListener> signOutListeners;
+    private final List<PhoneChangeListener> phoneListeners;
     private final SignInLimits signInLimits;
     private final TestModeService testMode;
     private final SmsBudget smsBudget;
@@ -108,12 +110,14 @@ public class AuthService {
                        SignInLimits signInLimits, TestModeService testMode,
                        List<PersonDetailsListener> detailsListeners, SmsBudget smsBudget,
                        RefreshTokenStore tokenStore, TestAccountShops testAccountShops, AdminTeamService team,
+                       List<PhoneChangeListener> phoneListeners,
                        @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds) {
         if (refreshGraceSeconds < 0 || refreshGraceSeconds > RETRY_GRACE.toSeconds()) {
             // Longer than the retry time would let an old token get new pairs after it should raise the alarm
             throw new IllegalStateException("app.auth.refresh-grace-seconds must be 0 to " + RETRY_GRACE.toSeconds());
         }
         this.refreshGrace = Duration.ofSeconds(refreshGraceSeconds);
+        this.phoneListeners = phoneListeners;
         this.team = team;
         this.testMode = testMode;
         this.smsBudget = smsBudget;
@@ -561,6 +565,179 @@ public class AuthService {
     public User me(UUID userId) {
         return users.findById(userId).filter(u -> !u.isDeleted())
                 .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+    }
+
+    // ---------------- changing the phone number (signed in) ----------------
+
+    /** Phone-change codes one account may ask for a day (each SMS goes to a number of their choosing). */
+    static final int PHONE_CHANGES_PER_ACCOUNT_PER_DAY = 5;
+
+    /** Where the second code went: the verified email, or (without one) the number the account has now. */
+    public enum SecondCode { EMAIL, PHONE }
+
+    /** Step 1's answer: where the second code went, masked ("r***@gmail.com", "ending 2345"). */
+    public record PhoneChangeSent(SecondCode secondCodeTo, String sentTo) {
+    }
+
+    /**
+     * Step 1: a code to the new number, and a second code so a borrowed or stolen session can't move the account
+     * alone: to the verified email, or, without one, to the number the account has now. Each code is bound to this
+     * account and this new number.
+     * <ul>
+     *   <li>400 INVALID_PHONE, 400 SAME_PHONE;</li>
+     *   <li>403 ADMIN_PHONE: an admin's number is changed on the admin Team page (its edits carry a version);</li>
+     *   <li>409 TEST_ACCOUNT: a test account can't take a real number (sign in with that number instead);</li>
+     *   <li>409 TEST_PHONE: a test number can't be anyone's real number;</li>
+     *   <li>409 PHONE_IN_USE: another account has it. Counted in the day's tries like a send, so the answer can't be
+     *       used to look up numbers freely;</li>
+     *   <li>429 TOO_MANY_CODES past {@value #PHONE_CHANGES_PER_ACCOUNT_PER_DAY} tries a day, and the usual limits.</li>
+     * </ul>
+     */
+    public PhoneChangeSent sendPhoneChangeCode(UUID userId, String newPhoneInput, String ip) {
+        User user = me(userId);
+        String newPhone = PhoneNumbers.normalize(newPhoneInput);
+        if (newPhone.equals(user.getPhone())) {
+            throw ApiException.badRequest("SAME_PHONE", "This is already your number.");
+        }
+        requireMayChangePhone(user, newPhone);
+        limitSends(ip);
+        String dayKey = "phone-change-user:" + userId;
+        if (!limits.tryHit(dayKey, PHONE_CHANGES_PER_ACCOUNT_PER_DAY, Duration.ofHours(24))) {
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_CODES",
+                    "You've asked for codes to change your number " + PHONE_CHANGES_PER_ACCOUNT_PER_DAY
+                            + " times today. Try again tomorrow.").retryAfter(limits.secondsLeft(dayKey));
+        }
+        if (users.findByPhone(newPhone).isPresent()) {
+            throw phoneInUse();   // after the day's count: at most 5 numbers a day can be asked about
+        }
+        SmsBudget.To to = SmsBudget.To.recovery(newPhone);   // a number new to us: counted as new
+        smsBudget.requireRoom(to);
+        String address = user.isEmailVerified() ? user.getEmail() : null;
+        // The second code first: if its own limits refuse, no code to the new number is left behind unsent
+        String second;
+        if (address != null) {
+            second = otp.issue(OtpPurpose.CHANGE_PHONE_EMAIL, secondTarget(userId, address, newPhone), ip);
+        } else {
+            SmsBudget.To own = SmsBudget.To.signedIn(user.getPhone());
+            smsBudget.requireRoom(own);
+            second = otp.issue(OtpPurpose.CHANGE_PHONE_CURRENT, secondTarget(userId, user.getPhone(), newPhone), ip);
+        }
+        String phoneCode = otp.issue(OtpPurpose.CHANGE_PHONE, userId + ":" + newPhone, ip);
+        String ending = newPhone.substring(6);
+        sendSms(to, () -> sms.sendOtp(newPhone, phoneCode));
+        if (address != null) {
+            background.run("phone-change email", () -> email.send(address, "Change your Clozest phone number",
+                    "Your code to move your Clozest account to the phone number ending " + ending + " is " + second
+                            + ".\n\nIt works for 10 minutes. If you didn't ask for this, don't share it with anyone "
+                            + "and contact Clozest support."));
+            return new PhoneChangeSent(SecondCode.EMAIL, mask(address));
+        }
+        String current = user.getPhone();
+        sendSms(SmsBudget.To.signedIn(current), () -> sms.sendOtp(current, second));
+        return new PhoneChangeSent(SecondCode.PHONE, "ending " + current.substring(6));
+    }
+
+    /** A second code's target: this account, where it went, and the number it allows moving to. */
+    private static String secondTarget(UUID userId, String sentTo, String newPhone) {
+        return userId + ":" + sentTo + ":" + newPhone;
+    }
+
+    /** The refusals that don't depend on the codes (also checked again under the lock). */
+    private void requireMayChangePhone(User user, String newPhone) {
+        if (user.isAdmin()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "ADMIN_PHONE",
+                    "An admin's number is changed by the super admin, on the Team page.");
+        }
+        if (user.isTestAccount()) {
+            throw new ApiException(HttpStatus.CONFLICT, "TEST_ACCOUNT",
+                    "A test account can't move to another number.");
+        }
+        if (testMode.isTestPhone(newPhone)) {
+            throw new ApiException(HttpStatus.CONFLICT, "TEST_PHONE", "This number can't be used. Use another one.");
+        }
+    }
+
+    /**
+     * Step 2: both codes right → the account (its bookings, shop and history: the same account) moves to the new
+     * number, waiting shop invitations and hand-over requests move with it, every other device is signed out, and this
+     * one gets new tokens. The old number and the email are told afterwards. The codes are used up only in the same
+     * transaction as the change, so a refusal or a failure on the way leaves them for another try.
+     * 400 SEND_CODES_AGAIN (the account's email changed since the codes were sent: the second code went elsewhere);
+     * the code errors (WRONG_CODE, CODE_EXPIRED, TOO_MANY_ATTEMPTS); 409 PHONE_IN_USE (taken meanwhile); the step 1
+     * refusals.
+     */
+    public AuthTokens changePhone(UUID userId, String newPhoneInput, String phoneCode, String secondCode, String device,
+                                  String ip) {
+        String newPhone = PhoneNumbers.normalize(newPhoneInput);
+        limitVerifies(ip);
+        User me = me(userId);
+        if (secondCode == null || secondCode.isBlank()) {
+            throw ApiException.badRequest("SEND_CODES_AGAIN", "Enter both codes.");
+        }
+        Second expected = secondOf(me, newPhone);
+        // Both checked before either is used up: a typo in one keeps the other
+        otp.check(OtpPurpose.CHANGE_PHONE, userId + ":" + newPhone, phoneCode, ip);
+        otp.check(expected.purpose(), expected.target(), secondCode, ip);
+        String[] oldPhone = new String[1];
+        String[] address = new String[1];
+        AuthTokens tokens = tx.execute(status -> {
+            // Others' screens (a salon's customer details) are told before the row lock (PersonDetailsListener)
+            detailsListeners.forEach(l -> l.detailsChanging(userId));
+            User user = users.lockById(userId).filter(u -> !u.isDeleted())
+                    .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+            if (newPhone.equals(user.getPhone())) {
+                throw ApiException.badRequest("SAME_PHONE", "This is already your number.");
+            }
+            requireMayChangePhone(user, newPhone);
+            if (!secondOf(user, newPhone).equals(expected)) {
+                // The email was verified, changed or replaced since the codes were checked above
+                throw ApiException.badRequest("SEND_CODES_AGAIN",
+                        "Your account changed since the codes were sent. Send the codes again.");
+            }
+            users.findByPhone(newPhone).filter(other -> !other.getId().equals(userId)).ifPresent(other -> {
+                throw phoneInUse();
+            });
+            oldPhone[0] = user.getPhone();
+            address[0] = user.isEmailVerified() ? user.getEmail() : null;
+            Instant now = Instant.now(clock);
+            user.changePhone(newPhone, now);
+            try {
+                users.saveAndFlush(user);
+            } catch (DataIntegrityViolationException e) {
+                throw phoneInUse();   // taken by a sign-up at this very moment
+            }
+            phoneListeners.forEach(l -> l.phoneChanged(userId, oldPhone[0], newPhone));
+            refreshTokens.revokeAllForUser(userId, now);
+            signOutListeners.forEach(l -> l.signedOutEverywhere(userId));   // the old phone stops getting messages
+            revocations.revokeAll(userId);
+            // The codes are used up last, still inside: anything refused or failing above keeps them (and one used
+            // by another request meanwhile undoes this one: CODE_EXPIRED)
+            otp.consume(OtpPurpose.CHANGE_PHONE, userId + ":" + newPhone);
+            otp.consume(expected.purpose(), expected.target());
+            return issueTokens(user, device, false);
+        });
+        String ending = newPhone.substring(6);
+        String previousPhone = oldPhone[0];
+        // Not under the daily SMS cap: this warning must get out
+        background.runAlways("phone-changed SMS", () -> sms.sendAccountMoved(previousPhone, ending));
+        if (address[0] != null) {
+            String to = address[0];
+            background.runAlways("phone-changed email", () -> email.send(to,
+                    "Your Clozest account moved to a new phone",
+                    "Your account now uses the phone number ending " + ending + ". Every other device was signed out."
+                            + "\n\nIf this wasn't you, contact Clozest support immediately."));
+        }
+        return tokens;
+    }
+
+    /** Which second code this account needs for this move, and its key. */
+    private record Second(OtpPurpose purpose, String target) {
+    }
+
+    private static Second secondOf(User user, String newPhone) {
+        return user.isEmailVerified()
+                ? new Second(OtpPurpose.CHANGE_PHONE_EMAIL, secondTarget(user.getId(), user.getEmail(), newPhone))
+                : new Second(OtpPurpose.CHANGE_PHONE_CURRENT, secondTarget(user.getId(), user.getPhone(), newPhone));
     }
 
     // ---------------- deleting the account ----------------
