@@ -100,6 +100,7 @@ class PlacesIntegrationTest {
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
     @Autowired StringRedisTemplate redis;
+    @Autowired in.apnidukan.common.security.RateLimiter limits;
 
     RestClient http;
 
@@ -318,6 +319,21 @@ class PlacesIntegrationTest {
         assertThat(call(HttpMethod.POST, "/shops/geocode", Map.of("addressLine", "Shop 9, Lake View", "area",
                 "Kondapur", "city", "Hyderabad", "pincode", "500084"), token(MEERA)).status()).isEqualTo(200);
         assertThat(call(HttpMethod.POST, "/me/places/geocode", typed, null).status()).isEqualTo(401);
+    }
+
+    @Test
+    void givingBackAHitNeverGoesBelowZeroOrMakesACounterWithoutAWindow() {
+        limits.hit("test-give-back", java.time.Duration.ofHours(1));
+        limits.hit("test-give-back", java.time.Duration.ofHours(1));
+        limits.giveBack("test-give-back");
+        assertThat(limits.current("test-give-back")).isEqualTo(1);
+        assertThat(redis.getExpire("rl:test-give-back")).isPositive();
+        limits.giveBack("test-give-back");
+        limits.giveBack("test-give-back");
+        assertThat(limits.current("test-give-back")).isZero();
+        // Gone already (expired): giving back makes nothing
+        limits.giveBack("test-never-counted");
+        assertThat(redis.hasKey("rl:test-never-counted")).isFalse();
     }
 
     private List<Object> kinds(String token) {
