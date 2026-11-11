@@ -154,8 +154,19 @@ public class AppointmentStore {
         for (int i = 0; i < services.size(); i++) {
             BookedService s = services.get(i);
             jdbc.update("INSERT INTO appointment_services (appointment_id, position, service_id, name, duration_min, "
-                            + "price_paise, price_is_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    appointmentId, i, s.serviceId(), s.name(), s.durationMin(), s.pricePaise(), s.priceIsFrom());
+                            + "price_paise, price_is_from, offer_id, list_price_paise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    appointmentId, i, s.serviceId(), s.name(), s.durationMin(), s.pricePaise(), s.priceIsFrom(),
+                    s.offerId(), s.listPricePaise());
+        }
+    }
+
+    /** New prices for a booking's services (moved into or out of an offer), in their booking order. */
+    public void reprice(UUID appointmentId, List<BookedService> services) {
+        for (int i = 0; i < services.size(); i++) {
+            BookedService s = services.get(i);
+            jdbc.update("UPDATE appointment_services SET price_paise = ?, offer_id = ?, list_price_paise = ? "
+                    + "WHERE appointment_id = ? AND position = ?",
+                    s.pricePaise(), s.offerId(), s.listPricePaise(), appointmentId, i);
         }
     }
 
@@ -683,14 +694,16 @@ public class AppointmentStore {
         if (appointmentIds.isEmpty()) {
             return out;
         }
-        jdbc.query("SELECT appointment_id, service_id, name, duration_min, price_paise, price_is_from "
-                        + "FROM appointment_services WHERE appointment_id = ANY(?) ORDER BY appointment_id, position",
+        jdbc.query("SELECT appointment_id, service_id, name, duration_min, price_paise, price_is_from, offer_id, "
+                        + "list_price_paise FROM appointment_services WHERE appointment_id = ANY(?) "
+                        + "ORDER BY appointment_id, position",
                 ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", appointmentIds.toArray())),
                 rs -> {
                     out.computeIfAbsent(rs.getObject("appointment_id", UUID.class), k -> new ArrayList<>())
                             .add(new BookedService(rs.getObject("service_id", UUID.class), rs.getString("name"),
                                     rs.getInt("duration_min"), rs.getLong("price_paise"),
-                                    rs.getBoolean("price_is_from")));
+                                    rs.getBoolean("price_is_from"), rs.getObject("offer_id", UUID.class),
+                                    (Long) rs.getObject("list_price_paise")));
                 });
         return out;
     }

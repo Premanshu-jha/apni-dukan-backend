@@ -3,11 +3,14 @@ package in.apnidukan.salon.service;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import in.apnidukan.salon.domain.BookedService;
+import in.apnidukan.salon.domain.SalonOffer;
 import in.apnidukan.salon.domain.SalonSettings;
 import in.apnidukan.salon.domain.SalonStaff;
+import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.domain.Shift;
 import in.apnidukan.salon.domain.StaffShift;
 import in.apnidukan.salon.domain.StaffSkill;
+import in.apnidukan.salon.repo.SalonOfferStore;
 import in.apnidukan.salon.repo.SalonServiceItemRepository;
 import in.apnidukan.salon.repo.SalonSettingsRepository;
 import in.apnidukan.salon.repo.SalonStaffRepository;
@@ -17,7 +20,9 @@ import in.apnidukan.salon.repo.StaffSkillRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -61,13 +66,21 @@ public class SalonSetups {
      * @param services     active services in the salon's order (sort order, then name), as a booking copies them
      * @param minLeadMin   earliest booking, minutes from now (the salon's settings, or the default)
      * @param maxDaysAhead latest booking, days from today
+     * @param offers       its offers not ended early that lasted until the day it was read or later (each says itself
+     *                     when it applies: SalonOffer.appliesAt), soonest first
      */
     public record Setup(long version, List<Barber> barbers, List<BookedService> services, int minLeadMin,
-                        int maxDaysAhead) {
+                        int maxDaysAhead, List<SalonOffer> offers) {
 
         public Setup {
             barbers = List.copyOf(barbers);
             services = List.copyOf(services);
+            offers = List.copyOf(offers);
+        }
+
+        /** Its offers that still last until this date or later. */
+        public List<SalonOffer> offersFrom(LocalDate date) {
+            return offers.stream().filter(o -> !o.endsOn().isBefore(date)).toList();
         }
 
         /** An active barber of this salon, if he is one. */
@@ -96,11 +109,13 @@ public class SalonSetups {
     private final StaffShiftRepository shifts;
     private final SalonServiceItemRepository services;
     private final SalonSettingsRepository settings;
+    private final SalonOfferStore offers;
+    private final Clock clock;
     private final Cache<UUID, Setup> cache;
 
     public SalonSetups(SalonVersionStore versions, SalonStaffRepository staff, StaffSkillRepository skills,
                        StaffShiftRepository shifts, SalonServiceItemRepository services,
-                       SalonSettingsRepository settings,
+                       SalonSettingsRepository settings, SalonOfferStore offers, Clock clock,
                        @Value("${app.salon.setup-cache-weight:2000000}") long maxWeight) {
         if (maxWeight < 1) {
             throw new IllegalStateException("app.salon.setup-cache-weight must be at least 1");
@@ -111,6 +126,8 @@ public class SalonSetups {
         this.shifts = shifts;
         this.services = services;
         this.settings = settings;
+        this.offers = offers;
+        this.clock = clock;
         // Bounded by size, not by count: a 50-barber salon with 100 services weighs as much as dozens of small ones
         this.cache = Caffeine.newBuilder().maximumWeight(maxWeight).weigher(SalonSetups::weight).build();
     }
@@ -121,7 +138,7 @@ public class SalonSetups {
      * 50,000 typical salons (some 40 units each) in about 100 MB per server.
      */
     static int weight(UUID shopId, Setup setup) {
-        long units = 1L + setup.services().size();
+        long units = 1L + setup.services().size() + setup.offers().size();
         for (Barber b : setup.barbers()) {
             units += 1L + b.serviceIds().size() + b.week().size();
         }
@@ -149,6 +166,12 @@ public class SalonSetups {
         return new Current(kept, now.pausedUntil(), shopId, now.versions().version());
     }
 
+    /** The offers that still cover some active service (one whose services were all switched off since offers none). */
+    static List<SalonOffer> stillOn(List<SalonOffer> all, List<BookedService> active) {
+        Set<UUID> on = active.stream().map(BookedService::serviceId).collect(Collectors.toSet());
+        return all.stream().filter(o -> o.allServices() || o.serviceIds().stream().anyMatch(on::contains)).toList();
+    }
+
     private Setup load(UUID shopId, long version) {
         List<SalonStaff> active = staff.findByShopIdAndActiveTrueOrderByCreatedAtAscIdAsc(shopId);
         List<UUID> ids = active.stream().map(SalonStaff::getId).toList();
@@ -166,8 +189,11 @@ public class SalonSetups {
                         s.details().pricePaise(), s.details().priceIsFrom()))
                 .toList();
         Optional<SalonSettings> saved = settings.findById(shopId);
+        // From yesterday: a server's clock a moment behind the database's day still has today's
+        LocalDate yesterday = LocalDate.ofInstant(clock.instant(), SalonTime.ZONE).minusDays(1);
         return new Setup(version, barbers, offered,
                 saved.map(SalonSettings::getMinLeadMin).orElse(SalonSettings.DEFAULT_MIN_LEAD_MIN),
-                saved.map(SalonSettings::getMaxDaysAhead).orElse(SalonSettings.DEFAULT_MAX_DAYS_AHEAD));
+                saved.map(SalonSettings::getMaxDaysAhead).orElse(SalonSettings.DEFAULT_MAX_DAYS_AHEAD),
+                stillOn(offers.current(shopId, yesterday), offered));
     }
 }

@@ -10,6 +10,7 @@ import in.apnidukan.salon.repo.SalonAccessStore;
 import in.apnidukan.salon.repo.SalonStaffRepository;
 import in.apnidukan.salon.repo.SalonVersionStore;
 import in.apnidukan.salon.repo.StrikeStore;
+import in.apnidukan.salon.repo.SalonOfferStore;
 import in.apnidukan.salon.repo.VisitFollowUpStore;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.salon.domain.SalonTime;
@@ -57,13 +58,16 @@ class SalonAccountDeletion implements AccountDeletionListener {
     private final SalonVersionStore versions;
     private final RatingStore ratings;
     private final VisitFollowUpStore followUps;
+    private final SalonOfferStore offers;
 
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH)
             .withZone(SalonTime.ZONE);
 
     SalonAccountDeletion(AppointmentStore appointments, SalonStaffRepository staff, SalonAccessStore access,
                          ShopMemberships memberships, SalonNotices notices, StrikeStore strikes,
-                         SalonVersionStore versions, RatingStore ratings, VisitFollowUpStore followUps) {
+                         SalonVersionStore versions, RatingStore ratings, VisitFollowUpStore followUps,
+                         SalonOfferStore offers) {
+        this.offers = offers;
         this.ratings = ratings;
         this.followUps = followUps;
         this.strikes = strikes;
@@ -124,5 +128,6 @@ class SalonAccountDeletion implements AccountDeletionListener {
         access.revokeAllWalkIns(userId);
         ratings.forgetComments(userId);
         followUps.forget(userId);
+        offers.forget(userId);   // which salons' offers they stopped
     }
 }

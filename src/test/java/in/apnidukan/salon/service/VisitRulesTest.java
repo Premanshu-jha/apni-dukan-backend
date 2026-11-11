@@ -1,6 +1,7 @@
 package in.apnidukan.salon.service;
 
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.salon.api.BookingResponses;
 import in.apnidukan.salon.api.BookingResponses.CardFacts;
 import in.apnidukan.salon.api.BookingResponses.RatingSummary;
 import in.apnidukan.salon.api.SalonRequests.SalonDayIn;
@@ -74,32 +75,38 @@ class VisitRulesTest {
     @Test
     void aCardIsOpenOnlyInsideTodaysHoursAndNotOnAClosedDay() {
         SalonCardStore.Facts open = new SalonCardStore.Facts(3, 13, true, 600, 1260, false, 4,
-                List.of(new SalonCardStore.Top("Haircut", 15000, false)), true, true);
+                List.of(new SalonCardStore.Top("Haircut", 15000, false)), true, true,
+                new SalonCardStore.Offer(20, TUESDAY, TUESDAY.plusDays(3)));
         CardFacts at11 = BookingService.cardFacts(open, TUESDAY, 660);
         assertThat(at11.openNow()).isTrue();
         assertThat(at11.today().open()).isEqualTo("10:00");
         assertThat(at11.rating().average()).isNull();   // 3 ratings: "New"
         assertThat(at11.serviceCount()).isEqualTo(4);
         assertThat(at11.registered()).isTrue();
+        assertThat(at11.offer()).isEqualTo(new BookingResponses.OfferBadge(20, TUESDAY, TUESDAY.plusDays(3)));
         assertThat(BookingService.cardFacts(open, TUESDAY, 1260).openNow()).isFalse();   // 21:00: closed
         assertThat(BookingService.cardFacts(open, TUESDAY, 599).openNow()).isFalse();
 
-        SalonCardStore.Facts holiday = new SalonCardStore.Facts(0, 0, true, 600, 1260, true, 1, List.of(), false, true);
+        SalonCardStore.Facts holiday = new SalonCardStore.Facts(0, 0, true, 600, 1260, true, 1, List.of(), false, true,
+                null);
         CardFacts h = BookingService.cardFacts(holiday, TUESDAY, 660);
         assertThat(h.closedToday()).isTrue();
         assertThat(h.openNow()).isFalse();
         assertThat(h.today()).isNull();
 
-        SalonCardStore.Facts weeklyOff = new SalonCardStore.Facts(0, 0, true, null, null, false, 1, List.of(), false, true);
+        SalonCardStore.Facts weeklyOff = new SalonCardStore.Facts(0, 0, true, null, null, false, 1, List.of(), false,
+                true, null);
         assertThat(BookingService.cardFacts(weeklyOff, TUESDAY, 660).closedToday()).isTrue();
 
-        SalonCardStore.Facts noHours = new SalonCardStore.Facts(0, 0, false, null, null, false, 1, List.of(), false, false);
+        SalonCardStore.Facts noHours = new SalonCardStore.Facts(0, 0, false, null, null, false, 1, List.of(), false,
+                false, null);
         assertThat(BookingService.cardFacts(noHours, TUESDAY, 660).openNow()).isNull();
         assertThat(BookingService.cardFacts(noHours, TUESDAY, 660).closedToday()).isFalse();
 
         // Open hours today but no working barber (none yet, all switched off, or none works Tuesdays): closed
         SalonCardStore.Facts nobody = new SalonCardStore.Facts(0, 0, true, 600, 1260, false, 0, List.of(), false,
-                false);
+                false, null);
+        assertThat(BookingService.cardFacts(nobody, TUESDAY, 660).offer()).isNull();
         assertThat(BookingService.cardFacts(nobody, TUESDAY, 660).closedToday()).isTrue();
         assertThat(BookingService.cardFacts(nobody, TUESDAY, 660).openNow()).isFalse();
         assertThat(BookingService.cardFacts(nobody, TUESDAY, 660).today()).isNull();
