@@ -683,7 +683,67 @@ completes the booking, by the automatic end or Finish):
 | `BOOKING_COME_BACK` "Time for your next Haircut?" | 10:00 India time, the shortest `returnAfterDays` of the visit's services (0s left out) after the visit's day; only between 9:00 and 21:00. Names and picks only the services due on the day it was scheduled for (all of them if the owner lengthened an interval since, so it isn't lost), at most 5 (the link fits `notification_jobs.url`) | the customer switched these off, has a booking coming up, completed another online booking since, the salon isn't live, or it offers none of those services any more | `/salons/{salonId}?services=a,b` |
 
 Both are push and in-app messages of the customer app (`BOOKING_` types), never SMS unless a template is set for the
-type. `GET` / `PUT /api/v1/me/salon-preferences {comeBackReminders}`: on until switched off.
+type. `GET` / `PUT /api/v1/me/salon-preferences {comeBackReminders?, salonOffers?}` (either or both; neither: 400): each
+on until switched off.
+
+## Salon offers
+
+A discount the owner publishes whenever he likes (nothing is automatic, and there is no limit on how often): 5 to 50%
+off all the salon's services or some, from a first to a last day (India dates, at most 90 days ahead) and, if he
+likes, only from one time to another each day (15-minute steps). Bookings that **start** inside it are priced with it
+(`SalonOffer.price`: each covered service, to the rupee, half up, never below ₹1); the booking keeps that price
+(`appointment_services.list_price_paise` and `offer_id`), whatever happens to the offer later. A **move** prices the
+booking again for its new time, from the prices it was booked at before any offer: the offer there if one applies,
+the price without one if not (so an offer's days and hours can't be carried to any time by moving). Walk-ins are at
+the list price (the salon gives a discount in person if it likes). Publishing or ending an offer takes the shop's row
+against bookings (like a pause): a booking in progress finishes first, and one after it sees the change.
+
+| Call | Who | What |
+| --- | --- | --- |
+| `GET /api/v1/salon/offers` | owner, helpers (403 `NOT_ALLOWED` for barbers) | every running or coming offer first (so each can be ended), then the newest ended ones, up to 100 in all: `{offer, state RUNNING/UPCOMING/ENDED, createdAt, endedAt, notified, bookings}` |
+| `POST /api/v1/salon/offers/preview` | owner | `{percentOff, serviceIds (empty: all), startsOn, endsOn, from?, until?}` → `{services [{serviceId, name, pricePaise, offerPricePaise, priceIsFrom}], customers}` after every check below |
+| `POST /api/v1/salon/offers` | owner | the same body → 201, and the message goes at once (see below) |
+| `POST /api/v1/salon/offers/{id}/end` | owner | ends it now: new bookings at the normal price; messages still waiting aren't sent. 409 `OFFER_OVER` if it already ended; 404 `OFFER_NOT_FOUND` |
+| `PUT /api/v1/salons/{id}/offer-messages {on}` | a customer | stops (or allows again) one salon's offer messages |
+
+Checks, in order: the request's own limits (400 `VALIDATION_FAILED`: `percentOff` 5–50, both dates, up to 100
+services); the salon is live (409 `SALON_NOT_LIVE`); the times (`from`/`until` both or neither, on 15-minute steps,
+`until` after `from`) and the dates (first day today or later, last day on or after it and at most 90 days ahead) (400
+naming the field); the salon has services (409 `NO_SERVICES`) and these are among its active ones (400 `serviceIds`);
+the first day inside the salon's booking window (409 `OFFER_TOO_FAR`, "Customers can book up to 7 days ahead, so start
+the offer by 17 Nov.", `details.lastStart`: a message about days nobody can book yet would only disappoint); online
+bookings not paused over its first moment (409 `SALON_PAUSED`); opening hours set (409 `NO_SALON_HOURS`: a salon
+registered before V34 that never set them, sent to Setup → Opening hours); the daily hours inside the salon's opening
+hours on **every open day** in the dates (409 `OFFER_OUTSIDE_HOURS`, the message and `details.days` name each such day
+with its hours; weekly offs and closed days are skipped, not refused); some opening time left in the dates (409
+`NO_OPEN_TIME`, e.g. only closed days, or today's hours already over); no running or coming offer on the same service
+at the same time (409 `OFFER_OVERLAPS` with `details.offerId`; another service at the same time is fine, and an offer
+whose services were all switched off since is not in the way).
+Publishing runs under the salon's calendar lock, so two at once are checked one after the other, and a double tap is
+refused as an overlap (nobody is told twice). Later changes to the opening hours are allowed: the offer simply covers
+the slots that remain.
+
+**The message** (type `BOOKING_OFFER`: push, and in the customer app's message list; no SMS template) goes when he
+publishes, at whatever time, with no limit on how often (the owner's choice; customers stop a salon's offers on its
+page), to the
+salon's past customers: anyone who completed an online booking there, whose account isn't deleted, who doesn't work in
+the salon, and who hasn't switched offer messages off (for every salon: `salon_customer_prefs.salon_offers`; for this
+one: `salon_offer_mutes`). "20% off at Sharma Hair", "Haircut · 12 Nov – 14 Nov, 12:00–16:00. Book in the app.", opening
+`/salons/{salonId}?offer={offerId}` (the app picks the services it covers). `notified` keeps how many. Who to tell is
+read before the salon's locks are taken, through `ix_appointments_completed_customers` (V38), so a big salon's
+publish doesn't hold up its day.
+
+**Customers see it** on the salon's card (`offer {percentOff, startsOn, endsOn}`: the soonest running or coming, the
+biggest of those starting the same day; an offer whose services are all switched off is left out everywhere), on its
+page (`offers`, and `offerMessages`: null until they completed a visit
+there, then whether they get its messages), on each service (`offerPricePaise`: the price in its best offer), on each
+free time (`pricePaise`, and `listPricePaise` when an offer applies at that start) and on the booking
+(`totalListPricePaise`, each service's `listPricePaise`).
+
+**No extra reads on the hot path:** the offers travel with the salon's setup kept in memory (`SalonSetups`), and
+publishing or ending one moves the salon's `setup_version` (triggers in V37, like a change to its services), so every
+server prices free times and bookings with the current offers at its next read. The cards read the badge in their
+one query per page (`SalonCardStore`). A deleted account's mutes go (`SalonAccountDeletion`).
 
 ## Run it on your laptop
 
@@ -825,6 +885,21 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 
 ### API changes in this version (deploy the backend first, then the apps)
 
+**Salon offers** (V37–V39; partner app 0.10.0 and customer app 0.10.0 use them; old apps keep working, without offers):
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `GET`/`POST /salon/offers`, `POST /salon/offers/preview`, `POST /salon/offers/{id}/end` | none | new | partner app: More → Offers |
+| `PUT /salons/{id}/offer-messages` | none | new | customer app: the switch on a visited salon's page |
+| `GET`/`PUT /me/salon-preferences` | `{comeBackReminders}`, required | adds `salonOffers`; PUT takes either or both (neither: 400) | customer app: the second switch on Profile |
+| `GET /salons` | | cards add `offer` (null if none) | customer app: the badge |
+| `GET /salons/{id}`, `/services`, `/availability` | | add `offers` and `offerMessages`; `offerPricePaise`; each start's `pricePaise` and `listPricePaise` | customer app: offer prices, "%" on times, Confirm's price |
+| booking answers (customer and salon) | | services add `listPricePaise`; the customer's booking adds `totalListPricePaise`; `totalPricePaise` and `pricePaise` are what is paid | customer app: both prices on the booking |
+| `POST /bookings/{id}/reschedule` | kept the booked prices | prices again for the new time (an offer there, or none) | customer app: the move screen shows each time's price |
+| messages | | new type `BOOKING_OFFER` (customer list) | customer app: opens `/salons/{id}?offer=` |
+
+### API changes in the previous version
+
 **Salon registration, opening hours, ratings and come-back reminders** (V34–V36; partner app 0.9.0, customer app
 0.4.0 and admin website 0.7.0 use them; old apps keep working except where said):
 
@@ -850,7 +925,7 @@ On the salon's screens a booking shows the customer's name and, for the owner an
 | messages | | new types `BOOKING_RATE_VISIT`, `BOOKING_COME_BACK` (customer list) | customer app: open `?rate=1`, and `?services=` on a salon's page |
 | `GET /admin/shops/{id}` | `salon {barbers, services}` | `salon` adds `serviceList`, `hours`, `ratings`, `ratingAverage`; adds `registrationDoc {type, label, url, checkedAt}`; a change `registrationDoc` | admin website: the salon's setup and document |
 
-### API changes in the previous version
+### API changes in an earlier version
 
 **Earlier-slot alerts and the 10-minute late allowance** (V33; the customer app needs this for the switch, old apps
 keep working):
@@ -1542,7 +1617,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V37__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V40__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
@@ -1592,6 +1667,15 @@ checks `NOT VALID`). The new tables and the backfill come first, and everything 
 (`shops`, `salon_services`, `salon_staff`, and `revinfo` through the new tables' keys) last, so those locks are held
 only until the commit right after. V35 builds the `shops` indexes for the document CONCURRENTLY (see above if it
 fails) and drops `ix_appointments_shop_closures` (V18) CONCURRENTLY, no longer read now that closed days have their own table; V36 validates V34's checks and key.
+
+**V37–V39** (salon offers): V37 adds the empty `salon_offers`, `salon_offer_services` and `salon_offer_mutes` (their
+keys to shops, users and services added NOT VALID at the end, as in V34), the setup_version triggers on
+`salon_offers`, `salon_customer_prefs.salon_offers` (a constant default: no rewrite), and `appointment_services.offer_id`
+and `list_price_paise` (nullable, with a check and a key NOT VALID), the keys before the two busy tables so nothing
+waits on them while their locks are held; V38 builds `ix_appointment_services_offer` and
+`ix_appointments_completed_customers` CONCURRENTLY (see above if it fails); V39 validates V37's checks and keys. **Deploying V37–V39:** a rolling deploy is
+fine. While an old copy serves next to a new one, bookings made through it are at the normal price even inside an
+offer, its moves keep the booked price, and its `PUT /me/salon-preferences` still needs `comeBackReminders`.
 
 **Deploying V34–V36: one copy at a time is not enough, run a single instance for the switch-over.** While an old copy
 and a new one run side by side: an old copy completes bookings without follow-up rows (those visits get no rating
