@@ -22,7 +22,8 @@ import java.util.List;
 
 /**
  * Who may call what:
- * - sign-in endpoints (OTP, refresh, logout, recovery) are open;
+ * - sign-in endpoints (OTP, refresh, logout, recovery) are open, and so is the support inbox (POST
+ *   /api/v1/helpdesk/inbound), which checks the Email Worker's signature itself;
  * - everything else needs a valid access token;
  * - /api/v1/admin/** additionally needs an admin (field team) account.
  * No server sessions and no cookies: every request carries its token, so CSRF protection isn't needed.
@@ -48,7 +49,9 @@ public class SecurityConfig {
                                 "/api/v1/auth/refresh",
                                 "/api/v1/auth/logout",
                                 "/api/v1/auth/recover/start",
-                                "/api/v1/auth/recover/complete").permitAll()
+                                "/api/v1/auth/recover/complete",
+                                // Signed by the Email Worker (HMAC), checked by InboundEmailController
+                                "/api/v1/helpdesk/inbound").permitAll()
                         .requestMatchers("/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
