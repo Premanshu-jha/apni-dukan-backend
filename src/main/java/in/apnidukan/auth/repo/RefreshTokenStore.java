@@ -33,8 +33,15 @@ public class RefreshTokenStore {
      * A token as refresh needs it, with the database's clock when it was read.
      * @param successorUnused it was swapped for a token that has never been used (nor ended otherwise)
      */
+    /** @param sessionId the device's sign-in it belongs to (kept through every swap); null for a token from before V45 */
     public record Stored(UUID id, UUID userId, String device, Instant expiresAt, Instant revokedAt,
-                         RevokeReason revokeReason, UUID replacedBy, boolean successorUnused, Instant now) {
+                         RevokeReason revokeReason, UUID replacedBy, boolean successorUnused, Instant now,
+                         UUID sessionId) {
+
+        /** The sign-in this token belongs to: its own id for a token from before V45 (its successors keep it). */
+        public UUID session() {
+            return sessionId != null ? sessionId : id;
+        }
     }
 
     private final JdbcTemplate jdbc;
@@ -57,7 +64,7 @@ public class RefreshTokenStore {
     public Optional<Stored> read(String tokenHash) {
         return jdbc.query("SELECT t.id, t.user_id, t.device, t.expires_at, t.revoked_at, t.revoke_reason, "
                         + "t.replaced_by, (s.id IS NOT NULL AND s.revoked_at IS NULL) AS successor_unused, " + DB_NOW
-                        + " FROM refresh_tokens t LEFT JOIN refresh_tokens s ON s.id = t.replaced_by "
+                        + ", t.session_id FROM refresh_tokens t LEFT JOIN refresh_tokens s ON s.id = t.replaced_by "
                         + "WHERE t.token_hash = ?", RefreshTokenStore::stored, tokenHash)
                 .stream().findFirst();
     }
@@ -72,9 +79,11 @@ public class RefreshTokenStore {
     }
 
     /** A new token (a plain INSERT: the id is new, so nothing needs reading first). */
-    public void insert(UUID id, UUID userId, String tokenHash, String device, Instant createdAt, Instant expiresAt) {
-        jdbc.update("INSERT INTO refresh_tokens (id, user_id, token_hash, device, created_at, expires_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?)", id, userId, tokenHash, device, at(createdAt), at(expiresAt));
+    public void insert(UUID id, UUID userId, String tokenHash, String device, Instant createdAt, Instant expiresAt,
+                       UUID sessionId) {
+        jdbc.update("INSERT INTO refresh_tokens (id, user_id, token_hash, device, created_at, expires_at, session_id) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, tokenHash, device, at(createdAt), at(expiresAt),
+                sessionId);
     }
 
     private static Stored stored(ResultSet rs, int row) throws SQLException {
@@ -83,7 +92,7 @@ public class RefreshTokenStore {
         return new Stored(rs.getObject("id", UUID.class), rs.getObject("user_id", UUID.class), rs.getString("device"),
                 rs.getObject("expires_at", OffsetDateTime.class).toInstant(), revoked == null ? null : revoked.toInstant(),
                 reason == null ? null : RevokeReason.valueOf(reason), rs.getObject("replaced_by", UUID.class),
-                rs.getBoolean("successor_unused"), micros(rs.getLong(9)));
+                rs.getBoolean("successor_unused"), micros(rs.getLong(9)), rs.getObject("session_id", UUID.class));
     }
 
     private static OffsetDateTime at(Instant instant) {

@@ -281,7 +281,7 @@ public class AuthService {
                 refreshTokens.revokeIfActive(stored.replacedBy(), now, RevokeReason.GRACE_REPLACED);
                 UUID next = UUID.randomUUID();
                 refreshTokens.replacedBy(stored.id(), next);
-                return issueTokens(user, device != null ? device : stored.device(), false, next);
+                return issueTokens(user, device != null ? device : stored.device(), false, next, stored.session());
             }
             // A token replaced under the grace: the real phone presenting it after the grace means the old token was
             // used by someone else. Within the grace it is "sign in again" only.
@@ -304,7 +304,7 @@ public class AuthService {
         if (!tokenStore.rotate(stored.id(), now, next)) {
             throw unauthorized("INVALID_REFRESH_TOKEN", "Sign in again.");   // a sign-out of this device just now
         }
-        return issueTokens(user, device != null ? device : stored.device(), false, next);
+        return issueTokens(user, device != null ? device : stored.device(), false, next, stored.session());
     }
 
     /** 401 for a token past its 30 days, or a test account whose test mode ended (an active one is ended too). */
@@ -883,25 +883,31 @@ public class AuthService {
 
     // ---------------- helpers ----------------
 
+    /** A new sign-in on a device: a new session (its first refresh token's id). */
     private AuthTokens issueTokens(User user, String device, boolean newUser) {
-        return issueTokens(user, device, newUser, UUID.randomUUID());
+        UUID refreshId = UUID.randomUUID();
+        return issueTokens(user, device, newUser, refreshId, refreshId);
     }
 
-    /** @param refreshId the new refresh token's id (a swap records it on the token it replaces) */
-    private AuthTokens issueTokens(User user, String device, boolean newUser, UUID refreshId) {
+    /**
+     * @param refreshId the new refresh token's id (a swap records it on the token it replaces)
+     * @param sessionId the device's sign-in, kept through every swap: in the access token ("sid"), so what is allowed
+     *                  per device (editing a verified shop after its code, EditUnlockStore) stays on that device
+     */
+    private AuthTokens issueTokens(User user, String device, boolean newUser, UUID refreshId, UUID sessionId) {
         Instant now = Instant.now(clock);
         // The shop the person works in, and their role there, go into the token (looked up fresh every time)
         ShopMemberships.Membership membership = memberships.find(user.getId()).orElse(null);
         JwtService.IssuedToken access = jwt.issue(new AuthPrincipal(user.getId(),
                         membership == null ? null : membership.shopId(),
-                        membership == null ? null : membership.role(), user.isAdmin()),
+                        membership == null ? null : membership.role(), user.isAdmin(), sessionId),
                 revocations.generationForNewToken(user.getId()));
         byte[] raw = new byte[32];
         random.nextBytes(raw);
         String refresh = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
         Instant refreshExpires = now.plus(refreshValidity);
         tokenStore.insert(refreshId, user.getId(), Hashing.sha256Hex(refresh), trimDevice(device), now,
-                refreshExpires);
+                refreshExpires, sessionId);
         return new AuthTokens(access.token(), access.expiresAt(), refresh, refreshExpires, user, newUser);
     }
 

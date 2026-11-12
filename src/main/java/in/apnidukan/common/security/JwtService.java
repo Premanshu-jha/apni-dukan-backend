@@ -45,6 +45,9 @@ public class JwtService {
         if (who.shopId() != null) {
             builder.claim("shop", who.shopId().toString()).claim("role", who.shopRole());
         }
+        if (who.sessionId() != null) {
+            builder.claim("sid", who.sessionId().toString());
+        }
         return new IssuedToken(builder.signWith(key).compact(), expires);
     }
 
@@ -68,11 +71,13 @@ public class JwtService {
             if (claims.getSubject() == null || generation == null) {
                 throw new InvalidTokenException();
             }
+            String session = claims.get("sid", String.class);
             AuthPrincipal who = new AuthPrincipal(
                     UUID.fromString(claims.getSubject()),
                     shop == null ? null : UUID.fromString(shop),
                     claims.get("role", String.class),
-                    Boolean.TRUE.equals(admin));
+                    Boolean.TRUE.equals(admin),
+                    session == null ? null : UUID.fromString(session));
             return new ParsedToken(who, generation.longValue());
         } catch (ExpiredJwtException e) {
             throw new TokenExpiredException();

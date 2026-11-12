@@ -33,7 +33,7 @@ public class JwtCurrentUserProvider implements CurrentUserProvider {
         if (m == null) {
             throw new ApiException(HttpStatus.FORBIDDEN, "SHOP_REQUIRED", "Register or join a shop first.");
         }
-        return new CurrentUser(token.userId(), m.shopId(), m.role());
+        return new CurrentUser(token.userId(), m.shopId(), m.role(), token.sessionId());
     }
 
     @Override
@@ -42,6 +42,6 @@ public class JwtCurrentUserProvider implements CurrentUserProvider {
         if (auth == null || !(auth.getPrincipal() instanceof AuthPrincipal who)) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "NOT_SIGNED_IN", "Sign in first.");
         }
-        return new CurrentUser(who.userId(), who.shopId(), who.shopRole());
+        return new CurrentUser(who.userId(), who.shopId(), who.shopRole(), who.sessionId());
     }
 }
