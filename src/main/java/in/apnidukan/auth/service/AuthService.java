@@ -904,8 +904,15 @@ public class AuthService {
                 "Too many requests from this network. Try again later.").retryAfter(retryAfter);
     }
 
+    /**
+     * A verified email belongs to one account (it is how a lost number is recovered). Said only at verify, after the
+     * code (on the normal path, the code emailed to that inbox; in test mode, for a test-list email, any code), so
+     * sending a code tells nobody whether an address has an account. The words say what to do, since the usual cause is one person with two numbers (the customer app on one SIM, the
+     * partner app on the other).
+     */
     private static ApiException emailInUse() {
-        return new ApiException(HttpStatus.CONFLICT, "EMAIL_IN_USE", "This email is already used by another account");
+        return new ApiException(HttpStatus.CONFLICT, "EMAIL_IN_USE", "This email is already on another Clozest "
+                + "account, which uses a different mobile number. Sign in with that number instead, or use another email.");
     }
 
     private static ApiException phoneInUse() {
