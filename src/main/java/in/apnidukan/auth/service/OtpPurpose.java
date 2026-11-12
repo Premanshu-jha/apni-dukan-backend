@@ -17,7 +17,9 @@ public enum OtpPurpose {
     /** Signed in, changing the phone number: the second code, to the verified email (target: user, email, new number). */
     CHANGE_PHONE_EMAIL(Duration.ofMinutes(10)),
     /** The second code without a verified email: to the number the account has now (target: user, it, new number). */
-    CHANGE_PHONE_CURRENT(Duration.ofMinutes(10));
+    CHANGE_PHONE_CURRENT(Duration.ofMinutes(10)),
+    /** Code to the person's own phone, to unlock editing a verified shop's details for a while (EditUnlockStore). */
+    EDIT_UNLOCK(Duration.ofMinutes(10));
 
     private final Duration validFor;
 

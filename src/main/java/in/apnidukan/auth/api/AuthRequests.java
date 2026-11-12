@@ -31,6 +31,10 @@ public final class AuthRequests {
     public record VerifyEmail(@NotBlank @Size(max = 254) String email, @NotBlank @Size(max = 10) String code) {
     }
 
+    /** @param code the 6-digit code from POST /auth/me/edit-code */
+    public record EditUnlock(@NotBlank @Size(max = 10) String code) {
+    }
+
     /** @param code the 6-digit code from POST /auth/me/delete-code */
     public record DeleteAccount(@NotBlank @Size(max = 10) String code) {
     }

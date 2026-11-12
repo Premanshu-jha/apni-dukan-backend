@@ -17,11 +17,13 @@ import in.apnidukan.auth.api.AuthRequests.VerifyOtp;
 import in.apnidukan.auth.api.AuthResponses.TokenResponse;
 import in.apnidukan.auth.api.AuthResponses.UserResponse;
 import in.apnidukan.auth.service.AuthService;
+import in.apnidukan.auth.service.EditUnlockStore;
 import in.apnidukan.auth.service.AuthService.PhoneChangeSent;
 import in.apnidukan.common.context.CurrentUserProvider;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -34,11 +36,14 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuthController {
 
     private final AuthService auth;
+    private final EditUnlockStore editUnlocks;
     private final CurrentUserProvider currentUser;
     private final ClientAddress client;
 
-    public AuthController(AuthService auth, CurrentUserProvider currentUser, ClientAddress client) {
+    public AuthController(AuthService auth, EditUnlockStore editUnlocks, CurrentUserProvider currentUser,
+                          ClientAddress client) {
         this.auth = auth;
+        this.editUnlocks = editUnlocks;
         this.currentUser = currentUser;
         this.client = client;
     }
@@ -88,6 +93,48 @@ public class AuthController {
     @PatchMapping("/me")
     public UserResponse updateMe(@Valid @RequestBody UpdateMe body) {
         return UserResponse.from(auth.rename(currentUser.get().userId(), body.name()));
+    }
+
+    /**
+     * Unlocking a verified shop's details for editing, step 1: a code to your own phone (a test number in test mode:
+     * no SMS, any 6 digits). 202; 429 as for other codes.
+     */
+    @PostMapping("/me/edit-code")
+    public ResponseEntity<Void> sendEditCode(HttpServletRequest request) {
+        auth.sendEditCode(currentUser.get().userId(), client.of(request));
+        return ResponseEntity.accepted().build();
+    }
+
+    /**
+     * Step 2: with the code, editing your verified shop's details (name, papers, photos, video, document, an address
+     * change request) is unlocked for 15 minutes: 200 {@code {until, secondsLeft}}. 403 OWNER_ONLY (step 1) for
+     * anyone but a shop's owner. 400 WRONG_CODE / CODE_EXPIRED as for others.
+     */
+    @PostMapping("/me/edit-unlock")
+    public EditUnlocked unlockEditing(@Valid @RequestBody AuthRequests.EditUnlock body, HttpServletRequest request) {
+        java.time.Instant until = auth.unlockEditing(currentUser.get().userId(), body.code(), client.of(request));
+        return new EditUnlocked(until, editUnlocks.secondsLeft(until));
+    }
+
+    /** Until when editing is unlocked: {@code {until}}, null when it isn't. */
+    @GetMapping("/me/edit-unlock")
+    public EditUnlocked editUnlock() {
+        java.time.Instant until = editUnlocks.unlockedUntil(currentUser.get().userId()).orElse(null);
+        return new EditUnlocked(until, editUnlocks.secondsLeft(until));
+    }
+
+    /** Lock editing again now (Done). 204. */
+    @DeleteMapping("/me/edit-unlock")
+    public ResponseEntity<Void> lockEditing() {
+        editUnlocks.lock(currentUser.get().userId());
+        return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * @param until       when editing locks again; null when it is locked
+     * @param secondsLeft how long from now (0 when locked): count down from this, a phone's clock may be off
+     */
+    public record EditUnlocked(java.time.Instant until, long secondsLeft) {
     }
 
     /**

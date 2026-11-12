@@ -99,6 +99,7 @@ public class AuthService {
     private final RefreshTokenStore tokenStore;
     private final TestAccountShops testAccountShops;
     private final AdminTeamService team;
+    private final EditUnlockStore editUnlocks;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
@@ -110,7 +111,7 @@ public class AuthService {
                        SignInLimits signInLimits, TestModeService testMode,
                        List<PersonDetailsListener> detailsListeners, SmsBudget smsBudget,
                        RefreshTokenStore tokenStore, TestAccountShops testAccountShops, AdminTeamService team,
-                       List<PhoneChangeListener> phoneListeners,
+                       List<PhoneChangeListener> phoneListeners, EditUnlockStore editUnlocks,
                        @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds) {
         if (refreshGraceSeconds < 0 || refreshGraceSeconds > RETRY_GRACE.toSeconds()) {
             // Longer than the retry time would let an old token get new pairs after it should raise the alarm
@@ -118,6 +119,7 @@ public class AuthService {
         }
         this.refreshGrace = Duration.ofSeconds(refreshGraceSeconds);
         this.phoneListeners = phoneListeners;
+        this.editUnlocks = editUnlocks;
         this.team = team;
         this.testMode = testMode;
         this.smsBudget = smsBudget;
@@ -738,6 +740,41 @@ public class AuthService {
         return user.isEmailVerified()
                 ? new Second(OtpPurpose.CHANGE_PHONE_EMAIL, secondTarget(user.getId(), user.getEmail(), newPhone))
                 : new Second(OtpPurpose.CHANGE_PHONE_CURRENT, secondTarget(user.getId(), user.getPhone(), newPhone));
+    }
+
+    // ---------------- unlocking a verified shop's details for editing ----------------
+
+    /**
+     * A code to the person's own phone, so a borrowed or stolen session can't change a verified shop's details
+     * (EditUnlockStore). A test number in OTP test mode gets no SMS and takes any 6 digits, as at sign-in.
+     */
+    public void sendEditCode(UUID userId, String ip) {
+        User user = me(userId);
+        // Only a shop's owner edits its details: nobody else can make the server send these codes
+        if (memberships.find(userId).filter(m -> "OWNER".equals(m.role())).isEmpty()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only a shop's owner needs this code.");
+        }
+        limitSends(ip);
+        if (testMode.acceptsAnyCode(user.getPhone())) {
+            return;
+        }
+        SmsBudget.To to = SmsBudget.To.signedIn(user.getPhone());
+        smsBudget.requireRoom(to);   // before a new code replaces the one they already have
+        String code = otp.issue(OtpPurpose.EDIT_UNLOCK, user.getPhone(), ip);
+        sendSms(to, () -> sms.sendOtp(user.getPhone(), code));
+    }
+
+    /**
+     * With the code from sendEditCode (or any 6 digits for a test number in test mode), editing is unlocked for 15
+     * minutes; returns until when. 400 WRONG_CODE / CODE_EXPIRED as for other codes.
+     */
+    public Instant unlockEditing(UUID userId, String code, String ip) {
+        User user = me(userId);
+        limitVerifies(ip);
+        if (!testCodeAccepted(user.getPhone(), code)) {
+            otp.verify(OtpPurpose.EDIT_UNLOCK, user.getPhone(), code, ip);
+        }
+        return editUnlocks.unlock(userId);
     }
 
     // ---------------- deleting the account ----------------
