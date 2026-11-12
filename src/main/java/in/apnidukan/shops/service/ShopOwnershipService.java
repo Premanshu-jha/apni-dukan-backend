@@ -150,7 +150,8 @@ public class ShopOwnershipService implements TestAccountShops {
 
     /**
      * Closes my shop for good (owner only). {@code version} is the one from GET /shops/me (409 SHOP_CHANGED if
-     * stale). Asking again after it worked (a lost reply) answers the closed shop again.
+     * stale). A verified shop needs the edit code on this device first (403 EDIT_LOCKED), as its details do. Asking
+     * again after it worked (a lost reply) answers the closed shop again.
      */
     @Transactional
     public ShopResponse close(UUID userId, long version, String reasonInput) {
@@ -165,6 +166,7 @@ public class ShopOwnershipService implements TestAccountShops {
         if (shop.getVersion() != version) {
             throw shopChanged();
         }
+        shopService.requireUnlocked(shop, userId);   // a verified shop closes only after the code, on this device
         String reason = reasonInput == null || reasonInput.isBlank() ? null
                 : TextCleaner.clean(CLOSE_REASON, reasonInput);
         closeLocked(shop, owner, userId, reason, now());
@@ -233,18 +235,23 @@ public class ShopOwnershipService implements TestAccountShops {
     /**
      * Asks the person with this phone to take my shop over (owner only). The same answer whether or not the number
      * has an account (they see it after signing in). 409 HANDOVER_PENDING while another request waits (cancel it
-     * first); 429 TOO_MANY_REQUESTS after HANDOVERS_PER_DAY requests in a day.
+     * first); 429 TOO_MANY_REQUESTS after HANDOVERS_PER_DAY requests in a day. A verified shop needs the edit code on
+     * this device first (403 EDIT_LOCKED).
      */
     @Transactional
     public HandoverRequested requestHandover(UUID userId, String phoneInput, long version) {
         UUID shopId = requireOwner(membership(userId)).getShopId();
         String phone = users.normalizePhone(phoneInput);
+        // The code first: asking without it (the app then asks for the code) doesn't use one of the day's requests.
+        // No entity read here: the row is locked and read fresh below, and checked again there.
+        shopService.requireUnlocked(shopId, userId);
         requireRequestsLeft(shopId);   // counted before anything else is checked: a refused try counts too
         Shop shop = shops.lockById(shopId).orElseThrow();
         ownerUnderLock(shopId, userId);
         if (shop.getVersion() != version) {
             throw shopChanged();
         }
+        shopService.requireUnlocked(shop, userId);   // approved since the check above: still the code
         Person me = users.find(Set.of(userId)).get(userId);
         if (me != null && phone.equals(me.phone())) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",

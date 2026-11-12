@@ -1,5 +1,7 @@
 package in.apnidukan.auth.service;
 
+import in.apnidukan.common.context.CurrentUser;
+import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.context.EditUnlocks;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -12,9 +14,12 @@ import java.util.UUID;
 
 /**
  * Editing a verified shop's details is unlocked for {@link #FOR} after the owner enters a code sent to his own phone
- * (AuthService.sendEditCode / unlockEditing), so a phone left signed in, or a stolen session, can't change them alone.
- * Kept in Redis (key edit-unlock:{userId}, the end as epoch milliseconds, expiring with it). Redis down: no unlock can
- * be made or read, and the change answers 503 like any call that needs Redis.
+ * (AuthService.sendEditCode / unlockEditing), on that device only: another sign-in to the same account (a phone left
+ * signed in at the salon, another computer) needs its own code. (A copied token shares its device's sign-in, until
+ * reuse detection ends every session.) Kept in Redis per device sign-in (key
+ * edit-unlock:{userId}:{sessionId}, the end as epoch milliseconds, expiring with it). A token from before sessions
+ * were named (at most 15 minutes after the deploy) shares one key, "-". Redis down: no unlock can be made or read,
+ * and the change answers 503 like any call that needs Redis.
  */
 @Service
 public class EditUnlockStore implements EditUnlocks {
@@ -23,10 +28,12 @@ public class EditUnlockStore implements EditUnlocks {
     public static final Duration FOR = Duration.ofMinutes(15);
 
     private final StringRedisTemplate redis;
+    private final CurrentUserProvider currentUser;
     private final Clock clock;
 
-    public EditUnlockStore(StringRedisTemplate redis, Clock clock) {
+    public EditUnlockStore(StringRedisTemplate redis, CurrentUserProvider currentUser, Clock clock) {
         this.redis = redis;
+        this.currentUser = currentUser;
         this.clock = clock;
     }
 
@@ -37,7 +44,7 @@ public class EditUnlockStore implements EditUnlocks {
         return until;
     }
 
-    /** Locked again now (the owner tapped Done). */
+    /** Locked again now on this device (the owner tapped Done). */
     public void lock(UUID userId) {
         redis.delete(key(userId));
     }
@@ -61,7 +68,12 @@ public class EditUnlockStore implements EditUnlocks {
         }
     }
 
-    private static String key(UUID userId) {
-        return "edit-unlock:" + userId;
+    /** The person on the device making this request (the caller is always the signed-in person themselves). */
+    private String key(UUID userId) {
+        CurrentUser me = currentUser.get();
+        if (!me.userId().equals(userId)) {
+            throw new IllegalStateException("An edit unlock is only ever read or set for the caller");
+        }
+        return "edit-unlock:" + userId + ":" + (me.sessionId() == null ? "-" : me.sessionId());
     }
 }
