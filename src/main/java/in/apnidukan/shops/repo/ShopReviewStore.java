@@ -36,8 +36,11 @@ public class ShopReviewStore {
     /** Shops a list page returns; the next page starts after the last one (see {@link Cursor}). */
     public static final int PAGE = 50;
 
+    /** Re-check: approved before and waiting again (the predicate of ix_shops_review_recheck, V42). */
+    static final String RECHECK_SQL = "((s.status = 'PENDING_VISIT' AND s.ever_approved) OR s.recheck_since IS NOT NULL)";
+
     private static final String GROUP = "CASE "
-            + "WHEN s.status = 'PENDING_VISIT' AND s.ever_approved THEN 'RECHECK' "
+            + "WHEN " + RECHECK_SQL + " THEN 'RECHECK' "
             + "WHEN s.status = 'PENDING_VISIT' THEN 'FIRST_VISIT' "
             + "WHEN s.status = 'DRAFT' AND s.status_reason IS NOT NULL THEN 'SENT_BACK' "
             + "WHEN s.status = 'APPROVED' THEN 'LIVE' "
@@ -105,7 +108,7 @@ public class ShopReviewStore {
      * (null: the first page). `q` (optional) matches the shop number exactly ("1042" or "#1042"), the owner's phone in
      * part (spaces, "+91" and dashes ignored), or the name or owner's name in part. {@code assignee}: only the shops
      * assigned to this field agent (ix_shops_assignee_list); {@code unassigned}: only those waiting for a visit with no
-     * agent (ix_shops_unassigned); neither: every shop.
+     * agent (ix_shops_unassigned_waiting); neither: every shop.
      */
     public List<UUID> search(ShopType type, ReviewGroup group, String q, Cursor after, UUID assignee,
                              boolean unassigned) {
@@ -113,9 +116,9 @@ public class ShopReviewStore {
         StringBuilder sql = new StringBuilder("SELECT s.id FROM shops s WHERE s.type = ? AND ");
         sql.append(switch (group) {
             case FIRST_VISIT -> "s.status = 'PENDING_VISIT' AND NOT s.ever_approved";
-            case RECHECK -> "s.status = 'PENDING_VISIT' AND s.ever_approved";
+            case RECHECK -> RECHECK_SQL;
             case SENT_BACK -> "s.status = 'DRAFT' AND s.status_reason IS NOT NULL";
-            case LIVE -> "s.status = 'APPROVED'";
+            case LIVE -> "s.status = 'APPROVED' AND s.recheck_since IS NULL";
             case SUSPENDED -> "s.status = 'SUSPENDED'";
             case CLOSED -> "s.status = 'CLOSED'";
         });
@@ -213,22 +216,39 @@ public class ShopReviewStore {
     }
 
     /**
-     * The shop as it was at the moment it was last approved (the history row where it became APPROVED), if it ever
-     * was. Not a later row saved while it stayed live: edits that didn't need a visit (a new name, GSTIN) were never
-     * checked, so they must show up as changes too.
+     * The shop as it was at the moment it was last checked by the field team (the history row where it became
+     * APPROVED, or where a live shop's re-check was done: approved with nothing waiting after a row that was waiting),
+     * if it ever was. Not a later row saved while it stayed live: edits that didn't need a visit (a new name) were
+     * never checked, and a live shop waiting for its re-check stays APPROVED, so they must show up as changes too.
+     * Found by the check count (V41); for a shop checked before that column, by the status change.
      */
     public Optional<Snapshot> lastApproved(UUID shopId) {
+        // The first history row with the newest check count: the version the field team checked (a re-check that
+        // ended without a check, ShopService.endRecheckIfNothingLeft, keeps the count, so it doesn't count)
+        Optional<Snapshot> checked = jdbc.query("SELECT a.* FROM shops_aud a WHERE a.id = ? AND a.checks > 0 "
+                        + "AND a.checks = (SELECT max(b.checks) FROM shops_aud b WHERE b.id = a.id) "
+                        + "ORDER BY a.rev LIMIT 1",
+                rs -> rs.next() ? Optional.of(snapshot(rs)) : Optional.<Snapshot>empty(), shopId);
+        if (checked.isPresent()) {
+            return checked;
+        }
+        // Checked before the count existed (V41)
         return jdbc.query("SELECT a.* FROM shops_aud a WHERE a.id = ? AND a.status = 'APPROVED' "
-                        + "AND COALESCE((SELECT p.status FROM shops_aud p WHERE p.id = a.id AND p.rev < a.rev "
-                        + "ORDER BY p.rev DESC LIMIT 1), '') <> 'APPROVED' ORDER BY a.rev DESC LIMIT 1",
+                        + "AND a.recheck_since IS NULL AND (SELECT p.status <> 'APPROVED' OR p.recheck_since IS NOT NULL "
+                        + "FROM shops_aud p WHERE p.id = a.id AND p.rev < a.rev ORDER BY p.rev DESC LIMIT 1) "
+                        + "IS NOT FALSE ORDER BY a.rev DESC LIMIT 1",
                 rs -> rs.next() ? Optional.of(snapshot(rs)) : Optional.<Snapshot>empty(), shopId);
     }
 
-    /** Whether a file was a photo of some shop's last approved version (kept so the field team can compare). */
+    /**
+     * Whether a file was a photo of some shop's last checked version (kept so the field team can compare): the newest
+     * approved history row with no re-check waiting (photos always need one, so those rows hold checked photos).
+     */
     public boolean isLastApprovedPhoto(UUID fileId) {
         Boolean yes = jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM shops_aud a WHERE a.status = 'APPROVED' "
-                + "AND (a.owner_photo_file_id = ? OR a.shop_photo_file_id = ?) AND a.rev = (SELECT max(b.rev) "
-                + "FROM shops_aud b WHERE b.id = a.id AND b.status = 'APPROVED'))", Boolean.class, fileId, fileId);
+                + "AND a.recheck_since IS NULL AND (a.owner_photo_file_id = ? OR a.shop_photo_file_id = ?) "
+                + "AND a.rev = (SELECT max(b.rev) FROM shops_aud b WHERE b.id = a.id AND b.status = 'APPROVED' "
+                + "AND b.recheck_since IS NULL))", Boolean.class, fileId, fileId);
         return Boolean.TRUE.equals(yes);
     }
 
