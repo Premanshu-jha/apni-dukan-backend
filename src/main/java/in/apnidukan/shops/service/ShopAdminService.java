@@ -73,12 +73,14 @@ public class ShopAdminService {
     private final SalonFacts salons;
     private final DashboardCounts dashboardCounts;
     private final ShopAssignments assignments;
+    private final ShopService shopService;
     private final Clock clock;
 
     public ShopAdminService(ShopRepository shops, ShopMemberRepository members, UserDirectory users, FileRefs files,
                             Notifications notifications, List<ShopChangeListener> listeners, ShopReviewStore review,
                             SalonFacts salons, DashboardCounts dashboardCounts, ShopAssignments assignments,
-                            Clock clock) {
+                            ShopService shopService, Clock clock) {
+        this.shopService = shopService;
         this.dashboardCounts = dashboardCounts;
         this.assignments = assignments;
         this.review = review;
@@ -244,7 +246,8 @@ public class ShopAdminService {
 
     /**
      * Live salons whose registration document was added or replaced since the field team last checked one (super
-     * admins only), oldest change first, at most 100. Salons waiting for a visit aren't listed: the visit checks it.
+     * admins only), oldest change first, at most 100. Salons waiting for a visit (PENDING_VISIT) aren't listed: the
+     * visit checks it. A live salon waiting for its re-check is: approving the re-check doesn't check the document.
      */
     @Transactional(readOnly = true)
     public List<AdminShopResponse> documentsToCheck(UUID adminId) {
@@ -301,26 +304,56 @@ public class ShopAdminService {
     }
 
     /**
-     * Approves a shop after the visit (PENDING_VISIT only). {@code version} is the one shown in the list the field
-     * team checked: if the owner changed anything since (photos, address), 409 SHOP_CHANGED, so nothing unchecked
-     * goes live. 409 WRONG_STATUS from any other status; 404 if there's no such shop.
+     * Approves a shop after the visit: PENDING_VISIT, or a live shop waiting for its re-check (it stays live; its
+     * changes count as checked). {@code version} is the one shown in the list the field team checked: if the owner
+     * changed anything since (photos, address), 409 SHOP_CHANGED, so nothing unchecked is approved. 409 WRONG_STATUS
+     * from any other status (a live shop with nothing to re-check too); 404 if there's no such shop.
      */
     @Transactional
     public AdminShopResponse approve(UUID adminId, UUID shopId, long version, String noteInput) {
-        Shop shop = checked(adminId, shopId, version, "approved", false, ShopStatus.PENDING_VISIT);
+        Shop shop = checkedWaiting(adminId, shopId, version, "approved");
+        boolean wasLive = shop.getStatus() == ShopStatus.APPROVED;
         String note = optionalNote(noteInput);
         shop.approve(now());
         save(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.APPROVED, null, note, List.of());
         dashboardCounts.clearAfterCommit();
-        tellOwner(shop, "SHOP_APPROVED", "Your shop is live",
-                shop.details().name() + " is approved. Customers nearby can find it now.");
+        if (wasLive) {
+            tellOwner(shop, "SHOP_RECHECKED", "Your changes are checked",
+                    "Our field team checked the changes to " + shop.details().name() + ". Nothing more to do.");
+        } else {
+            tellOwner(shop, "SHOP_APPROVED", "Your shop is live",
+                    shop.details().name() + " is approved. Customers nearby can find it now.");
+        }
         return view(shop);
     }
 
     /**
-     * The visit didn't pass but the shop can fix it: back to DRAFT with the reason; the owner fixes it and submits
-     * again. Bookings already made (a salon re-checked after a move) stay; suspend instead to cancel them.
+     * Like checked, for approve and send back: the shop must be waiting for a visit (PENDING_VISIT, or a live shop's
+     * re-check). Checked before the version, as the status is in checked: a live shop another admin approved first
+     * answers 409 WRONG_STATUS (nothing waits any more), not SHOP_CHANGED.
+     */
+    private Shop checkedWaiting(UUID adminId, UUID shopId, long version, String what) {
+        assignments.requireCanDecide(adminId, shopId);
+        Shop shop = shops.findById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
+        requireNotOwnShop(adminId, shopId);
+        if (!shop.waitingForVisit()) {
+            throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
+                    "A shop that is " + shop.getStatus() + (shop.getStatus() == ShopStatus.APPROVED
+                            ? " with nothing waiting for a check" : "") + " can't be " + what
+                            + ". Someone may have decided already; reload.", Map.of("status", shop.getStatus().name()));
+        }
+        if (shop.getVersion() != version) {
+            throw new ApiException(HttpStatus.CONFLICT, "SHOP_CHANGED",
+                    "The shop changed after you loaded it. Reload and check the new details first.");
+        }
+        return shop;
+    }
+
+    /**
+     * The visit didn't pass but the shop can fix it: PENDING_VISIT → DRAFT with the reason; the owner fixes it and
+     * submits again. Bookings already made (a reinstated salon) stay; suspend instead to cancel them. A live shop's
+     * re-check is never sent back (that would strand its team and its bookings): askToFix.
      */
     @Transactional
     public AdminShopResponse reject(UUID adminId, UUID shopId, long version, String reasonInput, String noteInput,
@@ -335,6 +368,59 @@ public class ShopAdminService {
         tellOwner(shop, "SHOP_NOT_APPROVED", "Your shop needs a change",
                 shop.details().name() + " wasn't approved yet: " + reason + " Fix it in the app and submit again.");
         return view(shop);
+    }
+
+    /**
+     * A live shop's re-check needs a fix from the owner: it stays as it is (live) and keeps its place in the queue, the owner is told the reason (statusReason, until he changes
+     * something or the field team approves). Same rules as approve; 409 WRONG_STATUS for anything but a live shop
+     * waiting for its re-check (a first visit is sent back instead).
+     */
+    @Transactional
+    public AdminShopResponse askToFix(UUID adminId, UUID shopId, long version, String reasonInput, String noteInput,
+                                      Collection<VisitIssue> checklist) {
+        Shop shop = checkedWaiting(adminId, shopId, version, "asked for a fix");
+        if (shop.getStatus() != ShopStatus.APPROVED) {
+            throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS", "A shop that is " + shop.getStatus()
+                    + " is sent back, not asked for a fix.", Map.of("status", shop.getStatus().name()));
+        }
+        String reason = TextCleaner.clean(REASON, reasonInput);
+        String note = optionalNote(noteInput);
+        shop.askToFix(reason, now());
+        save(shop);
+        review.addEvent(shopId, now(), adminId, true, ShopEventType.FIX_ASKED, reason, note, issues(checklist));
+        tellOwner(shop, "SHOP_FIX_ASKED", "Please fix your change", "Our field team checked the changes to "
+                + shop.details().name() + ": " + reason + " Fix it in the Salon tab → Salon details (or Photos and "
+                + "video). Your salon stays live.", "/setup");
+        return view(shop);
+    }
+
+    /**
+     * The field team changes a shop's address or pin (the owner can't once it was verified, Shop.addressLocked): any
+     * status but CLOSED, a field agent only for a business assigned to them, never their own. No re-check (they
+     * checked it); a note on the timeline with the old and new address; the owner is told. 409 SHOP_CHANGED /
+     * WRONG_STATUS as for a decision; 400 VALIDATION_FAILED for a field the owner's edit would refuse.
+     */
+    @Transactional
+    public AdminShopResponse changeAddress(UUID adminId, UUID shopId, long version, String addressLine, String area,
+                                          String city, String pincode, java.math.BigDecimal latitude,
+                                          java.math.BigDecimal longitude) {
+        assignments.lockForAssignment();   // first: a new pincode may assign it to another field agent
+        Shop shop = checked(adminId, shopId, version, "changed", false, ShopStatus.DRAFT, ShopStatus.PENDING_VISIT,
+                ShopStatus.APPROVED, ShopStatus.SUSPENDED);
+        ShopDetails old = shopService.moveByFieldTeam(shop, addressLine, area, city, pincode, latitude, longitude);
+        if (old != null) {
+            ShopDetails now = shop.details();
+            review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null, "Address changed by the field "
+                    + "team: " + addressText(old) + " → " + addressText(now), List.of());
+            dashboardCounts.clearAfterCommit();
+            tellOwner(shop, "SHOP_ADDRESS_CHANGED", "Your address is updated", "Our field team changed the address "
+                    + "of " + now.name() + " to " + addressText(now) + ". Customers see the new one now.");
+        }
+        return view(shop);
+    }
+
+    private static String addressText(ShopDetails d) {
+        return d.addressLine() + ", " + d.area() + ", " + d.city() + " " + d.pincode();
     }
 
     /**

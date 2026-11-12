@@ -24,7 +24,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Which field agent visits each business waiting for a visit (PENDING_VISIT).
+ * Which field agent visits each business waiting for a visit (PENDING_VISIT, or a live business's re-check).
  *
  * <p>The rule: when a business starts waiting for a visit (submitted, an approved one changed what was checked,
  * reinstated), or its pincode changes while it waits and its agent doesn't cover the new one, it goes to the field

@@ -164,12 +164,16 @@ public class ShopService implements ShopMemberships {
         if (updated.equals(old)) {
             return ShopResponse.from(shop, member.getRole());
         }
-        boolean wasApproved = shop.getStatus() == ShopStatus.APPROVED;
-        shop.apply(updated, now());
         boolean moved = !sameLocation(old, updated);
-        if (moved) {
-            recheck(shop, userId);   // the field team checked the old address: check the new one
+        if (moved && shop.addressLocked()) {
+            // Verified by the field team: only they change it now (ShopAdminService.changeAddress)
+            throw new ApiException(HttpStatus.CONFLICT, "ADDRESS_LOCKED", "Your address was verified by our field "
+                    + "team, so only they can change it. Ask them to change it for you.");
         }
+        shop.apply(updated, now());
+        // The field team checked the old papers: a live shop waits for them to check the new ones (a shop not live yet
+        // is checked at its visit anyway)
+        boolean waitsNow = !sameRegistrations(old, updated) && recheck(shop, userId);
         try {
             shops.saveAndFlush(shop);
         } catch (ObjectOptimisticLockingFailureException e) {
@@ -178,7 +182,7 @@ public class ShopService implements ShopMemberships {
         if (moved) {
             listeners.forEach(l -> l.locationChanged(shop.getId()));   // e.g. salon reminders with the new address
         }
-        if (moved && wasApproved) {
+        if (waitsNow) {
             assignments.startedWaiting(shop.getId(), "RECHECK");
         } else if (!old.pincode().equals(updated.pincode())) {
             assignments.pincodeChanged(shop.getId());   // waiting for a visit: the agent may not cover the new one
@@ -199,12 +203,11 @@ public class ShopService implements ShopMemberships {
                 : photo("shopPhotoFileId", in.shopPhotoFileId(), shop, "SHOP_PHOTO");
         if (!java.util.Objects.equals(owner, shop.getOwnerPhotoFileId())
                 || !java.util.Objects.equals(front, shop.getShopPhotoFileId())) {
-            boolean wasApproved = shop.getStatus() == ShopStatus.APPROVED;
             shop.setPhotos(owner, front, now());
-            recheck(shop, userId);   // the field team checked the old photos: check the new ones
+            boolean waitsNow = recheck(shop, userId);   // the field team checked the old photos: check the new ones
             try {
                 saveShop(shop);
-                if (wasApproved) {
+                if (waitsNow) {
                     assignments.startedWaiting(shop.getId(), "RECHECK");
                 }
             } catch (DataIntegrityViolationException deletedMeanwhile) {
@@ -226,8 +229,9 @@ public class ShopService implements ShopMemberships {
     /**
      * Sets the salon video (a salon's owner only; 409 NOT_A_SALON for a kirana): a SHOP_VIDEO file of this shop (POST
      * /files/video-uploads/{id}/complete); otherwise 400 naming fileId. Like a new photo, a new video on an approved
-     * shop sends it back to the field team. In the same transaction the new video is kept (off the deletion queue) and
-     * the one it replaces goes (its row now, its bytes queued for deletion due now); a refused save changes neither.
+     * shop puts it in the field team's re-check (it stays live). In the same transaction the new video is kept (off
+     * the deletion queue) and the one it replaces goes (its row now, its bytes queued for deletion due now); a refused
+     * save changes neither.
      */
     @Transactional
     public ShopResponse setVideo(UUID userId, ShopRequests.SetVideo in) {
@@ -244,12 +248,11 @@ public class ShopService implements ShopMemberships {
         UUID old = shop.getShopVideoFileId();
         if (!video.equals(old)) {
             files.keep(video);   // first: 409 UPLOAD_GONE if it was purged meanwhile, and the shop stays as it was
-            boolean wasApproved = shop.getStatus() == ShopStatus.APPROVED;
             shop.setVideo(video, now());
-            recheck(shop, userId);   // the field team checked the old video: check the new one
+            boolean waitsNow = recheck(shop, userId);   // the field team checked the old video: check the new one
             try {
                 saveShop(shop);
-                if (wasApproved) {
+                if (waitsNow) {
                     assignments.startedWaiting(shop.getId(), "RECHECK");
                 }
             } catch (DataIntegrityViolationException deletedMeanwhile) {
@@ -381,12 +384,18 @@ public class ShopService implements ShopMemberships {
                 || review.isLastApprovedPhoto(fileId);
     }
 
-    /** An approved shop changed what the field team checked: back to them, noted on its timeline. */
-    private void recheck(Shop shop, UUID ownerId) {
-        if (shop.getStatus() == ShopStatus.APPROVED) {
-            shop.recheckIfApproved(now());
-            review.addEvent(shop.getId(), now(), ownerId, false, ShopEventType.EDITED, null, null, List.of());
+    /**
+     * A live shop changed what the field team checked: it waits for their re-check (Shop.requestRecheck).
+     * True when it started waiting now (the caller assigns it after saving); its timeline says so then. False when it
+     * already waits (it keeps its place in the queue; the field team sees every change since the last check) or isn't
+     * live.
+     */
+    private boolean recheck(Shop shop, UUID ownerId) {
+        if (!shop.requestRecheck(now())) {
+            return false;
         }
+        review.addEvent(shop.getId(), now(), ownerId, false, ShopEventType.EDITED, null, null, List.of());
+        return true;
     }
 
     private Shop ownedShop(UUID userId, long version) {
@@ -481,6 +490,39 @@ public class ShopService implements ShopMemberships {
             members.delete(m);
             members.flush();
         });
+    }
+
+    /**
+     * The field team changes a shop's address or pin (ShopAdminService.changeAddress; the caller checked who may and
+     * the version, and holds the team lock): the same limits as the owner's edit; no re-check (they checked it). Its
+     * pending messages get the new address, and a shop waiting for a visit whose pincode changed goes by the rule
+     * again. Returns the old details, or null when nothing changed.
+     */
+    ShopDetails moveByFieldTeam(Shop shop, String addressLine, String area, String city, String pincode,
+                                BigDecimal latitude, BigDecimal longitude) {
+        ShopDetails old = shop.details();
+        ShopDetails moved = new ShopDetails(old.name(), old.ownerName(), clean(ADDRESS_LINE, addressLine),
+                clean(AREA, area), clean(CITY, city), pincode, coordinate(latitude), coordinate(longitude), old.gstin(),
+                old.udyamNumber());
+        if (sameLocation(old, moved)) {
+            return null;
+        }
+        shop.apply(moved, now());
+        try {
+            shops.saveAndFlush(shop);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            throw shopChanged();
+        }
+        listeners.forEach(l -> l.locationChanged(shop.getId()));
+        if (!old.pincode().equals(moved.pincode())) {
+            assignments.pincodeChanged(shop.getId());
+        }
+        return old;
+    }
+
+    /** The GSTIN and Udyam number: the field team checks them like the address. */
+    private static boolean sameRegistrations(ShopDetails a, ShopDetails b) {
+        return java.util.Objects.equals(a.gstin(), b.gstin()) && java.util.Objects.equals(a.udyamNumber(), b.udyamNumber());
     }
 
     /** Address, area, city, pincode and the map pin: what the field team visits and checks. */

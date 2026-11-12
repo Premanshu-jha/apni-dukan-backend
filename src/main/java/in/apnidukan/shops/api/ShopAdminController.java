@@ -18,6 +18,7 @@ import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -120,18 +121,28 @@ public class ShopAdminController {
     }
 
     /**
-     * Approve a shop after its visit (PENDING_VISIT): customers can find it from now on. Send {"version": n} from
-     * the page you checked; 409 SHOP_CHANGED if the owner changed something since.
+     * Approve a shop after its visit (PENDING_VISIT: customers can find it from now on), or a live shop's re-check (it
+     * stays live; its changes count as checked). Send {"version": n} from the page you checked; 409 SHOP_CHANGED if
+     * the owner changed something since, 409 WRONG_STATUS when nothing waits for a check.
      */
     @PostMapping("/shops/{id}/approve")
     public AdminShopResponse approve(@PathVariable UUID id, @Valid @RequestBody Approve body) {
         return admin.approve(caller(), id, body.version(), body.note());
     }
 
-    /** The visit didn't pass: back to DRAFT with the reason the owner sees. 409 WRONG_STATUS / SHOP_CHANGED. */
+    /** The visit didn't pass (PENDING_VISIT): back to DRAFT with the reason the owner sees. 409 WRONG_STATUS / SHOP_CHANGED. */
     @PostMapping("/shops/{id}/reject")
     public AdminShopResponse reject(@PathVariable UUID id, @Valid @RequestBody Decision body) {
         return admin.reject(caller(), id, body.version(), body.reason(), body.note(), body.checklist());
+    }
+
+    /**
+     * A live shop's re-check needs a fix: it stays as it is and waits, the owner sees the reason. Same body as reject.
+     * 409 WRONG_STATUS (not a live shop waiting for its re-check) / SHOP_CHANGED.
+     */
+    @PostMapping("/shops/{id}/ask-to-fix")
+    public AdminShopResponse askToFix(@PathVariable UUID id, @Valid @RequestBody Decision body) {
+        return admin.askToFix(caller(), id, body.version(), body.reason(), body.note(), body.checklist());
     }
 
     /**
@@ -141,6 +152,29 @@ public class ShopAdminController {
     @PostMapping("/shops/{id}/suspend")
     public AdminShopResponse suspend(@PathVariable UUID id, @Valid @RequestBody Decision body) {
         return admin.suspend(caller(), id, body.version(), body.reason(), body.note(), body.checklist());
+    }
+
+    /**
+     * The field team changes the address or pin (once verified the owner can't): `{version, addressLine, area, city,
+     * pincode, latitude, longitude}`, all needed, the same limits as the owner's edit. No re-check; a note on the
+     * timeline; the owner is told. Any status but CLOSED; a field agent only for a business assigned to them.
+     */
+    @PatchMapping("/shops/{id}/address")
+    public AdminShopResponse changeAddress(@PathVariable UUID id, @Valid @RequestBody AddressChange body) {
+        return admin.changeAddress(caller(), id, body.version(), body.addressLine(), body.area(), body.city(),
+                body.pincode(), body.latitude(), body.longitude());
+    }
+
+    public record AddressChange(@NotNull Long version,
+                                @NotBlank @Size(min = 5, max = 200) String addressLine,
+                                @NotBlank @Size(min = 2, max = 100) String area,
+                                @NotBlank @Size(min = 2, max = 60) String city,
+                                @NotNull @jakarta.validation.constraints.Pattern(regexp = "[1-9][0-9]{5}",
+                                        message = "must be a 6-digit pincode") String pincode,
+                                @NotNull @jakarta.validation.constraints.DecimalMin("6.0")
+                                @jakarta.validation.constraints.DecimalMax("37.6") java.math.BigDecimal latitude,
+                                @NotNull @jakarta.validation.constraints.DecimalMin("68.0")
+                                @jakarta.validation.constraints.DecimalMax("97.5") java.math.BigDecimal longitude) {
     }
 
     /** End a suspension: back to PENDING_VISIT, live again after the field team approves it. */

@@ -22,8 +22,14 @@ import java.util.UUID;
  * @param registrationDocFileId the document's file, or null if none; the owner's only
  * @param registrationDocCheckedAt when the field team checked the document now there (customers then see
  *                              "Registered"); null if not yet or none; the owner's only
- * @param statusReason why the field team sent it back to DRAFT or suspended it; null otherwise (and for barbers)
+ * @param statusReason why the field team sent it back to DRAFT or suspended it, or the fix they asked for on a live
+ *                     shop's re-check; null otherwise (and for barbers)
  * @param version send this back with PATCH /shops/me
+ * @param recheckSince when the field team's re-check of a live shop's changes started waiting (a photo, the video,
+ *                     the GSTIN or Udyam number changed); null when nothing waits. The shop stays live meanwhile. The
+ *                     owner's only
+ * @param addressLocked the address and pin were verified by the field team: the owner can't change them any more
+ *                     (PATCH /shops/me answers 409 ADDRESS_LOCKED); the field team does
  */
 public record ShopResponse(UUID id, long shopCode, String name, String ownerName, String addressLine, String area,
                            String city, String pincode, BigDecimal latitude, BigDecimal longitude, String gstin,
@@ -31,13 +37,13 @@ public record ShopResponse(UUID id, long shopCode, String name, String ownerName
                            UUID ownerPhotoFileId, UUID shopPhotoFileId, UUID shopVideoFileId,
                            RegistrationDocType registrationDocType, UUID registrationDocFileId,
                            Instant registrationDocCheckedAt, long version,
-                           Instant createdAt, Instant updatedAt) {
+                           Instant createdAt, Instant updatedAt, Instant recheckSince, boolean addressLocked) {
 
     /** The same without GSTIN, Udyam number, the owner's photo, the salon video and the registration document. */
     public ShopResponse forBarber() {
         return new ShopResponse(id, shopCode, name, ownerName, addressLine, area, city, pincode, latitude, longitude,
                 null, null, status, null, type, myRole, null, shopPhotoFileId, null, null, null, null, version,
-                createdAt, updatedAt);
+                createdAt, updatedAt, null, addressLocked);
     }
 
     public static ShopResponse from(Shop shop, ShopRole myRole) {
@@ -49,6 +55,7 @@ public record ShopResponse(UUID id, long shopCode, String name, String ownerName
                 myRole == ShopRole.OWNER ? shop.getRegistrationDocType() : null,
                 myRole == ShopRole.OWNER ? shop.getRegistrationDocFileId() : null,
                 myRole == ShopRole.OWNER ? shop.getRegistrationDocCheckedAt() : null, shop.getVersion(),
-                shop.getCreatedAt(), shop.getUpdatedAt());
+                shop.getCreatedAt(), shop.getUpdatedAt(), myRole == ShopRole.OWNER ? shop.getRecheckSince() : null,
+                shop.addressLocked());
     }
 }
