@@ -1247,10 +1247,9 @@ class SalonScaleIntegrationTest {
     }
 
     @Test
-    void theOwnerMovingTheSalonRewritesItsRemindersThroughTheRealChange() {
+    void theFieldTeamMovingTheSalonRewritesItsRemindersThroughTheRealChange() {
         UUID b = id(book(customer, at("10:00").plus(Duration.ofDays(2))));
-        long version = jdbc.queryForObject("SELECT version FROM shops WHERE id = ?", Long.class, salon);
-        Reply moved = patch("/shops/me", Map.of("version", version, "addressLine", "Shop 9, New Market Road"), owner);
+        Reply moved = moveByFieldTeam(salon, "Shop 9, New Market Road");
         assertThat(moved.status()).as(moved.text()).isEqualTo(200);
         assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE ref_id = ? AND type = "
                 + "'BOOKING_REMINDER' AND channel = 'PUSH'", String.class, b)).contains("Shop 9, New Market Road")
@@ -1491,6 +1490,24 @@ class SalonScaleIntegrationTest {
         return who;
     }
 
+    /**
+     * The field team moves the salon (once verified the owner can't: ShopService.update answers ADDRESS_LOCKED), as
+     * PATCH /admin/shops/{id}/address does, with its other address fields as they are.
+     */
+    private Reply moveByFieldTeam(UUID shop, String addressLine) {
+        UUID admin = jdbc.queryForList("SELECT id FROM users WHERE phone = '9000000777'", UUID.class).stream()
+                .findFirst().orElseGet(() -> {
+                    UUID id = person("9000000777");
+                    jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", id);
+                    return id;
+                });
+        Map<String, Object> row = jdbc.queryForMap("SELECT version, area, city, pincode, latitude, longitude "
+                + "FROM shops WHERE id = ?", shop);
+        return patch("/admin/shops/" + shop + "/address", Map.of("version", row.get("version"), "addressLine",
+                addressLine, "area", row.get("area"), "city", row.get("city"), "pincode", row.get("pincode"),
+                "latitude", row.get("latitude"), "longitude", row.get("longitude")), admin);
+    }
+
     private UUID person(String phone) {
         UUID id = UUID.randomUUID();
         TestData.user(jdbc, id, phone);
@@ -1588,7 +1605,10 @@ class SalonScaleIntegrationTest {
                 who);
         UUID shop = m.isEmpty() ? null : (UUID) m.get(0).get("shop_id");
         String role = m.isEmpty() ? null : (String) m.get(0).get("role");
-        return jwt.issue(new AuthPrincipal(who, shop, role, false), sessions.currentGeneration(who)).token();
+        // An admin's token says so, as sign-in makes it (the field team's calls need it)
+        Boolean admin = jdbc.queryForObject("SELECT admin_role <> 'NONE' FROM users WHERE id = ?", Boolean.class, who);
+        return jwt.issue(new AuthPrincipal(who, shop, role, Boolean.TRUE.equals(admin)),
+                sessions.currentGeneration(who)).token();
     }
 
     /** A token from before the person had a shop (or an old app that never refreshed): no shop in it. */

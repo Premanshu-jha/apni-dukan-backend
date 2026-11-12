@@ -1,5 +1,6 @@
 package in.apnidukan.support;
 
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.sql.Timestamp;
@@ -28,6 +29,18 @@ public final class TestData {
                 "staff_services", "salon_staff", "salon_services", "salon_settings", "shop_members", "shops",
                 "refresh_tokens", "users", "salon_versions"}) {
             jdbc.update("DELETE FROM " + table);
+        }
+    }
+
+    /**
+     * Editing a verified shop's details unlocked for an hour for everyone in the database, as if each had entered the
+     * code from POST /auth/me/edit-code (EditUnlockStore; its own tests go through the code). For tests that change
+     * an approved shop and are about something else.
+     */
+    public static void unlockEditing(JdbcTemplate jdbc, StringRedisTemplate redis) {
+        String until = Long.toString(Instant.parse("9999-01-01T00:00:00Z").toEpochMilli());   // whatever the test clock says
+        for (UUID id : jdbc.queryForList("SELECT id FROM users", UUID.class)) {
+            redis.opsForValue().set("edit-unlock:" + id, until, java.time.Duration.ofHours(1));
         }
     }
 

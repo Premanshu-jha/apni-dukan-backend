@@ -10,7 +10,9 @@ import in.apnidukan.shops.api.ShopRequests.ReverseGeocode;
 import in.apnidukan.shops.api.ShopRequests.SetPhotos;
 import in.apnidukan.shops.api.ShopRequests.Submit;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
+import in.apnidukan.shops.api.ShopRequests.AddressRequest;
 import in.apnidukan.shops.service.AddressLocator;
+import in.apnidukan.shops.service.AddressRequestService;
 import in.apnidukan.shops.service.AddressLocator.Asker;
 import in.apnidukan.shops.service.AddressLocator.Described;
 import in.apnidukan.shops.service.AddressLocator.Located;
@@ -27,6 +29,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -52,9 +55,12 @@ public class ShopController {
     private final ShopOwnershipService ownership;
     private final ShopInvitesService invites;
     private final AddressLocator addresses;
+    private final AddressRequestService addressRequests;
 
     public ShopController(ShopService shops, CurrentUserProvider currentUser, ShopMembersService people,
-                          ShopOwnershipService ownership, ShopInvitesService invites, AddressLocator addresses) {
+                          ShopOwnershipService ownership, ShopInvitesService invites, AddressLocator addresses,
+                          AddressRequestService addressRequests) {
+        this.addressRequests = addressRequests;
         this.invites = invites;
         this.addresses = addresses;
         this.shops = shops;
@@ -215,6 +221,32 @@ public class ShopController {
     @PutMapping("/me/registration-document")
     public ShopResponse setRegistrationDoc(@Valid @RequestBody ShopRequests.SetRegistrationDoc body) {
         return shops.setRegistrationDoc(currentUser.get().userId(), body);
+    }
+
+    /**
+     * Ask the field team to change the verified address (owner; editing unlocked with a code, else 403 EDIT_LOCKED):
+     * the new address and pin wait for them, the shop keeps the old one (and stays live) until they approve. Replaces
+     * a request still waiting. 201 with the request; 409 ADDRESS_NOT_LOCKED (not verified yet: PATCH /shops/me
+     * instead), WRONG_STATUS (suspended or closed), SHOP_CHANGED; 400 VALIDATION_FAILED (also: the same address).
+     */
+    @PostMapping("/me/address-request")
+    @ResponseStatus(HttpStatus.CREATED)
+    public AddressRequestView requestAddressChange(@Valid @RequestBody AddressRequest body) {
+        return addressRequests.request(currentUser.get().userId(), body);
+    }
+
+    /** My latest address change request (owner), waiting or decided; 204 if I never asked. */
+    @GetMapping("/me/address-request")
+    public ResponseEntity<AddressRequestView> addressRequest() {
+        return addressRequests.latest(currentUser.get().userId()).map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.noContent().build());
+    }
+
+    /** Take back my waiting address change request (owner): `?version=` from GET /shops/me. 204. */
+    @DeleteMapping("/me/address-request")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void cancelAddressRequest(@RequestParam long version) {
+        addressRequests.cancel(currentUser.get().userId(), version);
     }
 
     /**

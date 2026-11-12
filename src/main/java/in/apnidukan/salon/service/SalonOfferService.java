@@ -11,6 +11,7 @@ import in.apnidukan.salon.api.SalonOfferResponses.OfferState;
 import in.apnidukan.salon.api.SalonOfferResponses.OfferView;
 import in.apnidukan.salon.api.SalonOfferResponses.OwnerOffer;
 import in.apnidukan.salon.api.SalonOfferResponses.PricedService;
+import in.apnidukan.salon.api.SalonOfferResponses.TeamOffer;
 import in.apnidukan.salon.domain.Availability;
 import in.apnidukan.salon.domain.SalonOffer;
 import in.apnidukan.salon.domain.BookedService;
@@ -94,6 +95,20 @@ public class SalonOfferService {
         LocalDate today = today(clock.instant());
         return offers.list(c.shopId(), today, LIST_SIZE).stream()
                 .map(l -> ownerView(l.offer(), l.bookings(), today))
+                .toList();
+    }
+
+    /**
+     * The salon's offers running today or to come, soonest first, for anyone in the salon (a barber too: customers ask
+     * him). Without the owner's numbers (messages sent, bookings).
+     */
+    @Transactional(readOnly = true)
+    public List<TeamOffer> current(UUID userId) {
+        Caller c = access.caller(userId);
+        LocalDate today = today(clock.instant());
+        return offers.current(c.shopId(), today).stream()
+                .map(o -> new TeamOffer(OfferView.of(o), o.startsOn().isAfter(today) ? OfferState.UPCOMING
+                        : OfferState.RUNNING))
                 .toList();
     }
 

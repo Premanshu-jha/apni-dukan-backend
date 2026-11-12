@@ -58,6 +58,7 @@ class SalonVideoIntegrationTest {
 
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
+    @Autowired org.springframework.data.redis.core.StringRedisTemplate redis;
     @Autowired JwtService jwt;
     @Autowired FileDeletionJob deletionJob;
 
@@ -491,7 +492,7 @@ class SalonVideoIntegrationTest {
     }
 
     @Test
-    void aNewVideoOnALiveSalonGoesBackToTheFieldTeamWithTheChangeNamed() throws Exception {
+    void aNewVideoOnALiveSalonWaitsForTheFieldTeamWithTheChangeNamedAndStaysLive() throws Exception {
         String first = uploadedVideo();
         call(HttpMethod.PUT, "/shops/me/video", Map.of("version", version(), "fileId", first), OWNER);
         setPhotos();
@@ -505,7 +506,8 @@ class SalonVideoIntegrationTest {
         Reply replaced = call(HttpMethod.PUT, "/shops/me/video", Map.of("version", version(), "fileId", second),
                 OWNER);
         assertThat(replaced.status()).as(replaced.text()).isEqualTo(200);
-        assertThat(replaced.body().get("status")).isNotEqualTo("APPROVED");
+        assertThat(replaced.body().get("status")).isEqualTo("APPROVED");   // live while re-checked
+        assertThat(replaced.body().get("recheckSince")).isNotNull();
         Reply detail = get("/admin/shops/" + SALON, ADMIN);
         assertThat(detail.text()).contains("\"field\":\"shopVideo\"").contains("Salon video");
     }
@@ -611,6 +613,9 @@ class SalonVideoIntegrationTest {
     }
 
     private Reply call(HttpMethod method, String path, Object body, UUID who) {
+        if (path.startsWith("/shops/me") && method != HttpMethod.GET) {
+            TestData.unlockEditing(jdbc, redis);   // the code before editing a verified shop: tested in AdminIT
+        }
         var spec = http.method(method).uri(path).header("Authorization", "Bearer " + token(who));
         if (body != null) {
             spec = spec.contentType(MediaType.APPLICATION_JSON).body(body);

@@ -17,6 +17,7 @@ import in.apnidukan.shops.domain.ShopEventType;
 import in.apnidukan.shops.domain.ShopMember;
 import in.apnidukan.shops.domain.ShopRole;
 import in.apnidukan.shops.domain.ShopStatus;
+import in.apnidukan.shops.repo.AddressRequestStore;
 import in.apnidukan.shops.repo.ShopHandoverStore;
 import in.apnidukan.shops.repo.ShopHandoverStore.Handover;
 import in.apnidukan.shops.repo.ShopMemberRepository;
@@ -119,12 +120,17 @@ public class ShopOwnershipService implements TestAccountShops {
     private final Clock clock;
 
     private final ShopAssignments assignments;
+    private final AddressRequestStore addressRequests;
+    private final ShopService shopService;
 
     public ShopOwnershipService(ShopRepository shops, ShopMemberRepository members, ShopHandoverStore handovers,
                                 ShopReviewStore review, UserDirectory users, Notifications notifications,
                                 List<ShopChangeListener> listeners, SessionRevocations sessions, RateLimiter limits,
                                 DashboardCounts dashboardCounts, ShopInvitesService invites,
-                                ShopAssignments assignments, Clock clock) {
+                                ShopAssignments assignments, AddressRequestStore addressRequests,
+                                ShopService shopService, Clock clock) {
+        this.addressRequests = addressRequests;
+        this.shopService = shopService;
         this.assignments = assignments;
         this.invites = invites;
         this.shops = shops;
@@ -203,6 +209,7 @@ public class ShopOwnershipService implements TestAccountShops {
         review.addEvent(shopId, now, by, false, ShopEventType.CLOSED, reason, null, List.of());
         handovers.cancelFor(shopId, by, now);
         invites.cancelAll(shopId, by, now);
+        addressRequests.decide(shopId, "CANCELLED", null, by, now);   // nobody can decide it any more
         listeners.forEach(l -> l.closed(shopId));
         // Everyone leaves: helpers and barbers as if removed (sessions end), then the owner (keeps their sessions).
         // At most a few dozen people; what each module does for them is done for all together.
@@ -328,6 +335,13 @@ public class ShopOwnershipService implements TestAccountShops {
         }
         if (!handovers.decide(handoverId, "ACCEPTED", userId, now)) {
             throw gone("CHANGED");   // can't happen under the row lock
+        }
+        // The old owner's waiting address change was his: the new owner asks again if he wants it
+        if (addressRequests.decide(shop.getId(), "CANCELLED", null, h.fromUser(), now)) {
+            shop.touch(now);
+            shopService.endRecheckIfNothingLeft(shop);
+            shops.saveAndFlush(shop);
+            dashboardCounts.clearAfterCommit();
         }
         // The old owner first: there is exactly one owner (ux_shop_members_one_owner)
         members.delete(oldOwner);

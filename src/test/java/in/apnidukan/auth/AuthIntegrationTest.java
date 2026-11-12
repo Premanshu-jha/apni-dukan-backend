@@ -448,6 +448,8 @@ class AuthIntegrationTest {
                 Map.of("email", "shop@gmail.com", "code", codeSentTo(LAST_EMAIL, "shop@gmail.com")), other);
         assertThat(r.status()).isEqualTo(409);
         assertThat(r.body().get("code")).isEqualTo("EMAIL_IN_USE");
+        // Says what to do: usually one person with two numbers (customer app on one SIM, partner app on the other)
+        assertThat((String) r.body().get("message")).contains("Sign in with that number instead, or use another email");
     }
 
     @Test

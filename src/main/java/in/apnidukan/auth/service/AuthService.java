@@ -99,6 +99,7 @@ public class AuthService {
     private final RefreshTokenStore tokenStore;
     private final TestAccountShops testAccountShops;
     private final AdminTeamService team;
+    private final EditUnlockStore editUnlocks;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
@@ -110,7 +111,7 @@ public class AuthService {
                        SignInLimits signInLimits, TestModeService testMode,
                        List<PersonDetailsListener> detailsListeners, SmsBudget smsBudget,
                        RefreshTokenStore tokenStore, TestAccountShops testAccountShops, AdminTeamService team,
-                       List<PhoneChangeListener> phoneListeners,
+                       List<PhoneChangeListener> phoneListeners, EditUnlockStore editUnlocks,
                        @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds) {
         if (refreshGraceSeconds < 0 || refreshGraceSeconds > RETRY_GRACE.toSeconds()) {
             // Longer than the retry time would let an old token get new pairs after it should raise the alarm
@@ -118,6 +119,7 @@ public class AuthService {
         }
         this.refreshGrace = Duration.ofSeconds(refreshGraceSeconds);
         this.phoneListeners = phoneListeners;
+        this.editUnlocks = editUnlocks;
         this.team = team;
         this.testMode = testMode;
         this.smsBudget = smsBudget;
@@ -740,6 +742,41 @@ public class AuthService {
                 : new Second(OtpPurpose.CHANGE_PHONE_CURRENT, secondTarget(user.getId(), user.getPhone(), newPhone));
     }
 
+    // ---------------- unlocking a verified shop's details for editing ----------------
+
+    /**
+     * A code to the person's own phone, so a borrowed or stolen session can't change a verified shop's details
+     * (EditUnlockStore). A test number in OTP test mode gets no SMS and takes any 6 digits, as at sign-in.
+     */
+    public void sendEditCode(UUID userId, String ip) {
+        User user = me(userId);
+        // Only a shop's owner edits its details: nobody else can make the server send these codes
+        if (memberships.find(userId).filter(m -> "OWNER".equals(m.role())).isEmpty()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only a shop's owner needs this code.");
+        }
+        limitSends(ip);
+        if (testMode.acceptsAnyCode(user.getPhone())) {
+            return;
+        }
+        SmsBudget.To to = SmsBudget.To.signedIn(user.getPhone());
+        smsBudget.requireRoom(to);   // before a new code replaces the one they already have
+        String code = otp.issue(OtpPurpose.EDIT_UNLOCK, user.getPhone(), ip);
+        sendSms(to, () -> sms.sendOtp(user.getPhone(), code));
+    }
+
+    /**
+     * With the code from sendEditCode (or any 6 digits for a test number in test mode), editing is unlocked for 15
+     * minutes; returns until when. 400 WRONG_CODE / CODE_EXPIRED as for other codes.
+     */
+    public Instant unlockEditing(UUID userId, String code, String ip) {
+        User user = me(userId);
+        limitVerifies(ip);
+        if (!testCodeAccepted(user.getPhone(), code)) {
+            otp.verify(OtpPurpose.EDIT_UNLOCK, user.getPhone(), code, ip);
+        }
+        return editUnlocks.unlock(userId);
+    }
+
     // ---------------- deleting the account ----------------
 
     /**
@@ -904,8 +941,15 @@ public class AuthService {
                 "Too many requests from this network. Try again later.").retryAfter(retryAfter);
     }
 
+    /**
+     * A verified email belongs to one account (it is how a lost number is recovered). Said only at verify, after the
+     * code (on the normal path, the code emailed to that inbox; in test mode, for a test-list email, any code), so
+     * sending a code tells nobody whether an address has an account. The words say what to do, since the usual cause is one person with two numbers (the customer app on one SIM, the
+     * partner app on the other).
+     */
     private static ApiException emailInUse() {
-        return new ApiException(HttpStatus.CONFLICT, "EMAIL_IN_USE", "This email is already used by another account");
+        return new ApiException(HttpStatus.CONFLICT, "EMAIL_IN_USE", "This email is already on another Clozest "
+                + "account, which uses a different mobile number. Sign in with that number instead, or use another email.");
     }
 
     private static ApiException phoneInUse() {
