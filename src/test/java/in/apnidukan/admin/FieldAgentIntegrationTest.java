@@ -1026,6 +1026,9 @@ class FieldAgentIntegrationTest {
     }
 
     private Reply patch(String path, Object body, UUID who) {
+        if (path.startsWith("/shops/me")) {
+            TestData.unlockEditing(jdbc, redis);   // the code before editing a verified shop: tested in AdminIT
+        }
         return call(HttpMethod.PATCH, path, body, token(who));
     }
 

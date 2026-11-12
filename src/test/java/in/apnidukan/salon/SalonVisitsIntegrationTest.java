@@ -859,6 +859,18 @@ class SalonVisitsIntegrationTest {
         // A helper sees the list but can't publish; a barber can't see it
         assertThat(get("/salon/offers", frank).status()).isEqualTo(200);
         assertThat(field(post("/salon/offers/preview", offer, frank).body(), "code")).isEqualTo("OWNER_ONLY");
+        // A barber sees what runs and what is to come (customers ask him), without the owner's numbers
+        UUID barber = person();
+        jdbc.update("UPDATE salon_staff SET user_id = ? WHERE id = ?", barber, raju);
+        TestData.member(jdbc, salon, barber, "BARBER");
+        assertThat(get("/salon/offers", barber).status()).isEqualTo(403);
+        Reply team = get("/salon/offers/current", barber);
+        assertThat(team.status()).as(team.text()).isEqualTo(200);
+        assertThat((List<?>) team.body()).hasSize(1);
+        assertThat(field(((List<?>) team.body()).get(0), "state")).isEqualTo("UPCOMING");
+        assertThat(field(field(((List<?>) team.body()).get(0), "offer"), "percentOff")).isEqualTo(20);
+        assertThat(team.text()).doesNotContain("notified").doesNotContain("bookings");
+        assertThat(get("/salon/offers/current", alice).status()).isEqualTo(404);   // not in a salon
         // A double tap: refused as overlapping, nobody told twice
         Reply again = post("/salon/offers", offer, owner);
         assertThat(again.status()).isEqualTo(409);
@@ -1181,6 +1193,9 @@ class SalonVisitsIntegrationTest {
     }
 
     private Reply call(HttpMethod method, String path, Object body, UUID who, UUID key) {
+        if (path.startsWith("/shops/me") && method != HttpMethod.GET) {
+            TestData.unlockEditing(jdbc, redis);   // the code before editing a verified shop: tested in AdminIT
+        }
         RestClient.RequestBodySpec spec = http.method(method).uri(path).headers(h -> {
             if (who != null) {
                 h.setBearerAuth(token(who));

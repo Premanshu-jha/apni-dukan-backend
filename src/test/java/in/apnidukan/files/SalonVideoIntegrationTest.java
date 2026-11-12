@@ -58,6 +58,7 @@ class SalonVideoIntegrationTest {
 
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
+    @Autowired org.springframework.data.redis.core.StringRedisTemplate redis;
     @Autowired JwtService jwt;
     @Autowired FileDeletionJob deletionJob;
 
@@ -612,6 +613,9 @@ class SalonVideoIntegrationTest {
     }
 
     private Reply call(HttpMethod method, String path, Object body, UUID who) {
+        if (path.startsWith("/shops/me") && method != HttpMethod.GET) {
+            TestData.unlockEditing(jdbc, redis);   // the code before editing a verified shop: tested in AdminIT
+        }
         var spec = http.method(method).uri(path).header("Authorization", "Bearer " + token(who));
         if (body != null) {
             spec = spec.contentType(MediaType.APPLICATION_JSON).body(body);

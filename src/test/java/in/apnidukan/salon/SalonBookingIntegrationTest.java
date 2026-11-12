@@ -2455,6 +2455,9 @@ class SalonBookingIntegrationTest {
     }
 
     private Reply call(HttpMethod method, String path, Object body, UUID who, UUID key) {
+        if (path.startsWith("/shops/me") && method != HttpMethod.GET) {
+            TestData.unlockEditing(jdbc, redis);   // the code before editing a verified shop: tested in AdminIT
+        }
         RestClient.RequestBodySpec spec = http.method(method).uri(path).headers(h -> {
             if (who != null) {
                 h.setBearerAuth(token(who));
