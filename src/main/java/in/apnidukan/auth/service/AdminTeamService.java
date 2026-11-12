@@ -12,6 +12,7 @@ import in.apnidukan.common.async.BackgroundTasks;
 import in.apnidukan.common.context.FieldAssignments;
 import in.apnidukan.common.context.PersonDetailsListener;
 import in.apnidukan.common.context.SignOutEverywhereListener;
+import in.apnidukan.common.context.SupportDesk;
 import in.apnidukan.common.context.TeamLock;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.security.SessionRevocations;
@@ -83,13 +84,16 @@ public class AdminTeamService {
     private final SmsSender sms;
     private final BackgroundTasks background;
     private final Clock clock;
+    /** The support tickets: a support person's open tickets move when they leave support. */
+    private final SupportDesk supportDesk;
 
     public AdminTeamService(UserRepository users, JdbcTemplate jdbc, TestModeService testMode,
                             SessionRevocations revocations, RefreshTokenRepository refreshTokens,
                             AdminEvents events, AdminPincodeStore pincodes, FieldAssignments assignments,
                             List<PersonDetailsListener> detailsListeners,
                             List<SignOutEverywhereListener> signOutListeners, EmailSender email, SmsSender sms,
-                            BackgroundTasks background, Clock clock) {
+                            BackgroundTasks background, Clock clock, SupportDesk supportDesk) {
+        this.supportDesk = supportDesk;
         this.sms = sms;
         this.refreshTokens = refreshTokens;
         this.users = users;
@@ -200,8 +204,10 @@ public class AdminTeamService {
         user.bumpAdminVersion();
         save(user);
         pincodes.replace(user.getId(), in.pincodes(), now);
-        if (in.role() == AdminRole.ADMIN) {
+        if (in.designation() == AdminDesignation.FIELD_AGENT) {
             assignments.coverageAdded(user.getId(), in.pincodes(), superAdminId);   // businesses waiting with nobody
+        } else if (in.designation() == AdminDesignation.SUPPORT) {
+            supportDesk.joinedSupport(user.getId(), superAdminId);   // tickets waiting in Unassigned
         }
         // Anyone already signed in to this account starts again: admin rights come only with a new sign-in
         refreshTokens.revokeAllForUser(user.getId(), now);
@@ -273,7 +279,10 @@ public class AdminTeamService {
             oldVerifiedEmail = changeEmail(user, in.email(), now);
             changed.add("email");
         }
-        boolean wasFieldAgent = user.getAdminRole() == AdminRole.ADMIN;
+        boolean wasFieldAgent = user.getAdminDesignation() == AdminDesignation.FIELD_AGENT;
+        boolean wasSupport = user.getAdminDesignation() == AdminDesignation.SUPPORT;
+        // Who could hold tickets: support people, and super admins (they take some, e.g. answering Unassigned)
+        boolean heldTickets = wasSupport || user.getAdminRole() == AdminRole.SUPER_ADMIN;
         if (user.getAdminRole() != in.role() || user.getAdminDesignation() != in.designation()) {
             changed.add("role " + label(user.getAdminRole(), user.getAdminDesignation()) + " → "
                     + label(in.role(), in.designation()));
@@ -288,13 +297,22 @@ public class AdminTeamService {
         if (!pincodesBefore.equals(in.pincodes())) {
             changed.add("pincodes");
         }
-        if (wasFieldAgent && in.role() != AdminRole.ADMIN) {
+        boolean fieldAgent = in.designation() == AdminDesignation.FIELD_AGENT;
+        boolean support = in.designation() == AdminDesignation.SUPPORT;
+        if (wasFieldAgent && !fieldAgent) {
             assignments.coverageChanged(userId, null, superAdminId);   // no longer a field agent: all of them
         } else if (wasFieldAgent && !removed.isEmpty()) {
             assignments.coverageChanged(userId, removed, superAdminId);
         }
-        if (in.role() == AdminRole.ADMIN && !added.isEmpty()) {
+        if (fieldAgent && !added.isEmpty()) {
             assignments.coverageAdded(userId, added, superAdminId);
+        }
+        boolean holdsTickets = support || in.role() == AdminRole.SUPER_ADMIN;
+        if (heldTickets && !holdsTickets) {
+            supportDesk.leftSupport(userId, superAdminId);   // their open tickets go to the support people
+        }
+        if (!wasSupport && support) {
+            supportDesk.joinedSupport(userId, superAdminId);   // the Unassigned ones come to them
         }
         if (newPhone || newEmail) {
             refreshTokens.revokeAllForUser(userId, now);
@@ -328,11 +346,17 @@ public class AdminTeamService {
         requireSuperAdmin(users, superAdminId);   // again, under the lock: two super admins removing each other
         User user = users.lockById(adminId).filter(User::isAdmin).orElseThrow(() -> ApiException.notFound("Admin"));
         Instant now = now();
+        // Support people and super admins may hold tickets (a super admin takes some, e.g. answering Unassigned)
+        boolean heldTickets = user.getAdminDesignation() == AdminDesignation.SUPPORT
+                || user.getAdminRole() == AdminRole.SUPER_ADMIN;
         user.removeAdmin(now);
         user.bumpAdminVersion();
         users.saveAndFlush(user);
         pincodes.replace(adminId, Set.of(), now);
         assignments.coverageChanged(adminId, null, superAdminId);
+        if (heldTickets) {
+            supportDesk.leftSupport(adminId, superAdminId);
+        }
         events.record(superAdminId, "ADMIN_REMOVED", user.getPhone(), null);
         signOutAfterCommit(adminId);
     }
@@ -349,13 +373,16 @@ public class AdminTeamService {
 
     /**
      * A field agent deleted their own account (already wiped: no longer on the team): their pincodes go, and the
-     * businesses waiting for their visit go to another agent or to Unassigned. Nothing for anyone else.
+     * businesses waiting for their visit go to another agent or to Unassigned. A support person's open tickets go
+     * to the other support people. Nothing for anyone else.
      */
     void accountDeleted(UUID userId) {
         if (!pincodes.of(userId).isEmpty() || !assignments.pendingVisits(List.of(userId)).isEmpty()) {
             pincodes.replace(userId, Set.of(), now());
             assignments.coverageChanged(userId, null, null);
         }
+        // A support person's open tickets go to the others (nothing happens for anyone with none)
+        supportDesk.leftSupport(userId, null);
     }
 
     /** Validated and cleaned input; a super admin's designation and pincodes are dropped (they have none). */
@@ -390,6 +417,9 @@ public class AdminTeamService {
             if (designation == null) {
                 errors.put("designation", "choose a designation");
             }
+        }
+        // Pincodes for a field agent (and for an ADMIN with no designation chosen yet, so the form says both)
+        if (role == AdminRole.ADMIN && designation != AdminDesignation.SUPPORT) {
             List<String> bad = new ArrayList<>();
             for (String p : in.pincodes() == null ? List.<String>of() : in.pincodes()) {
                 String code = p == null ? "" : p.strip();
@@ -493,9 +523,10 @@ public class AdminTeamService {
         List<UUID> ids = list.stream().map(User::getId).toList();
         Map<UUID, List<String>> codes = pincodes.of(ids);
         Map<UUID, Long> pending = assignments.pendingVisits(ids);
+        Map<UUID, Long> tickets = supportDesk.openTickets(ids);
         return list.stream().map(u -> new Member(u.getId(), u.getName(), u.getPhone(), u.getEmail(),
                 u.isEmailVerified(), u.getAdminRole(), u.getAdminDesignation(), codes.getOrDefault(u.getId(),
-                List.of()), pending.getOrDefault(u.getId(), 0L),
+                List.of()), pending.getOrDefault(u.getId(), 0L), tickets.getOrDefault(u.getId(), 0L),
                 u.getAdminSince() == null ? u.getCreatedAt() : u.getAdminSince(), u.getAdminVersion())).toList();
     }
 
@@ -568,8 +599,8 @@ public class AdminTeamService {
     /**
      * What the Team page sends to add or edit a member.
      * @param role        ADMIN or SUPER_ADMIN
-     * @param designation required for ADMIN (FIELD_AGENT); ignored for SUPER_ADMIN
-     * @param pincodes    6 digits each, at least one for ADMIN; ignored for SUPER_ADMIN
+     * @param designation required for ADMIN (FIELD_AGENT or SUPPORT); ignored for SUPER_ADMIN
+     * @param pincodes    6 digits each, at least one for a FIELD_AGENT; ignored for SUPPORT and SUPER_ADMIN
      */
     public record MemberInput(String phone, String email, String name, AdminRole role,
                               AdminDesignation designation, List<String> pincodes) {
@@ -587,13 +618,14 @@ public class AdminTeamService {
     /**
      * @param emailVerified false until they confirm it at sign-in (an email typed on the Team page)
      * @param pendingVisits businesses waiting for their visit
+     * @param openTickets   support tickets assigned to them and not resolved yet
      * @param since         when they joined the team (for the first super admin, set by hand: when the account was
      *                      made)
      * @param version       send it back with an edit
      */
     public record Member(UUID userId, String name, String phone, String email, boolean emailVerified,
                          AdminRole adminRole, AdminDesignation designation, List<String> pincodes, long pendingVisits,
-                         Instant since, long version) {
+                         long openTickets, Instant since, long version) {
         public Member {
             pincodes = List.copyOf(pincodes);
         }

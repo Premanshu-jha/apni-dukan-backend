@@ -34,15 +34,36 @@ public class SmtpEmailSender implements EmailSender {
 
     @Override
     public void send(String to, String subject, String body) {
+        send(new Email(to, subject, body, from, null, subject, null));
+    }
+
+    @Override
+    public void send(String to, String subject, String body, String sender, String replyTo) {
+        send(new Email(to, subject, body, sender, replyTo, subject, null));
+    }
+
+    /**
+     * Gmail sends only from its signed-in account, so the sender is ignored here (and there is no idempotency key);
+     * the reply address is set. Logs say {@code logAs}.
+     */
+    @Override
+    public void send(Email email) {
+        String to = email.to();
+        String subject = email.subject();
+        String body = email.body();
+        String replyTo = email.replyTo();
         SimpleMailMessage message = new SimpleMailMessage();
         message.setFrom(from);
+        if (replyTo != null) {
+            message.setReplyTo(replyTo);
+        }
         message.setTo(to);
         message.setSubject(subject);
         message.setText(body);
         try {
             mailSender.send(message);
         } catch (MailException e) {
-            log.error("Could not send email ({}): {}", subject, e.getClass().getSimpleName());
+            log.error("Could not send email ({}): {}", email.logAs(), e.getClass().getSimpleName());
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "EMAIL_FAILED",
                     "We couldn't send the email. Please try again in a minute.");
         }

@@ -61,20 +61,30 @@ class ResendEmailSenderTest {
 
     @Test
     void postsTheEmailAsJsonWithTheKeyAsBearer() throws IOException {
-        new ResendEmailSender("re_test_key", "Apni Dukan <no-reply@apnidukan.in>", start())
+        new ResendEmailSender("re_test_key", "Clozest <no-reply@clozest.in>", start())
                 .send("owner@gmail.com", "Your code", "Your code is 123456.\n\n\"Ignore\" it if not you.");
         assertThat(seen.get("method")).isEqualTo("POST");
         assertThat(seen.get("auth")).isEqualTo("Bearer re_test_key");
         assertThat(seen.get("type")).isEqualTo("application/json");
-        assertThat(seen.get("body")).isEqualTo("{\"from\":\"Apni Dukan <no-reply@apnidukan.in>\","
+        assertThat(seen.get("body")).isEqualTo("{\"from\":\"Clozest <no-reply@clozest.in>\","
                 + "\"to\":[\"owner@gmail.com\"],\"subject\":\"Your code\","
                 + "\"text\":\"Your code is 123456.\\n\\n\\\"Ignore\\\" it if not you.\"}");
     }
 
     @Test
+    void aSupportEmailComesFromTheSupportAddressWithRepliesGoingThere() throws IOException {
+        new ResendEmailSender("re_test_key", "Clozest <no-reply@clozest.in>", start())
+                .send("owner@gmail.com", "[CLZ-1001] Got it", "Hi", "Clozest Support <support@clozest.in>",
+                        "support@clozest.in");
+        assertThat(seen.get("body")).isEqualTo("{\"from\":\"Clozest Support <support@clozest.in>\","
+                + "\"to\":[\"owner@gmail.com\"],\"subject\":\"[CLZ-1001] Got it\","
+                + "\"text\":\"Hi\",\"reply_to\":\"support@clozest.in\"}");
+    }
+
+    @Test
     void tooManyAtOnceIsTriedOnceMoreAfterRetryAfter() throws IOException {
         firstAnswers.add(429);
-        new ResendEmailSender("re_test_key", "a@apnidukan.in", start())
+        new ResendEmailSender("re_test_key", "a@clozest.in", start())
                 .send("owner@gmail.com", "Your code", "Your code is 123456");
         assertThat(requests.get()).isEqualTo(2);
     }
@@ -82,7 +92,7 @@ class ResendEmailSenderTest {
     @Test
     void stillTooManyAfterTheRetryTellsTheAppToTryAgain() throws IOException {
         answer = 429;
-        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@clozest.in", start());
         assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
                 .satisfies(e -> assertThat(((ApiException) e).getCode()).isEqualTo("EMAIL_FAILED"));
         assertThat(requests.get()).isEqualTo(2);
@@ -92,7 +102,7 @@ class ResendEmailSenderTest {
     void anAddressResendCantSendToIsTheUsersToFix() throws IOException {
         answer = 422;
         errorBody = "{\"statusCode\":422,\"name\":\"validation_error\",\"message\":\"Invalid `to` field\"}";
-        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@clozest.in", start());
         assertThatThrownBy(() -> resend.send("owner@gmail", "Your code", "Your code is 123456"))
                 .satisfies(e -> {
                     assertThat(((ApiException) e).getCode()).isEqualTo("INVALID_EMAIL");
@@ -107,7 +117,7 @@ class ResendEmailSenderTest {
     void anotherUnprocessableAnswerIsOurFaultNotTheUsers() throws IOException {
         answer = 422;
         errorBody = "{\"statusCode\":422,\"name\":\"missing_required_field\",\"message\":\"Missing `from`\"}";
-        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@clozest.in", start());
         assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
                 .satisfies(e -> assertThat(((ApiException) e).getCode()).isEqualTo("EMAIL_FAILED"));
         assertThat(requests.get()).isEqualTo(1);
@@ -116,7 +126,7 @@ class ResendEmailSenderTest {
     @Test
     void aBadKeyIsNotTheUsersFault() throws IOException {
         answer = 401;
-        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@clozest.in", start());
         assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
                 .satisfies(e -> {
                     assertThat(((ApiException) e).getCode()).isEqualTo("EMAIL_FAILED");
@@ -127,7 +137,7 @@ class ResendEmailSenderTest {
     @Test
     void aRefusalTellsTheAppToTryAgain() throws IOException {
         answer = 500;
-        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", start());
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@clozest.in", start());
         assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).getCode()).isEqualTo("EMAIL_FAILED"));
@@ -138,7 +148,7 @@ class ResendEmailSenderTest {
         URI gone = start();
         fake.stop(0);
         fake = null;
-        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@apnidukan.in", gone);
+        ResendEmailSender resend = new ResendEmailSender("re_test_key", "a@clozest.in", gone);
         assertThatThrownBy(() -> resend.send("owner@gmail.com", "Your code", "Your code is 123456"))
                 .satisfies(e -> assertThat(((ApiException) e).getCode()).isEqualTo("EMAIL_FAILED"));
     }
@@ -151,10 +161,10 @@ class ResendEmailSenderTest {
     @Test
     void resendIsUsedOnceItsKeyIsSetOtherwiseSmtpAsBefore() {
         EmailSender smtp = new SmtpEmailSender(mock(JavaMailSender.class), "shop@gmail.com", "pw", "");
-        assertThat(EmailConfig.choose(true, "re_key", "a@apnidukan.in", () -> smtp))
+        assertThat(EmailConfig.choose(true, "re_key", "a@clozest.in", () -> smtp))
                 .isInstanceOf(ResendEmailSender.class);
-        assertThat(EmailConfig.choose(true, "  ", "a@apnidukan.in", () -> smtp)).isSameAs(smtp);
-        assertThat(EmailConfig.choose(false, "re_key", "a@apnidukan.in", () -> smtp))
+        assertThat(EmailConfig.choose(true, "  ", "a@clozest.in", () -> smtp)).isSameAs(smtp);
+        assertThat(EmailConfig.choose(false, "re_key", "a@clozest.in", () -> smtp))
                 .isInstanceOf(LoggingEmailSender.class);
         assertThatThrownBy(() -> new ResendEmailSender("re_key", "", ResendEmailSender.RESEND))
                 .hasMessageContaining("EMAIL_FROM");
