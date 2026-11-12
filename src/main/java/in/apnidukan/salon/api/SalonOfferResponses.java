@@ -46,6 +46,10 @@ public final class SalonOfferResponses {
                              int bookings) {
     }
 
+    /** An offer running or to come, as anyone in the salon sees it (a barber can tell a customer). */
+    public record TeamOffer(OfferView offer, OfferState state) {
+    }
+
     /** A service with its price and its offer price (the owner's preview). */
     public record PricedService(UUID serviceId, String name, long pricePaise, long offerPricePaise,
                                 boolean priceIsFrom) {

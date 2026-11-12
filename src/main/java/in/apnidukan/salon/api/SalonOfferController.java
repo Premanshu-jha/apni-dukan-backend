@@ -4,6 +4,7 @@ import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.salon.api.SalonOfferRequests.NewOffer;
 import in.apnidukan.salon.api.SalonOfferResponses.OfferPreview;
 import in.apnidukan.salon.api.SalonOfferResponses.OwnerOffer;
+import in.apnidukan.salon.api.SalonOfferResponses.TeamOffer;
 import in.apnidukan.salon.service.SalonOfferService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -36,6 +37,12 @@ public class SalonOfferController {
     @GetMapping("/api/v1/salon/offers")
     public List<OwnerOffer> list() {
         return offers.list(me());
+    }
+
+    /** Offers running today or to come, for anyone in the salon (barbers too); without the owner's numbers. */
+    @GetMapping("/api/v1/salon/offers/current")
+    public List<TeamOffer> current() {
+        return offers.current(me());
     }
 
     /** What publishing would do: each service's price and offer price, and how many customers would be told. */
