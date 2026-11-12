@@ -1074,51 +1074,58 @@ class SalonBookingIntegrationTest {
         Reply page = get("/salons/" + newSalon, customer);
         assertThat(page.status()).isEqualTo(200);
         assertThat((String) field(page.body(), "photoUrl")).isNotBlank();
-        // A new shop photo after approval: back to the field team, invisible to customers meanwhile
+        // A new shop photo after approval: the field team re-checks it, and the salon stays live meanwhile
         UUID newPhoto = id(upload(newOwner, newSalon, "SHOP_PHOTO", 8));
         long version = ((Number) field(get("/shops/me", newOwner).body(), "version")).longValue();
         Reply changed = put("/shops/me/photos", Map.of("version", version, "shopPhotoFileId", newPhoto.toString()),
                 newOwner);
-        assertThat(field(changed.body(), "status")).as(changed.text()).isEqualTo("PENDING_VISIT");
-        assertThat(get("/salons/" + newSalon, customer).status()).isEqualTo(404);
+        assertThat(field(changed.body(), "status")).as(changed.text()).isEqualTo("APPROVED");
+        assertThat(field(changed.body(), "recheckSince")).isNotNull();
+        assertThat(get("/salons/" + newSalon, customer).status()).isEqualTo(200);
         assertThat(approve(newSalon, admin).status()).isEqualTo(200);
-        // A new address too; a new name alone doesn't need a visit
+        assertThat(field(get("/shops/me", newOwner).body(), "recheckSince")).isNull();
+        assertThat(count("notification_jobs WHERE type = 'SHOP_RECHECKED'")).isPositive();
+        assertThat(approve(newSalon, admin).status()).isEqualTo(409);   // nothing waits any more
+        // A new name alone doesn't need a check; a verified address can't be changed by the owner at all
         version = ((Number) field(get("/shops/me", newOwner).body(), "version")).longValue();
         Reply renamed = patch("/shops/me", Map.of("version", version, "name", "Sharma Hair Studio"), newOwner);
         assertThat(field(renamed.body(), "status")).as(renamed.text()).isEqualTo("APPROVED");
+        assertThat(field(renamed.body(), "recheckSince")).isNull();
         Reply moved = patch("/shops/me", Map.of("version", field(renamed.body(), "version"),
                 "addressLine", "Shop 9, New Market Road"), newOwner);
-        assertThat(field(moved.body(), "status")).as(moved.text()).isEqualTo("PENDING_VISIT");
-        assertThat(approve(newSalon, admin).status()).isEqualTo(200);
-        // A new owner photo or a moved map pin: checked again too
+        assertThat(field(moved.body(), "code")).as(moved.text()).isEqualTo("ADDRESS_LOCKED");
+        // A new owner photo: checked again too
         UUID newOwnerPhoto = id(upload(newOwner, newSalon, "OWNER_PHOTO", 10));
         version = ((Number) field(get("/shops/me", newOwner).body(), "version")).longValue();
         assertThat(field(put("/shops/me/photos", Map.of("version", version, "ownerPhotoFileId",
-                newOwnerPhoto.toString()), newOwner).body(), "status")).isEqualTo("PENDING_VISIT");
+                newOwnerPhoto.toString()), newOwner).body(), "recheckSince")).isNotNull();
+        assertThat(approve(newSalon, admin).status()).isEqualTo(200);
+        // A new GSTIN or Udyam number is re-checked too
+        version = ((Number) field(get("/shops/me", newOwner).body(), "version")).longValue();
+        Reply gstin = patch("/shops/me", Map.of("version", version, "gstin", "27AAPFU0939F1ZV"), newOwner);
+        assertThat(field(gstin.body(), "status")).as(gstin.text()).isEqualTo("APPROVED");
+        assertThat(field(gstin.body(), "recheckSince")).isNotNull();
         assertThat(approve(newSalon, admin).status()).isEqualTo(200);
         version = ((Number) field(get("/shops/me", newOwner).body(), "version")).longValue();
-        assertThat(field(patch("/shops/me", Map.of("version", version, "latitude", 17.4702), newOwner).body(),
-                "status")).isEqualTo("PENDING_VISIT");
+        assertThat(field(patch("/shops/me", Map.of("version", version, "udyamNumber", "UDYAM-TS-02-0012345"),
+                newOwner).body(), "recheckSince")).isNotNull();
     }
 
     @Test
     void aMoveWaitsForBookingsInProgressAndDoesntResendRemindersAlreadySent() throws Exception {
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
         jdbc.update("UPDATE notification_jobs SET status = 'SENT' WHERE ref_id = ? AND type = 'BOOKING_REMINDER'", b);
-        long version = ((Number) field(get("/shops/me", owner).body(), "version")).longValue();
         // A real booking is in progress: it has taken the shop (FOR SHARE) and now waits for a barber, whose rows a
-        // held transaction keeps locked. The owner saves a new address meanwhile: the move must wait for the booking.
+        // held transaction keeps locked. The field team saves a new address meanwhile: the move must wait for it.
         Future<Reply> second;
         Future<Reply> move;
         try (Held barbers = new Held(() -> jdbc.queryForList("SELECT id FROM salon_staff WHERE shop_id = ? "
                 + "FOR UPDATE", salon))) {
             second = background(() -> book(customer2, at("13:00"), List.of(haircut), UUID.randomUUID()));
             waitUntilBlocked("select active from salon_staff");
-            move = background(() -> patch("/shops/me",
-                    Map.of("version", version, "addressLine", "Shop 9, New Market Road"), owner));
-            // Blocked by the booking's hold on the shop: at its timeline entry, whose trigger (V16) updates the shop
-            // row before the shop's own update is written
-            waitUntilBlocked("insert into shop_events");
+            move = background(() -> moveByFieldTeam(salon, "Shop 9, New Market Road"));
+            // Blocked by the booking's hold on the shop: the decision takes the shop's row first (ShopAssignmentStore.lock)
+            waitUntilBlocked("select id, status, recheck_since");
             barbers.commit();
         }
         Reply booked = second.get(10, TimeUnit.SECONDS);
@@ -1132,20 +1139,31 @@ class SalonBookingIntegrationTest {
     }
 
     @Test
-    void aSalonMovingRewritesPendingRemindersAndHoldsMovesUntilCheckedAgain() {
+    void aVerifiedAddressIsLockedForTheOwnerAndTheFieldTeamsMoveRewritesPendingReminders() {
         UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
         long version = ((Number) field(get("/shops/me", owner).body(), "version")).longValue();
-        Reply moved = patch("/shops/me", Map.of("version", version, "addressLine", "Shop 9, New Market Road"), owner);
-        assertThat(field(moved.body(), "status")).as(moved.text()).isEqualTo("PENDING_VISIT");
+        assertThat(field(get("/shops/me", owner).body(), "addressLocked")).isEqualTo(true);
+        Reply refused = patch("/shops/me", Map.of("version", version, "addressLine", "Shop 9, New Market Road"), owner);
+        assertThat(field(refused.body(), "code")).as(refused.text()).isEqualTo("ADDRESS_LOCKED");
+        Reply pin = patch("/shops/me", Map.of("version", version, "latitude", 17.4702), owner);
+        assertThat(field(pin.body(), "code")).as(pin.text()).isEqualTo("ADDRESS_LOCKED");
+        // The name still changes (no check needed)
+        assertThat(patch("/shops/me", Map.of("version", version, "name", "Raju Hair Studio"), owner).status())
+                .isEqualTo(200);
+
+        Reply moved = moveByFieldTeam(salon, "Shop 9, New Market Road");
+        assertThat(moved.status()).as(moved.text()).isEqualTo(200);
+        assertThat(field(moved.body(), "status")).isEqualTo("APPROVED");   // no re-check: they checked it
+        assertThat(field(moved.body(), "waitingForVisit")).isEqualTo(false);
+        assertThat(count("notification_jobs WHERE type = 'SHOP_ADDRESS_CHANGED'")).isPositive();
         assertThat(jobs(b)).containsExactly("BOOKING_CONFIRMED:PENDING", "BOOKING_REMINDER:PENDING");   // rewritten
         assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE ref_id = ? AND status = 'PENDING' "
                 + "AND type = 'BOOKING_REMINDER' AND channel = 'PUSH'", String.class, b)).contains("New Market Road");
 
         Reply mine = get("/bookings/" + b, customer);
         assertThat(field(mine.body(), "canChange")).isEqualTo(true);
-        assertThat(field(mine.body(), "canMove")).isEqualTo(false);
-        Reply move = post("/bookings/" + b + "/reschedule", Map.of("startAt", at("13:00").toString()), customer);
-        assertThat(field(move.body(), "code")).as(move.text()).isEqualTo("SALON_NOT_BOOKABLE");
+        // Moved by the field team: still live, bookings move as usual
+        assertThat(field(mine.body(), "canMove")).isEqualTo(true);
         assertThat(post("/bookings/" + b + "/cancel", Map.of(), customer).status()).isEqualTo(200);
     }
 
@@ -1392,10 +1410,8 @@ class SalonBookingIntegrationTest {
         List<NotificationJob> claimed = store.claimDue(now, 10, Duration.ofMinutes(5), 8);
         NotificationJob reminder = claimed.stream().filter(j -> j.type().equals("BOOKING_REMINDER")).findFirst()
                 .orElseThrow();
-        // While this server is sending it, the owner saves a new address
-        long version = ((Number) field(get("/shops/me", owner).body(), "version")).longValue();
-        assertThat(patch("/shops/me", Map.of("version", version, "addressLine", "Shop 9, New Market Road"), owner)
-                .status()).isEqualTo(200);
+        // While this server is sending it, the field team saves a new address
+        assertThat(moveByFieldTeam(salon, "Shop 9, New Market Road").status()).isEqualTo(200);
         // The send finishes with the lease it claimed: still valid, so the reminder counts as sent, once (its row
         // already holds the new text; the copy being sent goes out with the old one)
         store.finish(reminder.id(), in.apnidukan.notifications.domain.JobStatus.SENT, now, now.plus(Duration.ofMinutes(5)));
@@ -2159,6 +2175,24 @@ class SalonBookingIntegrationTest {
         Reply accepted = post("/me/invites/" + invite + "/accept", Map.of(), who);
         assertThat(accepted.status()).as(accepted.text()).isEqualTo(200);
         return who;
+    }
+
+    /**
+     * The field team moves the salon (once verified the owner can't: ShopService.update answers ADDRESS_LOCKED), as
+     * PATCH /admin/shops/{id}/address does, with its other address fields as they are.
+     */
+    private Reply moveByFieldTeam(UUID shop, String addressLine) {
+        UUID admin = jdbc.queryForList("SELECT id FROM users WHERE phone = '9000000777'", UUID.class).stream()
+                .findFirst().orElseGet(() -> {
+                    UUID id = person("9000000777");
+                    jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE id = ?", id);
+                    return id;
+                });
+        Map<String, Object> row = jdbc.queryForMap("SELECT version, area, city, pincode, latitude, longitude "
+                + "FROM shops WHERE id = ?", shop);
+        return patch("/admin/shops/" + shop + "/address", Map.of("version", row.get("version"), "addressLine",
+                addressLine, "area", row.get("area"), "city", row.get("city"), "pincode", row.get("pincode"),
+                "latitude", row.get("latitude"), "longitude", row.get("longitude")), admin);
     }
 
     private UUID person(String phone) {

@@ -675,7 +675,7 @@ class AdminIntegrationTest {
         UUID first = shop("SALON", "PENDING_VISIT", "Raju Hair", "9200000001");
         UUID recheck = shop("SALON", "PENDING_VISIT", "Sharma Salon", "9200000002");
         approve(recheck);
-        moveThePin(recheck);
+        newGstin(recheck);
         shop("SALON", "APPROVED", "Live Cuts", "9200000003");
         UUID sentBack = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000004");
         assertThat(post("/admin/shops/" + sentBack + "/reject", Map.of("version", version(sentBack), "reason",
@@ -694,8 +694,14 @@ class AdminIntegrationTest {
         assertThat(field(waiting.get(0), "id")).isEqualTo(first.toString());
         assertThat(field(waiting.get(0), "group")).isEqualTo("FIRST_VISIT");
         assertThat(field(waiting.get(0), "ownerPhone")).isEqualTo("9200000001");
-        assertThat(field(((List<?>) get("/admin/shops?type=SALON&group=RECHECK", boss).body()).get(0), "group"))
-                .isEqualTo("RECHECK");
+        Object rechecking = ((List<?>) get("/admin/shops?type=SALON&group=RECHECK", boss).body()).get(0);
+        assertThat(field(rechecking, "group")).isEqualTo("RECHECK");
+        // Live while it waits for the re-check: in the Re-check list only, never twice
+        assertThat(field(rechecking, "status")).isEqualTo("APPROVED");
+        assertThat(field(rechecking, "waitingForVisit")).isEqualTo(true);
+        assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE", boss).body())
+                .extracting(x -> field(x, "id")).doesNotContain(recheck.toString());
+        assertThat(field(waiting.get(0), "waitingForVisit")).isEqualTo(true);
         // Search: name in part, owner phone in part, shop number exactly; LIKE wildcards are plain text
         assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=cuts", boss).body()).hasSize(1);
         assertThat((List<?>) get("/admin/shops?type=SALON&group=LIVE&q=920000000", boss).body()).hasSize(1);
@@ -716,9 +722,21 @@ class AdminIntegrationTest {
         UUID salon = shop("SALON", "PENDING_VISIT", "Sharma Salon", "9200000002");
         approve(salon);
         UUID owner = ownerOf(salon);
+        // The verified pin can't be moved by the owner any more: the field team does it
+        Reply locked = patch("/shops/me", Map.of("version", version(salon), "latitude", 17.466000), owner);
+        assertThat(field(locked.body(), "code")).as(locked.text()).isEqualTo("ADDRESS_LOCKED");
+        Reply movedByTeam = patch("/admin/shops/" + salon + "/address", Map.of("version", version(salon),
+                "addressLine", "Shop 4, Main Road", "area", "Kondapur", "city", "Hyderabad", "pincode", "500084",
+                "latitude", 17.466000, "longitude", 78.364000), boss);
+        assertThat(movedByTeam.status()).as(movedByTeam.text()).isEqualTo(200);
+        assertThat(field(movedByTeam.body(), "waitingForVisit")).isEqualTo(false);   // they checked it
+        assertThat(get("/shops/me", owner).text()).contains("Shop 4, Main Road");
+        assertThat(count("notification_jobs WHERE type = 'SHOP_ADDRESS_CHANGED'")).isPositive();
         Reply edited = patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair Studio",
-                "latitude", 17.466000, "gstin", "27AAPFU0939F1ZV"), owner);
-        assertThat(field(edited.body(), "status")).as(edited.text()).isEqualTo("PENDING_VISIT");
+                "gstin", "27AAPFU0939F1ZV"), owner);
+        // A live salon stays live while the field team re-checks it
+        assertThat(field(edited.body(), "status")).as(edited.text()).isEqualTo("APPROVED");
+        assertThat(field(edited.body(), "recheckSince")).isNotNull();
 
         Reply page = get("/admin/shops/" + salon, boss);
         assertThat(page.status()).as(page.text()).isEqualTo(200);
@@ -734,36 +752,52 @@ class AdminIntegrationTest {
         assertThat(salonFacts.get("hours")).isEqualTo(List.of());
         assertThat(salonFacts.get("ratings")).isEqualTo(0);
         List<?> timeline = (List<?>) field(page.body(), "timeline");
-        assertThat(timeline).extracting(e -> field(e, "event")).containsExactly("EDITED", "APPROVED");
-        assertThat(field(timeline.get(1), "byName")).isEqualTo("Prem");
-        assertThat(field(timeline.get(1), "byAdmin")).isEqualTo(true);
+        assertThat(timeline).extracting(e -> field(e, "event")).containsExactly("EDITED", "NOTE", "APPROVED");
+        assertThat((String) field(timeline.get(1), "note")).startsWith("Address changed by the field team: ");
+        assertThat(field(timeline.get(2), "byName")).isEqualTo("Prem");
+        assertThat(field(timeline.get(2), "byAdmin")).isEqualTo(true);
 
-        // Send back with a checklist, a reason for the owner and a note only admins see
-        Reply back = post("/admin/shops/" + salon + "/reject", Map.of("version", version(salon), "reason",
-                "The pin is 100 m away from the shop.", "note", "Owner was not there; called him.",
-                "checklist", List.of("PIN_WRONG", "OTHER")), boss);
-        assertThat(field(back.body(), "group")).as(back.text()).isEqualTo("SENT_BACK");
+        // A live re-check isn't sent back (that would strand its team and bookings): 409, ask the owner to fix
+        Reply notBack = post("/admin/shops/" + salon + "/reject", Map.of("version", version(salon), "reason",
+                "The GSTIN doesn't match the certificate."), boss);
+        assertThat(field(notBack.body(), "code")).as(notBack.text()).isEqualTo("WRONG_STATUS");
+        Object sinceBefore = field(get("/admin/shops/" + salon, boss).body(), "shop");
+        Reply asked = post("/admin/shops/" + salon + "/ask-to-fix", Map.of("version", version(salon), "reason",
+                "The GSTIN doesn't match the certificate.", "note", "Owner was not there; called him.",
+                "checklist", List.of("GST_UDYAM_MISMATCH", "OTHER")), boss);
+        assertThat(asked.status()).as(asked.text()).isEqualTo(200);
+        // Still live and waiting, in the same place in the queue
+        assertThat(field(asked.body(), "status")).isEqualTo("APPROVED");
+        assertThat(field(asked.body(), "group")).isEqualTo("RECHECK");
+        assertThat(field(asked.body(), "waitingForVisit")).isEqualTo(true);
+        assertThat(field(asked.body(), "statusSince")).isEqualTo(field(sinceBefore, "statusSince"));
+        assertThat(jdbc.queryForObject("SELECT string_agg(body, ' ') FROM notification_jobs "
+                + "WHERE type = 'SHOP_FIX_ASKED' AND user_id = ?", String.class, owner))
+                .contains("doesn't match the certificate").contains("Your salon stays live");
         Reply note = post("/admin/shops/" + salon + "/notes", Map.of("note", "Shop is behind the temple."), boss);
         assertThat(note.status()).isEqualTo(201);
         timeline = (List<?>) field(get("/admin/shops/" + salon, boss).body(), "timeline");
-        assertThat(timeline).extracting(e -> field(e, "event")).containsExactly("NOTE", "SENT_BACK", "EDITED",
-                "APPROVED");
-        assertThat(field(timeline.get(1), "checklist")).isEqualTo(List.of("PIN_WRONG", "OTHER"));
-        assertThat(field(timeline.get(1), "reason")).isEqualTo("The pin is 100 m away from the shop.");
+        assertThat(timeline).extracting(e -> field(e, "event")).containsExactly("NOTE", "FIX_ASKED", "EDITED",
+                "NOTE", "APPROVED");
+        assertThat(field(timeline.get(1), "checklist")).isEqualTo(List.of("GST_UDYAM_MISMATCH", "OTHER"));
+        assertThat(field(timeline.get(1), "reason")).isEqualTo("The GSTIN doesn't match the certificate.");
         assertThat(field(timeline.get(1), "note")).isEqualTo("Owner was not there; called him.");
         // The owner sees the reason, never the note
-        assertThat(get("/shops/me", owner).text()).contains("100 m away").doesNotContain("called him");
+        assertThat(get("/shops/me", owner).text()).contains("match the certificate").doesNotContain("called him");
+        // A first visit is sent back, never asked for a fix
+        UUID firstVisit = shop("SALON", "PENDING_VISIT", "New Cuts", "9200000011");
+        Reply wrong = post("/admin/shops/" + firstVisit + "/ask-to-fix", Map.of("version", version(firstVisit),
+                "reason", "Board not visible."), boss);
+        assertThat(field(wrong.body(), "code")).as(wrong.text()).isEqualTo("WRONG_STATUS");
 
-        // Sent again by the owner (both photos and the salon video are needed to submit): on the timeline
-        UUID video = file(salon, owner, "SHOP_VIDEO");
-        jdbc.update("UPDATE files SET content_type = 'video/mp4' WHERE id = ?", video);
-        jdbc.update("UPDATE shops SET owner_photo_file_id = ?, shop_photo_file_id = ?, shop_video_file_id = ? "
-                + "WHERE id = ?", file(salon, owner, "OWNER_PHOTO"), file(salon, owner, "SHOP_PHOTO"), video, salon);
-        TestData.setUpForVisit(jdbc, salon, owner);
-        Reply submitted = post("/shops/me/submit", Map.of("version", version(salon)), owner);
-        assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
-        assertThat(field(((List<?>) field(get("/admin/shops/" + salon, boss).body(), "timeline")).get(0), "event"))
-                .isEqualTo("SUBMITTED");
+        // The owner fixes the GSTIN: the ask is answered (the reason goes), still waiting for the field team
+        Reply fixed = patch("/shops/me", Map.of("version", version(salon), "gstin", "36AAPFU0939F1ZW"), owner);
+        assertThat(fixed.status()).as(fixed.text()).isEqualTo(200);
+        assertThat(field(fixed.body(), "statusReason")).isNull();
+        assertThat(field(fixed.body(), "recheckSince")).isNotNull();
+        approve(salon);
+        Reply checked = get("/shops/me", owner);
+        assertThat(field(checked.body(), "recheckSince")).isNull();
     }
 
     @Test
@@ -775,6 +809,16 @@ class AdminIntegrationTest {
                 boss);
         assertThat(field(late.body(), "code")).as(late.text()).isEqualTo("WRONG_STATUS");
         assertThat(field(field(late.body(), "details"), "status")).isEqualTo("APPROVED");
+
+        // The same for a live shop's re-check: it stays APPROVED, so "nothing waits any more" is the answer
+        newGstin(shop);
+        long recheckSeen = version(shop);
+        approve(shop);
+        Reply lateAgain = post("/admin/shops/" + shop + "/reject", Map.of("version", recheckSeen, "reason",
+                "Pin is wrong"), boss);
+        assertThat(field(lateAgain.body(), "code")).as(lateAgain.text()).isEqualTo("WRONG_STATUS");
+        Reply approveAgain = post("/admin/shops/" + shop + "/approve", Map.of("version", version(shop)), boss);
+        assertThat(field(approveAgain.body(), "code")).as(approveAgain.text()).isEqualTo("WRONG_STATUS");
     }
 
     @Test
@@ -788,9 +832,9 @@ class AdminIntegrationTest {
         UUID owner = ownerOf(salon);
         patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair Studio"), owner);
         assertThat(((List<?>) field(get("/admin/shops/" + salon, boss).body(), "changes"))).hasSize(1);
-        moveThePin(salon);
+        newGstin(salon);
         List<?> changes = (List<?>) field(get("/admin/shops/" + salon, boss).body(), "changes");
-        assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "location");
+        assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "gstin");
 
         // The waiting shop sent first stays first, even after its owner fixes a typo (which saves the shop again)
         UUID newer = shop("SALON", "PENDING_VISIT", "Second In", "9200000008");
@@ -1081,9 +1125,11 @@ class AdminIntegrationTest {
         assertThat(r.status()).as(r.text()).isEqualTo(200);
     }
 
-    private void moveThePin(UUID shop) {
-        Reply r = patch("/shops/me", Map.of("version", version(shop), "latitude", 17.470000), ownerOf(shop));
-        assertThat(field(r.body(), "status")).as(r.text()).isEqualTo("PENDING_VISIT");
+    /** The owner of a live shop gives a new GSTIN: it waits for a re-check, staying live. */
+    private void newGstin(UUID shop) {
+        Reply r = patch("/shops/me", Map.of("version", version(shop), "gstin", "27AABCU9603R1ZN"), ownerOf(shop));
+        assertThat(field(r.body(), "status")).as(r.text()).isEqualTo("APPROVED");   // live, waiting for a re-check
+        assertThat(field(r.body(), "recheckSince")).isNotNull();
     }
 
     private void submittedAt(UUID shop, Instant at) {

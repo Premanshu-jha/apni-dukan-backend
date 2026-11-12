@@ -491,7 +491,7 @@ class SalonVideoIntegrationTest {
     }
 
     @Test
-    void aNewVideoOnALiveSalonGoesBackToTheFieldTeamWithTheChangeNamed() throws Exception {
+    void aNewVideoOnALiveSalonWaitsForTheFieldTeamWithTheChangeNamedAndStaysLive() throws Exception {
         String first = uploadedVideo();
         call(HttpMethod.PUT, "/shops/me/video", Map.of("version", version(), "fileId", first), OWNER);
         setPhotos();
@@ -505,7 +505,8 @@ class SalonVideoIntegrationTest {
         Reply replaced = call(HttpMethod.PUT, "/shops/me/video", Map.of("version", version(), "fileId", second),
                 OWNER);
         assertThat(replaced.status()).as(replaced.text()).isEqualTo(200);
-        assertThat(replaced.body().get("status")).isNotEqualTo("APPROVED");
+        assertThat(replaced.body().get("status")).isEqualTo("APPROVED");   // live while re-checked
+        assertThat(replaced.body().get("recheckSince")).isNotNull();
         Reply detail = get("/admin/shops/" + SALON, ADMIN);
         assertThat(detail.text()).contains("\"field\":\"shopVideo\"").contains("Salon video");
     }

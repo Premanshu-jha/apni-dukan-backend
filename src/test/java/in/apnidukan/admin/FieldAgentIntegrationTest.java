@@ -472,23 +472,31 @@ class FieldAgentIntegrationTest {
         UUID sita = agent("9800000002", "500081");
         UUID shop = waitingSalon("500084");
         approveAs(shop, ravi);
-        // An approved salon moves its pin and pincode: back to waiting, by the new pincode
-        Reply moved = patch("/shops/me", Map.of("version", version(shop), "pincode", "500081", "latitude", 17.47),
-                ownerOf(shop));
-        assertThat(field(moved.body(), "status")).as(moved.text()).isEqualTo("PENDING_VISIT");
-        assertThat(assignee(shop)).isEqualTo(sita);
-        assertThat(lastLog(shop)).isEqualTo("RECHECK");
-        // While waiting it changes the pincode again: Sita doesn't cover it, Ravi does
-        patch("/shops/me", Map.of("version", version(shop), "pincode", "500084"), ownerOf(shop));
+        // An approved salon's owner gives a new GSTIN: it stays live and waits for a re-check, by the rule
+        Reply edited = patch("/shops/me", Map.of("version", version(shop), "gstin", "27AAPFU0939F1ZV"), ownerOf(shop));
+        assertThat(field(edited.body(), "status")).as(edited.text()).isEqualTo("APPROVED");
+        assertThat(field(edited.body(), "recheckSince")).isNotNull();
         assertThat(assignee(shop)).isEqualTo(ravi);
+        assertThat(lastLog(shop)).isEqualTo("RECHECK");
+        // While it waits the field team moves it to a pincode Sita covers (the owner can't: verified), then back
+        assertThat(field(patch("/shops/me", Map.of("version", version(shop), "pincode", "500081"), ownerOf(shop))
+                .body(), "code")).isEqualTo("ADDRESS_LOCKED");
+        moveTo(shop, "500081");
+        assertThat(assignee(shop)).isEqualTo(sita);
         assertThat(lastLog(shop)).isEqualTo("PINCODE_CHANGED");
+        moveTo(shop, "500084");
+        assertThat(assignee(shop)).isEqualTo(ravi);
         // A pincode change to one the same agent covers keeps them
         jdbc.update("INSERT INTO admin_pincodes (user_id, pincode, added_at) VALUES (?, '500085', ?)", ravi,
                 Timestamp.from(NOW));
         long logs = count("shop_assignments WHERE shop_id = '" + shop + "'");
-        patch("/shops/me", Map.of("version", version(shop), "pincode", "500085"), ownerOf(shop));
+        moveTo(shop, "500085");
         assertThat(assignee(shop)).isEqualTo(ravi);
         assertThat(count("shop_assignments WHERE shop_id = '" + shop + "'")).isEqualTo(logs);
+        // A field agent may move only a business assigned to them
+        assertThat(patch("/admin/shops/" + shop + "/address", Map.of("version", version(shop), "addressLine",
+                "Shop 4, Main Road", "area", "Kondapur", "city", "Hyderabad", "pincode", "500085", "latitude", 17.47,
+                "longitude", 78.364), sita).status()).isEqualTo(404);
 
         // Suspended, then reinstated by a super admin: assigned again
         assertThat(post("/admin/shops/" + shop + "/suspend", Map.of("version", version(shop), "reason",
@@ -779,6 +787,8 @@ class FieldAgentIntegrationTest {
                     post("/admin/shops/" + other + "/approve", Map.of("version", version(other)), ravi),
                     post("/admin/shops/" + other + "/reject", Map.of("version", version(other), "reason",
                             "Board not visible"), ravi),
+                    post("/admin/shops/" + other + "/ask-to-fix", Map.of("version", version(other), "reason",
+                            "Board not visible"), ravi),
                     post("/admin/shops/" + other + "/notes", Map.of("note", "Was here"), ravi));
             for (Reply r : refused) {
                 assertThat(r.status()).as(r.text()).isEqualTo(404);
@@ -927,6 +937,14 @@ class FieldAgentIntegrationTest {
     private void submit(UUID shop) {
         Reply r = post("/shops/me/submit", Map.of("version", version(shop)), ownerOf(shop));
         assertThat(field(r.body(), "status")).as(r.text()).isEqualTo("PENDING_VISIT");
+    }
+
+    /** The field team (a super admin) moves the business to this pincode, the rest of its address as it is. */
+    private void moveTo(UUID shop, String pincode) {
+        Reply r = patch("/admin/shops/" + shop + "/address", Map.of("version", version(shop), "addressLine",
+                "Shop 4, Main Road", "area", "Kondapur", "city", "Hyderabad", "pincode", pincode, "latitude",
+                17.465, "longitude", 78.364), boss);
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
     }
 
     private void approveAs(UUID shop, UUID who) {

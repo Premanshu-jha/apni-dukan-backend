@@ -402,8 +402,8 @@ sequenceDiagram
 | `POST /api/v1/shops/me/handover` · `GET` · `DELETE` | Owner. `{phone, version}`: asks the person with that phone to take the shop over. 202 `{message, handover: {id, phone, createdAt, expiresAt}}`, the same `message` for any number. 409 `HANDOVER_PENDING` while one waits, 429 `TOO_MANY_REQUESTS` after 5 a day, 400 `INVALID_PHONE` / `VALIDATION_FAILED` (`details.phone`: your own number). `GET`: the waiting one (404 `NO_HANDOVER`). `DELETE`: cancel it (204, also when none waits) |
 | `GET /api/v1/me/handover` · `POST /api/v1/me/handover/{id}/accept` · `.../decline` | Anyone signed in: requests waiting for their phone, `[{id, shopId, shopCode, shopName, type, area, city, ownerName, createdAt, expiresAt}]`. Accept: 200 with the shop (`myRole: OWNER`), then `POST /auth/refresh`. Decline: 204. 404 `HANDOVER_NOT_FOUND` (not for your phone), 409 `HANDOVER_GONE` with `details.status` (`ACCEPTED`, `DECLINED`, `CANCELLED`, `EXPIRED`, `CLOSED`, `OWNER_CHANGED`), 409 `ALREADY_IN_A_SHOP` (you work in another shop: leave it first), 403 `PROFILE_INCOMPLETE` |
 | `GET /api/v1/admin/shops?type=&group=` | Field team (admins) only, else 403. A group's shops with links to both photos (see "The admin website"). The older `?status=` form is gone: without `type` and `group`, 400 `VALIDATION_FAILED` |
-| `POST /api/v1/admin/shops/{id}/approve` | Field team. `{version, note?}` from the page they checked: PENDING_VISIT → APPROVED after the visit. 409 `SHOP_CHANGED` if the owner changed something since (reload, check, approve), 409 `WRONG_STATUS` from another status. Customers can find it from now on |
-| `POST /api/v1/admin/shops/{id}/reject` | Field team. `{version, reason, note?, checklist?}`: the visit didn't pass but can be fixed, PENDING_VISIT → DRAFT. The owner sees `statusReason`, fixes it and submits again. Bookings already made stay (suspend to cancel them) |
+| `POST /api/v1/admin/shops/{id}/approve` | Field team. `{version, note?}` from the page they checked: PENDING_VISIT → APPROVED after the visit (customers can find it from now on), or a live shop's re-check done (stays APPROVED, `recheckSince` cleared, the owner gets `SHOP_RECHECKED`). 409 `SHOP_CHANGED` if the owner changed something since (reload, check, approve), 409 `WRONG_STATUS` from another status or when nothing waits for a check |
+| `POST /api/v1/admin/shops/{id}/reject` | Field team. `{version, reason, note?, checklist?}`: the visit (or a live shop's re-check) didn't pass but can be fixed, PENDING_VISIT or a re-checked APPROVED shop → DRAFT. The owner sees `statusReason`, fixes it and submits again (a live one is told it is hidden from customers until then). Bookings already made stay (suspend to cancel them) |
 | `POST /api/v1/admin/shops/{id}/suspend` | Field team. `{version, reason, note?, checklist?}`: APPROVED or PENDING_VISIT (e.g. found shut at its visit) → SUSPENDED, off the app at once (no booking can be made). A salon's upcoming online bookings are cancelled within seconds by the background job (`SalonClosingJob`, as for a closing; a suspension reinstated before it is done stops it, the rest stay) and each customer is told ("isn't taking online bookings for now"; the field team's reason goes only to the owner). The salon can still run its own day (walk-ins) |
 | `POST /api/v1/admin/shops/{id}/reinstate` | Field team. `{version, note?}`: SUSPENDED → PENDING_VISIT, back in the visit list; live again only once approved after a new check (so nothing changed while suspended goes live unchecked). Cancelled bookings stay cancelled |
 
@@ -556,11 +556,15 @@ owner.
 Rules: the GPS pin is required and must be inside India; pincode is 6 digits; GSTIN and Udyam are optional, checked,
 and stored in capitals; text is trimmed. Unknown fields are refused with 400 `UNKNOWN_FIELD`, so nobody can send
 `"status": "APPROVED"` for their own shop. Status moves DRAFT → (both photos, Submit) → PENDING_VISIT → (field team
-visits and approves) → APPROVED; from any status the owner can close it for good (CLOSED). Changing the photos or the address (address line, area, city, pincode, map pin)
-of an APPROVED shop sends it back to PENDING_VISIT for another check: customers can't find it until the field team
-approves it again. Bookings already made stay and can be cancelled; moving one to a new time answers 409
-`SALON_NOT_BOOKABLE` until the approval (`canMove` is false meanwhile). A new address rewrites the pending booking
-reminders, so customers are sent to the new place. A photo that a shop or barber uses can't be deleted
+visits and approves) → APPROVED; from any status the owner can close it for good (CLOSED). Changing the photos, the
+salon video, the address (address line, area, city, pincode, map pin), the GSTIN or the Udyam number of an APPROVED
+shop puts it in the field team's **re-check** (V41): it **stays APPROVED and live** (customers find it, book and move
+bookings; its helpers and barbers work as usual) and `recheckSince` (owner's `GET /shops/me`) says since when it
+waits. The first change sets it; further changes while it waits keep its place in the queue (the field team sees every
+change since the last check). The field team then approves it (checked: `recheckSince` back to null, the owner gets
+`SHOP_RECHECKED` "Your changes are checked"), sends it back (DRAFT, hidden from customers until the owner fixes it and
+submits again; bookings already made stay) or suspends it. A new name or owner's name needs no check. A new address
+rewrites the pending booking reminders, so customers are sent to the new place. A photo that a shop or barber uses can't be deleted
 (409 `FILE_IN_USE`).
 
 A shop is a **kirana** or a **salon**: send `"type": "SALON"` when registering (left out = `KIRANA`). The type can't
@@ -591,8 +595,8 @@ their own account (409 `SUPER_ADMIN`): another super admin changes their role fi
 | Endpoint | Notes |
 | --- | --- |
 | `GET /admin/me` | Who is signed in: `{userId, name, phone, adminRole, designation, testMode: {on, until}}` (`designation`: `FIELD_AGENT` for an admin, null for a super admin; the website shows a red banner while test mode is on) |
-| `GET /admin/dashboard` | For `KIRANA` and `SALON`, how many shops are in each group: `FIRST_VISIT` (waiting, never approved), `RECHECK` (waiting, approved before: the owner moved the pin or changed a photo, or it was reinstated), `SENT_BACK` (a draft sent back with a reason), `LIVE`, `SUSPENDED`, `CLOSED` (closed by its owner). A draft never submitted is in no group. Counted at most every 30 seconds (kept in Redis); a field-team decision shows at once, an owner's own step (submitting, a moved pin) within 30 seconds |
-| `GET /admin/shops?type=&group=&q=&assignedTo=&unassigned=` | A field agent gets only the businesses assigned to them (`assignedTo` and `unassigned` are ignored for them); a super admin gets all, or one agent's (`assignedTo=<userId>`), or those waiting with no agent (`unassigned=true`; both: 400 `VALIDATION_FAILED`). Each has `assignedTo` (`{id, name}`, null when unassigned). A group's shops, longest in it first (`statusSince`: its latest timeline entry other than a note, so an owner fixing a typo doesn't move it), 50 a page (see "Pages" below), each with `group` and `ownerPhone`. `type` and `group` are required (400 `VALIDATION_FAILED`, `details` naming each missing one: `{"type": "is required"}`, `{"group": "is required"}`). `q`: the shop number exactly (`1042` or `#1042`, any length), the owner's phone in part (spaces, `+91` and dashes ignored; at least 3 digits), or the name or owner's name in part. A `q` of 1 or 2 characters that isn't a shop number is 400 `VALIDATION_FAILED` with `details: {"q": "type at least 3 letters"}`; a blank `q` is no search |
+| `GET /admin/dashboard` | For `KIRANA` and `SALON`, how many shops are in each group: `FIRST_VISIT` (waiting, never approved), `RECHECK` (waiting, approved before: a live shop whose owner changed the address, pin, a photo, the video, GSTIN or Udyam, which stays live meanwhile; or a reinstated one), `SENT_BACK` (a draft sent back with a reason), `LIVE`, `SUSPENDED`, `CLOSED` (closed by its owner). A draft never submitted is in no group. Counted at most every 30 seconds (kept in Redis); a field-team decision shows at once, an owner's own step (submitting, a moved pin) within 30 seconds |
+| `GET /admin/shops?type=&group=&q=&assignedTo=&unassigned=` | A field agent gets only the businesses assigned to them (`assignedTo` and `unassigned` are ignored for them); a super admin gets all, or one agent's (`assignedTo=<userId>`), or those waiting with no agent (`unassigned=true`; both: 400 `VALIDATION_FAILED`). Each has `assignedTo` (`{id, name}`, null when unassigned). A group's shops, longest in it first (`statusSince`: its latest timeline entry other than a note, so an owner fixing a typo doesn't move it), 50 a page (see "Pages" below), each with `group`, `ownerPhone` and `waitingForVisit` (true for the first visit and the re-check, also a live shop's: Approve and Send back are for these only). `type` and `group` are required (400 `VALIDATION_FAILED`, `details` naming each missing one: `{"type": "is required"}`, `{"group": "is required"}`). `q`: the shop number exactly (`1042` or `#1042`, any length), the owner's phone in part (spaces, `+91` and dashes ignored; at least 3 digits), or the name or owner's name in part. A `q` of 1 or 2 characters that isn't a shop number is 400 `VALIDATION_FAILED` with `details: {"q": "type at least 3 letters"}`; a blank `q` is no search |
 | `GET /admin/shops/{id}` | The shop; a salon's barbers and services; `changes` since the moment it was last approved (name, owner, address, area, city, pincode, pin with `pinMovedMetres`, GSTIN, Udyam, photos with the old photo links), so edits a live shop made without needing a visit show up too; the `timeline`, newest first, its first 50 entries, and `timelineNext` (`{afterAt, afterSeq}`, or null when there are no more) |
 | `GET /admin/shops/{id}/timeline?afterAt=&afterSeq=` | The rest of the timeline, 50 a page: `{items: [...], next}` with the same entries as `timeline` and `next` like `timelineNext`. See "Pages" below |
 | `POST /admin/shops/{id}/notes {note}` | A note only admins see (2–500 characters), 201 |
@@ -661,7 +665,8 @@ change (admins, test numbers, test emails, test mode on and off) is logged in `a
 suspended, reinstated, note, closed (owner, with their reason), handed over (the new owner). A note and a hand-over
 don't change `statusSince`. Shops registered before it existed have an empty timeline and count their waiting time
 from registration. The photos a shop had when last approved can't be deleted while it waits for its re-check (409
-`FILE_IN_USE`): the field team compares them with the new ones.
+`FILE_IN_USE`): the field team compares them with the new ones. "Last approved" is the history row where it became
+APPROVED or where its last re-check was approved (`recheck_since` cleared).
 
 ## How salon setup works
 
@@ -938,6 +943,20 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
+
+### API changes for re-checks while live (V41–V43; partner app 0.14.0 and admin app 0.9.0 use them)
+
+Deploy the backend first. Old apps keep working: a re-checked salon now stays `APPROVED`, which an old partner app
+shows as live (its banner's old words about being hidden are wrong until it is updated), and an old admin website shows
+it in the Re-check list but offers Suspend only (its Approve button needs `PENDING_VISIT`) until it is updated.
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `PATCH /shops/me`, `PUT /shops/me/photos`, `PUT /shops/me/video` on a live shop | address, pin, photos, video: back to `PENDING_VISIT` (hidden, staff locked out) | stays `APPROVED` with `recheckSince`; GSTIN and Udyam changes are re-checked too | partner app: "stays live, our team checks it" |
+| `GET /shops/me` and shop answers | | adds `recheckSince` (owner only, else null) | partner app: the waiting card |
+| `GET /admin/shops`, `/admin/shops/{id}` | | each shop adds `waitingForVisit`; `group` `RECHECK` for a live shop waiting (no longer `LIVE`) | admin app: Approve / Send back / Assign by `waitingForVisit`, not by status |
+| `POST /admin/shops/{id}/approve`, `/reject` | `PENDING_VISIT` only | also a live shop waiting for its re-check | admin app: the words after approving a re-check |
+| messages | | new type `SHOP_RECHECKED` (owner) | partner app: the inbox icon |
 
 ### API changes for changing the phone number (no migration; customer app and partner app use them)
 
@@ -1687,7 +1706,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V41__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V44__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
