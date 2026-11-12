@@ -17,13 +17,17 @@ import java.io.IOException;
 /**
  * JSON bodies are small (a phone number, a code, an order). Anything over 64 KB is refused before it is read, so
  * nobody can tie up the server's memory with a huge body. Only the file upload (POST /api/v1/files) may be larger;
- * it has its own 10 MB limit.
+ * it has its own 10 MB limit. A support email from the Email Worker (POST /api/v1/helpdesk/inbound, the raw email)
+ * may be up to 1 MB (the worker sends only the headers of a bigger one).
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class RequestSizeLimitFilter extends OncePerRequestFilter {
 
     static final long MAX_JSON_BYTES = 64 * 1024;
+    /** A raw support email (see the class comment). */
+    static final long MAX_EMAIL_BYTES = 1024 * 1024;
+    static final String INBOUND_EMAIL = "/api/v1/helpdesk/inbound";
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
@@ -35,7 +39,9 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
             chain.doFilter(request, response);
             return;
         }
-        if (request.getContentLengthLong() > MAX_JSON_BYTES) {
+        long limit = "POST".equals(request.getMethod()) && INBOUND_EMAIL.equals(request.getRequestURI())
+                ? MAX_EMAIL_BYTES : MAX_JSON_BYTES;
+        if (request.getContentLengthLong() > limit) {
             response.setStatus(413);
             response.setContentType("application/json");
             response.setCharacterEncoding("UTF-8");
@@ -44,28 +50,30 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
             return;
         }
         // No length given (chunked): count while reading and stop at the limit.
-        chain.doFilter(new LimitedRequest(request), response);
+        chain.doFilter(new LimitedRequest(request, limit), response);
     }
 
     /** Thrown while reading a body that turns out to be too large; answered as 413 by GlobalExceptionHandler. */
     public static final class RequestTooLargeException extends IOException {
-        RequestTooLargeException() {
-            super("Request body over " + MAX_JSON_BYTES + " bytes");
+        RequestTooLargeException(long limit) {
+            super("Request body over " + limit + " bytes");
         }
     }
 
     private static final class LimitedRequest extends HttpServletRequestWrapper {
 
         private ServletInputStream limited;
+        private final long limit;
 
-        LimitedRequest(HttpServletRequest request) {
+        LimitedRequest(HttpServletRequest request, long limit) {
             super(request);
+            this.limit = limit;
         }
 
         @Override
         public ServletInputStream getInputStream() throws IOException {
             if (limited == null) {
-                limited = new LimitedStream(super.getInputStream());
+                limited = new LimitedStream(super.getInputStream(), limit);
             }
             return limited;
         }
@@ -74,10 +82,12 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
     private static final class LimitedStream extends ServletInputStream {
 
         private final ServletInputStream in;
+        private final long limit;
         private long read;
 
-        LimitedStream(ServletInputStream in) {
+        LimitedStream(ServletInputStream in, long limit) {
             this.in = in;
+            this.limit = limit;
         }
 
         @Override
@@ -100,8 +110,8 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
 
         private void count(int n) throws IOException {
             read += n;
-            if (read > MAX_JSON_BYTES) {
-                throw new RequestTooLargeException();
+            if (read > limit) {
+                throw new RequestTooLargeException(limit);
             }
         }
 

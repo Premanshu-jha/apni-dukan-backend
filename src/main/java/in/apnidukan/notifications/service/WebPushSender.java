@@ -46,7 +46,7 @@ public class WebPushSender implements PushSender {
     /**
      * @param publicKey  the VAPID public key, base64url (65 bytes); the app gives the same one to the browser
      * @param privateKey the matching private key
-     * @param subject    contact for the push services, e.g. mailto:support@apnidukan.in
+     * @param subject    contact for the push services, e.g. mailto:support@clozest.in
      */
     public WebPushSender(String publicKey, ECPrivateKey privateKey, String subject, Clock clock) {
         this.publicKey = publicKey;

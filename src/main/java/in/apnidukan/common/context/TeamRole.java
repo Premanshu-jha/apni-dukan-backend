@@ -9,10 +9,21 @@ public enum TeamRole {
     NONE,
     /** An ADMIN whose designation is field agent: only the businesses assigned to them. */
     FIELD_AGENT,
+    /**
+     * An ADMIN whose designation is support: only the support tickets (the helpdesk module). Never the businesses,
+     * assignments or the team: {@link #onTeam()} is false for them, so every page that checks it refuses them.
+     */
+    SUPPORT,
     /** Everything: every business, assignments, the team, support, test mode. */
     SUPER_ADMIN;
 
+    /** The field team, who may see businesses: field agents and super admins (not support people). */
     public boolean onTeam() {
-        return this != NONE;
+        return this == FIELD_AGENT || this == SUPER_ADMIN;
+    }
+
+    /** Who may work on support tickets: support people and super admins. */
+    public boolean handlesTickets() {
+        return this == SUPPORT || this == SUPER_ADMIN;
     }
 }

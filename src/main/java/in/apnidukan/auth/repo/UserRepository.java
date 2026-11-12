@@ -63,4 +63,9 @@ public interface UserRepository extends JpaRepository<User, UUID> {
     /** Only the id, so the row locked next (lockById) is read fresh, not from this lookup's copy. */
     @Query("SELECT u.id FROM User u WHERE lower(u.email) = lower(:email) AND u.emailVerifiedAt IS NOT NULL")
     Optional<UUID> findIdByVerifiedEmail(String email);
+
+    /** Live support people (ADMIN with the SUPPORT designation), oldest admins first. */
+    @Query(value = "SELECT id FROM users WHERE admin_role = 'ADMIN' AND admin_designation = 'SUPPORT' "
+            + "AND deleted_at IS NULL ORDER BY admin_since, id", nativeQuery = true)
+    java.util.List<UUID> findSupportStaff();
 }

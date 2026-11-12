@@ -182,6 +182,21 @@ class MessagesAtScaleIntegrationTest {
                 public boolean isAdmin(UUID userId) {
                     return real.isAdmin(userId);
                 }
+
+                @Override
+                public Optional<UUID> findByVerifiedEmail(String email) {
+                    return real.findByVerifiedEmail(email);
+                }
+
+                @Override
+                public Optional<String> verifiedEmail(UUID userId) {
+                    return real.verifiedEmail(userId);
+                }
+
+                @Override
+                public java.util.List<UUID> supportStaff() {
+                    return real.supportStaff();
+                }
             };
         }
     }

@@ -51,7 +51,16 @@ public interface UserDirectory {
         }
     }
 
-    /** True only for the Apni Dukan team (users.admin): field agents and super admins. */
+    /** The live account whose verified email this is (any case), if any: a support email's sender. */
+    Optional<UUID> findByVerifiedEmail(String email);
+
+    /** The person's verified email, if they have one (a support ticket's replies go there). */
+    Optional<String> verifiedEmail(UUID userId);
+
+    /** The support people (ADMIN with the SUPPORT designation, live accounts), oldest first. */
+    List<UUID> supportStaff();
+
+    /** True only for the Apni Dukan team (users.admin): field agents, support people and super admins. */
     boolean isAdmin(UUID userId);
 
     /** What this person may do on the admin website (NONE for an unknown or deleted account). */

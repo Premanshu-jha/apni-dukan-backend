@@ -76,6 +76,27 @@ public class UserDirectoryService implements UserDirectory {
 
     @Override
     @Transactional(readOnly = true)
+    public Optional<UUID> findByVerifiedEmail(String email) {
+        if (email == null || email.isBlank()) {
+            return Optional.empty();
+        }
+        return users.findIdByVerifiedEmail(email.strip()).filter(this::isActive);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<String> verifiedEmail(UUID userId) {
+        return users.findById(userId).filter(u -> !u.isDeleted()).filter(User::isEmailVerified).map(User::getEmail);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<UUID> supportStaff() {
+        return users.findSupportStaff();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public boolean isAdmin(UUID userId) {
         return users.findById(userId).map(User::isAdmin).orElse(false);
     }
@@ -88,6 +109,7 @@ public class UserDirectoryService implements UserDirectory {
         return users.findTeamRoleById(userId).map(r -> switch (r) {
             case "SUPER_ADMIN" -> TeamRole.SUPER_ADMIN;
             case "ADMIN:FIELD_AGENT" -> TeamRole.FIELD_AGENT;
+            case "ADMIN:SUPPORT" -> TeamRole.SUPPORT;
             default -> TeamRole.NONE;
         }).orElse(TeamRole.NONE);
     }

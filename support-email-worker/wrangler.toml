@@ -1,0 +1,8 @@
+name = "clozest-support-email"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+HELPDESK_URL = "https://api.clozest.in/api/v1/helpdesk/inbound"
+# GMAIL_COPY and HELPDESK_SECRET are set in the dashboard (Settings → Variables), not here: the secret must never be
+# committed, and the Gmail address is private.

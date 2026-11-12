@@ -136,8 +136,8 @@ public class AdminTeamController {
 
     /**
      * @param role        ADMIN or SUPER_ADMIN
-     * @param designation FIELD_AGENT for an ADMIN; ignored for a SUPER_ADMIN
-     * @param pincodes    6 digits each, at least one for an ADMIN; ignored for a SUPER_ADMIN
+     * @param designation FIELD_AGENT or SUPPORT for an ADMIN; ignored for a SUPER_ADMIN
+     * @param pincodes    6 digits each, at least one for a FIELD_AGENT; ignored for SUPPORT and a SUPER_ADMIN
      */
     public record MemberBody(@NotBlank @Size(max = 20) String phone, @NotBlank @Size(max = 254) String email,
                              @NotBlank @Size(max = 100) String name, @NotNull AdminRole role,

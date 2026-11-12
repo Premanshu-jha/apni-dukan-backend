@@ -42,7 +42,7 @@ public class ResendEmailSender implements EmailSender {
     private final HttpClient http;
 
     /**
-     * @param from     who the email is from, e.g. "Apni Dukan &lt;no-reply@apnidukan.in&gt;" (an address on a domain
+     * @param from     who the email is from, e.g. "Clozest &lt;no-reply@clozest.in&gt;" (an address on a domain
      *                 verified in Resend; onboarding@resend.dev only reaches the Resend account's own address)
      * @param endpoint {@link #RESEND}; a local fake in tests
      */
@@ -67,14 +67,30 @@ public class ResendEmailSender implements EmailSender {
 
     @Override
     public void send(String to, String subject, String body) {
-        String json = "{\"from\":" + json(from) + ",\"to\":[" + json(to) + "],\"subject\":" + json(subject)
-                + ",\"text\":" + json(body) + "}";
-        HttpRequest request = HttpRequest.newBuilder(endpoint)
+        send(new Email(to, subject, body, from, null, subject, null));
+    }
+
+    @Override
+    public void send(String to, String subject, String body, String sender, String replyTo) {
+        send(new Email(to, subject, body, sender, replyTo, subject, null));
+    }
+
+    /** Sends one email; logs say {@code logAs}, never the subject when they differ. Resend's Idempotency-Key when set. */
+    @Override
+    public void send(Email email) {
+        String replyTo = email.replyTo();
+        String subject = email.logAs();
+        String json = "{\"from\":" + json(email.from()) + ",\"to\":[" + json(email.to()) + "],\"subject\":"
+                + json(email.subject()) + ",\"text\":" + json(email.body())
+                + (replyTo == null ? "" : ",\"reply_to\":" + json(replyTo)) + "}";
+        HttpRequest.Builder builder = HttpRequest.newBuilder(endpoint)
                 .timeout(ANSWER_TIMEOUT)
                 .header("Authorization", "Bearer " + apiKey)
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
-                .build();
+                .header("Content-Type", "application/json");
+        if (email.idempotencyKey() != null) {
+            builder.header("Idempotency-Key", email.idempotencyKey());
+        }
+        HttpRequest request = builder.POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8)).build();
         HttpResponse<String> answer = post(request, subject);
         if (answer.statusCode() == 429) {
             // Over Resend's rate limit: wait as told (at most MAX_RETRY_WAIT, so the person isn't kept waiting) and

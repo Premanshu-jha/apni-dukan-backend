@@ -121,7 +121,8 @@ public class ShopAssignments implements FieldAssignments {
 
     @Override
     public void coverageChanged(UUID adminId, Collection<String> removed, UUID by) {
-        String reason = users.teamRole(adminId).onTeam() ? "COVERAGE_CHANGED" : "ADMIN_REMOVED";
+        // Still on the team (a super admin, or now in support) is a coverage change, not a removal
+        String reason = users.isAdmin(adminId) ? "COVERAGE_CHANGED" : "ADMIN_REMOVED";
         UUID after = null;
         Map<UUID, Integer> batch = new java.util.HashMap<>();
         for (List<Locked> slice = store.lockPendingOf(adminId, null, sliceSize); !slice.isEmpty();
