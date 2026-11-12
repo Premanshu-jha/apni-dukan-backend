@@ -946,6 +946,58 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### Support tickets (V46; admin app 0.10.0, customer app 0.15.0, partner app 0.16.0)
+
+Questions to **support@clozest.in** and from **Need help** in the customer and partner apps become tickets
+(`CLZ-1001`, `CLZ-1002`, …), answered on the admin website. Module `in.apnidukan.helpdesk`.
+
+- **Support people**: an `ADMIN` with the new designation `SUPPORT` (Team page; no pincodes). They see only the
+  tickets given to them; `TeamRole.onTeam()` is now false for them, so every business, dashboard, assignment and
+  strikes page answers 404 and the Team and stats pages 403 `SUPER_ADMIN_ONLY`. Super admins see every ticket.
+- **Who gets a ticket**: the support person with the fewest open (not resolved) tickets, at random among those tied
+  (`TicketAssigner`; the team lock shared, then the helpdesk lock, then rows, so simultaneous tickets spread evenly
+  and a team change never deadlocks with it). Nobody in support: **Unassigned** (super admins). Someone joining
+  support takes the Unassigned ones; someone leaving it (another designation, removed, account deleted) hands
+  their open tickets to the others.
+- **From the apps**: `POST /api/v1/helpdesk/tickets {app: CUSTOMER|PARTNER, subject?, message}` → 201
+  `{id, number, sentTo}`. Needs a verified email and a name (403 `PROFILE_INCOMPLETE`, `details.missing`); message
+  10–5,000 characters; at most `app.helpdesk.new-per-hour` (5) new tickets an hour (429 `TOO_MANY_TICKETS`).
+- **By email**: Cloudflare Email Routing hands every email to `support-email-worker/worker.js`, which forwards a copy
+  to the support Gmail and posts the raw email (headers only over 1 MB) to `POST /api/v1/helpdesk/inbound`, signed
+  (`X-Helpdesk-Timestamp`, `X-Helpdesk-Signature` = hex HMAC-SHA256 of `"timestamp.body"` under
+  `HELPDESK_INBOUND_SECRET`; 403 `BAD_SIGNATURE` when missing, wrong or 5 minutes off). Auto-replies, bounces,
+  newsletters and our own domain's emails are ignored; the same Message-ID from the same sender twice is one email.
+  **A forged From is never trusted**: only when Cloudflare's own results header (the topmost
+  `ARC-Authentication-Results`/`Authentication-Results` from `mx.cloudflare.net`) says `dmarc=pass` is the sender's
+  account found by verified email (profile shown); otherwise the ticket is from an unknown sender, marked
+  `senderVerified: false`, and the acknowledgement doesn't quote their words. A reply with `[CLZ-n]` in the subject
+  from the ticket's address (or the account's current verified email) goes into that ticket and reopens it; past the
+  hourly limit a sender's emails join their latest ticket (reopened). Past `app.helpdesk.emails-per-hour` (300) new
+  emailed tickets get no acknowledgement (a flood can't use us to send mail). HTML is read in one pass (at most
+  200 KB), NUL and control characters are dropped.
+- **Emails we send** (queued in `ticket_emails` with the change, sent by `TicketEmailJob` every 15 s, one at a time,
+  each claimed just before sending and with Resend's `Idempotency-Key` = the email's id, so none goes twice; from
+  `Clozest Support <support@clozest.in>`, replies to support@clozest.in; tried again after 1, 5, 15 minutes, then
+  FAILED and shown on the ticket; logs say "ticket email", never the subject): "We've got your request (CLZ-n)" on
+  creation, and each reply (to the account's current verified email, signed with the support person's name only,
+  their last message quoted).
+- **Admin website** (`/api/v1/admin/tickets`): `GET ?view=ACTIVE|OPEN|WAITING|RESOLVED|UNASSIGNED&assignee=&before=&beforeId=`
+  (50 a page, newest activity first), `GET /counts`, `GET /stats` (super admins), `GET /{id}` (conversation, history,
+  the person's profile from each module's `ProfileFacts`, logged as PROFILE_VIEWED), `POST /{id}/reply
+  {seenSeq, body, resolve}` (409 `NEW_MESSAGE` if they wrote after `seenSeq`, `NOT_YOURS`, `REQUESTER_GONE`),
+  `POST /{id}/close {seenSeq}` (no email; 409 `NEW_MESSAGE`), `POST /{id}/assign {version, assigneeId}` (super
+  admins; 409 `TICKET_CHANGED`, 400 `NOT_SUPPORT`, 400 `OWN_TICKET`: never to the person who asked). A ticket is
+  never given to the person who asked it. The Team page's members carry `openTickets`; a super admin holding tickets
+  who is demoted or removed hands them on like a support person.
+- Deleting an account forgets its address and name on its tickets (also those emailed from its verified address),
+  cancels emails still waiting to go to it, and blanks the address and text of every email to it; deleted people show
+  as "Deleted account".
+- The push services' contact (VAPID subject) default is now `mailto:support@clozest.in`.
+
+New settings: `HELPDESK_INBOUND_SECRET` (at least 32 characters; the worker's `HELPDESK_SECRET`; empty refuses every
+email), `SUPPORT_EMAIL_FROM` (default `Clozest Support <support@clozest.in>`), `SUPPORT_EMAIL` (reply-to, default
+`support@clozest.in`), `HELPDESK_EMAILS_PER_HOUR` (default 300). Deploy the backend first, then the apps, then the worker.
+
 ### API changes for the edit code per device, closing and handing over (V45; partner app 0.15.0)
 
 - **The edit code works on the device it was entered on.** Each sign-in on a device is a session: its refresh
