@@ -79,6 +79,15 @@ jobs:
   # Security scan of the source code (free Semgrep rules: Java, secrets, OWASP Top 10). Separate job, runs in parallel.
   # Semgrep is installed from PyPI at the exact version in .github/semgrep/requirements.txt (Dependabot proposes
   # updates), instead of an unpinned Docker image that anyone controlling the tag could swap.
+  email-worker:                # the Cloudflare Email Worker for support@clozest.in (support-email-worker/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the worker      # Node's own test runner, nothing to install (the runner's Node 20+)
+        run: node --test support-email-worker/worker.test.mjs
+
   semgrep:
     runs-on: ubuntu-latest
     steps:
