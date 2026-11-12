@@ -24,7 +24,7 @@ public class PushConfig {
     @Bean
     PushSender pushSender(@Value("${app.push.vapid-public-key:}") String publicKey,
                           @Value("${app.push.vapid-private-key:}") String privateKey,
-                          @Value("${app.push.subject:mailto:support@apnidukan.in}") String subject,
+                          @Value("${app.push.subject:mailto:support@clozest.in}") String subject,
                           Clock clock) throws GeneralSecurityException {
         if (publicKey.isBlank() || privateKey.isBlank()) {
             return new LoggingPushSender();

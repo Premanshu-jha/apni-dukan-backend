@@ -67,7 +67,7 @@ class ProductionSafetyCheckTest {
                         in.apnidukan.auth.notify.ResendEmailSender.RESEND),
                 "https://shop.example.in", true, realPush)).hasMessageContaining("EMAIL_FROM");
         assertThatCode(() -> ProductionSafetyCheck.check(true, realSms,
-                new in.apnidukan.auth.notify.ResendEmailSender("re_key", "Apni Dukan <no-reply@apnidukan.in>",
+                new in.apnidukan.auth.notify.ResendEmailSender("re_key", "Clozest <no-reply@clozest.in>",
                         in.apnidukan.auth.notify.ResendEmailSender.RESEND),
                 "https://shop.example.in", true, realPush)).doesNotThrowAnyException();
     }

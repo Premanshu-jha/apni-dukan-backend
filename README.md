@@ -1762,7 +1762,7 @@ Setting up Resend:
 2. For testing, send from `onboarding@resend.dev` (the default `EMAIL_FROM`): it only delivers to the email address
    of your own Resend account. For real customers, add your domain under Domains, put the DNS records Resend shows
    (SPF, DKIM) at your DNS provider, wait until it says Verified, and set `EMAIL_FROM`, e.g.
-   `Clozest <no-reply@apnidukan.in>`. Production must set `EMAIL_FROM`: the real server (`APP_PRODUCTION=true`)
+   `Clozest <no-reply@clozest.in>`. Production must set `EMAIL_FROM`: the real server (`APP_PRODUCTION=true`)
    refuses to start with the test address.
 3. On Railway: Variables → add `RESEND_API_KEY` (the key, starting `re_`) and `EMAIL_FROM`, then redeploy. The Gmail
    variables can be removed afterwards. Never commit the key.

@@ -105,7 +105,7 @@ public final class WebPushCrypto {
     /**
      * The VAPID token for one push service: a JWT signed with ES256.
      * @param audience the push service's origin, e.g. https://fcm.googleapis.com
-     * @param subject  how the push service can contact us, e.g. mailto:support@apnidukan.in
+     * @param subject  how the push service can contact us, e.g. mailto:support@clozest.in
      * @param expiresAtEpochSeconds at most 24 hours ahead (RFC 8292)
      */
     public static String vapidToken(String audience, String subject, long expiresAtEpochSeconds,
