@@ -33,7 +33,8 @@
     </Match>
     <!-- These constructors refuse to start the app when a required setting is missing or too weak (fail fast, on
          purpose): no SMS/mail settings, production misconfiguration, a JWT_SECRET too short to sign safely, or a job's batch
-         size, concurrency, retention or slice below 1, or a refresh grace longer than the 60 s retry time. -->
+         size, concurrency, retention or slice below 1, or a refresh grace longer than the 60 s retry time; the support
+         emails' addresses missing, a helpdesk secret under 32 characters, a ticket limit below 1. -->
     <Match>
         <Bug pattern="CT_CONSTRUCTOR_THROW"/>
         <Or>
@@ -56,6 +57,9 @@
             <Class name="in.apnidukan.salon.service.SalonClosingJob"/>
             <Class name="in.apnidukan.salon.service.SalonCalendar"/>
             <Class name="in.apnidukan.salon.service.SalonSetups"/>
+            <Class name="in.apnidukan.auth.notify.SupportEmailSender"/>
+            <Class name="in.apnidukan.helpdesk.service.InboundSignature"/>
+            <Class name="in.apnidukan.helpdesk.service.TicketService"/>
         </Or>
     </Match>
     <!-- SpotBugs 4.10 / FindSecBugs 1.14 (new findings in code that didn't change):

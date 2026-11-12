@@ -9,7 +9,8 @@ import java.util.UUID;
  * @param direction   IN (from the person) or OUT (our reply)
  * @param authorId    the support person for OUT; the person's account for IN, when known
  * @param attachments the email's attachments, kept only in the Gmail copy
+ * @param senderVerified false for an email whose From couldn't be proven
  */
 public record TicketMessage(UUID id, long seq, String direction, UUID authorId, String body, int attachments,
-                            Instant createdAt) {
+                            boolean senderVerified, Instant createdAt) {
 }

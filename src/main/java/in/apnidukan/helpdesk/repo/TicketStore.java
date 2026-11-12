@@ -9,7 +9,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
-import java.sql.Array;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -25,7 +24,7 @@ import java.util.UUID;
 public class TicketStore {
 
     private static final String COLUMNS = "id, number, source, status, subject, requester_id, requester_email, "
-            + "requester_name, assignee_id, created_at, last_message_at, resolved_at, version";
+            + "requester_name, assignee_id, created_at, last_message_at, resolved_at, version, sender_verified";
     private static final RowMapper<Ticket> TICKET = (rs, i) -> new Ticket(rs.getObject("id", UUID.class),
             rs.getLong("number"), TicketSource.valueOf(rs.getString("source")),
             TicketStatus.valueOf(rs.getString("status")), rs.getString("subject"),
@@ -33,7 +32,7 @@ public class TicketStore {
             rs.getString("requester_name"), rs.getObject("assignee_id", UUID.class),
             rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("last_message_at").toInstant(),
             rs.getTimestamp("resolved_at") == null ? null : rs.getTimestamp("resolved_at").toInstant(),
-            rs.getLong("version"));
+            rs.getLong("version"), rs.getBoolean("sender_verified"));
 
     private final JdbcTemplate jdbc;
 
@@ -43,13 +42,13 @@ public class TicketStore {
 
     /** Saves a new OPEN ticket and returns it with its number. */
     public Ticket insert(TicketSource source, String subject, UUID requesterId, String requesterEmail,
-                         String requesterName, UUID assigneeId, Instant now) {
+                         String requesterName, UUID assigneeId, boolean senderVerified, Instant now) {
         UUID id = UUID.randomUUID();
         return jdbc.queryForObject("INSERT INTO tickets (id, source, status, subject, requester_id, requester_email, "
-                        + "requester_name, assignee_id, created_at, updated_at, last_message_at) "
-                        + "VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING " + COLUMNS, TICKET,
-                id, source.name(), subject, requesterId, requesterEmail, requesterName, assigneeId, ts(now), ts(now),
-                ts(now));
+                        + "requester_name, assignee_id, sender_verified, created_at, updated_at, last_message_at) "
+                        + "VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING " + COLUMNS, TICKET,
+                id, source.name(), subject, requesterId, requesterEmail, requesterName, assigneeId, senderVerified,
+                ts(now), ts(now), ts(now));
     }
 
     public Optional<Ticket> find(UUID id) {
@@ -81,12 +80,12 @@ public class TicketStore {
      * email delivered twice).
      */
     public Optional<Long> addMessage(UUID ticketId, String direction, UUID authorId, String body, int attachments,
-                                     String emailMessageId, Instant now) {
+                                     String emailMessageId, boolean senderVerified, Instant now) {
         return jdbc.query("INSERT INTO ticket_messages (id, ticket_id, direction, author_id, body, attachments, "
-                        + "email_message_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                        + "email_message_id, sender_verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                         + "ON CONFLICT (email_message_id) DO NOTHING RETURNING seq", (rs, i) -> rs.getLong(1),
-                UUID.randomUUID(), ticketId, direction, authorId, body, attachments, emailMessageId, ts(now))
-                .stream().findFirst();
+                UUID.randomUUID(), ticketId, direction, authorId, body, attachments, emailMessageId, senderVerified,
+                ts(now)).stream().findFirst();
     }
 
     /** Whether an email with this Message-ID was saved already. */
@@ -97,11 +96,12 @@ public class TicketStore {
     }
 
     public List<TicketMessage> messages(UUID ticketId) {
-        return jdbc.query("SELECT id, seq, direction, author_id, body, attachments, created_at FROM ticket_messages "
-                        + "WHERE ticket_id = ? ORDER BY seq", (rs, i) -> new TicketMessage(rs.getObject("id", UUID.class),
-                        rs.getLong("seq"), rs.getString("direction"), rs.getObject("author_id", UUID.class),
-                        rs.getString("body"), rs.getInt("attachments"), rs.getTimestamp("created_at").toInstant()),
-                ticketId);
+        return jdbc.query("SELECT id, seq, direction, author_id, body, attachments, sender_verified, created_at "
+                        + "FROM ticket_messages WHERE ticket_id = ? ORDER BY seq",
+                (rs, i) -> new TicketMessage(rs.getObject("id", UUID.class), rs.getLong("seq"),
+                        rs.getString("direction"), rs.getObject("author_id", UUID.class), rs.getString("body"),
+                        rs.getInt("attachments"), rs.getBoolean("sender_verified"),
+                        rs.getTimestamp("created_at").toInstant()), ticketId);
     }
 
     /** The seq of the person's latest message (0 when none). */
@@ -135,15 +135,12 @@ public class TicketStore {
         if (assignees.isEmpty()) {
             return out;
         }
-        jdbc.query(connection -> {
-            var ps = connection.prepareStatement("SELECT assignee_id, count(*) FROM tickets WHERE status <> 'RESOLVED' "
-                    + "AND assignee_id = ANY (?) GROUP BY assignee_id");
-            Array ids = connection.createArrayOf("uuid", assignees.toArray());
-            ps.setArray(1, ids);
-            return ps;
-        }, rs -> {
+        // The ids as one Postgres array literal ({a,b,c}): UUIDs need no quoting
+        String ids = "{" + String.join(",", assignees.stream().map(UUID::toString).toList()) + "}";
+        jdbc.query("SELECT assignee_id, count(*) FROM tickets WHERE status <> 'RESOLVED' "
+                + "AND assignee_id = ANY (CAST(? AS uuid[])) GROUP BY assignee_id", rs -> {
             out.put(rs.getObject(1, UUID.class), rs.getLong(2));
-        });
+        }, ids);
         return out;
     }
 
@@ -170,10 +167,11 @@ public class TicketStore {
      * @param assigneeId only this person's (null: anyone's)
      * @param statuses   only these
      * @param unassigned only tickets nobody has
-     * @param before     only tickets whose last activity is older than this (the next page); null for the first
+     * @param before     the previous page's last ticket's lastMessageAt (the next page starts after it, then after
+     *                   {@code beforeId} among tickets with that same time); null for the first page
      */
     public List<Ticket> list(UUID assigneeId, Collection<TicketStatus> statuses, boolean unassigned, Instant before,
-                             int limit) {
+                             UUID beforeId, int limit) {
         StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM tickets WHERE status IN (");
         List<Object> args = new ArrayList<>();
         String sep = "";
@@ -190,13 +188,39 @@ public class TicketStore {
         if (unassigned) {
             sql.append(" AND assignee_id IS NULL");
         }
-        if (before != null) {
+        if (before != null && beforeId != null) {
+            // The first condition bounds the index scan; the second picks up after the cursor among equal times
+            sql.append(" AND last_message_at <= ? AND (last_message_at < ? OR id > ?)");
+            args.add(ts(before));
+            args.add(ts(before));
+            args.add(beforeId);
+        } else if (before != null) {
             sql.append(" AND last_message_at < ?");
             args.add(ts(before));
         }
         sql.append(" ORDER BY last_message_at DESC, id LIMIT ?");
         args.add(limit);
         return jdbc.query(sql.toString(), TICKET, args.toArray());
+    }
+
+    /** This person's tickets waiting on us (the menu's count). */
+    public long openOf(UUID assigneeId) {
+        Long n = jdbc.queryForObject("SELECT count(*) FROM tickets WHERE assignee_id = ? AND status = 'OPEN'",
+                Long.class, assigneeId);
+        return n == null ? 0 : n;
+    }
+
+    /** Tickets nobody has, not resolved. */
+    public long unassignedCount() {
+        Long n = jdbc.queryForObject("SELECT count(*) FROM tickets WHERE assignee_id IS NULL AND status <> 'RESOLVED'",
+                Long.class);
+        return n == null ? 0 : n;
+    }
+
+    /** Emails queued since then, all tickets together (a cap on acknowledgements against floods). */
+    public long emailsQueuedSince(Instant since) {
+        Long n = jdbc.queryForObject("SELECT count(*) FROM ticket_emails WHERE created_at >= ?", Long.class, ts(since));
+        return n == null ? 0 : n;
     }
 
     /** Per assignee (null key = Unassigned): how many tickets in each status. */
@@ -219,13 +243,17 @@ public class TicketStore {
         return n == null ? 0 : n;
     }
 
-    /** This sender's most recently active ticket that isn't resolved, its row locked. */
-    public Optional<Ticket> lockLatestOpenOf(UUID requesterId, String requesterEmail) {
+    /**
+     * This sender's most recently active ticket (open ones first), its row locked: their account's, or (no proven
+     * account) only one emailed from that address by nobody's account.
+     */
+    public Optional<Ticket> lockLatestOf(UUID requesterId, String requesterEmail) {
         return (requesterId != null
-                ? jdbc.query("SELECT " + COLUMNS + " FROM tickets WHERE requester_id = ? AND status <> 'RESOLVED' "
-                + "ORDER BY last_message_at DESC LIMIT 1 FOR UPDATE", TICKET, requesterId)
-                : jdbc.query("SELECT " + COLUMNS + " FROM tickets WHERE lower(requester_email) = lower(?) "
-                + "AND status <> 'RESOLVED' ORDER BY last_message_at DESC LIMIT 1 FOR UPDATE", TICKET,
+                ? jdbc.query("SELECT " + COLUMNS + " FROM tickets WHERE requester_id = ? "
+                + "ORDER BY (status = 'RESOLVED'), last_message_at DESC LIMIT 1 FOR UPDATE", TICKET, requesterId)
+                : jdbc.query("SELECT " + COLUMNS + " FROM tickets WHERE requester_id IS NULL "
+                + "AND lower(requester_email) = lower(?) "
+                + "ORDER BY (status = 'RESOLVED'), last_message_at DESC LIMIT 1 FOR UPDATE", TICKET,
                 requesterEmail)).stream().findFirst();
     }
 
@@ -235,12 +263,24 @@ public class TicketStore {
         return n == null ? 0 : n;
     }
 
-    /** Someone deleted their account: their address and name are forgotten on their tickets; nothing more is sent. */
-    public void forgetRequester(UUID requesterId, Instant now) {
-        jdbc.update("UPDATE ticket_emails SET status = 'CANCELLED' WHERE status = 'PENDING' AND ticket_id IN "
-                + "(SELECT id FROM tickets WHERE requester_id = ?)", requesterId);
+    /**
+     * Someone deleted their account: their address and name are forgotten on their tickets (those of their account,
+     * and those they emailed from {@code email} before it was matched to it); the emails to them are cancelled if
+     * still waiting, and every email to them loses its address and text. The tickets first: that waits for a reply
+     * being saved on one of them right now, so its email is cancelled too.
+     */
+    public void forgetRequester(UUID requesterId, String email, Instant now) {
+        List<UUID> ids = jdbc.queryForList("SELECT id FROM tickets WHERE requester_id = ? OR (requester_id IS NULL "
+                        + "AND CAST(? AS VARCHAR) IS NOT NULL AND lower(requester_email) = lower(?)) ORDER BY id FOR UPDATE",
+                UUID.class, requesterId, email, email);
+        if (ids.isEmpty()) {
+            return;
+        }
+        String in = "{" + String.join(",", ids.stream().map(UUID::toString).toList()) + "}";
         jdbc.update("UPDATE tickets SET requester_email = NULL, requester_name = NULL, updated_at = ?, "
-                + "version = version + 1 WHERE requester_id = ?", ts(now), requesterId);
+                + "version = version + 1 WHERE id = ANY (CAST(? AS uuid[]))", ts(now), in);
+        jdbc.update("UPDATE ticket_emails SET status = CASE WHEN status = 'PENDING' THEN 'CANCELLED' ELSE status END, "
+                + "to_address = '', body = '' WHERE ticket_id = ANY (CAST(? AS uuid[]))", in);
     }
 
     // ---------- emails to send ----------
@@ -253,11 +293,12 @@ public class TicketStore {
 
     /**
      * Claims up to {@code limit} due emails for this round (nobody else's claim still running), until
-     * {@code claimUntil}; each claim counts as an attempt.
+     * {@code claimUntil}; each claim counts as an attempt. An email whose address was forgotten meanwhile (an account
+     * deleted) is never claimed.
      */
     public List<Outgoing> claimDue(Instant now, Instant claimUntil, int limit) {
         return jdbc.query("UPDATE ticket_emails SET claimed_until = ?, attempts = attempts + 1 WHERE id IN ("
-                        + "SELECT id FROM ticket_emails WHERE status = 'PENDING' AND next_try_at <= ? "
+                        + "SELECT id FROM ticket_emails WHERE status = 'PENDING' AND next_try_at <= ? AND to_address <> '' "
                         + "AND (claimed_until IS NULL OR claimed_until < ?) ORDER BY next_try_at "
                         + "LIMIT ? FOR UPDATE SKIP LOCKED) RETURNING id, ticket_id, to_address, subject, body, attempts",
                 (rs, i) -> new Outgoing(rs.getObject("id", UUID.class), rs.getObject("ticket_id", UUID.class),
