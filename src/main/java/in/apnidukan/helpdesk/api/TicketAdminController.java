@@ -51,6 +51,22 @@ public class TicketAdminController {
         return tickets.list(me(), view, assignee, before, beforeId);
     }
 
+    /**
+     * Finds tickets by a ticket number (CLZ-1042), a mobile number or an email ({@code q}), or one account's
+     * ({@code requester}). 400 VALIDATION_FAILED for anything else.
+     */
+    @GetMapping("/search")
+    public List<Summary> search(@RequestParam(required = false) String q,
+                                @RequestParam(required = false) UUID requester) {
+        return tickets.search(me(), q, requester);
+    }
+
+    /** Super admins: every open ticket of one person to another (toUserId), or (null) shared out by the rule. */
+    @PostMapping("/move")
+    public TicketService.Moved move(@Valid @RequestBody Move body) {
+        return tickets.moveAll(me(), body.fromUserId(), body.toUserId());
+    }
+
     @GetMapping("/counts")
     public Counts counts() {
         return tickets.counts(me());
@@ -79,6 +95,12 @@ public class TicketAdminController {
         return tickets.close(me(), id, body.seenSeq());
     }
 
+    /** Opens a resolved ticket again without emailing anyone. */
+    @PostMapping("/{id}/reopen")
+    public Detail reopen(@PathVariable UUID id, @Valid @RequestBody Reopen body) {
+        return tickets.reopen(me(), id, body.version());
+    }
+
     /** Super admins: gives it to someone else (assigneeId null = Unassigned). */
     @PostMapping("/{id}/assign")
     public Detail assign(@PathVariable UUID id, @Valid @RequestBody Assign body) {
@@ -94,6 +116,12 @@ public class TicketAdminController {
     }
 
     public record Assign(@NotNull Long version, UUID assigneeId) {
+    }
+
+    public record Move(@NotNull UUID fromUserId, UUID toUserId) {
+    }
+
+    public record Reopen(@NotNull Long version) {
     }
 
     /** @param seenSeq the ticket's lastIncomingSeq when they chose to close it */
