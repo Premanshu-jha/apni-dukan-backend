@@ -97,12 +97,13 @@ public class TicketStore {
 
     public List<TicketMessage> messages(UUID ticketId) {
         return jdbc.query("SELECT id, seq, direction, author_id, body, attachments, sender_verified, created_at "
-                        + "FROM ticket_messages WHERE ticket_id = ? ORDER BY seq",
-                (rs, i) -> new TicketMessage(rs.getObject("id", UUID.class), rs.getLong("seq"),
-                        rs.getString("direction"), rs.getObject("author_id", UUID.class), rs.getString("body"),
-                        rs.getInt("attachments"), rs.getBoolean("sender_verified"),
-                        rs.getTimestamp("created_at").toInstant()), ticketId);
+                        + "FROM ticket_messages WHERE ticket_id = ? ORDER BY seq", MESSAGE, ticketId);
     }
+
+    private static final RowMapper<TicketMessage> MESSAGE = (rs, i) -> new TicketMessage(
+            rs.getObject("id", UUID.class), rs.getLong("seq"), rs.getString("direction"),
+            rs.getObject("author_id", UUID.class), rs.getString("body"), rs.getInt("attachments"),
+            rs.getBoolean("sender_verified"), rs.getTimestamp("created_at").toInstant());
 
     /** The seq of the person's latest message (0 when none). */
     public long lastIncomingSeq(UUID ticketId) {
@@ -156,6 +157,41 @@ public class TicketStore {
                 + "ORDER BY created_at, id FOR UPDATE", TICKET);
     }
 
+    /**
+     * Tickets found by one thing, newest activity first, at most {@code limit}: their number, the asking account, or
+     * the address they wrote from (any case).
+     * @param assigneeId only this person's (a support person searches their own); null: anyone's
+     */
+    public List<Ticket> search(Long number, UUID requesterId, String email, UUID assigneeId, int limit) {
+        String sql = number != null ? BY_NUMBER : requesterId != null ? BY_REQUESTER : BY_EMAIL;
+        Object key = number != null ? number : requesterId != null ? requesterId : email;
+        return jdbc.query(sql, TICKET, key, assigneeId, assigneeId, limit);
+    }
+
+    /** The searches: each a fixed query (key, then the optional assignee twice, then the limit). */
+    private static final String ONLY_THEIRS = " AND (CAST(? AS uuid) IS NULL OR assignee_id = ?)"
+            + " ORDER BY last_message_at DESC, id LIMIT ?";
+    private static final String BY_NUMBER = "SELECT " + COLUMNS + " FROM tickets WHERE number = ?" + ONLY_THEIRS;
+    private static final String BY_REQUESTER = "SELECT " + COLUMNS + " FROM tickets WHERE requester_id = ?"
+            + ONLY_THEIRS;
+    private static final String BY_EMAIL = "SELECT " + COLUMNS + " FROM tickets WHERE lower(requester_email) = "
+            + "lower(?)" + ONLY_THEIRS;
+    private static final String BY_EMAIL_OR_ACCOUNT = "SELECT " + COLUMNS + " FROM tickets WHERE "
+            + "(lower(requester_email) = lower(?) OR requester_id = ?)" + ONLY_THEIRS;
+
+    /** This account's own tickets, newest activity first, at most {@code limit} (the apps' "My requests"). */
+    public List<Ticket> ofRequester(UUID requesterId, int limit) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM tickets WHERE requester_id = ? "
+                + "ORDER BY last_message_at DESC, id LIMIT ?", TICKET, requesterId, limit);
+    }
+
+    /** Messages this person wrote in the apps since then (a limit on replies from the app). */
+    public long messagesBySince(UUID authorId, Instant since) {
+        Long n = jdbc.queryForObject("SELECT count(*) FROM ticket_messages WHERE author_id = ? AND direction = 'IN' "
+                + "AND created_at >= ?", Long.class, authorId, ts(since));
+        return n == null ? 0 : n;
+    }
+
     /** Sets the assignee only (moving tickets between people); bumps the version. */
     public void reassign(UUID id, UUID assigneeId, Instant now) {
         jdbc.update("UPDATE tickets SET assignee_id = ?, updated_at = ?, version = version + 1 WHERE id = ?",
@@ -201,6 +237,13 @@ public class TicketStore {
         sql.append(" ORDER BY last_message_at DESC, id LIMIT ?");
         args.add(limit);
         return jdbc.query(sql.toString(), TICKET, args.toArray());
+    }
+
+    /** This person's tickets not resolved (waiting on us or on them): what "move all" moves. */
+    public long notResolvedOf(UUID assigneeId) {
+        Long n = jdbc.queryForObject("SELECT count(*) FROM tickets WHERE assignee_id = ? AND status <> 'RESOLVED'",
+                Long.class, assigneeId);
+        return n == null ? 0 : n;
     }
 
     /** This person's tickets waiting on us (the menu's count). */
@@ -261,6 +304,31 @@ public class TicketStore {
     public long countByRequester(UUID requesterId) {
         Long n = jdbc.queryForObject("SELECT count(*) FROM tickets WHERE requester_id = ?", Long.class, requesterId);
         return n == null ? 0 : n;
+    }
+
+    /** How many of this account's tickets one support person holds (what their search by this account shows). */
+    public long countByRequester(UUID requesterId, UUID assigneeId) {
+        Long n = jdbc.queryForObject("SELECT count(*) FROM tickets WHERE requester_id = ? AND assignee_id = ?",
+                Long.class, requesterId, assigneeId);
+        return n == null ? 0 : n;
+    }
+
+    /**
+     * Tickets sent from this address, or (when known) by the account whose verified email it is now: someone who
+     * changed their email is still found by the new one. Optionally only one support person's; newest first.
+     */
+    public List<Ticket> searchByEmail(String email, UUID accountId, UUID assigneeId, int limit) {
+        if (accountId == null) {
+            return search(null, null, email, assigneeId, limit);
+        }
+        return jdbc.query(BY_EMAIL_OR_ACCOUNT, TICKET, email, accountId, assigneeId, assigneeId, limit);
+    }
+
+    /** The newest message on this ticket, if any (a send repeated after a lost answer is the same as it). */
+    public Optional<TicketMessage> lastMessage(UUID ticketId) {
+        return jdbc.query("SELECT id, seq, direction, author_id, body, attachments, sender_verified, created_at "
+                + "FROM ticket_messages WHERE ticket_id = ? ORDER BY seq DESC LIMIT 1", MESSAGE, ticketId)
+                .stream().findFirst();
     }
 
     /**
