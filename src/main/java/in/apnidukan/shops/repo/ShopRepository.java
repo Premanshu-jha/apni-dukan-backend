@@ -28,6 +28,14 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     @Query("SELECT s FROM Shop s WHERE s.id = :id")
     Optional<Shop> lockById(UUID id);
 
+    /**
+     * Whether changing the shop needs the owner's edit code (ShopService.requireUnlocked): verified and not a draft.
+     * No entity is loaded, so the row locked next with lockById is read fresh.
+     */
+    @Query(value = "SELECT (ever_approved OR status = 'APPROVED') AND status <> 'DRAFT' FROM shops WHERE id = :id",
+            nativeQuery = true)
+    boolean needsEditCode(UUID id);
+
     /** Locks the shop's row against bookings (FOR NO KEY UPDATE, see ShopDirectory.holdAgainstBookings). */
     @Query(value = "SELECT CAST(id AS text) FROM shops WHERE id = :id FOR NO KEY UPDATE", nativeQuery = true)
     Optional<String> holdAgainstBookings(UUID id);

@@ -946,6 +946,25 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### API changes for the edit code per device, closing and handing over (V45; partner app 0.15.0)
+
+- **The edit code works on the device it was entered on.** Each sign-in on a device is a session: its refresh
+  tokens keep its id through every swap (`refresh_tokens.session_id`, V45) and the access tokens carry it (`sid`).
+  The unlock is kept per session (`edit-unlock:{userId}:{sessionId}`), so another device signed in to the same
+  account (a phone left signed in at the salon, another computer) needs its own code; a copied token shares its
+  device's sign-in until reuse detection ends every session. A token from before V45 starts its
+  session on its next refresh (nobody is signed out); an access token from before the deploy (15 minutes at most)
+  shares one key.
+- **Closing a verified shop** (`POST /shops/me/close`) and **asking someone to take it over**
+  (`POST /shops/me/handover`) need the code on this device too: 403 `EDIT_LOCKED` otherwise (for a hand-over
+  before the day's count, so asking without the code doesn't use a request). A draft needs none.
+- `EDIT_LOCKED`'s words: "Your shop is verified: confirm it's you with the code we send to your phone first."
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /auth/me/edit-unlock`, `GET`, `DELETE` | per person | per device session | none (partner: nothing changes) |
+| `POST /shops/me/close`, `POST /shops/me/handover` | no code | 403 `EDIT_LOCKED` on a verified shop without the code | partner app: the code sheet on Close and Hand over |
+
 ### API changes for address change requests and the edit code (V44; partner app 0.14.0 and admin app 0.9.0 use them)
 
 **Address change requests.** Once the field team verified the address the owner asks them for a new one in the

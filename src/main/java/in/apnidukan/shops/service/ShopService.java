@@ -538,8 +538,22 @@ public class ShopService implements ShopMemberships {
     void requireUnlocked(Shop shop, UUID userId) {
         if (shop.addressLocked() && shop.getStatus() != ShopStatus.DRAFT
                 && editUnlocks.unlockedUntil(userId).isEmpty()) {
-            throw new ApiException(HttpStatus.FORBIDDEN, "EDIT_LOCKED",
-                    "To change your verified details, confirm with the code we send to your phone first.");
+            throw editLocked();
+        }
+    }
+
+    private static ApiException editLocked() {
+        return new ApiException(HttpStatus.FORBIDDEN, "EDIT_LOCKED",
+                "Your shop is verified: confirm it's you with the code we send to your phone first.");
+    }
+
+    /**
+     * As requireUnlocked, before the shop's row is read (a hand-over checks the code before counting the day's
+     * requests). The caller checks again under the row lock: the shop may have been approved in between.
+     */
+    void requireUnlocked(UUID shopId, UUID userId) {
+        if (shops.needsEditCode(shopId) && editUnlocks.unlockedUntil(userId).isEmpty()) {
+            throw editLocked();
         }
     }
 
