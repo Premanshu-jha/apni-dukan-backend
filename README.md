@@ -946,6 +946,54 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### API changes for address change requests and the edit code (V44; partner app 0.14.0 and admin app 0.9.0 use them)
+
+**Address change requests.** Once the field team verified the address the owner asks them for a new one in the
+partner app: `POST /shops/me/address-request` `{version, addressLine, area, city, pincode, latitude, longitude}` (201,
+the request). It waits in `address_change_requests` (one per shop; a new one replaces it); the shop keeps its old
+address and stays live and bookable, and a live shop waits in the Re-check list. The field team sees it on the shop's
+page (`addressRequest`) and as `addressRequested` in the lists. **Approve** the shop and the request is applied with
+it (the address and pin are the shop's, a timeline note, `SHOP_ADDRESS_CHANGED` to the owner, pending booking
+messages get the new address); **decline** it with a reason (`SHOP_ADDRESS_DECLINED`, he keeps his address). Changing
+the address directly (`PATCH /admin/shops/{id}/address`) answers a waiting request too (CANCELLED). Every request,
+cancel and decline gives the shop a new version, so a decision on a page loaded before answers 409 `SHOP_CHANGED`.
+A live shop waiting only because of the request (nothing else changed since its last check: GSTIN, Udyam, photos,
+video) stops waiting when the request is taken back, declined, or answered by the field team's own change. A waiting
+request is cancelled when the shop is suspended, closed or handed over (it was the old owner's). Ending a re-check
+that way isn't a check: "What changed" compares with the version the field team last approved
+(`shops.checks`, V41), so an unchecked edit made before (a new name) still shows.
+
+**The edit code.** On a verified shop (`addressLocked: true`) the owner's changes to its details (name, owner's name,
+GSTIN, Udyam number, photos, video, registration document, an address change request) need a code sent to his own
+phone in the last 15 minutes: `POST /auth/me/edit-code` (202), then `POST /auth/me/edit-unlock` `{code}` → `{until}`.
+One code unlocks every edit until then; `GET /auth/me/edit-unlock` → `{until}` (null when locked); `DELETE` locks at
+once (Done). The answers also carry `secondsLeft` (count down from it: a phone's clock may be off). Only a shop's
+owner can ask for the code (403 `OWNER_ONLY`). Without it: 403 `EDIT_LOCKED`. A draft (also one sent back after it
+was approved before) or a first visit asks for no code (the owner is registering);
+services, hours, barbers and offers don't either. Kept in Redis (`edit-unlock:{userId}`). A test number in OTP test
+mode gets no SMS and takes any 6 digits, as at sign-in.
+
+**Barbers see the offers.** `GET /salon/offers/current`: the offers running today or to come, for anyone in the salon
+(services and hours were readable already); without the owner's numbers.
+
+**Deploying:** backend, then the admin website, then the partner app, close together: an old partner app can't
+change a verified shop's details (it can't ask for the code: the save shows "confirm with the code we send to your
+phone first"), and an old admin website doesn't show an address request, which Approve then applies unseen.
+
+| Call | Before | Now | What the apps should do |
+| --- | --- | --- | --- |
+| `POST /shops/me/address-request` | none | new (owner; the code): 201 the request; 409 `ADDRESS_NOT_LOCKED` (not verified yet: `PATCH /shops/me`), `WRONG_STATUS` (suspended, closed), `SHOP_CHANGED`; 400 `VALIDATION_FAILED` (also the same address) | partner app: Request address change |
+| `GET /shops/me/address-request` | none | new (owner): the latest request (`PENDING`, `APPROVED`, `DECLINED` with `reason`, `CANCELLED`); 204 if none | partner app: the waiting or declined card |
+| `DELETE /shops/me/address-request?version=` | none | new (owner): takes the waiting one back; 204 | partner app: Cancel request |
+| `POST /admin/shops/{id}/address-request/decline` | none | new: `{version, reason}`; 409 `NO_ADDRESS_REQUEST` when none waits | admin app: Decline with a reason |
+| `POST /admin/shops/{id}/approve` | | also applies the waiting address request | admin app: say so before approving |
+| `GET /admin/shops`, `/admin/shops/{id}` | | each shop adds `addressRequested`; the page adds `addressRequest` (null if none waits) | admin app: the badge and the old-vs-new card |
+| `PATCH /shops/me`, `PUT /shops/me/photos`, `PUT /shops/me/video`, `PUT`/`DELETE /shops/me/registration-document` on a verified shop | | 403 `EDIT_LOCKED` without the code (saving what is there already: as before) | partner app: Edit → the code → 15 minutes |
+| `POST /auth/me/edit-code`, `POST`/`GET`/`DELETE /auth/me/edit-unlock` | none | new | partner app: the code sheet, the countdown, Done |
+| `GET /salon/offers/current` | none | new: running and upcoming offers for anyone in the salon | partner app: the barber's Salon info |
+| `PATCH /shops/me` 409 `ADDRESS_LOCKED` | "Ask them to change it for you." | "Ask them with Request address change." | none |
+| messages | | new type `SHOP_ADDRESS_DECLINED` (owner; opens `/setup/address`) | partner app: its icon |
+
 ### API changes for re-checks while live (V41–V43; partner app 0.14.0 and admin app 0.9.0 use them)
 
 **What changed once the field team has verified a shop** (before: an owner's new address, pin, photo or video sent an
@@ -956,8 +1004,8 @@ app, so bookings already made couldn't be started):
   with a new address line, area, city, pincode or pin answers 409 `ADDRESS_LOCKED`. The field team changes it:
   `PATCH /admin/shops/{id}/address` (no re-check: they checked it; a note on the timeline; the owner gets
   `SHOP_ADDRESS_CHANGED`; pending booking messages get the new address). Locked from the first approval on, whatever
-  the status (a sent-back or reinstated shop that was approved before too). An in-app request from the owner comes
-  in the next round.
+  the status (a sent-back or reinstated shop that was approved before too). The owner asks for it in the app (see
+  "address change requests" above).
 - **A photo, the salon video, the GSTIN or the Udyam number:** the shop stays APPROVED, live and bookable (its team
   works as usual); `recheckSince` (owner only) is set and it waits in the field team's Re-check list.
 - **The field team on a re-check:** Approve (`SHOP_RECHECKED` to the owner) or **Ask the owner to fix**
@@ -981,7 +1029,7 @@ an old admin website shows it in the Re-check list with Suspend only.
 | `POST /admin/shops/{id}/approve` | `PENDING_VISIT` only | also a live shop waiting for its re-check | admin app: the words after approving a re-check |
 | `POST /admin/shops/{id}/reject` | | `PENDING_VISIT` only (a live re-check: 409 `WRONG_STATUS`) | admin app: not offered for a live re-check |
 | `POST /admin/shops/{id}/ask-to-fix` | none | new: `{version, reason, note?, checklist?}` for a live shop waiting for its re-check | admin app: the new decision |
-| `PATCH /admin/shops/{id}/address` | none | new: `{version, addressLine, area, city, pincode, latitude, longitude}`; any status but CLOSED; a field agent only for a business assigned to them | admin app: next round (the form) |
+| `PATCH /admin/shops/{id}/address` | none | new: `{version, addressLine, area, city, pincode, latitude, longitude}`; any status but CLOSED; a field agent only for a business assigned to them | admin app: Change address |
 | timeline | | new entry `FIX_ASKED` (doesn't move `statusSince`); an address change is a note | admin app: its label |
 | messages | | new types `SHOP_RECHECKED`, `SHOP_FIX_ASKED`, `SHOP_ADDRESS_CHANGED` (owner) | partner app: the inbox icons |
 | `POST /auth/email/verify` 409 `EMAIL_IN_USE` | "This email is already used by another account" | says what to do: "…already on another Clozest account, which uses a different mobile number. Sign in with that number instead, or use another email." | none: both apps show the message as it comes |
