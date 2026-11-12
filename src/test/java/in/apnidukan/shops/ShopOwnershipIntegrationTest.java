@@ -826,6 +826,9 @@ class ShopOwnershipIntegrationTest {
     }
 
     private Reply call(HttpMethod method, String path, Object body, String token, UUID key) {
+        if (path.startsWith("/shops/me") && method != HttpMethod.GET) {
+            TestData.unlockEditing(jdbc, redis);   // the code before closing or handing over: tested in AdminIT
+        }
         RestClient.RequestBodySpec spec = http.method(method).uri(path).headers(h -> {
             if (token != null) {
                 h.setBearerAuth(token);

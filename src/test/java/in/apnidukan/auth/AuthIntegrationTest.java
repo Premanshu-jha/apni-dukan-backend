@@ -58,6 +58,7 @@ class AuthIntegrationTest {
     @Autowired in.apnidukan.auth.service.SignInCleanupJob signInCleanup;
     @Autowired in.apnidukan.auth.service.AuthService authService;
     @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
+    @Autowired in.apnidukan.common.security.JwtService jwt;
 
     RestClient http;
     String base;
@@ -165,6 +166,27 @@ class AuthIntegrationTest {
         Reply r = post("/auth/otp/send", Map.of("phone", "12345"), null);
         assertThat(r.status()).isEqualTo(400);
         assertThat(r.body().get("code")).isEqualTo("INVALID_PHONE");
+    }
+
+    @Test
+    void eachSignInIsItsOwnSessionKeptThroughRefreshes() {
+        Map<?, ?> first = signIn(PHONE).body();
+        java.util.UUID session = jwt.parse((String) first.get("accessToken")).sessionId();
+        assertThat(session).isNotNull();
+        Reply rotated = post("/auth/refresh", Map.of("refreshToken", first.get("refreshToken")), null);
+        assertThat(rotated.status()).as(rotated.body().toString()).isEqualTo(200);
+        assertThat(jwt.parse((String) rotated.body().get("accessToken")).sessionId()).isEqualTo(session);
+        // Another device (a new sign-in): another session
+        Map<?, ?> second = signIn(PHONE).body();
+        assertThat(jwt.parse((String) second.get("accessToken")).sessionId()).isNotEqualTo(session);
+        // A token from before sessions were named: its next swap starts one, with its own id, and keeps it
+        jdbc.update("UPDATE refresh_tokens SET session_id = NULL");
+        Reply old = post("/auth/refresh", Map.of("refreshToken", second.get("refreshToken")), null);
+        assertThat(old.status()).isEqualTo(200);
+        java.util.UUID named = jwt.parse((String) old.body().get("accessToken")).sessionId();
+        assertThat(named).isNotNull().isNotEqualTo(session);
+        Reply again = post("/auth/refresh", Map.of("refreshToken", old.body().get("refreshToken")), null);
+        assertThat(jwt.parse((String) again.body().get("accessToken")).sessionId()).isEqualTo(named);
     }
 
     @Test

@@ -40,7 +40,8 @@ public final class TestData {
     public static void unlockEditing(JdbcTemplate jdbc, StringRedisTemplate redis) {
         String until = Long.toString(Instant.parse("9999-01-01T00:00:00Z").toEpochMilli());   // whatever the test clock says
         for (UUID id : jdbc.queryForList("SELECT id FROM users", UUID.class)) {
-            redis.opsForValue().set("edit-unlock:" + id, until, java.time.Duration.ofHours(1));
+            // Test tokens carry no device session ("-"), see EditUnlockStore
+            redis.opsForValue().set("edit-unlock:" + id + ":-", until, java.time.Duration.ofHours(1));
         }
     }
 

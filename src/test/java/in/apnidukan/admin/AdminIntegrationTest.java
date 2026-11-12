@@ -864,6 +864,30 @@ class AdminIntegrationTest {
         assertThat(delete("/auth/me/edit-unlock", owner).status()).isEqualTo(204);
         assertThat(field(patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair"), owner).body(),
                 "code")).isEqualTo("EDIT_LOCKED");
+        // On this device only: another device of the same owner (another sign-in) needs its own code
+        post("/auth/me/edit-code", Map.of(), owner);
+        UUID phoneA = UUID.randomUUID();
+        UUID phoneB = UUID.randomUUID();
+        assertThat(call(HttpMethod.POST, "/auth/me/edit-unlock", Map.of("code",
+                CapturingSenders.codeSentTo(LAST_SMS, "9200000002")), tokenOn(owner, phoneA)).status()).isEqualTo(200);
+        assertThat(call(HttpMethod.PATCH, "/shops/me", Map.of("version", version(salon), "name", "Sharma Hair A"),
+                tokenOn(owner, phoneA)).status()).isEqualTo(200);
+        Reply other = call(HttpMethod.PATCH, "/shops/me", Map.of("version", version(salon), "name", "Sharma Hair B"),
+                tokenOn(owner, phoneB));
+        assertThat(field(other.body(), "code")).as(other.text()).isEqualTo("EDIT_LOCKED");
+        assertThat(field(call(HttpMethod.GET, "/auth/me/edit-unlock", null, tokenOn(owner, phoneB)).body(), "until"))
+                .isNull();
+        // Closing or handing over a verified shop needs the code too
+        Reply close = call(HttpMethod.POST, "/shops/me/close", Map.of("version", version(salon)), tokenOn(owner, phoneB));
+        assertThat(field(close.body(), "code")).as(close.text()).isEqualTo("EDIT_LOCKED");
+        Reply handover = call(HttpMethod.POST, "/shops/me/handover", Map.of("phone", "9200000055", "version",
+                version(salon)), tokenOn(owner, phoneB));
+        assertThat(field(handover.body(), "code")).as(handover.text()).isEqualTo("EDIT_LOCKED");
+        assertThat(count("shop_handovers")).isZero();
+        Reply handedWithCode = call(HttpMethod.POST, "/shops/me/handover", Map.of("phone", "9200000055", "version",
+                version(salon)), tokenOn(owner, phoneA));
+        assertThat(handedWithCode.status()).as(handedWithCode.text()).isEqualTo(202);
+        call(HttpMethod.DELETE, "/shops/me/handover", null, tokenOn(owner, phoneA));
         // Another person's code unlocks only them: the field team's own edits never ask
         Reply byTeam = patch("/admin/shops/" + salon + "/address", Map.of("version", version(salon),
                 "addressLine", "Shop 4, Main Road", "area", "Kondapur", "city", "Hyderabad", "pincode", "500084",
@@ -1378,6 +1402,11 @@ class AdminIntegrationTest {
     private long count(String fromWhere) {
         Long n = jdbc.queryForObject("SELECT count(*) FROM " + fromWhere, Long.class);
         return n == null ? 0 : n;
+    }
+
+    /** A token of this person signed in on one device (a session), as a real sign-in carries. */
+    private String tokenOn(UUID who, UUID session) {
+        return jwt.issue(new AuthPrincipal(who, null, null, false, session), sessions.currentGeneration(who)).token();
     }
 
     private String token(UUID who) {
