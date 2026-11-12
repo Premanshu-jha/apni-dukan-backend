@@ -946,6 +946,31 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### Support tickets, round 2 (V47; admin app 0.11.0, customer app 0.16.0, partner app 0.17.0)
+
+- **Find a ticket** (admin website): `GET /api/v1/admin/tickets/search?q=` takes a ticket number (`CLZ-1042`,
+  `clz 1042`, `1042`, or a pasted email subject such as `Re: [CLZ-1042] My booking`), an email (the address on the
+  ticket, any case, or the account whose verified email it is now) or a mobile number (the account with that phone);
+  anything else 400 `VALIDATION_FAILED` (`q`). `?requester={userId}` lists every
+  ticket of one person ("N other tickets from them"). A support person finds only their own; at most 50.
+- **Move someone's open tickets** (super admins): `POST /api/v1/admin/tickets/move {fromUserId, toUserId?}` →
+  `{moved, stayed}`. To one support person, or (no `toUserId`) shared out by the usual rule (fewest open). Never to
+  the person who asked; `stayed` counts the open ones nobody else could take. 400 `NOT_SUPPORT` for anyone not in
+  support (or the same person). Same locks as assignment.
+- **Open again without emailing**: `POST /api/v1/admin/tickets/{id}/reopen {version}` → the ticket (OPEN, history
+  REOPENED, its activity now, so it is at the top of the lists); nobody is emailed. Resolved by someone no longer in
+  support, it goes to the support person with fewest (or Unassigned). 409 `TICKET_CHANGED`. For someone who came
+  back by phone. A support person's "other tickets from them" count is of their own only (what their search shows).
+- **My requests** in the customer and partner apps: `GET /api/v1/helpdesk/tickets` (the latest 30 of my own,
+  newest activity first: id, number, subject, status, createdAt, lastMessageAt), `GET /api/v1/helpdesk/tickets/{id}`
+  (`{ticket, messages}`: each with `fromSupport`, the support person's first name, body, attachments count, time;
+  never the internal history, and never an email from an address we couldn't prove; 404 when it isn't mine), `POST
+  /api/v1/helpdesk/tickets/{id}/messages {message}` (2–5,000 characters; it goes back to support, reopened if
+  resolved; 429 `TOO_MANY_MESSAGES` past 20 messages of theirs an hour, new questions and emails included; the same
+  words sent again within two minutes, after a lost answer, are kept once). Support's replies are still emailed as
+  before. Migration V47 indexes messages by author for that count.
+- Attachments stay in the support Gmail copy (decided): the apps and the admin website show how many there were.
+
 ### Support tickets (V46; admin app 0.10.0, customer app 0.15.0, partner app 0.16.0)
 
 Questions to **support@clozest.in** and from **Need help** in the customer and partner apps become tickets
