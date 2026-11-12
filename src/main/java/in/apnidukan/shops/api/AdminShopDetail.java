@@ -17,13 +17,16 @@ import java.util.List;
  * @param previousShopPhotoUrl   the approved shop photo, only when it has been replaced since
  * @param videoUrl               a link to the salon video (valid at least 15 more minutes); null if none
  * @param registrationDoc        a salon's registration document; null if none
+ * @param addressRequest         the owner's address change request waiting for the field team (approve applies it,
+ *                               POST .../address-request/decline refuses it); null if none waits
  * @param timeline               newest first, the first 50 entries
  * @param timelineNext           where the next 50 start (GET /admin/shops/{id}/timeline with these); null when the
  *                               timeline has no more
  */
 public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> changes, Long pinMovedMetres,
                               String previousOwnerPhotoUrl, String previousShopPhotoUrl, String videoUrl,
-                              RegistrationDoc registrationDoc, List<TimelineEntry> timeline,
+                              RegistrationDoc registrationDoc, AddressRequestView addressRequest,
+                              List<TimelineEntry> timeline,
                               TimelineNext timelineNext) {
 
     public AdminShopDetail {

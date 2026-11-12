@@ -43,6 +43,21 @@ public final class ShopRequests {
     }
 
     /**
+     * Ask the field team to change your verified address (POST /shops/me/address-request): the new address and pin,
+     * with the same limits as POST /shops.
+     * @param version the version you last read (GET /shops/me); 409 SHOP_CHANGED if someone saved in between
+     */
+    public record AddressRequest(
+            @NotNull Long version,
+            @NotBlank @Size(min = 5, max = 200) String addressLine,
+            @NotBlank @Size(min = 2, max = 100) String area,
+            @NotBlank @Size(min = 2, max = 60) String city,
+            @NotNull @Pattern(regexp = "[1-9][0-9]{5}", message = "must be a 6-digit pincode") String pincode,
+            @NotNull @DecimalMin("6.0") @DecimalMax("37.6") BigDecimal latitude,
+            @NotNull @DecimalMin("68.0") @DecimalMax("97.5") BigDecimal longitude) {
+    }
+
+    /**
      * Find a typed address on the map (registration, before the shop exists): the same fields and limits as POST /shops.
      */
     public record Geocode(

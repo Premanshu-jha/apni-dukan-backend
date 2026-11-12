@@ -230,6 +230,30 @@ public class Shop {
     }
 
     /**
+     * Something about the shop the field team decides on changed without changing the shop's own columns (its owner's
+     * address change request was made, cancelled or declined): a new version, so a decision made on what was shown
+     * before answers 409 SHOP_CHANGED.
+     */
+    public void touch(Instant now) {
+        this.updatedAt = now;
+    }
+
+    /**
+     * A live shop's re-check has nothing left to check (the address request that started it was taken back, declined
+     * or answered by the field team, and nothing else changed): it stops waiting, and a fix asked for goes with it.
+     * True when it was waiting.
+     */
+    public boolean endRecheck(Instant now) {
+        if (status != ShopStatus.APPROVED || recheckSince == null) {
+            return false;
+        }
+        this.recheckSince = null;
+        this.statusReason = null;
+        this.updatedAt = now;
+        return true;
+    }
+
+    /**
      * The field team asked the owner to fix something on a live shop's re-check: it stays as it is (live, waiting) and
      * the owner sees the reason until he changes something or it is approved.
      */

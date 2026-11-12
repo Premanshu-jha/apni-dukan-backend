@@ -177,6 +177,19 @@ public class ShopAdminController {
                                 @jakarta.validation.constraints.DecimalMax("97.5") java.math.BigDecimal longitude) {
     }
 
+    /**
+     * Decline the owner's waiting address change request: `{version, reason}` (the owner is told the reason; the shop
+     * keeps its address). 409 NO_ADDRESS_REQUEST when none waits; SHOP_CHANGED / WRONG_STATUS as for changeAddress.
+     * To accept it, approve the shop (the request is applied with it).
+     */
+    @PostMapping("/shops/{id}/address-request/decline")
+    public AdminShopResponse declineAddressRequest(@PathVariable UUID id, @Valid @RequestBody DeclineAddress body) {
+        return admin.declineAddressRequest(caller(), id, body.version(), body.reason());
+    }
+
+    public record DeclineAddress(@NotNull Long version, @NotBlank @Size(max = 200) String reason) {
+    }
+
     /** End a suspension: back to PENDING_VISIT, live again after the field team approves it. */
     @PostMapping("/shops/{id}/reinstate")
     public AdminShopResponse reinstate(@PathVariable UUID id, @Valid @RequestBody Approve body) {
