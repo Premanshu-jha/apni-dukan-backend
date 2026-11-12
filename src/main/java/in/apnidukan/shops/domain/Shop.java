@@ -10,6 +10,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import org.hibernate.envers.Audited;
+import org.hibernate.envers.NotAudited;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -92,6 +93,25 @@ public class Shop {
     /** When the field team checked this document; null until then (customers see "Registered" only once checked). */
     @Column(name = "registration_doc_checked_at")
     private Instant registrationDocCheckedAt;
+
+    /**
+     * When a live shop started waiting for the field team's re-check (its owner changed what they checked); null when
+     * nothing waits. Only ever set while APPROVED: the shop stays live meanwhile (see {@link #requestRecheck}).
+     */
+    @Column(name = "recheck_since")
+    private Instant recheckSince;
+
+    /** How many times the field team checked it (approve); its history row marks the version checked (lastApproved). */
+    @Column(name = "checks", nullable = false)
+    private int checks;
+
+    /**
+     * Ever approved by the field team (kept by a trigger from the timeline, V16; read only here, and not in the
+     * history). Once it is, the owner can't change the address or pin any more: the field team does (addressLocked).
+     */
+    @Column(name = "ever_approved", insertable = false, updatable = false)
+    @NotAudited
+    private boolean everApproved;
 
     /** Why the field team sent it back to DRAFT or suspended it (shown to the owner); null otherwise. */
     @Column(name = "status_reason", length = 200)
@@ -190,32 +210,75 @@ public class Shop {
     }
 
     /**
-     * An approved shop changed what the field team checked (its photos or its address and pin): it goes back to
-     * PENDING_VISIT and customers can't find it until the field team approves it again. Bookings already made stay.
-     * Does nothing in any other status.
+     * An approved shop changed what the field team checked (a photo, the video, the GSTIN or Udyam number; the address
+     * can't change, addressLocked): it stays APPROVED (bookable, its team works as usual) and waits for the field
+     * team's re-check. A change the owner makes after the field team asked for a fix answers that ask (the reason
+     * goes). Returns true when it starts waiting now; false when it already waits (the first change keeps its place in
+     * the queue) or isn't approved (a draft or a shop waiting for its visit is checked at that visit anyway).
      */
-    public void recheckIfApproved(Instant now) {
-        if (status == ShopStatus.APPROVED) {
-            this.status = ShopStatus.PENDING_VISIT;
-            this.updatedAt = now;
+    public boolean requestRecheck(Instant now) {
+        if (status != ShopStatus.APPROVED) {
+            return false;
         }
+        this.updatedAt = now;
+        this.statusReason = null;   // a fix asked for: this change answers it
+        if (recheckSince != null) {
+            return false;
+        }
+        this.recheckSince = now;
+        return true;
     }
 
-    /** The field team visited and approves the shop: customers can find it from now on. Only from PENDING_VISIT. */
-    public void approve(Instant now) {
-        if (status != ShopStatus.PENDING_VISIT) {
-            throw new IllegalStateException("Only a PENDING_VISIT shop can be approved, not " + status);
+    /**
+     * The field team asked the owner to fix something on a live shop's re-check: it stays as it is (live, waiting) and
+     * the owner sees the reason until he changes something or it is approved.
+     */
+    public void askToFix(String reason, Instant now) {
+        if (status != ShopStatus.APPROVED || recheckSince == null) {
+            throw new IllegalStateException("Only a live shop waiting for its re-check can be asked for a fix");
         }
+        this.statusReason = reason;
+        this.updatedAt = now;
+    }
+
+    /**
+     * The address and pin were verified by the field team: from the first approval on the owner can't change them (a
+     * request to the field team does), whatever the status now. A draft (also one sent back) and a first visit can.
+     */
+    public boolean addressLocked() {
+        return everApproved || status == ShopStatus.APPROVED;
+    }
+
+    /** Waiting for the field team: its first visit, a reinstated shop's visit, or a live shop's re-check. */
+    public boolean waitingForVisit() {
+        return status == ShopStatus.PENDING_VISIT || recheckSince != null;
+    }
+
+    /**
+     * The field team visited and approves the shop: customers can find it from now on. From PENDING_VISIT, or a live
+     * shop waiting for its re-check (it stays live; its changes count as checked).
+     */
+    public void approve(Instant now) {
+        if (!waitingForVisit()) {
+            throw new IllegalStateException("Only a shop waiting for a visit or a re-check can be approved, not "
+                    + status);
+        }
+        boolean liveRecheck = status == ShopStatus.APPROVED;
+        this.recheckSince = null;   // a live shop's re-check: its changes are checked now
+        this.checks++;
         this.status = ShopStatus.APPROVED;
         this.statusReason = null;
         this.updatedAt = now;
-        if (registrationDocFileId != null && registrationDocCheckedAt == null) {
-            this.registrationDocCheckedAt = now;   // the visit checked the document there
+        // A visit checks the document there; a live shop's re-check doesn't (a document added meanwhile waits for
+        // its own check, ShopAdminService.markDocumentChecked)
+        if (!liveRecheck && registrationDocFileId != null && registrationDocCheckedAt == null) {
+            this.registrationDocCheckedAt = now;
         }
     }
 
     /**
-     * The visit didn't pass: PENDING_VISIT → DRAFT with the reason, so the owner can fix it and submit again.
+     * The visit didn't pass: PENDING_VISIT → DRAFT with the reason, so the owner can fix it and submit again. A live
+     * shop's re-check is never sent back (askToFix).
      */
     public void reject(String reason, Instant now) {
         if (status != ShopStatus.PENDING_VISIT) {
@@ -234,6 +297,7 @@ public class Shop {
         if (status != ShopStatus.APPROVED && status != ShopStatus.PENDING_VISIT) {
             throw new IllegalStateException("Only an APPROVED or PENDING_VISIT shop can be suspended, not " + status);
         }
+        this.recheckSince = null;
         this.status = ShopStatus.SUSPENDED;
         this.statusReason = reason;
         this.updatedAt = now;
@@ -260,6 +324,7 @@ public class Shop {
         if (status == ShopStatus.CLOSED) {
             throw new IllegalStateException("The shop is closed already");
         }
+        this.recheckSince = null;
         this.status = ShopStatus.CLOSED;
         this.statusReason = reason;
         this.updatedAt = now;
@@ -280,6 +345,8 @@ public class Shop {
     public RegistrationDocType getRegistrationDocType() { return registrationDocType; }
     public UUID getRegistrationDocFileId() { return registrationDocFileId; }
     public Instant getRegistrationDocCheckedAt() { return registrationDocCheckedAt; }
+    public Instant getRecheckSince() { return recheckSince; }
+    public boolean isEverApproved() { return everApproved; }
     public long getVersion() { return version; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }

@@ -4,7 +4,7 @@ package in.apnidukan.shops.domain;
 public enum ShopEventType {
     /** The owner sent it for a visit. */
     SUBMITTED,
-    /** The owner changed an approved shop (pin or photos): it is checked again. */
+    /** The owner changed what was checked on an approved shop (address, pin, photos, video, GSTIN, Udyam). */
     EDITED,
     APPROVED,
     SENT_BACK,
@@ -15,5 +15,10 @@ public enum ShopEventType {
     /** The owner closed the shop for good (reason: theirs, if they gave one). */
     CLOSED,
     /** Another person took the shop over (the owner asked, they accepted). Not a change of status. */
-    HANDED_OVER
+    HANDED_OVER,
+    /**
+     * The field team asked the owner to fix something on a live shop's re-check (reason: what the owner is told). The
+     * shop stays as it is and keeps its place in the queue (like a note, it doesn't move status_since).
+     */
+    FIX_ASKED
 }
