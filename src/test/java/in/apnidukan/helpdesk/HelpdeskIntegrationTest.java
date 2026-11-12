@@ -553,6 +553,179 @@ class HelpdeskIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT body FROM ticket_messages", String.class)).contains("support Gmail");
     }
 
+    // ---------------- round 2: search, move, reopen, "My requests" ----------------
+
+    @Test
+    void ticketsAreFoundByNumberPhoneEmailOrAccount() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        inbound(email("vikram@gmail.com", "", "Hi", "Another question", "<s1@x>"));
+        assertThat((List<?>) get("/admin/tickets/search?q=CLZ-1001", neha).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/tickets/search?q=1001", neha).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/tickets/search?q=90000 00003", neha).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/tickets/search?q=VIKRAM@gmail.com", neha).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/tickets/search?requester=" + customer, boss).body()).hasSize(1);
+        assertThat(get("/admin/tickets/search?q=hello", neha).status()).isEqualTo(400);
+        // A support person finds only their own
+        UUID ravi = support("9800000002", "Ravi");
+        assertThat((List<?>) get("/admin/tickets/search?q=CLZ-1001", ravi).body()).isEmpty();
+        assertThat(id).isNotNull();
+    }
+
+    @Test
+    void aSuperAdminMovesEveryOpenTicketOfSomeoneAway() {
+        UUID neha = support("9800000001", "Neha");
+        ask(customer, "Question one about bookings");
+        ask(customer, "Question two about bookings");
+        UUID ravi = support("9800000002", "Ravi");
+        Reply moved = post("/admin/tickets/move", Map.of("fromUserId", neha.toString(), "toUserId", ravi.toString()), boss);
+        assertThat(field(moved.body(), "moved")).isEqualTo(2);
+        assertThat(open(ravi)).isEqualTo(2);
+        assertThat(field(post("/admin/tickets/move", Map.of("fromUserId", ravi.toString(), "toUserId", ravi.toString()),
+                boss).body(), "code")).isEqualTo("NOT_SUPPORT");
+        assertThat(post("/admin/tickets/move", Map.of("fromUserId", ravi.toString()), neha).status()).isEqualTo(403);
+        Map<String, Object> share = new HashMap<>();
+        share.put("fromUserId", ravi.toString());
+        share.put("toUserId", null);
+        assertThat(field(post("/admin/tickets/move", share, boss).body(), "moved")).isEqualTo(2);
+        assertThat(open(neha)).isEqualTo(2);   // the only other support person
+    }
+
+    @Test
+    void aClosedTicketIsOpenedAgainWithoutEmailingAnyone() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        emailJob.runOnce();
+        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999), neha);
+        long version = ((Number) field(get("/admin/tickets/" + id, neha).body(), "version")).longValue();
+        Reply r = post("/admin/tickets/" + id + "/reopen", Map.of("version", version), neha);
+        assertThat(field(field(r.body(), "ticket"), "status")).isEqualTo("OPEN");
+        assertThat(emailJob.runOnce()).isZero();
+        assertThat(field(post("/admin/tickets/" + id + "/reopen", Map.of("version", version), neha).body(), "code"))
+                .isEqualTo("TICKET_CHANGED");
+    }
+
+    @Test
+    void myRequestsShowOnlyMineAndICanAddToThem() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        UUID other = person("9000000005");
+        long seen = ((Number) field(get("/admin/tickets/" + id, neha).body(), "lastIncomingSeq")).longValue();
+        post("/admin/tickets/" + id + "/reply", Map.of("seenSeq", seen, "body", "Fixed it.", "resolve", true), neha);
+
+        List<?> mine = (List<?>) get("/helpdesk/tickets", customer).body();
+        assertThat(mine).hasSize(1);
+        assertThat(field(mine.get(0), "status")).isEqualTo("RESOLVED");
+        assertThat((List<?>) get("/helpdesk/tickets", other).body()).isEmpty();
+        assertThat(get("/helpdesk/tickets/" + id, other).status()).isEqualTo(404);
+
+        Reply detail = get("/helpdesk/tickets/" + id, customer);
+        List<?> messages = (List<?>) field(detail.body(), "messages");
+        assertThat(messages).hasSize(2);
+        assertThat(field(messages.get(1), "fromSupport")).isEqualTo(true);
+        assertThat(field(messages.get(1), "supportName")).isEqualTo("Neha");
+        assertThat(detail.text()).doesNotContain("PROFILE_VIEWED");   // no internal history
+
+        Reply added = post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "Still not fixed"), customer);
+        assertThat(added.status()).as(added.text()).isEqualTo(200);
+        assertThat(field(field(added.body(), "ticket"), "status")).isEqualTo("OPEN");
+        assertThat(post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "Me too"), other).status())
+                .isEqualTo(404);
+        assertThat(post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "x"), customer).status())
+                .isEqualTo(400);
+    }
+
+    @Test
+    void aTicketIsFoundByAPastedSubjectAndBySomeonesNewEmail() {
+        UUID neha = support("9800000001", "Neha");
+        ask(customer, "Question about my booking");
+        assertThat((List<?>) get("/admin/tickets/search?q=Re: [CLZ-1001] Question", neha).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/tickets/search?q=clz 1001", neha).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/tickets/search?q=CLZ - 1001", neha).body()).hasSize(1);
+        // They changed their verified email after asking: the new one finds the ticket too
+        jdbc.update("UPDATE users SET email = 'asha.new@test.in' WHERE id = ?", customer);
+        assertThat((List<?>) get("/admin/tickets/search?q=asha.new@test.in", neha).body()).hasSize(1);
+        assertThat((List<?>) get("/admin/tickets/search?q=9000000003@test.in", neha).body()).hasSize(1);
+    }
+
+    @Test
+    void aSupportPersonsOtherTicketsCountIsOnlyTheirOwn() {
+        UUID neha = support("9800000001", "Neha");
+        String first = ask(customer, "Question one about bookings");
+        support("9800000002", "Ravi");
+        ask(customer, "Question two about bookings");   // fewest open: Ravi
+        assertThat(field(get("/admin/tickets/" + first, neha).body(), "earlierTickets")).isEqualTo(0);
+        assertThat(field(get("/admin/tickets/" + first, boss).body(), "earlierTickets")).isEqualTo(1);
+    }
+
+    @Test
+    void movingWhenNobodyElseCanTakeThemSaysHowManyStayed() {
+        UUID neha = support("9800000001", "Neha");
+        ask(customer, "Question one about bookings");
+        String waiting = ask(customer, "Question two about bookings");
+        post("/admin/tickets/" + waiting + "/reply", Map.of("seenSeq", 999_999, "body", "Which day?", "resolve",
+                false), neha);
+        Map<String, Object> share = new HashMap<>();
+        share.put("fromUserId", neha.toString());
+        share.put("toUserId", null);
+        Reply r = post("/admin/tickets/move", share, boss);
+        assertThat(field(r.body(), "moved")).isEqualTo(0);
+        assertThat(field(r.body(), "stayed")).isEqualTo(2);   // waiting on us and waiting on them
+    }
+
+    @Test
+    void aTicketReopenedAfterItsHolderLeftSupportGoesToSomeoneInSupport() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999), neha);
+        UUID ravi = support("9800000002", "Ravi");
+        assertThat(delete("/admin/team/" + neha, boss).status()).isEqualTo(204);
+        CLOCK.set(NOW.plusSeconds(86_400));
+        long version = ((Number) field(get("/admin/tickets/" + id, boss).body(), "version")).longValue();
+        Reply r = post("/admin/tickets/" + id + "/reopen", Map.of("version", version), boss);
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT assignee_id FROM tickets WHERE id = ?::uuid", UUID.class, id))
+                .isEqualTo(ravi);
+        assertThat(jdbc.queryForObject("SELECT last_message_at FROM tickets WHERE id = ?::uuid",
+                java.sql.Timestamp.class, id).toInstant()).isEqualTo(NOW.plusSeconds(86_400));
+        assertThat(count("ticket_events WHERE event = 'REOPENED'")).isEqualTo(1);
+    }
+
+    @Test
+    void addingFromTheAppIsLimitedAndASendRepeatedAfterALostAnswerIsKeptOnce() {
+        String id = ask(customer, "Question about my booking");   // counts as one
+        assertThat(post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "One more thing"), customer)
+                .status()).isEqualTo(200);
+        assertThat(post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "One more thing"), customer)
+                .status()).isEqualTo(200);
+        assertThat(count("ticket_messages WHERE body = 'One more thing'")).isEqualTo(1);
+        // The same short answer again after support's question is new, not a repeat
+        UUID neha = support("9800000001", "Neha");
+        jdbc.update("UPDATE tickets SET assignee_id = ?", neha);
+        post("/admin/tickets/" + id + "/reply", Map.of("seenSeq", 999_999, "body", "Is it the 3 pm one?", "resolve",
+                false), neha);
+        post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "One more thing"), customer);
+        assertThat(count("ticket_messages WHERE body = 'One more thing'")).isEqualTo(2);
+        for (int i = 0; i < 17; i++) {
+            assertThat(post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "Note " + i), customer)
+                    .status()).isEqualTo(200);
+        }
+        Reply r = post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "Too many now"), customer);
+        assertThat(r.status()).isEqualTo(429);
+        assertThat(field(r.body(), "code")).isEqualTo("TOO_MANY_MESSAGES");
+    }
+
+    @Test
+    void anEmailWeCouldNotProveIsNeverShownInTheirApp() {
+        support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        inbound(email("9000000003@test.in", "Asha", "Re: [CLZ-1001] Question", "Someone pretending", "<f1@x>",
+                false));
+        List<?> messages = (List<?>) field(get("/helpdesk/tickets/" + id, customer).body(), "messages");
+        assertThat(messages).hasSize(1);
+        assertThat(get("/helpdesk/tickets/" + id, customer).text()).doesNotContain("Someone pretending");
+    }
+
     // ---------------- super admins ----------------
 
     @Test
