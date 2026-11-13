@@ -39,7 +39,8 @@ public class HelpController {
     @PostMapping("/tickets")
     public ResponseEntity<Created> ask(@Valid @RequestBody Ask body) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(tickets.ask(currentUser.get().userId(), body.app(), body.subject(), body.message()));
+                .body(tickets.ask(currentUser.get().userId(), body.app(), body.subject(), body.message(),
+                        body.fileIds()));
     }
 
     /** "My requests": this person's tickets, newest activity first (at most 30). */
@@ -57,10 +58,11 @@ public class HelpController {
     /** Adds to one of their own tickets (reopens a resolved one). 400 VALIDATION_FAILED; 429 TOO_MANY_MESSAGES. */
     @PostMapping("/tickets/{id}/messages")
     public TicketService.MyDetail add(@PathVariable UUID id, @Valid @RequestBody Add body) {
-        return tickets.addToMine(currentUser.get().userId(), id, body.message());
+        return tickets.addToMine(currentUser.get().userId(), id, body.message(), body.fileIds());
     }
 
-    public record Add(@NotNull @Size(max = 6000) String message) {
+    /** @param fileIds photos, videos or PDFs to send with it (POST /files/ticket), at most 5; may be null */
+    public record Add(@NotNull @Size(max = 6000) String message, @Size(max = 5) List<UUID> fileIds) {
     }
 
     /**
@@ -69,6 +71,6 @@ public class HelpController {
      * @param message 10 to 5,000 characters
      */
     public record Ask(@NotNull TicketSource app, @Size(max = 200) String subject,
-                      @NotNull @Size(max = 6000) String message) {
+                      @NotNull @Size(max = 6000) String message, @Size(max = 5) List<UUID> fileIds) {
     }
 }
