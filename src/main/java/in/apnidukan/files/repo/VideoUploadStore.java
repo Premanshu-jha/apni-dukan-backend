@@ -68,6 +68,31 @@ public class VideoUploadStore {
         return n == null ? 0 : n;
     }
 
+    /** A person's ticket video upload (no shop), if any. */
+    public Optional<Upload> findPersonal(UUID id, UUID userId) {
+        return jdbc.query("SELECT * FROM video_uploads WHERE id = ? AND shop_id IS NULL AND created_by = ?", ROW, id,
+                userId).stream().findFirst();
+    }
+
+    /** The same, locked until the transaction ends. */
+    public Optional<Upload> lockPersonal(UUID id, UUID userId) {
+        return jdbc.query("SELECT * FROM video_uploads WHERE id = ? AND shop_id IS NULL AND created_by = ? FOR UPDATE",
+                ROW, id, userId).stream().findFirst();
+    }
+
+    /** Holds this person's ticket uploads (files and video links) until the transaction ends: one after the other. */
+    public void lockPersonStarts(UUID userId) {
+        jdbc.query("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", rs -> null, "ticket-uploads:" + userId);
+    }
+
+    /** Ticket video links this person got since a moment (ix_video_uploads_person_created). */
+    public long countPersonalSince(UUID userId, Instant since) {
+        // A completed one is counted as its file (files.purpose TICKET_FILE), not twice
+        Long n = jdbc.queryForObject("SELECT count(*) FROM video_uploads WHERE shop_id IS NULL AND created_by = ? "
+                + "AND created_at >= ? AND file_id IS NULL", Long.class, userId, Timestamp.from(since));
+        return n == null ? 0 : n;
+    }
+
     /** Whether some upload completed with this file (it may have been purged or replaced since). */
     public boolean completedWith(UUID fileId) {
         return !jdbc.queryForList("SELECT 1 FROM video_uploads WHERE file_id = ? LIMIT 1", Integer.class, fileId)

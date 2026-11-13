@@ -18,7 +18,7 @@ public class StoredFile {
     @Id
     private UUID id;
 
-    @Column(name = "shop_id", nullable = false)
+    @Column(name = "shop_id")   // null for a support ticket's file (a person's, V49)
     private UUID shopId;
 
     @Enumerated(EnumType.STRING)

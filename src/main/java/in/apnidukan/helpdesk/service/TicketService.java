@@ -4,6 +4,7 @@ import in.apnidukan.common.context.ProfileFacts;
 import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.helpdesk.domain.Ticket;
 import in.apnidukan.helpdesk.domain.TicketEvent;
@@ -30,6 +31,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -57,14 +59,21 @@ public class TicketService {
     static final String DELETED = "Deleted account";
     /** A message from the app. */
     static final int MESSAGE_MIN = 10;
+    /** An email on an account's ticket from an address the account gave up (verified by someone else since). */
+    static final String SOMEONE_ELSE = "Someone else (from an email address they no longer use)";
     static final int MESSAGE_MAX = 5000;
     /** A support person's reply. */
     static final int REPLY_MAX = 5000;
+    /** Photos, videos and PDFs one message may carry. */
+    static final int MAX_FILES = 5;
+    /** A ticket's files are deleted this long after it was resolved (its words stay). */
+    static final Duration FILES_KEPT = Duration.ofDays(182);
     static final int SUBJECT_MAX = 100;
     /** Opening a ticket again within this long isn't logged again as a profile view. */
     static final Duration VIEW_LOGGED_FOR = Duration.ofMinutes(30);
 
     private final Notifications notifications;
+    private final FileRefs files;
     private final TicketStore store;
     private final TicketAssigner assigner;
     private final UserDirectory users;
@@ -74,7 +83,7 @@ public class TicketService {
     private final int emailsPerHour;
 
     public TicketService(TicketStore store, TicketAssigner assigner, UserDirectory users, List<ProfileFacts> facts,
-                         Notifications notifications,
+                         Notifications notifications, FileRefs files,
                          Clock clock, @Value("${app.helpdesk.new-per-hour}") int newPerHour,
                          @Value("${app.helpdesk.emails-per-hour}") int emailsPerHour) {
         if (newPerHour < 1 || emailsPerHour < 1) {
@@ -86,6 +95,7 @@ public class TicketService {
         this.users = users;
         this.facts = facts;
         this.notifications = notifications;
+        this.files = files;
         this.clock = clock;
         this.newPerHour = newPerHour;
     }
@@ -100,10 +110,11 @@ public class TicketService {
      * @param subject optional; the message's first words when blank
      */
     @Transactional
-    public Created ask(UUID userId, TicketSource source, String subject, String message) {
+    public Created ask(UUID userId, TicketSource source, String subject, String message, List<UUID> fileIds) {
         if (source == TicketSource.EMAIL) {
             throw ApiException.badRequest("VALIDATION_FAILED", "app must be CUSTOMER or PARTNER");
         }
+        List<UUID> sent = checkFiles(fileIds);
         String text = MessageText.clean("message", message, MESSAGE_MIN, MESSAGE_MAX);
         String typed = subject == null ? "" : MessageText.line("subject", subject, 0, SUBJECT_MAX);
         // A subject of one letter (or none) says nothing: the message's first words instead
@@ -113,12 +124,18 @@ public class TicketService {
                 "PROFILE_INCOMPLETE", "Verify your email first.", Map.of("missing", List.of("email"))));
         Instant now = clock.instant();
         assigner.lock();
+        // The answer to their send was lost and they sent it again (its files are on a question of theirs already)
+        Optional<Ticket> same = sameQuestion(userId, text, sent, now);
+        if (same.isPresent()) {
+            return new Created(same.get().id(), same.get().label(), email);
+        }
         if (store.openedSince(userId, email, now.minus(Duration.ofHours(1))) >= newPerHour) {
             throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_TICKETS",
                     "You've sent several requests in the last hour. We'll answer those first; add anything more by "
                             + "replying to our email.");
         }
         Ticket t = open(source, title, userId, email, null, text, 0, null, true, now);
+        attach(t, userId, sent);
         return new Created(t.id(), t.label(), email);
     }
 
@@ -152,8 +169,12 @@ public class TicketService {
         if (e.ticketNumber() != null) {
             Ticket t = store.lockByNumber(e.ticketNumber()).orElse(null);
             if (t != null && fromRequester(t, e.fromAddress(), requesterId)) {
-                return incoming(t, e.senderVerified() ? t.requesterId() : null, e.text(), e.attachments(),
-                        e.messageId(), e.senderVerified(), now) ? Received.ADDED : Received.DUPLICATE;
+                // Written as the account's own only when it is proven from that account's verified email now: an
+                // address they gave up (and someone else verified since) is never them
+                UUID author = e.senderVerified() && t.requesterId() != null && t.requesterId().equals(requesterId)
+                        ? t.requesterId() : null;
+                return incoming(t, author, e.text(), e.attachments(), e.messageId(), e.senderVerified(), now)
+                        ? Received.ADDED : Received.DUPLICATE;
             }
         }
         if (store.openedSince(requesterId, e.fromAddress(), now.minus(Duration.ofHours(1))) >= newPerHour) {
@@ -493,11 +514,13 @@ public class TicketService {
                 names.put(id, p.name());
             }
         });
+        Map<UUID, List<TicketStore.MessageFile>> attached = store.files(t.id());
+        Map<UUID, String> links = links(attached);
         return new MyDetail(MyTicket.of(t), messages.stream()
-                .filter(m -> m.direction().equals("OUT") || userId.equals(m.authorId()) || m.senderVerified())
+                .filter(m -> m.direction().equals("OUT") || userId.equals(m.authorId()))
                 .map(m -> new MyMessage(m.seq(), m.direction().equals("OUT"),
                         m.direction().equals("OUT") ? firstName(names.get(m.authorId())) : null, m.body(),
-                        m.attachments(), m.createdAt())).toList());
+                        m.attachments(), m.createdAt(), files(attached.get(m.id()), links))).toList());
     }
 
     /**
@@ -505,8 +528,10 @@ public class TicketService {
      * it isn't theirs; 400 VALIDATION_FAILED (2 to 5,000 characters); 429 TOO_MANY_MESSAGES past 20 an hour.
      */
     @Transactional
-    public MyDetail addToMine(UUID userId, UUID ticketId, String message) {
-        String text = MessageText.clean("message", message, 2, MESSAGE_MAX);
+    public MyDetail addToMine(UUID userId, UUID ticketId, String message, List<UUID> fileIds) {
+        List<UUID> sent = checkFiles(fileIds);
+        // With files the words may be left out ("here is the photo" is optional)
+        String text = MessageText.clean("message", message, sent.isEmpty() ? 2 : 0, MESSAGE_MAX);
         // Whose it is, before any lock (who asked never changes): someone else's id never waits on the helpdesk lock
         if (store.find(ticketId).filter(x -> userId.equals(x.requesterId())).isEmpty()) {
             throw ApiException.notFound("Ticket");
@@ -516,9 +541,11 @@ public class TicketService {
         Instant now = clock.instant();   // after the locks: never earlier than a reply saved while we waited
         // The answer to their send was lost and they sent it again: the same words, still the newest message (nobody
         // answered since), within two minutes, and not resolved since. A "yes" after support's question is new.
+        // With files: the same files too (each can be sent once, so sending them again means the same send).
         boolean repeated = t.status() != TicketStatus.RESOLVED && store.lastMessage(t.id())
                 .filter(m -> m.direction().equals("IN") && userId.equals(m.authorId()) && m.body().equals(text)
-                        && m.createdAt().isAfter(now.minus(Duration.ofMinutes(2))))
+                        && m.createdAt().isAfter(now.minus(Duration.ofMinutes(2)))
+                        && sameFiles(store.files(t.id()).get(m.id()), sent))
                 .isPresent();
         if (repeated) {
             return myTicket(userId, ticketId);
@@ -528,7 +555,102 @@ public class TicketService {
                     "You've written a lot in the last hour. We'll read those first.");
         }
         incoming(t, userId, text, 0, null, true, now);
+        attach(t, userId, sent);
         return myTicket(userId, ticketId);
+    }
+
+    /** Whether a message carries exactly these files (none when there are none). */
+    private static boolean sameFiles(List<TicketStore.MessageFile> on, List<UUID> sent) {
+        Set<UUID> had = on == null ? Set.of() : on.stream().map(TicketStore.MessageFile::fileId)
+                .collect(java.util.stream.Collectors.toSet());
+        return had.equals(Set.copyOf(sent));
+    }
+
+    /**
+     * Their question asked a moment ago with these same words and files (the answer was lost and they sent it
+     * again): only with files, which can go with one message each, so a second send can only be the same one.
+     */
+    private Optional<Ticket> sameQuestion(UUID userId, String text, List<UUID> sent, Instant now) {
+        if (sent.isEmpty()) {
+            return Optional.empty();
+        }
+        return store.sentWith(sent.get(0)).flatMap(w -> store.find(w.ticketId())
+                .filter(t -> userId.equals(t.requesterId()))
+                .flatMap(t -> store.messages(t.id()).stream().findFirst()
+                        .filter(m -> m.id().equals(w.messageId()) && userId.equals(m.authorId())
+                                && m.body().equals(text) && m.createdAt().isAfter(now.minus(Duration.ofMinutes(2)))
+                                && sameFiles(store.files(t.id()).get(m.id()), sent))
+                        .map(m -> t)));
+    }
+
+    /** The file ids a message comes with: at most {@value #MAX_FILES}, each once. 400 VALIDATION_FAILED. */
+    private static List<UUID> checkFiles(List<UUID> fileIds) {
+        List<UUID> ids = fileIds == null ? List.of() : List.copyOf(fileIds);
+        if (ids.size() > MAX_FILES || new HashSet<>(ids).size() != ids.size()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("fileIds", "at most " + MAX_FILES + " files, each once"));
+        }
+        return ids;
+    }
+
+    /**
+     * The files go with the message just added (the ticket's newest): each must be a ticket file this person sent
+     * and not on a message yet. It is then kept (taken off the deletion queue). 400 FILE_NOT_FOUND (gone after a
+     * day unsent, or someone else's), 409 FILE_ALREADY_SENT, 409 UPLOAD_GONE (deleted at this very moment).
+     */
+    private void attach(Ticket t, UUID authorId, List<UUID> fileIds) {
+        if (fileIds.isEmpty()) {
+            return;
+        }
+        TicketMessage message = store.lastMessage(t.id()).orElseThrow();
+        int position = 0;
+        for (UUID id : fileIds) {
+            FileRefs.FileRef f = files.find(id)
+                    .filter(x -> "TICKET_FILE".equals(x.purpose()) && x.shopId() == null
+                            && authorId.equals(x.uploadedBy()))
+                    .orElseThrow(TicketService::fileGone);
+            if (store.fileSent(id)) {
+                throw alreadySent(f);
+            }
+            try {
+                files.keep(id);
+            } catch (ApiException e) {
+                if ("UPLOAD_GONE".equals(e.getCode())) {   // deleted (a day unsent) at this very moment
+                    throw fileGone();
+                }
+                throw e;
+            }
+            if (!store.addFile(id, message.id(), t.id(), position++, f.contentType(), f.sizeBytes(), f.name())) {
+                throw alreadySent(f);   // sent with another message at the same moment
+            }
+        }
+    }
+
+    private static ApiException fileGone() {
+        return ApiException.badRequest("FILE_NOT_FOUND",
+                "A file you added is no longer there (files not sent within a day are deleted). Remove it and add it "
+                        + "again.");
+    }
+
+    private static ApiException alreadySent(FileRefs.FileRef f) {
+        String which = f.name() == null ? "A file you added" : "\"" + f.name() + "\"";
+        return new ApiException(HttpStatus.CONFLICT, "FILE_ALREADY_SENT",
+                which + " was sent already. Remove it and add it again to send it once more.");
+    }
+
+    /** Links (valid at least 15 minutes) for the files still kept. */
+    private Map<UUID, String> links(Map<UUID, List<TicketStore.MessageFile>> attached) {
+        List<UUID> kept = attached.values().stream().flatMap(List::stream).filter(f -> f.removedAt() == null)
+                .map(TicketStore.MessageFile::fileId).toList();
+        return kept.isEmpty() ? Map.of() : files.links(kept);
+    }
+
+    private static List<MessageFile> files(List<TicketStore.MessageFile> of, Map<UUID, String> links) {
+        if (of == null) {
+            return List.of();
+        }
+        return of.stream().map(f -> new MessageFile(f.fileId(), f.contentType(), f.sizeBytes(), f.name(),
+                links.get(f.fileId()), f.removedAt() != null || !links.containsKey(f.fileId()))).toList();
     }
 
     private static String firstName(String name) {
@@ -579,10 +701,14 @@ public class TicketService {
         // A support person's search by this account shows only their own: the count says the same
         long earlier = t.requesterId() == null ? 0 : Math.max(0, (role == TeamRole.SUPPORT
                 ? store.countByRequester(t.requesterId(), adminId) : store.countByRequester(t.requesterId())) - 1);
+        Map<UUID, List<TicketStore.MessageFile>> attached = store.files(t.id());
+        Map<UUID, String> links = links(attached);
         return new Detail(summary(t, names), t.requesterId(), t.requesterEmail(),
                 messages.stream().map(m -> new Message(m.seq(), m.direction(), m.direction().equals("OUT")
-                        ? names.getOrDefault(m.authorId(), "Support") : displayName(t, names),
-                        m.body(), m.attachments(), m.senderVerified(), m.createdAt())).toList(),
+                        ? names.getOrDefault(m.authorId(), "Support")
+                        : notThem(t, m) && m.senderVerified() ? SOMEONE_ELSE : displayName(t, names),
+                        m.body(), m.attachments(), m.senderVerified() && !notThem(t, m), m.createdAt(),
+                        files(attached.get(m.id()), links))).toList(),
                 events.stream().map(e -> new Event(e.event(), e.actorId() == null ? null
                         : names.getOrDefault(e.actorId(), DELETED), e.detail(), e.at())).toList(),
                 profile, earlier, emails.getOrDefault("PENDING", 0L), emails.getOrDefault("FAILED", 0L),
@@ -596,9 +722,10 @@ public class TicketService {
      * to); 400 VALIDATION_FAILED (1 to 5,000 characters).
      */
     @Transactional
-    public Detail reply(UUID adminId, UUID ticketId, long seenSeq, String body, boolean resolve) {
+    public Detail reply(UUID adminId, UUID ticketId, long seenSeq, String body, boolean resolve, List<UUID> fileIds) {
         TeamRole role = requireHandles(adminId);
-        String text = MessageText.clean("body", body, 1, REPLY_MAX);
+        List<UUID> sent = checkFiles(fileIds);
+        String text = MessageText.clean("body", body, sent.isEmpty() ? 1 : 0, REPLY_MAX);
         Ticket t = store.lock(ticketId).orElseThrow(() -> ApiException.notFound("Ticket"));
         requireMayAnswer(role, adminId, t);
         // An account's ticket goes to its current verified email (they may have changed it since asking)
@@ -608,6 +735,10 @@ public class TicketService {
             throw new ApiException(HttpStatus.CONFLICT, "REQUESTER_GONE",
                     "They deleted their account, so there is no address to send a reply to. Close the ticket instead.");
         }
+        if (!sent.isEmpty() && t.requesterId() == null) {
+            throw ApiException.badRequest("FILES_NEED_APP",
+                    "They wrote by email and have no Clozest account, so files can't reach them. Describe it in words.");
+        }
         if (store.lastIncomingSeq(t.id()) > seenSeq) {
             throw new ApiException(HttpStatus.CONFLICT, "NEW_MESSAGE",
                     "They wrote again while you were typing. Read their new message, then send your reply.");
@@ -616,6 +747,7 @@ public class TicketService {
         // A super admin answering Unassigned takes it (never their own question)
         UUID assignee = t.assigneeId() == null && !adminId.equals(t.requesterId()) ? adminId : t.assigneeId();
         store.addMessage(t.id(), "OUT", adminId, text, 0, null, true, now);
+        attach(t, adminId, sent);
         store.update(t.id(), resolve ? TicketStatus.RESOLVED : TicketStatus.WAITING, assignee, now,
                 resolve ? now : null, now);
         if (!Objects.equals(assignee, t.assigneeId())) {
@@ -624,8 +756,12 @@ public class TicketService {
         store.addEvent(t.id(), adminId, resolve ? "RESOLVED" : "REPLIED", resolve ? "With a reply" : null, now);
         UserDirectory.Person me = users.find(List.of(adminId)).get(adminId);
         // Signed with the support person's name only (never their phone)
-        store.queueEmail(t.id(), to, TicketEmails.replySubject(t), TicketEmails.replyBody(t, requesterName(t), text,
-                resolve, me == null ? null : me.name(), lastIncoming(t.id())), now);
+        // The files themselves stay in the app (an email link would expire): the email says where they are
+        String emailed = sent.isEmpty() ? text : (text.isBlank() ? "" : text + "\n\n") + "(We sent " + sent.size()
+                + (sent.size() == 1 ? " file" : " files") + " with this reply. "
+                + "See them in the Clozest app: Need help, then My requests.)";
+        store.queueEmail(t.id(), to, TicketEmails.replySubject(t), TicketEmails.replyBody(t, requesterName(t), emailed,
+                resolve, me == null ? null : me.name(), lastIncoming(t)), now);
         notifyReplied(t, resolve, now);
         return get(adminId, ticketId);
     }
@@ -636,10 +772,16 @@ public class TicketService {
      * changes.
      */
     @Transactional
-    public Detail close(UUID adminId, UUID ticketId, long seenSeq) {
+    public Detail close(UUID adminId, UUID ticketId, long seenSeq, Long version) {
         TeamRole role = requireHandles(adminId);
         Ticket t = store.lock(ticketId).orElseThrow(() -> ApiException.notFound("Ticket"));
         requireMayAnswer(role, adminId, t);
+        // Changed meanwhile (opened again by someone else, given to another): look again first. Older admin pages
+        // send no version and are checked only for new messages.
+        if (version != null && t.version() != version) {
+            throw new ApiException(HttpStatus.CONFLICT, "TICKET_CHANGED",
+                    "This ticket changed meanwhile. Check it again, then choose.");
+        }
         if (store.lastIncomingSeq(t.id()) > seenSeq) {
             throw new ApiException(HttpStatus.CONFLICT, "NEW_MESSAGE",
                     "They wrote again. Read their new message before closing the ticket.");
@@ -756,14 +898,22 @@ public class TicketService {
      * The person's latest message, quoted under our reply so they remember what it was about; null when it came from
      * a sender we couldn't prove (never sent on to the real person's inbox).
      */
-    private String lastIncoming(UUID ticketId) {
-        List<TicketMessage> all = store.messages(ticketId);
+    private String lastIncoming(Ticket t) {
+        List<TicketMessage> all = store.messages(t.id());
         for (int i = all.size() - 1; i >= 0; i--) {
             if (all.get(i).direction().equals("IN")) {
-                return all.get(i).senderVerified() ? all.get(i).body() : null;
+                return all.get(i).senderVerified() && !notThem(t, all.get(i)) ? all.get(i).body() : null;
             }
         }
         return null;
+    }
+
+    /**
+     * An email on an account's ticket that isn't written as the account's: from an address they gave up (someone
+     * else verified it since), or one we couldn't prove. Never shown or quoted as theirs.
+     */
+    private static boolean notThem(Ticket t, TicketMessage m) {
+        return m.direction().equals("IN") && t.requesterId() != null && m.authorId() == null;
     }
 
     /** The name to greet the person with in our emails (null: just "Hi,"). */
@@ -851,7 +1001,18 @@ public class TicketService {
      * @param senderVerified false for an email whose From couldn't be proven (it may not be from them)
      */
     public record Message(long seq, String direction, String author, String body, int attachments,
-                          boolean senderVerified, Instant at) {
+                          boolean senderVerified, Instant at, List<MessageFile> files) {
+        public Message {
+            files = List.copyOf(files);
+        }
+    }
+
+    /**
+     * A photo, video or PDF on a message.
+     * @param url     a link that opens it for at least 15 minutes; null once removed
+     * @param removed deleted (6 months after the ticket was resolved, or the account was deleted)
+     */
+    public record MessageFile(UUID id, String contentType, long sizeBytes, String name, String url, boolean removed) {
     }
 
     /** @param actor null for the system */
@@ -891,7 +1052,10 @@ public class TicketService {
      * @param supportName the support person's first name on our replies (null when unknown)
      */
     public record MyMessage(long seq, boolean fromSupport, String supportName, String body, int attachments,
-                            Instant at) {
+                            Instant at, List<MessageFile> files) {
+        public MyMessage {
+            files = List.copyOf(files);
+        }
     }
 
     public record Stats(List<PersonStats> people, long unassigned) {

@@ -37,10 +37,14 @@ public interface FileRefs {
     void release(UUID fileId);
 
     /**
-     * @param purpose     SHOP_PHOTO, OWNER_PHOTO, STAFF_PHOTO, SHOP_VIDEO, REG_DOC, BILL or RECEIPT
+     * @param shopId      null for a ticket file (it belongs to a person)
+     * @param purpose     SHOP_PHOTO, OWNER_PHOTO, STAFF_PHOTO, SHOP_VIDEO, REG_DOC, BILL, RECEIPT or TICKET_FILE
      * @param contentType e.g. image/jpeg
+     * @param uploadedBy  who sent it
+     * @param name        the name it had on the phone or computer; may be null
      */
-    record FileRef(UUID id, UUID shopId, String purpose, String contentType) {
+    record FileRef(UUID id, UUID shopId, String purpose, String contentType, UUID uploadedBy, long sizeBytes,
+                   String name) {
 
         public boolean isPhoto() {
             return contentType.startsWith("image/");

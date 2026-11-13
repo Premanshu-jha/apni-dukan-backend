@@ -64,7 +64,8 @@ public class FileDeletionStore {
      * Claims up to {@code max} keys due by now, oldest due first, in one transaction: the rows are locked (FOR UPDATE
      * SKIP LOCKED: a row another transaction holds, e.g. a shop setting that video right now, is left for later) and
      * pushed to {@code claimedUntil}, so no other server takes them meanwhile. A salon video completed but never set
-     * on a shop loses its files row here, in the same transaction, so nothing can attach it once its bytes go. A key
+     * on a shop, or a ticket file never sent, loses its files row here, in the same transaction, so nothing can attach
+     * it once its bytes go. A key
      * whose files row still exists otherwise (something uses it) is taken off the queue and never deleted.
      */
     @Transactional
@@ -78,6 +79,8 @@ public class FileDeletionStore {
         String[] keys = due.stream().map(Pending::storageKey).toArray(String[]::new);
         jdbc.update("DELETE FROM files f WHERE f.storage_key = ANY (?) AND f.purpose = 'SHOP_VIDEO' "
                 + "AND NOT EXISTS (SELECT 1 FROM shops s WHERE s.shop_video_file_id = f.id)", (Object) keys);
+        // A ticket file still queued was never sent (sending it takes it off the queue): it goes, row and bytes
+        jdbc.update("DELETE FROM files f WHERE f.storage_key = ANY (?) AND f.purpose = 'TICKET_FILE'", (Object) keys);
         List<String> inUse = jdbc.queryForList("SELECT storage_key FROM files WHERE storage_key = ANY (?)",
                 String.class, (Object) keys);
         if (!inUse.isEmpty()) {

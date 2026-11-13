@@ -72,7 +72,7 @@ public class FileRefService implements FileRefs {
     @Transactional(readOnly = true)
     public Optional<FileRef> find(UUID fileId) {
         return repository.findById(fileId).map(f -> new FileRef(f.getId(), f.getShopId(), f.getPurpose().name(),
-                f.getContentType()));
+                f.getContentType(), f.getUploadedBy(), f.getSizeBytes(), f.getOriginalName()));
     }
 
     @Override
@@ -138,7 +138,11 @@ public class FileRefService implements FileRefs {
     @Transactional
     public void release(UUID fileId) {
         repository.findById(fileId).ifPresent(f -> {
-            repository.deleteByIdAndShopId(f.getId(), f.getShopId());
+            if (f.getShopId() == null) {
+                repository.deleteById(f.getId());   // a ticket file: a person's, no shop
+            } else {
+                repository.deleteByIdAndShopId(f.getId(), f.getShopId());
+            }
             deletions.queueNow(f.getStorageKey(), clock.instant());
             cache.invalidate(f.getId());
         });

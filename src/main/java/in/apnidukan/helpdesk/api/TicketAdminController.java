@@ -99,13 +99,14 @@ public class TicketAdminController {
     /** Emails the answer; resolve=true also resolves the ticket. See TicketService.reply for the refusals. */
     @PostMapping("/{id}/reply")
     public Detail reply(@PathVariable UUID id, @Valid @RequestBody Reply body) {
-        return tickets.reply(me(), id, body.seenSeq(), body.body(), Boolean.TRUE.equals(body.resolve()));
+        return tickets.reply(me(), id, body.seenSeq(), body.body(), Boolean.TRUE.equals(body.resolve()),
+                body.fileIds());
     }
 
     /** Resolves without emailing anyone (409 NEW_MESSAGE if they wrote after seenSeq). */
     @PostMapping("/{id}/close")
     public Detail close(@PathVariable UUID id, @Valid @RequestBody Close body) {
-        return tickets.close(me(), id, body.seenSeq());
+        return tickets.close(me(), id, body.seenSeq(), body.version());
     }
 
     /** Opens a resolved ticket again without emailing anyone. */
@@ -125,7 +126,9 @@ public class TicketAdminController {
     }
 
     /** @param seenSeq the ticket's lastIncomingSeq when the reply was written */
-    public record Reply(@NotNull Long seenSeq, @NotNull @Size(max = 6000) String body, Boolean resolve) {
+    /** @param fileIds photos, videos or PDFs to send with it (POST /files/ticket), at most 5; may be null */
+    public record Reply(@NotNull Long seenSeq, @NotNull @Size(max = 6000) String body, Boolean resolve,
+                        @Size(max = 5) List<UUID> fileIds) {
     }
 
     public record Assign(@NotNull Long version, UUID assigneeId) {
@@ -141,6 +144,7 @@ public class TicketAdminController {
     }
 
     /** @param seenSeq the ticket's lastIncomingSeq when they chose to close it */
-    public record Close(@NotNull Long seenSeq) {
+    /** @param version the ticket's version on screen (a change meanwhile: 409 TICKET_CHANGED); may be null */
+    public record Close(@NotNull Long seenSeq, Long version) {
     }
 }

@@ -946,6 +946,39 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### Support tickets, round 4a: photos, videos and PDFs (V49–V51; admin app 0.13.0, customer app 0.18.0, partner app 0.19.0)
+
+- **Uploading** (anyone signed in): `POST /api/v1/files/ticket` (multipart `file`): a photo (JPEG or PNG, stored as
+  a cleaned JPEG without the phone's hidden details) or a PDF, at most 10 MB → 201 `{id, contentType, sizeBytes,
+  name}`. A video (MP4, MOV or WebM, at most 100 MB) goes straight to R2: `POST /api/v1/files/ticket/videos
+  {sizeBytes, contentType}` → a one-time upload link (15 minutes), the phone PUTs it, then `POST
+  /api/v1/files/ticket/videos/{uploadId}/complete` checks its size and first bytes. At most 30 uploads a person a
+  day, a video counting once (429 `TOO_MANY_UPLOADS`). Ticket files belong to a person, not a shop (`files.shop_id`
+  is null for them); `POST /api/v1/files` refuses `purpose=TICKET_FILE`. The photo or PDF upload is let past the
+  64 KB limit on other requests (RequestSizeLimitFilter), like `/api/v1/files`.
+- **Sending**: `fileIds` (at most 5) on a new question (`POST /helpdesk/tickets`), on adding to one (`POST
+  /helpdesk/tickets/{id}/messages`, where the words may then be left out) and on support's reply (`POST
+  /admin/tickets/{id}/reply`). Each must be this person's and not sent before: 400 `FILE_NOT_FOUND`, 409
+  `FILE_ALREADY_SENT` (naming the file; also when two sends race). The same words and files sent again within two
+  minutes (the answer was lost) are kept once: the same message, or the same new question. A file never sent is
+  deleted after a day (FileDeletionJob, row and bytes). Support's reply email says the files are in the app; to
+  someone who only wrote by email (no account, no app) files are refused (400 `FILES_NEED_APP`).
+- **Showing**: each message carries `files: [{id, contentType, sizeBytes, name, url, removed}]` in My requests and
+  on the admin ticket; `url` opens it for at least 15 minutes (signed R2 link).
+- **Deleting**: a ticket's files go 6 months after it was resolved (TicketFileRetentionJob, hourly; the words stay,
+  `removed: true`), and a person's files go when they delete their account.
+- **Also fixed**: "Close" sends the ticket's version (409 `TICKET_CHANGED` if it was opened again or given to
+  someone meanwhile); an email from an address the person gave up (verified by someone else since) is never shown
+  as theirs in My requests, nor on the admin ticket ("Someone else (from an email address they no longer use)", not
+  proven), nor quoted in our reply to them. The retention job locks the tickets it reads (`SKIP LOCKED`), so one
+  opened again at that moment keeps its files.
+- **Migrations:** V49 (the columns, the table, the check `NOT VALID`), V50 (the daily-limit index on `files`, built
+  concurrently), V51 (validates the check), as V26–V28 did.
+- **One-time setup in Cloudflare (before videos can be sent from the customer app or the admin website):** a video
+  is PUT straight to R2 from the app's address, so the bucket's CORS rule (see "The salon video") must list the
+  customer app's and the admin website's addresses as well as the partner app's. Without it the video says it could
+  not be sent; photos and PDFs go through the backend and are not affected.
+
 ### Support tickets, round 3 (V48; admin app 0.12.0, customer app 0.17.0, partner app 0.18.0)
 
 - **Away** (leave, sick): `PUT /api/v1/admin/tickets/away/{userId} {away}` by a super admin, or by a support person

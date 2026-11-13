@@ -385,7 +385,7 @@ public class SalonSetupService {
         Membership salon = owner(userId);
         SalonStaff barber = lockBarber(staffId, salon);
         if (fileId != null && files.find(fileId)
-                .filter(f -> f.shopId().equals(salon.shopId()) && "STAFF_PHOTO".equals(f.purpose()) && f.isPhoto())
+                .filter(f -> salon.shopId().equals(f.shopId()) && "STAFF_PHOTO".equals(f.purpose()) && f.isPhoto())
                 .isEmpty()) {
             throw invalid("fileId", "must be a photo uploaded with purpose STAFF_PHOTO");
         }
