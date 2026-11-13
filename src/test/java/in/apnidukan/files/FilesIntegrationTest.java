@@ -69,6 +69,12 @@ class FilesIntegrationTest {
                 }
 
                 @Override
+                public String signedLinkAt(String key, java.time.Instant signedAt, java.time.Duration validFor,
+                                           String downloadName) {
+                    return real.signedLinkAt(key, signedAt, validFor, downloadName);
+                }
+
+                @Override
                 public void delete(String key) {
                     if (r2DeletesFail) {
                         throw new IllegalStateException("R2 is down");

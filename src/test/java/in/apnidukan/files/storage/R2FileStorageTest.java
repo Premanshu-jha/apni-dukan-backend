@@ -63,6 +63,16 @@ class R2FileStorageTest {
             // The same request, signed the same way: R2 accepts ours exactly as it accepts the SDK's
             assertThat(query(ours)).isEqualTo(query(sdk));
             assertThat(java.net.URI.create(ours).getRawPath()).isEqualTo(java.net.URI.create(sdk).getRawPath());
+
+            // A download link (saved under its name, a non-English one too): the same as the SDK's as well
+            String sdkDownload = storage.signedLink("tickets/u/f.bin", Duration.ofMinutes(120), "बिल quote 1.docx");
+            String dateD = java.net.URI.create(sdkDownload).getQuery().replaceAll(".*X-Amz-Date=([0-9TZ]+).*", "$1");
+            java.time.Instant atD = java.time.LocalDateTime.parse(dateD,
+                    java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'"))
+                    .toInstant(java.time.ZoneOffset.UTC);
+            String oursDownload = storage.signedLinkAt("tickets/u/f.bin", atD, Duration.ofMinutes(120),
+                    "बिल quote 1.docx");
+            assertThat(query(oursDownload)).isEqualTo(query(sdkDownload)).containsKey("response-content-disposition");
         }
     }
 

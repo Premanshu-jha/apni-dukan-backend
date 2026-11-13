@@ -105,10 +105,20 @@ public class R2FileStorage implements FileStorage {
      */
     @Override
     public String signedLinkAt(String key, Instant signedAt, Duration validFor) {
-        SdkHttpRequest get = SdkHttpRequest.builder()
+        return signedLinkAt(key, signedAt, validFor, null);
+    }
+
+    @Override
+    public String signedLinkAt(String key, Instant signedAt, Duration validFor, String downloadName) {
+        SdkHttpRequest.Builder builder = SdkHttpRequest.builder()
                 .method(SdkHttpMethod.GET)
-                .uri(URI.create(endpoint + "/" + bucket + "/" + SdkHttpUtils.urlEncodeIgnoreSlashes(key)))
-                .build();
+                .uri(URI.create(endpoint + "/" + bucket + "/" + SdkHttpUtils.urlEncodeIgnoreSlashes(key)));
+        if (downloadName != null) {
+            // R2 answers with this Content-Disposition (signed with the rest): saved under its name, never shown
+            builder.appendRawQueryParameter("response-content-disposition", ContentDisposition.attachment()
+                    .filename(downloadName, StandardCharsets.UTF_8).build().toString());
+        }
+        SdkHttpRequest get = builder.build();
         SignedRequest signed = SIGNER.sign(r -> r
                 .identity(credentials)
                 .request(get)

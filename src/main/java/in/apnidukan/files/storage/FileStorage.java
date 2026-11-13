@@ -26,6 +26,9 @@ public interface FileStorage {
      */
     String signedLinkAt(String key, Instant signedAt, Duration validFor);
 
+    /** As {@link #signedLinkAt(String, Instant, Duration)}, downloaded (never opened in the browser) as this name. */
+    String signedLinkAt(String key, Instant signedAt, Duration validFor, String downloadName);
+
     void delete(String key);
 
     /**
