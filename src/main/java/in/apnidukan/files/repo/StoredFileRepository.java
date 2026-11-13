@@ -19,6 +19,10 @@ public interface StoredFileRepository extends JpaRepository<StoredFile, UUID> {
     /** Uploads of this shop since a moment (today's count, for the daily limit). */
     long countByShopIdAndCreatedAtGreaterThanEqual(UUID shopId, java.time.Instant since);
 
+    /** A person's files of one purpose since a moment (ticket files: ix_files_ticket_uploader). */
+    long countByUploadedByAndPurposeAndCreatedAtGreaterThanEqual(UUID uploadedBy, FilePurpose purpose,
+                                                                 java.time.Instant since);
+
     /**
      * Deletes the row only if it still exists and belongs to the shop, in one statement.
      * Returns 1 if it was deleted, 0 if someone else deleted it first (e.g. a double tap).

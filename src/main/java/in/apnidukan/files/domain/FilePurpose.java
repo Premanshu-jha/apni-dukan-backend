@@ -16,7 +16,12 @@ public enum FilePurpose {
      */
     REG_DOC("documents"),
     BILL("bills"),
-    RECEIPT("receipts");
+    RECEIPT("receipts"),
+    /**
+     * A photo, video or PDF sent with a support ticket (from the apps or the admin website). It belongs to the person
+     * who sent it, not to a shop (its row has no shop); the helpdesk decides who may see it.
+     */
+    TICKET_FILE("tickets");
 
     private final String folder;
 

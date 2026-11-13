@@ -245,7 +245,7 @@ public class ShopService implements ShopMemberships {
             throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The salon video is only for salons.");
         }
         UUID video = files.find(in.fileId())
-                .filter(x -> x.shopId().equals(shop.getId()) && "SHOP_VIDEO".equals(x.purpose()) && x.isVideo())
+                .filter(x -> shop.getId().equals(x.shopId()) && "SHOP_VIDEO".equals(x.purpose()) && x.isVideo())
                 .map(FileRef::id)
                 .orElseThrow(() -> files.expiredVideo(in.fileId())
                         ? new ApiException(HttpStatus.CONFLICT, "UPLOAD_GONE", "This video expired. Upload it again.")
@@ -285,7 +285,7 @@ public class ShopService implements ShopMemberships {
             throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The registration document is only for salons.");
         }
         UUID doc = files.find(in.fileId())
-                .filter(x -> x.shopId().equals(shop.getId()) && "REG_DOC".equals(x.purpose()))
+                .filter(x -> shop.getId().equals(x.shopId()) && "REG_DOC".equals(x.purpose()))
                 .map(FileRef::id)
                 .orElseThrow(() -> invalid("fileId", "must be a photo or PDF uploaded with purpose REG_DOC"));
         if (doc.equals(shop.getRegistrationDocFileId()) && in.type() == shop.getRegistrationDocType()) {
@@ -422,7 +422,7 @@ public class ShopService implements ShopMemberships {
     /** The file, if it is a photo this shop uploaded for this purpose; 400 naming the field otherwise. */
     private UUID photo(String field, UUID fileId, Shop shop, String purpose) {
         FileRef f = files.find(fileId)
-                .filter(x -> x.shopId().equals(shop.getId()) && purpose.equals(x.purpose()) && x.isPhoto())
+                .filter(x -> shop.getId().equals(x.shopId()) && purpose.equals(x.purpose()) && x.isPhoto())
                 .orElseThrow(() -> invalid(field, "must be a photo uploaded with purpose " + purpose));
         return f.id();
     }
