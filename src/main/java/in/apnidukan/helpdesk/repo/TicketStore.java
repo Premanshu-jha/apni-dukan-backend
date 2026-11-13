@@ -151,6 +151,42 @@ public class TicketStore {
                 + "ORDER BY last_message_at, id FOR UPDATE", TICKET, assigneeId);
     }
 
+    /** Who of these people is away, and since when. */
+    public Map<UUID, Instant> awaySince(Collection<UUID> userIds) {
+        Map<UUID, Instant> out = new HashMap<>();
+        if (userIds.isEmpty()) {
+            return out;
+        }
+        jdbc.query("SELECT user_id, since FROM support_away WHERE user_id = ANY (CAST(? AS uuid[]))", rs -> {
+            out.put(rs.getObject("user_id", UUID.class), rs.getTimestamp("since").toInstant());
+        }, "{" + String.join(",", userIds.stream().map(UUID::toString).toList()) + "}");
+        return out;
+    }
+
+    /** Everyone away, and since when. */
+    public Map<UUID, Instant> awaySince() {
+        Map<UUID, Instant> out = new HashMap<>();
+        jdbc.query("SELECT user_id, since FROM support_away", rs -> {
+            out.put(rs.getObject("user_id", UUID.class), rs.getTimestamp("since").toInstant());
+        });
+        return out;
+    }
+
+    public boolean isAway(UUID userId) {
+        return userId != null && Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS (SELECT 1 FROM support_away WHERE user_id = ?)", Boolean.class, userId));
+    }
+
+    /** Marks them away (keeps the first time when already away). */
+    public void setAway(UUID userId, Instant since, UUID by) {
+        jdbc.update("INSERT INTO support_away (user_id, since, set_by) VALUES (?, ?, ?) "
+                + "ON CONFLICT (user_id) DO NOTHING", userId, Timestamp.from(since), by);
+    }
+
+    public void clearAway(UUID userId) {
+        jdbc.update("DELETE FROM support_away WHERE user_id = ?", userId);
+    }
+
     /** Open tickets nobody has, oldest first, rows locked. */
     public List<Ticket> lockUnassignedOpen() {
         return jdbc.query("SELECT " + COLUMNS + " FROM tickets WHERE assignee_id IS NULL AND status <> 'RESOLVED' "
