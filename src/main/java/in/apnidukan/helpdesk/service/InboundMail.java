@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit;
 public class InboundMail {
 
     /** The most files kept from one email. */
-    public static final int MAX_FILES = 10;
+    public static final int MAX_FILES = 30;
     /** The header the worker adds to the headers it posts, naming where the whole email is. */
     public static final String PARKED_HEADER = "X-Clozest-Raw";
     /** Cloudflare Email Routing takes emails up to 25 MiB; a parked one bigger than this isn't read. */
@@ -59,7 +59,8 @@ public class InboundMail {
             return truncated ? tickets.receive(email, List.of()) : withFiles(email, raw);
         }
         Optional<String> key = InboundEmail.header(raw, PARKED_HEADER);
-        if (key.isEmpty() || email.automated() || tickets.hasEmail(email.messageId())) {
+        if (key.isEmpty() || email.automated() || tickets.hasEmail(email.messageId())
+                || tickets.floods(email.fromAddress())) {
             return tickets.receive(email, List.of());
         }
         // A big email is read whole (up to 25 MB, several copies while it is read): a few at a time
@@ -87,7 +88,7 @@ public class InboundMail {
 
     /** The email with its files kept (stored first, outside the helpdesk lock); the rest named in its text. */
     private Received withFiles(InboundEmail email, byte[] raw) {
-        if (email.automated() || tickets.hasEmail(email.messageId())) {
+        if (email.automated() || tickets.hasEmail(email.messageId()) || tickets.floods(email.fromAddress())) {
             return tickets.receive(email, List.of());
         }
         List<EmailAttachment> attached;
@@ -101,8 +102,8 @@ public class InboundMail {
         List<String> left = new ArrayList<>();
         for (EmailAttachment a : attached) {
             if (a.inline() && a.contentType().startsWith("image/") && a.bytes().length > 0
-                    && a.bytes().length < MIN_LOGO_BYTES) {
-                continue;   // a signature logo or tracking pixel, not something they sent us
+                    && (a.bytes().length < MIN_LOGO_BYTES || !PASTED_PHOTOS.contains(a.contentType()))) {
+                continue;   // a signature logo, banner (GIF, SVG) or tracking pixel, not something they sent us
             }
             Optional<UUID> id = Optional.empty();
             if (kept.size() < MAX_FILES && a.bytes().length > 0) {
@@ -152,6 +153,10 @@ public class InboundMail {
     static final int BIG_AT_ONCE = 2;
     static final int MAX_WAIT_SECONDS = 20;
     private final Semaphore busy = new Semaphore(BIG_AT_ONCE, true);
+
+    /** Photos pasted into the text that are kept; other pasted images (GIF, SVG, BMP) are signatures and banners. */
+    static final java.util.Set<String> PASTED_PHOTOS = java.util.Set.of("image/jpeg", "image/jpg", "image/png",
+            "image/heic", "image/heif", "image/webp");
 
     /** Pasted images smaller than this are logos and pixels (the files module skips them too). */
     static final int MIN_LOGO_BYTES = 10 * 1024;

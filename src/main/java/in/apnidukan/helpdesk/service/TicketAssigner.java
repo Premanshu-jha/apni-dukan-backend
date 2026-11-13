@@ -60,6 +60,26 @@ public class TicketAssigner implements SupportDesk {
     }
 
     /**
+     * Only the team lock (shared): enough to add to a ticket whose person still receives tickets (nobody is assigned,
+     * so new tickets elsewhere never wait on it). Take {@link #lock} instead when a ticket may need assigning; inside,
+     * {@link #tryLockAssigning} takes the helpdesk lock only if nobody holds it.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void lockTeam() {
+        TeamLock.shared(jdbc);
+    }
+
+    /**
+     * The helpdesk lock without waiting (true at once if this transaction holds it already): for a ticket that turned
+     * out to need assigning after only {@link #lockTeam} (its person went away a moment ago). Never waits, so it can't
+     * deadlock with someone holding the lock and waiting for this ticket's row.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean tryLockAssigning() {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT pg_try_advisory_xact_lock(?)", Boolean.class, LOCK));
+    }
+
+    /**
      * Who should get the next ticket (null = Unassigned), never the person who asked (a support person's own
      * question goes to someone else). Call after {@link #lock}.
      */
@@ -115,6 +135,23 @@ public class TicketAssigner implements SupportDesk {
             store.addEvent(t.id(), by, "REASSIGNED", "Moved with all of them; given to "
                     + names.getOrDefault(target, "another support person"), now);
             moved++;
+        }
+        return moved;
+    }
+
+    /**
+     * The safety net for many people at once: every open ticket held by someone who no longer receives tickets (away,
+     * or out of support) goes to whoever is here with fewest, as {@link #moveAll} does. A ticket written on at the very
+     * moment its person went away (that write locks only the ticket, not the whole helpdesk) is caught here within
+     * minutes. Returns how many moved. Call after {@link #lock}.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public int reassignStranded() {
+        int moved = 0;
+        for (UUID holder : store.openAssignees()) {
+            if (!mayReceive(holder)) {
+                moved += moveAll(holder, null, null);
+            }
         }
         return moved;
     }
