@@ -48,6 +48,10 @@ public class TicketService {
     private static final Logger log = LoggerFactory.getLogger(TicketService.class);
     /** A list page. */
     static final int PAGE = 50;
+    /** "My requests" in the apps: how many. */
+    static final int MINE = 30;
+    /** Messages one person may add from the apps in an hour. */
+    static final int APP_MESSAGES_PER_HOUR = 20;
     /** How a person whose account was deleted is shown. */
     static final String DELETED = "Deleted account";
     /** A message from the app. */
@@ -259,6 +263,196 @@ public class TicketService {
         return tickets.stream().map(t -> summary(t, names)).toList();
     }
 
+    /**
+     * Finds tickets by what someone quotes: a ticket number ("CLZ-1042" or "1042"), a phone number (their account's
+     * tickets) or an email address; or {@code requester}, one account's tickets ("N other tickets from them"). A
+     * support person finds only their own. Newest activity first, at most 50. 400 VALIDATION_FAILED for anything else.
+     */
+    @Transactional(readOnly = true)
+    public List<Summary> search(UUID adminId, String q, UUID requester) {
+        TeamRole role = requireHandles(adminId);
+        UUID only = role == TeamRole.SUPPORT ? adminId : null;
+        List<Ticket> found;
+        if (requester != null) {
+            found = store.search(null, requester, null, only, PAGE);
+        } else {
+            String text = q == null ? "" : q.strip();
+            Long number = text.contains("@") ? null : ticketNumber(text);
+            if (number != null) {
+                found = store.search(number, null, null, only, PAGE);
+            } else if (text.contains("@") && text.length() <= 254) {
+                found = store.searchByEmail(text, users.findByVerifiedEmail(text).orElse(null), only, PAGE);
+            } else {
+                UUID account;
+                try {
+                    account = users.findByPhone(text).orElse(null);
+                } catch (ApiException e) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                            Map.of("q", "type a ticket number (CLZ-1042), a mobile number or an email"));
+                }
+                found = account == null ? List.of() : store.search(null, account, null, only, PAGE);
+            }
+        }
+        Map<UUID, String> names = names(found);
+        return found.stream().map(t -> summary(t, names)).toList();
+    }
+
+    /**
+     * The ticket number someone typed or pasted: "1042", "CLZ-1042", "clz 1042", "CLZ - 1042", or anywhere in a pasted
+     * email subject ("Re: [CLZ-1042] My booking"); null when there is none. A plain scan, no regular expression (one
+     * pass, whatever is typed).
+     */
+    static Long ticketNumber(String text) {
+        if (!text.isEmpty() && text.length() <= 9 && text.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            return Long.valueOf(text);
+        }
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        for (int at = lower.indexOf("clz"); at >= 0; at = lower.indexOf("clz", at + 1)) {
+            if (at > 0 && Character.isLetterOrDigit(lower.charAt(at - 1))) {
+                continue;   // part of a word ("xclz")
+            }
+            int i = skipSpaces(lower, at + 3);
+            if (i < lower.length() && lower.charAt(i) == '-') {
+                i = skipSpaces(lower, i + 1);
+            }
+            int start = i;
+            while (i < lower.length() && i - start < 10 && lower.charAt(i) >= '0' && lower.charAt(i) <= '9') {
+                i++;
+            }
+            boolean ends = i == lower.length() || !Character.isLetterOrDigit(lower.charAt(i));
+            if (i > start && i - start <= 9 && ends) {
+                return Long.valueOf(lower.substring(start, i));
+            }
+        }
+        return null;
+    }
+
+    private static int skipSpaces(String s, int i) {
+        while (i < s.length() && Character.isWhitespace(s.charAt(i))) {
+            i++;
+        }
+        return i;
+    }
+
+    /**
+     * Super admins: every open ticket of one person goes to another support person ({@code to}), or (null) to the
+     * other support people by the usual rule (someone away or on leave). Returns how many moved. 400 NOT_SUPPORT.
+     */
+    @Transactional
+    public Moved moveAll(UUID superAdminId, UUID from, UUID to) {
+        requireSuperAdmin(superAdminId);
+        assigner.lock();
+        requireSuperAdmin(superAdminId);   // again, under the team lock
+        if (to != null && (to.equals(from) || !assigner.mayHold(to))) {
+            throw ApiException.badRequest("NOT_SUPPORT", "Choose another support person.");
+        }
+        int moved = assigner.moveAll(from, to, superAdminId);
+        return new Moved(moved, store.notResolvedOf(from));
+    }
+
+    /**
+     * Opens a resolved ticket again without emailing anyone (closed by mistake). 409 TICKET_CHANGED on a stale
+     * {@code version}; NOT_YOURS as for a reply. A ticket not resolved: nothing changes.
+     */
+    @Transactional
+    public Detail reopen(UUID adminId, UUID ticketId, long version) {
+        TeamRole role = requireHandles(adminId);
+        // The helpdesk lock first (as every change of holder): a reopen and "move all" or someone leaving support
+        // never pass each other, and the holder is checked against the team as it is now
+        assigner.lock();
+        Ticket t = store.lock(ticketId).orElseThrow(() -> ApiException.notFound("Ticket"));
+        requireMayAnswer(role, adminId, t);
+        if (t.version() != version) {
+            throw new ApiException(HttpStatus.CONFLICT, "TICKET_CHANGED",
+                    "This ticket changed meanwhile. Check it again, then choose.");
+        }
+        if (t.status() == TicketStatus.RESOLVED) {
+            Instant now = clock.instant();
+            UUID assignee = t.assigneeId();
+            if (!assigner.mayHold(assignee)) {
+                // Resolved by someone no longer in support: it goes to whoever has fewest (never left with nobody)
+                assignee = assigner.next(t.requesterId());
+                if (!Objects.equals(assignee, t.assigneeId())) {
+                    store.addEvent(t.id(), null, assignee == null ? "UNASSIGNED" : "ASSIGNED",
+                            assignee == null ? "Nobody is in support" : "Given to " + name(assignee), now);
+                }
+            }
+            // Its activity is now: it comes to the top of the lists, not below two months of others
+            store.update(t.id(), TicketStatus.OPEN, assignee, now, null, now);
+            store.addEvent(t.id(), adminId, "REOPENED", "Opened again by " + name(adminId) + " (nobody was emailed)",
+                    now);
+        }
+        return get(adminId, ticketId);
+    }
+
+    // ---------- the apps' own requests ----------
+
+    /** "My requests" in the apps: this person's tickets, newest activity first (at most 30). */
+    @Transactional(readOnly = true)
+    public List<MyTicket> mine(UUID userId) {
+        return store.ofRequester(userId, MINE).stream().map(MyTicket::of).toList();
+    }
+
+    /** One of this person's own tickets with its messages (no internal history). 404 when it isn't theirs. */
+    @Transactional(readOnly = true)
+    public MyDetail myTicket(UUID userId, UUID ticketId) {
+        Ticket t = store.find(ticketId).filter(x -> userId.equals(x.requesterId()))
+                .orElseThrow(() -> ApiException.notFound("Ticket"));
+        Map<UUID, String> names = new HashMap<>();
+        List<TicketMessage> messages = store.messages(t.id());
+        Set<UUID> authors = new HashSet<>();
+        messages.forEach(m -> addIfSet(authors, m.authorId()));
+        users.find(authors).forEach((id, p) -> {
+            if (p.name() != null) {
+                names.put(id, p.name());
+            }
+        });
+        return new MyDetail(MyTicket.of(t), messages.stream()
+                .filter(m -> m.direction().equals("OUT") || userId.equals(m.authorId()) || m.senderVerified())
+                .map(m -> new MyMessage(m.seq(), m.direction().equals("OUT"),
+                        m.direction().equals("OUT") ? firstName(names.get(m.authorId())) : null, m.body(),
+                        m.attachments(), m.createdAt())).toList());
+    }
+
+    /**
+     * Adds to one of this person's own tickets from the app; it waits on us again (reopened if resolved). 404 when
+     * it isn't theirs; 400 VALIDATION_FAILED (2 to 5,000 characters); 429 TOO_MANY_MESSAGES past 20 an hour.
+     */
+    @Transactional
+    public MyDetail addToMine(UUID userId, UUID ticketId, String message) {
+        String text = MessageText.clean("message", message, 2, MESSAGE_MAX);
+        // Whose it is, before any lock (who asked never changes): someone else's id never waits on the helpdesk lock
+        if (store.find(ticketId).filter(x -> userId.equals(x.requesterId())).isEmpty()) {
+            throw ApiException.notFound("Ticket");
+        }
+        assigner.lock();
+        Ticket t = store.lock(ticketId).orElseThrow(() -> ApiException.notFound("Ticket"));
+        Instant now = clock.instant();   // after the locks: never earlier than a reply saved while we waited
+        // The answer to their send was lost and they sent it again: the same words, still the newest message (nobody
+        // answered since), within two minutes, and not resolved since. A "yes" after support's question is new.
+        boolean repeated = t.status() != TicketStatus.RESOLVED && store.lastMessage(t.id())
+                .filter(m -> m.direction().equals("IN") && userId.equals(m.authorId()) && m.body().equals(text)
+                        && m.createdAt().isAfter(now.minus(Duration.ofMinutes(2))))
+                .isPresent();
+        if (repeated) {
+            return myTicket(userId, ticketId);
+        }
+        if (store.messagesBySince(userId, now.minus(Duration.ofHours(1))) >= APP_MESSAGES_PER_HOUR) {
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_MESSAGES",
+                    "You've written a lot in the last hour. We'll read those first.");
+        }
+        incoming(t, userId, text, 0, null, true, now);
+        return myTicket(userId, ticketId);
+    }
+
+    private static String firstName(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        int space = name.strip().indexOf(' ');
+        return space > 0 ? name.strip().substring(0, space) : name.strip();
+    }
+
     /** The counts the admin website shows on its menu: my tickets waiting on us, and (super admins) Unassigned. */
     @Transactional(readOnly = true)
     public Counts counts(UUID adminId) {
@@ -296,7 +490,9 @@ public class TicketService {
         addIfSet(people, t.requesterId());
         Map<UUID, String> names = names(people);
         Map<String, Long> emails = store.emailCounts(t.id());
-        long earlier = t.requesterId() == null ? 0 : Math.max(0, store.countByRequester(t.requesterId()) - 1);
+        // A support person's search by this account shows only their own: the count says the same
+        long earlier = t.requesterId() == null ? 0 : Math.max(0, (role == TeamRole.SUPPORT
+                ? store.countByRequester(t.requesterId(), adminId) : store.countByRequester(t.requesterId())) - 1);
         return new Detail(summary(t, names), t.requesterId(), t.requesterEmail(),
                 messages.stream().map(m -> new Message(m.seq(), m.direction(), m.direction().equals("OUT")
                         ? names.getOrDefault(m.authorId(), "Support") : displayName(t, names),
@@ -572,6 +768,39 @@ public class TicketService {
     }
 
     public record Counts(long mineOpen, long unassigned) {
+    }
+
+    /**
+     * @param moved  how many went to someone else
+     * @param stayed how many open ones they still hold (nobody else could take them: their own question, or nobody
+     *               else is in support)
+     */
+    public record Moved(int moved, long stayed) {
+    }
+
+    /**
+     * A ticket as the person who asked sees it.
+     * @param status OPEN (with us), WAITING (we answered), RESOLVED
+     */
+    public record MyTicket(UUID id, String number, String subject, TicketStatus status, Instant createdAt,
+                           Instant lastMessageAt) {
+        static MyTicket of(Ticket t) {
+            return new MyTicket(t.id(), t.label(), t.subject(), t.status(), t.createdAt(), t.lastMessageAt());
+        }
+    }
+
+    public record MyDetail(MyTicket ticket, List<MyMessage> messages) {
+        public MyDetail {
+            messages = List.copyOf(messages);
+        }
+    }
+
+    /**
+     * @param fromSupport our reply (true) or theirs
+     * @param supportName the support person's first name on our replies (null when unknown)
+     */
+    public record MyMessage(long seq, boolean fromSupport, String supportName, String body, int attachments,
+                            Instant at) {
     }
 
     public record Stats(List<PersonStats> people, long unassigned) {

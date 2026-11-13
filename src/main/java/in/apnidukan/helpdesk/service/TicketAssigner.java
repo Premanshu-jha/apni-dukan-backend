@@ -75,6 +75,35 @@ public class TicketAssigner implements SupportDesk {
         return userId != null && users.teamRole(userId).handlesTickets();
     }
 
+    /**
+     * A super admin moves every open ticket of one person (away, on leave): to {@code to}, or (null) to the other
+     * support people by the usual rule. A ticket asked by {@code to} goes by the rule instead. Returns how many moved.
+     * Call after {@link #lock}.
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public int moveAll(UUID from, UUID to, UUID by) {
+        List<Ticket> theirs = store.lockOpenOf(from);
+        Set<UUID> staff = new LinkedHashSet<>(users.supportStaff());
+        staff.remove(from);
+        Instant now = clock.instant();
+        Map<UUID, String> names = names(staff);
+        if (to != null) {
+            names.putAll(names(List.of(to)));
+        }
+        int moved = 0;
+        for (Ticket t : theirs) {
+            UUID target = to != null && !to.equals(t.requesterId()) ? to : pick(without(staff, t.requesterId()));
+            if (target == null) {
+                continue;   // nobody else may hold it: it stays
+            }
+            store.reassign(t.id(), target, now);
+            store.addEvent(t.id(), by, "REASSIGNED", "Moved with all of them; given to "
+                    + names.getOrDefault(target, "another support person"), now);
+            moved++;
+        }
+        return moved;
+    }
+
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public void leftSupport(UUID userId, UUID by) {

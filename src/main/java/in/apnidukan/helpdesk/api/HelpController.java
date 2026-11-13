@@ -9,10 +9,15 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+import java.util.UUID;
 
 /** "Need help" in the customer and partner apps: a support ticket from the signed-in person. */
 @RestController
@@ -35,6 +40,27 @@ public class HelpController {
     public ResponseEntity<Created> ask(@Valid @RequestBody Ask body) {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(tickets.ask(currentUser.get().userId(), body.app(), body.subject(), body.message()));
+    }
+
+    /** "My requests": this person's tickets, newest activity first (at most 30). */
+    @GetMapping("/tickets")
+    public List<TicketService.MyTicket> mine() {
+        return tickets.mine(currentUser.get().userId());
+    }
+
+    /** One of their own tickets with the conversation. 404 when it isn't theirs. */
+    @GetMapping("/tickets/{id}")
+    public TicketService.MyDetail one(@PathVariable UUID id) {
+        return tickets.myTicket(currentUser.get().userId(), id);
+    }
+
+    /** Adds to one of their own tickets (reopens a resolved one). 400 VALIDATION_FAILED; 429 TOO_MANY_MESSAGES. */
+    @PostMapping("/tickets/{id}/messages")
+    public TicketService.MyDetail add(@PathVariable UUID id, @Valid @RequestBody Add body) {
+        return tickets.addToMine(currentUser.get().userId(), id, body.message());
+    }
+
+    public record Add(@NotNull @Size(max = 6000) String message) {
     }
 
     /**
