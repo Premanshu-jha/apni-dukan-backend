@@ -946,6 +946,38 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### Support tickets, round 4b: files that come by email (V52–V53; admin app 0.14.0, customer app 0.19.0, partner app 0.20.0)
+
+- **What is kept**: the photos (JPEG, PNG; stored as a cleaned JPEG), PDFs (at most 10 MB) and videos (MP4, MOV,
+  WebM, at most 25 MB: Cloudflare's limit for a whole email) in an email to support@clozest.in, at most 10, become
+  ticket files on that email's message, shown on the admin ticket and, when it is from the account (proven), in My
+  requests. They are deleted like the app's files (6 months after resolved; with the account). Any other file (Word,
+  zip, HEIC, a forwarded email, one that can't be decoded), or past 10, stays only in the support Gmail: the
+  message's `attachments` counts those and its text ends "(Only in the email: notes.docx, …)". A file that can't be
+  read or kept never loses the email. The same photo again on a ticket (a reply quoting our email resends its pasted
+  photos) is kept once (`ticket_message_files.sha256`). Deleting an account deletes every file that came in on its
+  tickets, also those emailed unproven.
+  Images under 10 KB shown inside the text (signature logos, tracking pixels) are skipped. A file's kind is told
+  from its bytes, never from the email's word for it.
+- **Big emails**: up to 1 MB the worker posts the whole email, as before. Over 1 MB it parks the whole email in the
+  R2 bucket as `inbound/<uuid>.eml` and posts the headers with a line `X-Clozest-Raw: <key>` (signed with the rest;
+  a sender's own header of that name is dropped; and only a post of headers alone may name one). The backend
+  (InboundMail) reads only keys of that exact form, two big emails at a time (others wait 20 s, then 503
+  `INBOX_BUSY`, which the worker tries once more),
+  queues each for deletion 30 minutes after reading, and falls back to "read it in the support Gmail" when the key is
+  missing or gone.
+- **Order**: the files are stored first (outside the helpdesk lock, like an app upload: queued for deletion in a
+  day), then `TicketService.receive` saves the message and attaches them; an email saved already (sent twice) stores
+  nothing. A file deleted meanwhile is left out (`FileRefs.tryKeep`), never refusing the email.
+- **Migrations:** V52 (`files.uploaded_by` may be null for a ticket file: an email from an address with no account;
+  the check `NOT VALID`; `ticket_message_files.sha256`), V53 (validates the check).
+- **One-time setup in Cloudflare** (after deploying the backend; the worker is deployed from the dashboard, so
+  `wrangler.toml` only records the same settings): Workers → `clozest-support-email` → Settings → Bindings → Add →
+  R2 bucket, name `INBOX`, the bucket in the backend's `R2_BUCKET` (`apnidukan-files`; if they differ the backend
+  can't find a parked email and says to read it in the support inbox); then paste and deploy the new `worker.js`. R2 →
+  the bucket → Settings → Object lifecycle rules → Add: prefix `inbound/`, delete after 1 day (should the backend not
+  read one).
+
 ### Support tickets, round 4a: photos, videos and PDFs (V49–V51; admin app 0.13.0, customer app 0.18.0, partner app 0.19.0)
 
 - **Uploading** (anyone signed in): `POST /api/v1/files/ticket` (multipart `file`): a photo (JPEG or PNG, stored as
@@ -1037,7 +1069,8 @@ Questions to **support@clozest.in** and from **Need help** in the customer and p
   `{id, number, sentTo}`. Needs a verified email and a name (403 `PROFILE_INCOMPLETE`, `details.missing`); message
   10–5,000 characters; at most `app.helpdesk.new-per-hour` (5) new tickets an hour (429 `TOO_MANY_TICKETS`).
 - **By email**: Cloudflare Email Routing hands every email to `support-email-worker/worker.js`, which forwards a copy
-  to the support Gmail and posts the raw email (headers only over 1 MB) to `POST /api/v1/helpdesk/inbound`, signed
+  to the support Gmail and posts the raw email (over 1 MB: parked in R2, headers only posted; see round 4b) to
+  `POST /api/v1/helpdesk/inbound`, signed
   (`X-Helpdesk-Timestamp`, `X-Helpdesk-Signature` = hex HMAC-SHA256 of `"timestamp.body"` under
   `HELPDESK_INBOUND_SECRET`; 403 `BAD_SIGNATURE` when missing, wrong or 5 minutes off). Auto-replies, bounces,
   newsletters and our own domain's emails are ignored; the same Message-ID from the same sender twice is one email.
