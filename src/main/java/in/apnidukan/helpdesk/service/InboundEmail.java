@@ -8,10 +8,14 @@ import jakarta.mail.Part;
 import jakarta.mail.Session;
 import jakarta.mail.internet.InternetAddress;
 import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.util.SharedByteArrayInputStream;
+import in.apnidukan.helpdesk.domain.EmailAttachment;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -26,7 +30,8 @@ import java.util.regex.Pattern;
  *                    so a retry is still one email; with the sender in it, nobody can block another's email by reusing
  *                    its Message-ID)
  * @param text        the new text only (quoted earlier messages cut off), at most {@link #MAX_TEXT} characters
- * @param attachments how many files it carried (they stay in the Gmail copy)
+ * @param attachments how many of its files stay only in the Gmail copy (a kind we don't keep, or past the most; see
+ *                    {@link #leftInGmail})
  * @param automated   an auto-reply, bounce, newsletter or our own email: never a ticket, never answered
  * @param ticketNumber the CLZ number in the subject (a reply to one of our emails), or null
  * @param senderVerified Cloudflare checked the From address (DMARC pass, in the topmost ARC-Authentication-Results or
@@ -38,7 +43,7 @@ public record InboundEmail(String fromAddress, String fromName, String subject, 
     /** The longest text kept from one email (the column allows 20,000). */
     public static final int MAX_TEXT = 10_000;
     /** Shown instead of the text of an email too large to bring in (the worker sent its headers only). */
-    static final String TOO_LARGE = "(This email was too large to bring in here. Read it in the support Gmail inbox.)";
+    static final String TOO_LARGE = "(This email was too large to show here. Our support team reads it in full in the support inbox.)";
     private static final Pattern TICKET = Pattern.compile("\\[CLZ-(\\d{1,12})]");
     /**
      * "On Thu, 12 Nov 2026 at 14:02, Asha <asha@x.com> wrote:" (Gmail, Apple Mail; may wrap onto a second line). Only
@@ -62,18 +67,18 @@ public record InboundEmail(String fromAddress, String fromName, String subject, 
      */
     public static InboundEmail parse(byte[] raw, boolean truncated, String ourDomain) {
         try {
-            MimeMessage m = new MimeMessage(Session.getInstance(new Properties()), new ByteArrayInputStream(raw));
+            MimeMessage m = new MimeMessage(Session.getInstance(new Properties()), new SharedByteArrayInputStream(raw));
             InternetAddress from = sender(m);
             String address = from == null ? "" : from.getAddress().strip().toLowerCase(Locale.ROOT);
             String name = from == null || from.getPersonal() == null ? "" : clean(from.getPersonal()).strip();
             String subject = m.getSubject() == null ? "" : clean(m.getSubject()).replaceAll("\\s+", " ").strip();
             String id = m.getMessageID();
             int[] files = {0};
-            String body = truncated ? "" : body(m, files);
+            String body = truncated ? "" : body(m, files, 0);
             // Only the start can be kept anyway: cut before looking for the quoted part
             String text = truncated ? TOO_LARGE : newText(clean(cut(body, MAX_TEXT * 2)));
             if (text.isBlank()) {
-                text = files[0] > 0 ? "(No text: only attachments, see the support Gmail inbox.)" : "(No text.)";
+                text = files[0] > 0 ? ONLY_FILES : NO_TEXT;
             }
             if (id == null || id.isBlank()) {
                 id = "made:" + subject + "|" + text + "|" + m.getHeader("Date", null);
@@ -87,6 +92,99 @@ public record InboundEmail(String fromAddress, String fromName, String subject, 
             throw new IllegalArgumentException("Not a readable email: " + e.getClass().getSimpleName(), e);
         }
     }
+
+    /** The files of a whole email (not headers only), in order: at most {@link #MAX_FILES_READ}, read up to MAX_RAW. */
+    public static List<EmailAttachment> files(byte[] raw) {
+        try {
+            MimeMessage m = new MimeMessage(Session.getInstance(new Properties()), new SharedByteArrayInputStream(raw));
+            List<EmailAttachment> out = new ArrayList<>();
+            collect(m, out, 0);
+            return out;
+        } catch (MessagingException | IOException | RuntimeException e) {
+            throw new IllegalArgumentException("Not a readable email: " + e.getClass().getSimpleName(), e);
+        }
+    }
+
+    /** A header of the email (the first, unfolded), if it has it. */
+    public static Optional<String> header(byte[] raw, String name) {
+        try {
+            MimeMessage m = new MimeMessage(Session.getInstance(new Properties()), new SharedByteArrayInputStream(raw));
+            String value = m.getHeader(name, null);
+            return value == null ? Optional.empty() : Optional.of(value.strip());
+        } catch (MessagingException e) {
+            return Optional.empty();
+        }
+    }
+
+    /** More files than this in one email aren't read (counted only: they stay in Gmail). */
+    static final int MAX_FILES_READ = 30;
+    /** Parts nested deeper than this aren't read (no real email is). */
+    static final int MAX_DEPTH = 10;
+
+    private static void collect(Part part, List<EmailAttachment> out, int depth) throws MessagingException, IOException {
+        if (depth > MAX_DEPTH || out.size() >= MAX_PARTS) {
+            return;
+        }
+        if (part.isMimeType("multipart/*")) {
+            Multipart mp = (Multipart) part.getContent();
+            for (int i = 0; i < mp.getCount(); i++) {
+                collect(mp.getBodyPart(i), out, depth + 1);
+            }
+            return;
+        }
+        String disposition = part.getDisposition();
+        boolean attached = Part.ATTACHMENT.equalsIgnoreCase(disposition) || part.getFileName() != null
+                || part.isMimeType("message/rfc822");
+        // A photo pasted into the text: an image with a Content-ID (the HTML shows it with cid:)
+        boolean pasted = part.isMimeType("image/*") && part instanceof jakarta.mail.internet.MimePart mime
+                && mime.getContentID() != null;
+        if (!attached && !pasted) {
+            return;
+        }
+        String type = part.getContentType() == null ? "" : part.getContentType().split(";", 2)[0].strip()
+                .toLowerCase(Locale.ROOT);
+        String name;
+        try {
+            name = part.getFileName() == null ? null : clean(part.getFileName()).strip();
+        } catch (MessagingException | RuntimeException e) {
+            name = null;
+        }
+        name = name == null || name.isEmpty() ? null : cut(name, 255);
+        boolean inline = !Part.ATTACHMENT.equalsIgnoreCase(disposition);
+        byte[] bytes = new byte[0];   // past the most read, or unreadable: counted, never kept
+        if (out.stream().filter(a -> a.bytes().length > 0).count() < MAX_FILES_READ) {
+            try (java.io.InputStream in = part.getInputStream()) {
+                bytes = in.readAllBytes();
+            } catch (IOException | MessagingException | RuntimeException e) {
+                bytes = new byte[0];   // an encoding we can't decode, base64 cut short: it stays in Gmail
+            }
+        }
+        out.add(new EmailAttachment(name, type, bytes, inline));
+    }
+
+    /** At most this many files are even counted. */
+    static final int MAX_PARTS = 200;
+
+    /**
+     * The same email, with the files that stay only in the Gmail copy counted and named at the end of its text (so
+     * support knows which to look for); with no words, the text says whether the files are here.
+     * @param kept some of its files are kept here
+     */
+    public InboundEmail withFilesLeft(List<String> left, boolean kept) {
+        String words = text.equals(NO_TEXT) || text.equals(ONLY_FILES) ? "" : text;
+        if (words.isEmpty()) {
+            words = kept ? ONLY_FILES : left.isEmpty() ? NO_TEXT : "(No text: only files, which stay in the email.)";
+        }
+        if (!left.isEmpty()) {
+            String names = String.join(", ", left);
+            words = words + "\n\n(Only in the email: " + cut(names, 300) + ")";
+        }
+        return new InboundEmail(fromAddress, fromName, subject, messageId, cut(words, MAX_TEXT), left.size(),
+                automated, ticketNumber, senderVerified);
+    }
+
+    static final String NO_TEXT = "(No text.)";
+    static final String ONLY_FILES = "(No text: only files.)";
 
     private static InternetAddress sender(MimeMessage m) throws MessagingException {
         Address[] from = m.getFrom();
@@ -128,7 +226,10 @@ public record InboundEmail(String fromAddress, String fromName, String subject, 
     }
 
     /** The plain text of the email (its HTML turned into text when there is no plain part); counts the files. */
-    private static String body(Part part, int[] files) throws MessagingException, IOException {
+    private static String body(Part part, int[] files, int depth) throws MessagingException, IOException {
+        if (depth > MAX_DEPTH) {
+            return "";   // nested deeper than any real email: not read
+        }
         String disposition = part.getDisposition();
         if (Part.ATTACHMENT.equalsIgnoreCase(disposition)
                 || (part.getFileName() != null && !part.isMimeType("multipart/*"))) {
@@ -150,7 +251,7 @@ public record InboundEmail(String fromAddress, String fromName, String subject, 
                     return String.valueOf(p.getContent());
                 }
                 if (html.isEmpty()) {
-                    html = body(p, files);
+                    html = body(p, files, depth + 1);
                 }
             }
             return html;
@@ -158,8 +259,8 @@ public record InboundEmail(String fromAddress, String fromName, String subject, 
         if (part.isMimeType("multipart/*")) {
             Multipart mp = (Multipart) part.getContent();
             StringBuilder out = new StringBuilder();
-            for (int i = 0; i < mp.getCount(); i++) {
-                String t = body(mp.getBodyPart(i), files);
+            for (int i = 0; i < mp.getCount() && out.length() <= MAX_TEXT * 2; i++) {
+                String t = body(mp.getBodyPart(i), files, depth + 1);
                 if (!t.isBlank()) {
                     out.append(out.isEmpty() ? "" : "\n\n").append(t);
                 }
