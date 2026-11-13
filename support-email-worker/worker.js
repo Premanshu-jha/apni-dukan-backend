@@ -3,22 +3,32 @@
 // For every email:
 //   1. a copy is forwarded to the support Gmail (GMAIL_COPY, a verified destination address), so nothing is ever
 //      lost, even if the backend is down;
-//   2. the raw email is posted to the backend (HELPDESK_URL), which makes it a ticket or adds it to one. Over 1 MB
-//      (photos, PDFs) only its headers are posted, marked X-Helpdesk-Truncated: 1: the ticket says to read it in Gmail.
+//   2. the raw email is posted to the backend (HELPDESK_URL), which makes it a ticket or adds it to one, with its
+//      photos, PDFs and videos. Over 1 MB the whole email is first parked in R2 (the INBOX bucket binding) as
+//      inbound/<uuid>.eml, and only its headers are posted, marked X-Helpdesk-Truncated: 1, with a line
+//      X-Clozest-Raw: <that key> among them (so it is signed too): the backend reads the email from there and deletes
+//      it. Without the binding, or if parking fails, only the headers go and the ticket says to read it in Gmail.
 //
 // The post is signed: X-Helpdesk-Timestamp (seconds) and X-Helpdesk-Signature = hex HMAC-SHA256 of
 // "<timestamp>.<body>" under HELPDESK_SECRET (the backend's HELPDESK_INBOUND_SECRET). The backend refuses anything
 // unsigned, wrongly signed or more than 5 minutes old.
 //
 // Settings (Workers → this worker → Settings → Variables): HELPDESK_URL (plain text), GMAIL_COPY (plain text),
-// HELPDESK_SECRET (secret).
+// HELPDESK_SECRET (secret). Bindings: INBOX, the R2 bucket (the backend's R2_BUCKET).
 
 export const MAX_RAW = 1024 * 1024;
+export const PARKED_HEADER = 'X-Clozest-Raw';
 
 export default {
   async email(message, env) {
     const truncated = message.rawSize > MAX_RAW;
-    const body = truncated ? headersOnly(message.headers) : new Uint8Array(await new Response(message.raw).arrayBuffer());
+    let body;
+    if (truncated) {
+      const key = await park(message, env);
+      body = headersOnly(message.headers, key);
+    } else {
+      body = new Uint8Array(await new Response(message.raw).arrayBuffer());
+    }
 
     try {
       await message.forward(env.GMAIL_COPY);
@@ -69,11 +79,36 @@ export async function sign(secret, timestamp, body) {
   return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** The email's headers as a raw header block (for an email too large to send whole). */
-export function headersOnly(headers) {
+/** Parks the whole email in R2 for the backend to read; its key, or null (no binding, or it failed). */
+export async function park(message, env) {
+  if (!env.INBOX) {
+    return null;
+  }
+  try {
+    const key = 'inbound/' + crypto.randomUUID() + '.eml';
+    await env.INBOX.put(key, new Uint8Array(await new Response(message.raw).arrayBuffer()),
+      { httpMetadata: { contentType: 'message/rfc822' } });
+    return key;
+  } catch (e) {
+    console.error('Parking the email in R2 failed', e && e.message);
+    return null;
+  }
+}
+
+/**
+ * The email's headers as a raw header block (for an email too large to send whole), with the key it was parked under
+ * (any header of that name the sender wrote is left out: only ours counts).
+ */
+export function headersOnly(headers, parkedKey) {
   let out = '';
   for (const [name, value] of headers) {
+    if (name.toLowerCase() === PARKED_HEADER.toLowerCase()) {
+      continue;
+    }
     out += name + ': ' + String(value).replace(/\r?\n/g, ' ') + '\r\n';
+  }
+  if (parkedKey) {
+    out += PARKED_HEADER + ': ' + parkedKey + '\r\n';
   }
   return new TextEncoder().encode(out + '\r\n');
 }

@@ -115,9 +115,21 @@ public class TicketStore {
      */
     public boolean addFile(UUID fileId, UUID messageId, UUID ticketId, int position, String contentType,
                            long sizeBytes, String name) {
+        return addFile(fileId, messageId, ticketId, position, contentType, sizeBytes, name, null);
+    }
+
+    /** @param sha256 of an emailed file as it came (null for the app's): the same one again is kept once */
+    public boolean addFile(UUID fileId, UUID messageId, UUID ticketId, int position, String contentType,
+                           long sizeBytes, String name, String sha256) {
         return jdbc.update("INSERT INTO ticket_message_files (file_id, message_id, ticket_id, position, content_type, "
-                + "size_bytes, name) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (file_id) DO NOTHING", fileId, messageId,
-                ticketId, position, contentType, sizeBytes, name) == 1;
+                + "size_bytes, name, sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (file_id) DO NOTHING", fileId,
+                messageId, ticketId, position, contentType, sizeBytes, name, sha256) == 1;
+    }
+
+    /** The fingerprints of the emailed files a ticket has (removed ones too: sent again, it isn't kept again). */
+    public List<String> fileFingerprints(UUID ticketId) {
+        return jdbc.queryForList("SELECT sha256 FROM ticket_message_files WHERE ticket_id = ? AND sha256 IS NOT NULL",
+                String.class, ticketId);
     }
 
     /** The files of a ticket's messages, by message, in order (removed ones too: "removed" shows in their place). */
@@ -442,18 +454,34 @@ public class TicketStore {
      * still waiting, and every email to them loses its address and text. The tickets first: that waits for a reply
      * being saved on one of them right now, so its email is cancelled too.
      */
-    public void forgetRequester(UUID requesterId, String email, Instant now) {
+    /** @return the tickets that were theirs (by account, or emailed from that address) */
+    public List<UUID> forgetRequester(UUID requesterId, String email, Instant now) {
         List<UUID> ids = jdbc.queryForList("SELECT id FROM tickets WHERE requester_id = ? OR (requester_id IS NULL "
                         + "AND CAST(? AS VARCHAR) IS NOT NULL AND lower(requester_email) = lower(?)) ORDER BY id FOR UPDATE",
                 UUID.class, requesterId, email, email);
         if (ids.isEmpty()) {
-            return;
+            return ids;
         }
         String in = "{" + String.join(",", ids.stream().map(UUID::toString).toList()) + "}";
         jdbc.update("UPDATE tickets SET requester_email = NULL, requester_name = NULL, updated_at = ?, "
                 + "version = version + 1 WHERE id = ANY (CAST(? AS uuid[]))", ts(now), in);
         jdbc.update("UPDATE ticket_emails SET status = CASE WHEN status = 'PENDING' THEN 'CANCELLED' ELSE status END, "
                 + "to_address = '', body = '' WHERE ticket_id = ANY (CAST(? AS uuid[]))", in);
+        return ids;
+    }
+
+    /**
+     * Files still kept on the messages that came in on these tickets (theirs: from the app, or emailed, proven or
+     * not), for an account being deleted.
+     */
+    public List<UUID> incomingFiles(List<UUID> ticketIds) {
+        if (ticketIds.isEmpty()) {
+            return List.of();
+        }
+        String in = "{" + String.join(",", ticketIds.stream().map(UUID::toString).toList()) + "}";
+        return jdbc.queryForList("SELECT f.file_id FROM ticket_message_files f JOIN ticket_messages m "
+                + "ON m.id = f.message_id WHERE f.removed_at IS NULL AND m.direction = 'IN' "
+                + "AND f.ticket_id = ANY (CAST(? AS uuid[]))", UUID.class, in);
     }
 
     // ---------- emails to send ----------

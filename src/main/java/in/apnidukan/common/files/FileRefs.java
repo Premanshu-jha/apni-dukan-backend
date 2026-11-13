@@ -25,6 +25,12 @@ public interface FileRefs {
     void keep(UUID fileId);
 
     /**
+     * As {@link #keep}, but false (nothing changed, the caller's transaction unharmed) when the file is gone, for a
+     * caller that goes on without it (a support email's files).
+     */
+    boolean tryKeep(UUID fileId);
+
+    /**
      * Whether this id was a salon video that no longer exists (purged unused after a day, or replaced): then 409
      * UPLOAD_GONE rather than "not a video".
      */

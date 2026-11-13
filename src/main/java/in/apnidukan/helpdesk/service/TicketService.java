@@ -148,10 +148,11 @@ public class TicketService {
      * that ticket and opens it again if it was resolved. Anything else is a new ticket, linked to the sender's account
      * only when Cloudflare proved the From (InboundEmail.senderVerified); past app.helpdesk.new-per-hour new tickets
      * in an hour from one sender, it goes into their latest ticket instead (reopened), never a new one. An unproven
-     * message is never written as an account's own.
+     * message is never written as an account's own. Its files kept from the email ({@code fileIds}, stored by
+     * InboundMail beforehand) go with its message; when nothing is saved they are deleted after a day as unsent.
      */
     @Transactional
-    public Received receive(InboundEmail e) {
+    public Received receive(InboundEmail e, List<Emailed> fileIds) {
         if (e.automated()) {
             log.info("Support email ignored: automated");
             return Received.IGNORED;
@@ -173,8 +174,11 @@ public class TicketService {
                 // address they gave up (and someone else verified since) is never them
                 UUID author = e.senderVerified() && t.requesterId() != null && t.requesterId().equals(requesterId)
                         ? t.requesterId() : null;
-                return incoming(t, author, e.text(), e.attachments(), e.messageId(), e.senderVerified(), now)
-                        ? Received.ADDED : Received.DUPLICATE;
+                if (!incoming(t, author, e.text(), e.attachments(), e.messageId(), e.senderVerified(), now)) {
+                    return Received.DUPLICATE;
+                }
+                attachEmailed(t, fileIds);
+                return Received.ADDED;
             }
         }
         if (store.openedSince(requesterId, e.fromAddress(), now.minus(Duration.ofHours(1))) >= newPerHour) {
@@ -184,13 +188,56 @@ public class TicketService {
                 log.warn("Support email dropped: over the hourly limit");
                 return Received.IGNORED;
             }
-            return incoming(latest, requesterId, e.text(), e.attachments(), e.messageId(),
-                    e.senderVerified(), now) ? Received.ADDED : Received.DUPLICATE;
+            if (!incoming(latest, requesterId, e.text(), e.attachments(), e.messageId(), e.senderVerified(), now)) {
+                return Received.DUPLICATE;
+            }
+            attachEmailed(latest, fileIds);
+            return Received.ADDED;
         }
-        open(TicketSource.EMAIL, e.subject().isBlank() ? "(no subject)" : e.subject(), requesterId,
+        Ticket t = open(TicketSource.EMAIL, e.subject().isBlank() ? "(no subject)" : e.subject(), requesterId,
                 e.fromAddress(), requesterId == null && !e.fromName().isBlank() ? e.fromName() : null,
                 e.text(), e.attachments(), e.messageId(), e.senderVerified(), now);
+        attachEmailed(t, fileIds);
         return Received.CREATED;
+    }
+
+    /** Whether this email (by InboundEmail.messageId) was saved already: its files needn't even be stored. */
+    @Transactional(readOnly = true)
+    public boolean hasEmail(String messageId) {
+        return store.hasEmail(messageId);
+    }
+
+    /**
+     * An email's files go with its message (the ticket's newest): ticket files stored from that email (no uploader,
+     * not sent yet). One deleted meanwhile is left out: the email is never refused for a file.
+     */
+    private void attachEmailed(Ticket t, List<Emailed> emailed) {
+        if (emailed == null || emailed.isEmpty()) {
+            return;
+        }
+        TicketMessage message = store.lastMessage(t.id()).orElseThrow();
+        // A reply quoting our earlier email sends its pasted photos (and a signature banner) again: kept once
+        Set<String> had = new HashSet<>(store.fileFingerprints(t.id()));
+        int position = 0;
+        for (Emailed e : emailed.stream().limit(InboundMail.MAX_FILES).toList()) {
+            Optional<FileRefs.FileRef> f = files.find(e.fileId()).filter(x -> "TICKET_FILE".equals(x.purpose())
+                    && x.shopId() == null && x.uploadedBy() == null);
+            if (f.isEmpty() || had.contains(e.sha256()) || store.fileSent(e.fileId()) || !files.tryKeep(e.fileId())) {
+                continue;   // a copy is deleted after a day as unsent
+            }
+            if (store.addFile(e.fileId(), message.id(), t.id(), position, f.get().contentType(), f.get().sizeBytes(),
+                    f.get().name(), e.sha256())) {
+                had.add(e.sha256());
+                position++;
+            }
+        }
+    }
+
+    /**
+     * A file kept from a support email, to go with its message.
+     * @param sha256 of the file as it came in the email (before a photo was cleaned): the same photo again is one
+     */
+    public record Emailed(UUID fileId, String sha256) {
     }
 
     /**

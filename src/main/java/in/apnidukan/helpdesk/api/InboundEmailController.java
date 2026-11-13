@@ -1,8 +1,7 @@
 package in.apnidukan.helpdesk.api;
 
-import in.apnidukan.helpdesk.service.InboundEmail;
+import in.apnidukan.helpdesk.service.InboundMail;
 import in.apnidukan.helpdesk.service.InboundSignature;
-import in.apnidukan.helpdesk.service.TicketService;
 import in.apnidukan.helpdesk.service.TicketService.Received;
 import in.apnidukan.common.error.ApiException;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -15,7 +14,8 @@ import java.util.Map;
 
 /**
  * The support inbox: Cloudflare's Email Worker posts each email sent to support@clozest.in here (the raw message, or
- * only its headers when over 1 MB, with X-Helpdesk-Truncated: 1), signed (see {@link InboundSignature}). Open to the
+ * only its headers when over 1 MB, with X-Helpdesk-Truncated: 1 and, when it parked the whole email in storage, its
+ * key in X-Clozest-Raw among those headers; see {@link InboundMail}), signed (see {@link InboundSignature}). Open to the
  * internet without a sign-in; the signature is the check. Answers 200 {"result": CREATED | ADDED | DUPLICATE |
  * IGNORED}, so the worker knows it arrived; 403 BAD_SIGNATURE; 400 NOT_AN_EMAIL.
  */
@@ -26,11 +26,11 @@ public class InboundEmailController {
     /** Our own domain: an email from it coming back in is a loop, never a ticket. */
     static final String OUR_DOMAIN = "clozest.in";
 
-    private final TicketService tickets;
+    private final InboundMail mail;
     private final InboundSignature signature;
 
-    public InboundEmailController(TicketService tickets, InboundSignature signature) {
-        this.tickets = tickets;
+    public InboundEmailController(InboundMail mail, InboundSignature signature) {
+        this.mail = mail;
         this.signature = signature;
     }
 
@@ -40,13 +40,12 @@ public class InboundEmailController {
                                        @RequestHeader(value = "X-Helpdesk-Truncated", required = false) String truncated,
                                        @RequestBody byte[] raw) {
         signature.check(timestamp, sig, raw);
-        InboundEmail email;
+        Received result;
         try {
-            email = InboundEmail.parse(raw, "1".equals(truncated), OUR_DOMAIN);
+            result = mail.take(raw, "1".equals(truncated), OUR_DOMAIN);
         } catch (IllegalArgumentException e) {
             throw ApiException.badRequest("NOT_AN_EMAIL", "That isn't a readable email.");
         }
-        Received result = tickets.receive(email);
         return Map.of("result", result.name());
     }
 }

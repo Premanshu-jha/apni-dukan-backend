@@ -70,3 +70,28 @@ test('the Gmail copy failing still posts to the backend', async () => {
 test('headersOnly makes a header block', () => {
   assert.equal(new TextDecoder().decode(headersOnly(new Map([['a', 'b']]))), 'a: b\r\n\r\n');
 });
+
+test('an email over 1 MB is parked in R2 whole; the headers posted name its key', async () => {
+  const calls = [];
+  const parked = new Map();
+  globalThis.fetch = async (url, init) => { calls.push(init); return new Response('{}', { status: 200 }); };
+  const big = 'From: a@b.com\r\n\r\n' + 'x'.repeat(100);
+  const m = message(big, MAX_RAW + 1);
+  m.headers.set('x-clozest-raw', 'inbound/forged.eml');   // a sender's own header of that name never counts
+  await worker.email(m, { ...env, INBOX: { put: async (key, value) => parked.set(key, value) } });
+  assert.equal(parked.size, 1);
+  const [key, value] = [...parked][0];
+  assert.match(key, /^inbound\/[0-9a-f-]{36}\.eml$/);
+  assert.equal(new TextDecoder().decode(value), big);
+  const posted = new TextDecoder().decode(calls[0].body);
+  assert.equal(calls[0].headers['X-Helpdesk-Truncated'], '1');
+  assert.ok(posted.endsWith('X-Clozest-Raw: ' + key + '\r\n\r\n'));
+  assert.ok(!posted.includes('forged'));
+});
+
+test('parking failing still posts the headers (read it in Gmail)', async () => {
+  const calls = [];
+  globalThis.fetch = async (url, init) => { calls.push(init); return new Response('{}', { status: 200 }); };
+  await worker.email(message('x', MAX_RAW + 1), { ...env, INBOX: { put: async () => { throw new Error('down'); } } });
+  assert.ok(!new TextDecoder().decode(calls[0].body).includes('X-Clozest-Raw'));
+});

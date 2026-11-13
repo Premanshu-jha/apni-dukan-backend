@@ -33,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -550,7 +551,7 @@ class HelpdeskIntegrationTest {
                     h.set("X-Helpdesk-Truncated", "1");
                 }).body(headers).exchange((rq, res) -> read(res));
         assertThat(r.body()).isEqualTo(Map.of("result", "CREATED"));
-        assertThat(jdbc.queryForObject("SELECT body FROM ticket_messages", String.class)).contains("support Gmail");
+        assertThat(jdbc.queryForObject("SELECT body FROM ticket_messages", String.class)).contains("support inbox");
     }
 
     // ---------------- round 2: search, move, reopen, "My requests" ----------------
@@ -1073,6 +1074,197 @@ class HelpdeskIntegrationTest {
         Reply over = upload(photo, "p30.jpg", customer);
         assertThat(over.status()).isEqualTo(429);
         assertThat(field(over.body(), "code")).isEqualTo("TOO_MANY_UPLOADS");
+    }
+
+    // ---------------- round 4b: files that come by email ----------------
+
+    @Autowired in.apnidukan.files.storage.FileStorage storage;
+
+    @Test
+    void anEmailsPhotosAndPdfsGoOnItsMessageOtherFilesAndLogosStayInGmail() throws Exception {
+        UUID neha = support("9800000001", "Neha");
+        byte[] raw = withFiles("vikram@gmail.com", "<f1@x>", "The cut was uneven, photos attached",
+                new Part("IMG_1.jpg", "image/jpeg", noisyJpeg(), false),
+                new Part("bill.pdf", "application/pdf", pdf(), false),
+                new Part("notes.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "PK not really".getBytes(StandardCharsets.UTF_8), false),
+                new Part("logo.png", "image/png", jpeg(), true));   // a small inline image: a signature logo
+        assertThat(inbound(raw).body()).isEqualTo(Map.of("result", "CREATED"));
+        String id = jdbc.queryForObject("SELECT id::text FROM tickets", String.class);
+        Reply detail = get("/admin/tickets/" + id, neha);
+        assertThat(detail.text()).contains("IMG_1.jpg").contains("bill.pdf").doesNotContain("logo.png")
+                .contains("\"url\":\"http");
+        assertThat(jdbc.queryForList("SELECT name FROM ticket_message_files", String.class))
+                .containsExactlyInAnyOrder("IMG_1.jpg", "bill.pdf");   // the Word file is only named in the text
+        assertThat(count("ticket_message_files")).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT attachments FROM ticket_messages", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT body FROM ticket_messages", String.class))
+                .isEqualTo("The cut was uneven, photos attached\n\n(Only in the email: notes.docx)");
+        // Kept like an app upload: off the deletion queue, a cleaned JPEG
+        assertThat(count("file_deletions WHERE storage_key LIKE 'tickets/email/%'")).isZero();
+        assertThat(jdbc.queryForList("SELECT content_type FROM files ORDER BY content_type", String.class))
+                .containsExactly("application/pdf", "image/jpeg");
+
+        // The same email again (the worker tried twice): nothing more is stored
+        inbound(raw);
+        assertThat(count("files")).isEqualTo(2);
+    }
+
+    @Test
+    void aBigEmailIsReadFromWhereTheWorkerParkedItAndThenDeleted() throws Exception {
+        support("9800000001", "Neha");
+        byte[] whole = withFiles("vikram@gmail.com", "<big2@x>", "Video of the problem",
+                new Part("cut.mp4", "video/mp4", video(), false));
+        String key = "inbound/" + UUID.randomUUID() + ".eml";
+        storage.put(key, new java.io.ByteArrayInputStream(whole), whole.length, "message/rfc822");
+        byte[] headers = ("ARC-Authentication-Results: i=1; mx.cloudflare.net; dmarc=pass header.from=gmail.com\r\n"
+                + "From: vikram@gmail.com\r\nSubject: Video\r\nMessage-ID: <big2@x>\r\nX-Clozest-Raw: " + key
+                + "\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+        assertThat(truncatedInbound(headers).body()).isEqualTo(Map.of("result", "CREATED"));
+        assertThat(jdbc.queryForObject("SELECT body FROM ticket_messages", String.class))
+                .isEqualTo("Video of the problem");
+        assertThat(jdbc.queryForObject("SELECT content_type FROM ticket_message_files", String.class))
+                .isEqualTo("video/mp4");
+        assertThat(count("file_deletions WHERE storage_key = '" + key + "'")).isEqualTo(1);   // read: deleted soon
+
+        // A key outside inbound/ is never read: headers only
+        byte[] forged = ("From: vikram@gmail.com\r\nSubject: Again\r\nMessage-ID: <big3@x>\r\nX-Clozest-Raw: "
+                + "tickets/someone/secret.pdf\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+        truncatedInbound(forged);
+        assertThat(jdbc.queryForList("SELECT body FROM ticket_messages ORDER BY seq", String.class))
+                .anyMatch(b -> b.contains("support inbox"));
+    }
+
+    @Test
+    void aProvenAccountsEmailedFileShowsInTheirApp() throws Exception {
+        String id = ask(customer, "Question about my booking");
+        String label = jdbc.queryForObject("SELECT 'CLZ-' || number FROM tickets WHERE id = ?::uuid", String.class, id);
+        byte[] raw = withFiles("9000000003@test.in", "<f4@x>", "Here is the bill",
+                new Part("bill.pdf", "application/pdf", pdf(), false));
+        raw = new String(raw, StandardCharsets.ISO_8859_1).replace("Subject: Files",
+                "Subject: Re: [" + label + "] Question").getBytes(StandardCharsets.ISO_8859_1);
+        assertThat(inbound(raw).body()).isEqualTo(Map.of("result", "ADDED"));
+        assertThat(get("/helpdesk/tickets/" + id, customer).text()).contains("bill.pdf");
+    }
+
+    @Test
+    void tenFilesAreKeptTheRestNamedAndABrokenFileNeverLosesTheEmail() throws Exception {
+        support("9800000001", "Neha");
+        List<Part> parts = new ArrayList<>();
+        for (int i = 1; i <= 12; i++) {
+            parts.add(new Part("bill" + i + ".pdf", "application/pdf",
+                    ("%PDF-1.4\n% bill " + i + "\n").getBytes(StandardCharsets.UTF_8), false));
+        }
+        byte[] raw = withFiles("vikram@gmail.com", "<many@x>", "All my bills", parts.toArray(new Part[0]));
+        // and a part whose base64 is cut short (it can't be decoded)
+        raw = new String(raw, StandardCharsets.UTF_8).replace("--b1--", "--b1\r\nContent-Type: image/jpeg; "
+                + "name=\"x.jpg\"\r\nContent-Disposition: attachment; filename=\"x.jpg\"\r\n"
+                + "Content-Transfer-Encoding: base64\r\n\r\n/9j/4AAQSk=Z!!\r\n--b1--").getBytes(StandardCharsets.UTF_8);
+        assertThat(inbound(raw).body()).isEqualTo(Map.of("result", "CREATED"));
+        assertThat(count("ticket_message_files")).isEqualTo(10);
+        assertThat(jdbc.queryForObject("SELECT attachments FROM ticket_messages", Integer.class)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT body FROM ticket_messages", String.class))
+                .endsWith("(Only in the email: bill11.pdf, bill12.pdf, x.jpg)");
+    }
+
+    @Test
+    void aReplyQuotingOurEmailDoesNotKeepItsPhotoTwice() throws Exception {
+        support("9800000001", "Neha");
+        byte[] photo = noisyJpeg();
+        inbound(withFiles("vikram@gmail.com", "<q1@x>", "Photo of the cut",
+                new Part("IMG_1.jpg", "image/jpeg", photo, false)));
+        String label = jdbc.queryForObject("SELECT 'CLZ-' || number FROM tickets", String.class);
+        byte[] reply = new String(withFiles("vikram@gmail.com", "<q2@x>", "Any news?",
+                new Part("IMG_1.jpg", "image/jpeg", photo, true)), StandardCharsets.UTF_8)
+                .replace("Subject: Files", "Subject: Re: [" + label + "] Files").getBytes(StandardCharsets.UTF_8);
+        assertThat(inbound(reply).body()).isEqualTo(Map.of("result", "ADDED"));
+        assertThat(count("ticket_message_files")).isEqualTo(1);
+    }
+
+    @Test
+    void deletingTheAccountDeletesTheFilesItEmailedEvenUnproven() throws Exception {
+        String id = ask(customer, "Question about my booking");
+        String label = jdbc.queryForObject("SELECT 'CLZ-' || number FROM tickets WHERE id = ?::uuid", String.class, id);
+        // From their address but without Cloudflare's proof: kept on the ticket, never written as theirs
+        String raw = new String(withFiles("9000000003@test.in", "<u1@x>", "My ID card",
+                new Part("id.pdf", "application/pdf", pdf(), false)), StandardCharsets.UTF_8)
+                .replace("Subject: Files", "Subject: Re: [" + label + "] Question");
+        raw = raw.substring(raw.indexOf("\r\n") + 2);   // no ARC-Authentication-Results line
+        inbound(raw.getBytes(StandardCharsets.UTF_8));
+        assertThat(count("ticket_message_files WHERE removed_at IS NULL")).isEqualTo(1);
+        deletion.accountDeleted(customer, CLOCK.instant());
+        assertThat(count("ticket_message_files WHERE removed_at IS NULL")).isZero();
+    }
+
+    @Test
+    void aSmallEmailNamingAParkedKeyIsReadAsItIs() throws Exception {
+        support("9800000001", "Neha");
+        String key = "inbound/" + UUID.randomUUID() + ".eml";
+        byte[] other = withFiles("someone@gmail.com", "<p0@x>", "Not yours", new Part("a.pdf", "application/pdf",
+                pdf(), false));
+        storage.put(key, new java.io.ByteArrayInputStream(other), other.length, "message/rfc822");
+        // A sender's own X-Clozest-Raw in an email posted whole is never followed, even if marked truncated
+        byte[] forged = ("From: vikram@gmail.com\r\nSubject: Hi\r\nMessage-ID: <p1@x>\r\nX-Clozest-Raw: " + key
+                + "\r\n\r\nHello").getBytes(StandardCharsets.UTF_8);
+        truncatedInbound(forged);
+        assertThat(count("ticket_message_files")).isZero();
+        assertThat(count("file_deletions WHERE storage_key = '" + key + "'")).isZero();   // never read
+    }
+
+    private record Part(String name, String type, byte[] bytes, boolean inline) {
+    }
+
+    /** A proven multipart email from {@code from} with these files. */
+    private static byte[] withFiles(String from, String messageId, String text, Part... parts) {
+        String domain = from.substring(from.indexOf('@') + 1);
+        StringBuilder raw = new StringBuilder("ARC-Authentication-Results: i=1; mx.cloudflare.net; dkim=pass header.d="
+                + domain + "; dmarc=pass header.from=" + domain + "\r\nFrom: " + from
+                + "\r\nTo: support@clozest.in\r\nSubject: Files\r\nMessage-ID: " + messageId
+                + "\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n--b1\r\n"
+                + "Content-Type: text/plain; charset=UTF-8\r\n\r\n" + text + "\r\n");
+        int n = 0;
+        for (Part p : parts) {
+            raw.append("--b1\r\nContent-Type: ").append(p.type()).append("; name=\"").append(p.name())
+                    .append("\"\r\nContent-Disposition: ").append(p.inline() ? "inline" : "attachment")
+                    .append("; filename=\"").append(p.name()).append("\"\r\n")
+                    .append(p.inline() ? "Content-ID: <c" + (n++) + "@x>\r\n" : "")
+                    .append("Content-Transfer-Encoding: base64\r\n\r\n")
+                    .append(java.util.Base64.getMimeEncoder().encodeToString(p.bytes())).append("\r\n");
+        }
+        raw.append("--b1--\r\n");
+        return raw.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private Reply truncatedInbound(byte[] headers) {
+        long ts = CLOCK.instant().getEpochSecond();
+        Reply r = http.post().uri("/helpdesk/inbound").contentType(MediaType.parseMediaType("message/rfc822"))
+                .headers(h -> {
+                    h.set("X-Helpdesk-Timestamp", String.valueOf(ts));
+                    h.set("X-Helpdesk-Signature", sign(ts, headers));
+                    h.set("X-Helpdesk-Truncated", "1");
+                }).body(headers).exchange((rq, res) -> read(res));
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        return r;
+    }
+
+    private static byte[] noisyJpeg() throws java.io.IOException {
+        java.awt.image.BufferedImage noisy = new java.awt.image.BufferedImage(300, 200,
+                java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.util.Random random = new java.util.Random(3);
+        for (int x = 0; x < 300; x++) {
+            for (int y = 0; y < 200; y++) {
+                noisy.setRGB(x, y, random.nextInt());
+            }
+        }
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(noisy, "jpeg", out);
+        return out.toByteArray();
+    }
+
+    private static byte[] video() {
+        byte[] video = new byte[4096];
+        System.arraycopy(new byte[] {0, 0, 0, 0x20, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, 0, video, 0, 12);
+        return video;
     }
 
     private Reply upload(byte[] bytes, String name, UUID who) {

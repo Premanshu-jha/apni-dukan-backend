@@ -123,6 +123,21 @@ public class FileRefService implements FileRefs {
     }
 
     @Override
+    @Transactional
+    public boolean tryKeep(UUID fileId) {
+        Optional<StoredFile> f = repository.findById(fileId);
+        if (f.isEmpty()) {
+            return false;
+        }
+        deletions.lock(f.get().getStorageKey());   // as keep: waits for a deletion claim under way
+        if (!deletions.fileExists(fileId)) {
+            return false;
+        }
+        deletions.done(f.get().getStorageKey());
+        return true;
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public boolean expiredVideo(UUID fileId) {
         return !repository.existsById(fileId) && videoUploads.completedWith(fileId);

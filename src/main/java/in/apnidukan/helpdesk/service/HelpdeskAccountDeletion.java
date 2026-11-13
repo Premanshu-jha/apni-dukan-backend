@@ -7,6 +7,9 @@ import in.apnidukan.helpdesk.repo.TicketStore;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -31,8 +34,11 @@ public class HelpdeskAccountDeletion implements AccountDeletionListener {
     /** Called before the account's email is wiped, so the tickets they emailed from it are found too. */
     @Override
     public void accountDeleted(UUID userId, Instant now) {
-        store.forgetRequester(userId, users.verifiedEmail(userId).orElse(null), now);
-        for (UUID fileId : store.filesSentBy(userId)) {
+        List<UUID> theirs = store.forgetRequester(userId, users.verifiedEmail(userId).orElse(null), now);
+        // What they sent anywhere, and what came in on their tickets (also emailed unproven, or before the account)
+        Set<UUID> sent = new LinkedHashSet<>(store.filesSentBy(userId));
+        sent.addAll(store.incomingFiles(theirs));
+        for (UUID fileId : sent) {
             files.release(fileId);   // the row now, the bytes queued (deleted after this commits)
             store.fileRemoved(fileId, now);
         }
