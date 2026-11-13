@@ -40,7 +40,7 @@ public class StoredFile {
     @Column(name = "original_name")
     private String originalName;
 
-    @Column(name = "uploaded_by", nullable = false)
+    @Column(name = "uploaded_by")   // null for a file from a support email whose sender has no account (V52)
     private UUID uploadedBy;
 
     @Column(name = "created_at", nullable = false)
