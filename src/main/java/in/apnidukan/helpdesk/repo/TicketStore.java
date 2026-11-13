@@ -88,6 +88,75 @@ public class TicketStore {
                 ts(now)).stream().findFirst();
     }
 
+    /** A file a message carries (as the files module described it when it was sent). */
+    public record MessageFile(UUID fileId, UUID messageId, int position, String contentType, long sizeBytes,
+                              String name, Instant removedAt) {
+    }
+
+    /** Whether this file is on a message already (each file goes with one message only). */
+    public boolean fileSent(UUID fileId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS (SELECT 1 FROM ticket_message_files WHERE file_id = ?)", Boolean.class, fileId));
+    }
+
+    /** The message a file was sent with (and its ticket), if it was sent. */
+    public Optional<SentWith> sentWith(UUID fileId) {
+        return jdbc.query("SELECT message_id, ticket_id FROM ticket_message_files WHERE file_id = ?",
+                (rs, i) -> new SentWith(rs.getObject("message_id", UUID.class), rs.getObject("ticket_id", UUID.class)),
+                fileId).stream().findFirst();
+    }
+
+    public record SentWith(UUID messageId, UUID ticketId) {
+    }
+
+    /**
+     * False when the file is on a message already: sent with another message at the same moment (each file goes
+     * with one message only).
+     */
+    public boolean addFile(UUID fileId, UUID messageId, UUID ticketId, int position, String contentType,
+                           long sizeBytes, String name) {
+        return jdbc.update("INSERT INTO ticket_message_files (file_id, message_id, ticket_id, position, content_type, "
+                + "size_bytes, name) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (file_id) DO NOTHING", fileId, messageId,
+                ticketId, position, contentType, sizeBytes, name) == 1;
+    }
+
+    /** The files of a ticket's messages, by message, in order (removed ones too: "removed" shows in their place). */
+    public Map<UUID, List<MessageFile>> files(UUID ticketId) {
+        Map<UUID, List<MessageFile>> out = new HashMap<>();
+        jdbc.query("SELECT file_id, message_id, position, content_type, size_bytes, name, removed_at "
+                + "FROM ticket_message_files WHERE ticket_id = ? ORDER BY message_id, position", rs -> {
+                    Timestamp removed = rs.getTimestamp("removed_at");
+                    MessageFile f = new MessageFile(rs.getObject("file_id", UUID.class),
+                            rs.getObject("message_id", UUID.class), rs.getInt("position"),
+                            rs.getString("content_type"), rs.getLong("size_bytes"), rs.getString("name"),
+                            removed == null ? null : removed.toInstant());
+                    out.computeIfAbsent(f.messageId(), k -> new ArrayList<>()).add(f);
+                }, ticketId);
+        return out;
+    }
+
+    /**
+     * Files still kept on tickets resolved before {@code before} (6 months after they were resolved, they go). Their
+     * tickets stay locked until the caller's transaction ends, so one opened again at this moment either waits (and
+     * is opened again after) or is skipped (it is no longer resolved by the next look).
+     */
+    public List<UUID> filesResolvedBefore(Instant before, int max) {
+        return jdbc.queryForList("SELECT f.file_id FROM ticket_message_files f JOIN tickets t ON t.id = f.ticket_id "
+                + "WHERE f.removed_at IS NULL AND t.status = 'RESOLVED' AND t.resolved_at < ? LIMIT ? "
+                + "FOR UPDATE OF t SKIP LOCKED", UUID.class, ts(before), max);
+    }
+
+    /** Files still kept that this person sent (their account is being deleted). */
+    public List<UUID> filesSentBy(UUID userId) {
+        return jdbc.queryForList("SELECT f.file_id FROM ticket_message_files f JOIN ticket_messages m "
+                + "ON m.id = f.message_id WHERE f.removed_at IS NULL AND m.author_id = ?", UUID.class, userId);
+    }
+
+    public void fileRemoved(UUID fileId, Instant now) {
+        jdbc.update("UPDATE ticket_message_files SET removed_at = ? WHERE file_id = ? AND removed_at IS NULL",
+                ts(now), fileId);
+    }
+
     /** Whether an email with this Message-ID was saved already. */
     public boolean hasEmail(String emailMessageId) {
         return Boolean.TRUE.equals(jdbc.queryForObject(
