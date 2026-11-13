@@ -49,6 +49,28 @@ class InboundEmailTest {
     }
 
     @Test
+    void readsTheFilesAttachedAndPastedButNotTheText() {
+        String raw = "From: a@b.com\r\nSubject: x\r\nMIME-Version: 1.0\r\n"
+                + "Content-Type: multipart/mixed; boundary=\"B1\"\r\n\r\n"
+                + "--B1\r\nContent-Type: multipart/related; boundary=\"B2\"\r\n\r\n"
+                + "--B2\r\nContent-Type: text/html\r\n\r\n<p>See <img src=\"cid:p1\"></p>\r\n"
+                + "--B2\r\nContent-Type: image/jpeg\r\nContent-ID: <p1>\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+                + "/9j/4AAQ\r\n--B2--\r\n"
+                + "--B1\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"bill.pdf\"\r\n"
+                + "Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQ=\r\n--B1--\r\n";
+        var files = InboundEmail.files(raw.getBytes(StandardCharsets.UTF_8));
+        assertThat(files).hasSize(2);
+        assertThat(files.get(0).inline()).isTrue();   // pasted into the text
+        assertThat(files.get(0).contentType()).isEqualTo("image/jpeg");
+        assertThat(files.get(0).name()).isNull();
+        assertThat(files.get(1).name()).isEqualTo("bill.pdf");
+        assertThat(files.get(1).inline()).isFalse();
+        assertThat(new String(files.get(1).bytes(), StandardCharsets.UTF_8)).isEqualTo("%PDF-1.4");
+        assertThat(InboundEmail.header("X-Clozest-Raw: inbound/a.eml\r\n\r\n".getBytes(StandardCharsets.UTF_8),
+                "X-Clozest-Raw")).contains("inbound/a.eml");
+    }
+
+    @Test
     void turnsHtmlOnlyIntoText() {
         InboundEmail e = parse("From: a@b.com\r\nSubject: x\r\nContent-Type: text/html\r\n\r\n"
                 + "<html><head><style>p{}</style></head><body><p>Line one</p><div>Line&nbsp;two &amp; more</div>"
