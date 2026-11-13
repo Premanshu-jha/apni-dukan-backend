@@ -12,6 +12,7 @@ import jakarta.validation.constraints.Size;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -67,6 +68,18 @@ public class TicketAdminController {
         return tickets.moveAll(me(), body.fromUserId(), body.toUserId());
     }
 
+    /** Who is away: everyone for a super admin, themselves for a support person. */
+    @GetMapping("/away")
+    public List<TicketService.Away> away() {
+        return tickets.away(me());
+    }
+
+    /** Marks a support person away (their open tickets go to the others) or back. */
+    @PutMapping("/away/{userId}")
+    public TicketService.AwayChange setAway(@PathVariable UUID userId, @Valid @RequestBody SetAway body) {
+        return tickets.setAway(me(), userId, body.away());
+    }
+
     @GetMapping("/counts")
     public Counts counts() {
         return tickets.counts(me());
@@ -119,6 +132,9 @@ public class TicketAdminController {
     }
 
     public record Move(@NotNull UUID fromUserId, UUID toUserId) {
+    }
+
+    public record SetAway(@NotNull Boolean away) {
     }
 
     public record Reopen(@NotNull Long version) {

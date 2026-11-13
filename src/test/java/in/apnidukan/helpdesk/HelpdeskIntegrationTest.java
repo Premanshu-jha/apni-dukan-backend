@@ -726,6 +726,151 @@ class HelpdeskIntegrationTest {
         assertThat(get("/helpdesk/tickets/" + id, customer).text()).doesNotContain("Someone pretending");
     }
 
+    // ---------------- round 3: away, and "Support replied" ----------------
+
+    @Test
+    void someoneAwayGetsNoNewTicketsTheirOpenOnesGoToOthersAndBackTheyTakeTheirShare() {
+        UUID neha = support("9800000001", "Neha");
+        String first = ask(customer, "Question one about bookings");
+        UUID ravi = support("9800000002", "Ravi");
+        assertThat(assigneeOf(first)).isEqualTo(neha);
+
+        Reply r = put("/admin/tickets/away/" + neha, Map.of("away", true), boss);
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        assertThat(field(r.body(), "moved")).isEqualTo(1);
+        assertThat(assigneeOf(first)).isEqualTo(ravi);
+        assertThat(get("/admin/tickets/away", boss).text()).contains(neha.toString());
+
+        // New ones and ones coming back skip her
+        String second = ask(customer, "Question two about bookings");
+        assertThat(assigneeOf(second)).isEqualTo(ravi);
+
+        // A support person sets only their own switch; anyone else's is not found
+        assertThat(put("/admin/tickets/away/" + neha, Map.of("away", false), ravi).status()).isEqualTo(404);
+        assertThat(put("/admin/tickets/away/" + boss, Map.of("away", true), boss).status()).isEqualTo(400);
+
+        // Back: nothing waits in Unassigned, so nothing changes hands; new ones share by the rule again
+        assertThat(put("/admin/tickets/away/" + neha, Map.of("away", false), neha).status()).isEqualTo(200);
+        assertThat(get("/admin/tickets/away", boss).text()).doesNotContain(neha.toString());
+        String third = ask(customer, "Question three about bookings");
+        assertThat(assigneeOf(third)).isEqualTo(neha);   // fewest open: 0 against 2
+    }
+
+    @Test
+    void everyoneAwayLeavesNewTicketsUnassignedAndTheFirstBackTakesThem() {
+        UUID neha = support("9800000001", "Neha");
+        assertThat(put("/admin/tickets/away/" + neha, Map.of("away", true), neha).status()).isEqualTo(200);
+        String id = ask(customer, "Question about my booking");
+        assertThat(assigneeOf(id)).isNull();
+        put("/admin/tickets/away/" + neha, Map.of("away", false), neha);
+        assertThat(assigneeOf(id)).isEqualTo(neha);
+    }
+
+    @Test
+    void aResolvedTicketOfSomeoneAwayGoesToSomeoneElseWhenTheyWriteAgain() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999), neha);
+        UUID ravi = support("9800000002", "Ravi");
+        put("/admin/tickets/away/" + neha, Map.of("away", true), boss);
+        post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "It happened again"), customer);
+        assertThat(assigneeOf(id)).isEqualTo(ravi);
+    }
+
+    @Test
+    void aReplyIsInTheAppTheQuestionCameFromAndOnlyTheNewestWaits() {
+        UUID neha = support("9800000001", "Neha");
+        String fromApp = ask(customer, "Question about my booking");
+        post("/admin/tickets/" + fromApp + "/reply", Map.of("seenSeq", 999_999, "body", "First answer",
+                "resolve", false), neha);
+        post("/admin/tickets/" + fromApp + "/reply", Map.of("seenSeq", 999_999, "body", "Second answer",
+                "resolve", true), neha);
+        // Two quick replies: one message waiting, about the newest (resolved), never the reply's words
+        List<Map<String, Object>> jobs = jdbc.queryForList("SELECT type, title, body, url FROM notification_jobs "
+                + "WHERE user_id = ? AND type = 'CUSTOMERHELP_REPLIED' AND status <> 'CANCELLED' AND channel = 'PUSH'",
+                customer);
+        assertThat(jobs).hasSize(1);
+        assertThat(jobs.get(0).get("title")).isEqualTo("Support resolved CLZ-1001");
+        assertThat(jobs.get(0).get("url")).isEqualTo("/help/requests/" + fromApp);
+        assertThat(jobs.get(0).get("body").toString()).doesNotContain("Second answer").doesNotContain("First answer");
+
+        Reply r = post("/helpdesk/tickets", Map.of("app", "PARTNER", "message", "Payout question for my salon"),
+                customer);
+        String fromPartner = (String) field(r.body(), "id");
+        post("/admin/tickets/" + fromPartner + "/reply", Map.of("seenSeq", 999_999, "body", "It goes on Monday",
+                "resolve", false), neha);
+        assertThat(count("notification_jobs WHERE type = 'PARTNERHELP_REPLIED'")).isPositive();
+        // Each app's own list: the customer app's has its message, not the partner one, and the reverse
+        assertThat(get("/me/notifications?app=customer", customer).text()).contains("CUSTOMERHELP_REPLIED")
+                .doesNotContain("PARTNERHELP_REPLIED");
+        assertThat(get("/me/notifications?app=partner", customer).text()).contains("PARTNERHELP_REPLIED")
+                .doesNotContain("CUSTOMERHELP_REPLIED");
+        // Never the subject: it can be the first words of their own message
+        assertThat(get("/me/notifications?app=customer", customer).text()).doesNotContain("Question about");
+    }
+
+    @Test
+    void someoneAwayWhoOpensTheirOwnTicketAgainKeepsIt() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999), neha);
+        support("9800000002", "Ravi");
+        put("/admin/tickets/away/" + neha, Map.of("away", true), neha);
+        long version = ((Number) field(get("/admin/tickets/" + id, neha).body(), "version")).longValue();
+        Reply r = post("/admin/tickets/" + id + "/reopen", Map.of("version", version), neha);
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        assertThat(assigneeOf(id)).isEqualTo(neha);
+    }
+
+    @Test
+    void aTicketIsNeverGivenByHandToSomeoneAway() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        UUID ravi = support("9800000002", "Ravi");
+        put("/admin/tickets/away/" + ravi, Map.of("away", true), boss);
+        long version = ((Number) field(get("/admin/tickets/" + id, boss).body(), "version")).longValue();
+        Map<String, Object> to = new HashMap<>();
+        to.put("version", version);
+        to.put("assigneeId", ravi.toString());
+        Reply r = post("/admin/tickets/" + id + "/assign", to, boss);
+        assertThat(r.status()).isEqualTo(400);
+        assertThat(field(r.body(), "code")).isEqualTo("AWAY");
+        assertThat(assigneeOf(id)).isEqualTo(neha);
+    }
+
+    @Test
+    void someoneMarkedAwayWhoBecomesASuperAdminCanStillBeSetBack() {
+        UUID neha = support("9800000001", "Neha");
+        put("/admin/tickets/away/" + neha, Map.of("away", true), boss);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', admin_designation = NULL WHERE id = ?", neha);
+        assertThat(put("/admin/tickets/away/" + neha, Map.of("away", false), boss).status()).isEqualTo(200);
+        assertThat(count("support_away")).isZero();
+    }
+
+    @Test
+    void someoneMarkedAwayWhoRejoinsSupportIsNotAwayEvenWithNothingWaiting() {
+        UUID neha = support("9800000001", "Neha");
+        put("/admin/tickets/away/" + neha, Map.of("away", true), boss);
+        Map<String, Object> boss2 = member("9800000001", "9800000001@example.com", "Neha", null, List.of());
+        boss2.put("role", "SUPER_ADMIN");
+        boss2.put("version", teamVersion(neha));
+        assertThat(put("/admin/team/" + neha, boss2, boss).status()).isEqualTo(200);
+        Map<String, Object> back = member("9800000001", "9800000001@example.com", "Neha", "SUPPORT", List.of());
+        back.put("version", teamVersion(neha));
+        assertThat(put("/admin/team/" + neha, back, boss).status()).isEqualTo(200);
+        assertThat(count("support_away")).isZero();
+    }
+
+    private long teamVersion(UUID who) {
+        return ((Number) field(((List<?>) get("/admin/team", boss).body()).stream()
+                .filter(m -> who.toString().equals(field(m, "userId"))).findFirst().orElseThrow(), "version"))
+                .longValue();
+    }
+
+    private UUID assigneeOf(String ticketId) {
+        return jdbc.queryForObject("SELECT assignee_id FROM tickets WHERE id = ?::uuid", UUID.class, ticketId);
+    }
+
     // ---------------- super admins ----------------
 
     @Test

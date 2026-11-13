@@ -2,6 +2,7 @@ package in.apnidukan.helpdesk.service;
 
 import in.apnidukan.common.context.SupportDesk;
 import in.apnidukan.common.context.TeamLock;
+import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.helpdesk.domain.Ticket;
 import in.apnidukan.helpdesk.repo.TicketStore;
@@ -64,9 +65,23 @@ public class TicketAssigner implements SupportDesk {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public UUID next(UUID requesterId) {
-        List<UUID> staff = new ArrayList<>(users.supportStaff());
+        List<UUID> staff = new ArrayList<>(available());
         staff.remove(requesterId);
         return pick(staff);
+    }
+
+    /** Whether new tickets (and ones coming back) may go to this person: may hold tickets and isn't away. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean mayReceive(UUID userId) {
+        // Away is about support people: someone marked who has become a super admin meanwhile still receives
+        return mayHold(userId) && !(store.isAway(userId) && users.teamRole(userId) == TeamRole.SUPPORT);
+    }
+
+    /** The support people who get new tickets: everyone in support who isn't away. */
+    private List<UUID> available() {
+        List<UUID> staff = new ArrayList<>(users.supportStaff());
+        staff.removeAll(store.awaySince(staff).keySet());
+        return staff;
     }
 
     /** Whether this person may still hold tickets (a support person or a super admin). */
@@ -83,7 +98,7 @@ public class TicketAssigner implements SupportDesk {
     @Transactional(propagation = Propagation.MANDATORY)
     public int moveAll(UUID from, UUID to, UUID by) {
         List<Ticket> theirs = store.lockOpenOf(from);
-        Set<UUID> staff = new LinkedHashSet<>(users.supportStaff());
+        Set<UUID> staff = new LinkedHashSet<>(available());
         staff.remove(from);
         Instant now = clock.instant();
         Map<UUID, String> names = names(staff);
@@ -108,11 +123,12 @@ public class TicketAssigner implements SupportDesk {
     @Transactional(propagation = Propagation.MANDATORY)
     public void leftSupport(UUID userId, UUID by) {
         helpdeskLock();
+        store.clearAway(userId);   // away only means something while in support
         List<Ticket> theirs = store.lockOpenOf(userId);
         if (theirs.isEmpty()) {
             return;
         }
-        Set<UUID> staff = new LinkedHashSet<>(users.supportStaff());
+        Set<UUID> staff = new LinkedHashSet<>(available());
         staff.remove(userId);   // their change may not be visible to that query yet
         Instant now = clock.instant();
         Map<UUID, String> names = names(staff);
@@ -129,11 +145,12 @@ public class TicketAssigner implements SupportDesk {
     @Transactional(propagation = Propagation.MANDATORY)
     public void joinedSupport(UUID userId, UUID by) {
         helpdeskLock();
+        store.clearAway(userId);   // newly in support (again): not away, whether or not anything waits
         List<Ticket> waiting = store.lockUnassignedOpen();
         if (waiting.isEmpty()) {
             return;
         }
-        Set<UUID> staff = new LinkedHashSet<>(users.supportStaff());
+        Set<UUID> staff = new LinkedHashSet<>(available());
         staff.add(userId);   // their change may not be visible to that query yet
         Instant now = clock.instant();
         Map<UUID, String> names = names(staff);

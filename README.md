@@ -946,6 +946,22 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### Support tickets, round 3 (V48; admin app 0.12.0, customer app 0.17.0, partner app 0.18.0)
+
+- **Away** (leave, sick): `PUT /api/v1/admin/tickets/away/{userId} {away}` by a super admin, or by a support person
+  for themselves (anyone else's: 404) → `{away, moved, stayed}`. Away: their open tickets go to the others by the
+  usual rule (what nobody else can take stays), no new ticket goes to them, and one of theirs that comes back (they
+  wrote again, opened again by someone else) goes to someone here; one they open again themselves stays theirs. A
+  ticket is never given by hand to someone away (400 `AWAY`). Back: they take their share of what waits in
+  Unassigned (back always works for someone marked, even after becoming a super admin). 400 `NOT_SUPPORT` for anyone
+  not in support. `GET /api/v1/admin/tickets/away` → `[{userId, since}]` (a support person:
+  only themselves). Table `support_away`; leaving support or deleting the account ends it.
+- **"Support replied"**: each reply (and "Send & resolve") also puts a message in the app the question came from
+  (`CUSTOMERHELP_REPLIED` / `PARTNERHELP_REPLIED`; an emailed question: the customer app) and a push to their
+  phones, opening `/help/requests/{id}`. Each reply is in the list; a push not sent yet is replaced by the newest
+  (quick replies make one push). It shows only the ticket number, never the reply's or the subject's words (a
+  subject can be the first words of their message). The email still goes. No SMS.
+
 ### Support tickets, round 2 (V47; admin app 0.11.0, customer app 0.16.0, partner app 0.17.0)
 
 - **Find a ticket** (admin website): `GET /api/v1/admin/tickets/search?q=` takes a ticket number (`CLZ-1042`,
