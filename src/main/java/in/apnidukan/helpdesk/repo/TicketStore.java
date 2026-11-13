@@ -148,14 +148,24 @@ public class TicketStore {
     }
 
     /**
-     * Files still kept on tickets resolved before {@code before} (6 months after they were resolved, they go). Their
-     * tickets stay locked until the caller's transaction ends, so one opened again at this moment either waits (and
-     * is opened again after) or is skipped (it is no longer resolved by the next look).
+     * Files still kept on tickets resolved before {@code before}, or never resolved and last written on before it (6
+     * months after either, they go: a ticket nobody closes never keeps files for ever). Their tickets stay locked until
+     * the caller's transaction ends, so one written on at this moment either waits (its files go: it was 6 months
+     * quiet) or is skipped (no longer due by the next look).
      */
-    public List<UUID> filesResolvedBefore(Instant before, int max) {
-        return jdbc.queryForList("SELECT f.file_id FROM ticket_message_files f JOIN tickets t ON t.id = f.ticket_id "
-                + "WHERE f.removed_at IS NULL AND t.status = 'RESOLVED' AND t.resolved_at < ? LIMIT ? "
-                + "FOR UPDATE OF t SKIP LOCKED", UUID.class, ts(before), max);
+    public List<UUID> filesExpired(Instant before, int max) {
+        // Two reads, each led by its own index on tickets (an OR would read every kept file each hour)
+        List<UUID> out = new ArrayList<>(jdbc.queryForList("SELECT f.file_id FROM tickets t "
+                + "JOIN ticket_message_files f ON f.ticket_id = t.id AND f.removed_at IS NULL "
+                + "WHERE t.status = 'RESOLVED' AND t.resolved_at < ? LIMIT ? FOR UPDATE OF t SKIP LOCKED",
+                UUID.class, ts(before), max));
+        if (out.size() < max) {
+            out.addAll(jdbc.queryForList("SELECT f.file_id FROM tickets t "
+                    + "JOIN ticket_message_files f ON f.ticket_id = t.id AND f.removed_at IS NULL "
+                    + "WHERE t.status IN ('OPEN', 'WAITING') AND t.last_message_at < ? LIMIT ? "
+                    + "FOR UPDATE OF t SKIP LOCKED", UUID.class, ts(before), max - out.size()));
+        }
+        return out;
     }
 
     /** Files still kept that this person sent (their account is being deleted). */
@@ -300,6 +310,30 @@ public class TicketStore {
     public List<Ticket> ofRequester(UUID requesterId, int limit) {
         return jdbc.query("SELECT " + COLUMNS + " FROM tickets WHERE requester_id = ? "
                 + "ORDER BY last_message_at DESC, id LIMIT ?", TICKET, requesterId, limit);
+    }
+
+    /**
+     * One person's own lock, until the transaction ends: their writes from the app are counted (the hourly limit) one
+     * at a time, even when sent at once to several of their tickets. Taken after the team and helpdesk locks, before
+     * any ticket row.
+     */
+    public void lockPerson(UUID userId) {
+        jdbc.queryForObject("SELECT count(*) FROM (SELECT pg_advisory_xact_lock(hashtextextended(?, 7302))) l",
+                Long.class, "helpdesk-person:" + userId);
+    }
+
+    /** Everyone holding an open (not resolved) ticket. */
+    public List<UUID> openAssignees() {
+        return jdbc.queryForList("SELECT DISTINCT assignee_id FROM tickets WHERE status <> 'RESOLVED' "
+                + "AND assignee_id IS NOT NULL", UUID.class);
+    }
+
+    /** Emails from this address saved on its tickets since then (a limit against a flood from one sender). */
+    public long emailsFromSince(String address, Instant since) {
+        Long n = jdbc.queryForObject("SELECT count(*) FROM ticket_messages m JOIN tickets t ON t.id = m.ticket_id "
+                + "WHERE lower(t.requester_email) = lower(?) AND m.direction = 'IN' AND m.email_message_id IS NOT NULL "
+                + "AND m.created_at >= ?", Long.class, address, ts(since));
+        return n == null ? 0 : n;
     }
 
     /** Messages this person wrote in the apps since then (a limit on replies from the app). */

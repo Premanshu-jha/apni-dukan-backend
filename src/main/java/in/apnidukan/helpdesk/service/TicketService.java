@@ -165,6 +165,10 @@ public class TicketService {
         if (store.hasEmail(e.messageId())) {
             return Received.DUPLICATE;   // the same email delivered twice at once: the other one saved it first
         }
+        if (floods(e.fromAddress(), now)) {
+            log.warn("Support email dropped: over {} an hour from one sender", EMAILS_PER_SENDER_HOUR);
+            return Received.IGNORED;   // still in the support Gmail
+        }
         // Their account only when Cloudflare proved the From address: a forged From never shows someone's profile
         UUID requesterId = e.senderVerified() ? users.findByVerifiedEmail(e.fromAddress()).orElse(null) : null;
         if (e.ticketNumber() != null) {
@@ -200,6 +204,22 @@ public class TicketService {
         attachEmailed(t, fileIds);
         return Received.CREATED;
     }
+
+    /**
+     * Whether this sender's emails are past {@value #EMAILS_PER_SENDER_HOUR} in the last hour: the rest are dropped
+     * (kept in the support Gmail), their files never even stored. A person writes a few; a flood is a robot or a loop.
+     */
+    @Transactional(readOnly = true)
+    public boolean floods(String fromAddress) {
+        return floods(fromAddress, clock.instant());
+    }
+
+    private boolean floods(String fromAddress, Instant now) {
+        return store.emailsFromSince(fromAddress, now.minus(Duration.ofHours(1))) >= EMAILS_PER_SENDER_HOUR;
+    }
+
+    /** Emails one sender may add in an hour (new tickets have their own limit too). */
+    static final int EMAILS_PER_SENDER_HOUR = 30;
 
     /** Whether this email (by InboundEmail.messageId) was saved already: its files needn't even be stored. */
     @Transactional(readOnly = true)
@@ -287,8 +307,10 @@ public class TicketService {
             return false;
         }
         UUID assignee = t.assigneeId();
-        // Coming back to someone no longer in support, or away: it goes to whoever is here with fewest
-        if (!assigner.mayReceive(assignee)) {
+        // Coming back to someone no longer in support, or away: it goes to whoever is here with fewest. Assigning
+        // needs the helpdesk lock (held by every caller but addToMine, which takes it when it saw this coming; if the
+        // person went away just now and the lock is busy, StrandedTicketJob moves it within minutes)
+        if (!assigner.mayReceive(assignee) && assigner.tryLockAssigning()) {
             assignee = assigner.next(t.requesterId());
             if (!Objects.equals(assignee, t.assigneeId())) {
                 store.addEvent(t.id(), null, assignee == null ? "UNASSIGNED" : "ASSIGNED",
@@ -562,7 +584,7 @@ public class TicketService {
             }
         });
         Map<UUID, List<TicketStore.MessageFile>> attached = store.files(t.id());
-        Map<UUID, String> links = links(attached);
+        FileLinks links = links(attached);
         return new MyDetail(MyTicket.of(t), messages.stream()
                 .filter(m -> m.direction().equals("OUT") || userId.equals(m.authorId()))
                 .map(m -> new MyMessage(m.seq(), m.direction().equals("OUT"),
@@ -580,10 +602,16 @@ public class TicketService {
         // With files the words may be left out ("here is the photo" is optional)
         String text = MessageText.clean("message", message, sent.isEmpty() ? 2 : 0, MESSAGE_MAX);
         // Whose it is, before any lock (who asked never changes): someone else's id never waits on the helpdesk lock
-        if (store.find(ticketId).filter(x -> userId.equals(x.requesterId())).isEmpty()) {
-            throw ApiException.notFound("Ticket");
+        Ticket seen = store.find(ticketId).filter(x -> userId.equals(x.requesterId()))
+                .orElseThrow(() -> ApiException.notFound("Ticket"));
+        // Many people write at once: only a ticket that may need a new person takes the helpdesk-wide lock; the rest
+        // lock just their own ticket (and the team lock shared), so they never wait on each other
+        if (assigner.mayReceive(seen.assigneeId())) {
+            assigner.lockTeam();
+        } else {
+            assigner.lock();
         }
-        assigner.lock();
+        store.lockPerson(userId);   // their sends to several tickets at once are counted one after the other
         Ticket t = store.lock(ticketId).orElseThrow(() -> ApiException.notFound("Ticket"));
         Instant now = clock.instant();   // after the locks: never earlier than a reply saved while we waited
         // The answer to their send was lost and they sent it again: the same words, still the newest message (nobody
@@ -685,19 +713,35 @@ public class TicketService {
                 which + " was sent already. Remove it and add it again to send it once more.");
     }
 
-    /** Links (valid at least 15 minutes) for the files still kept. */
-    private Map<UUID, String> links(Map<UUID, List<TicketStore.MessageFile>> attached) {
-        List<UUID> kept = attached.values().stream().flatMap(List::stream).filter(f -> f.removedAt() == null)
+    /** Links (valid at least 15 minutes) for the files still kept: to open (shown kinds) and to download (all). */
+    private FileLinks links(Map<UUID, List<TicketStore.MessageFile>> attached) {
+        List<TicketStore.MessageFile> kept = attached.values().stream().flatMap(List::stream)
+                .filter(f -> f.removedAt() == null).toList();
+        if (kept.isEmpty()) {
+            return new FileLinks(Map.of(), Map.of());
+        }
+        List<UUID> shown = kept.stream().filter(f -> !DOWNLOAD_ONLY.equals(f.contentType()))
                 .map(TicketStore.MessageFile::fileId).toList();
-        return kept.isEmpty() ? Map.of() : files.links(kept);
+        return new FileLinks(shown.isEmpty() ? Map.of() : files.links(shown),
+                files.downloadLinks(kept.stream().map(TicketStore.MessageFile::fileId).toList()));
     }
 
-    private static List<MessageFile> files(List<TicketStore.MessageFile> of, Map<UUID, String> links) {
+    private record FileLinks(Map<UUID, String> open, Map<UUID, String> download) {
+    }
+
+    /** A file of a kind we don't show (TicketFileService.DOWNLOAD_ONLY): it is only ever downloaded. */
+    static final String DOWNLOAD_ONLY = "application/octet-stream";
+
+    private static List<MessageFile> files(List<TicketStore.MessageFile> of, FileLinks links) {
         if (of == null) {
             return List.of();
         }
-        return of.stream().map(f -> new MessageFile(f.fileId(), f.contentType(), f.sizeBytes(), f.name(),
-                links.get(f.fileId()), f.removedAt() != null || !links.containsKey(f.fileId()))).toList();
+        return of.stream().map(f -> {
+            String download = links.download().get(f.fileId());
+            String open = DOWNLOAD_ONLY.equals(f.contentType()) ? download : links.open().get(f.fileId());
+            return new MessageFile(f.fileId(), f.contentType(), f.sizeBytes(), f.name(), open, download,
+                    f.removedAt() != null || download == null);
+        }).toList();
     }
 
     private static String firstName(String name) {
@@ -749,7 +793,7 @@ public class TicketService {
         long earlier = t.requesterId() == null ? 0 : Math.max(0, (role == TeamRole.SUPPORT
                 ? store.countByRequester(t.requesterId(), adminId) : store.countByRequester(t.requesterId())) - 1);
         Map<UUID, List<TicketStore.MessageFile>> attached = store.files(t.id());
-        Map<UUID, String> links = links(attached);
+        FileLinks links = links(attached);
         return new Detail(summary(t, names), t.requesterId(), t.requesterEmail(),
                 messages.stream().map(m -> new Message(m.seq(), m.direction(), m.direction().equals("OUT")
                         ? names.getOrDefault(m.authorId(), "Support")
@@ -1055,11 +1099,15 @@ public class TicketService {
     }
 
     /**
-     * A photo, video or PDF on a message.
-     * @param url     a link that opens it for at least 15 minutes; null once removed
-     * @param removed deleted (6 months after the ticket was resolved, or the account was deleted)
+     * A file on a message: a photo, video or PDF (shown), or any other kind ({@code application/octet-stream}: only
+     * downloaded).
+     * @param url         a link that opens it for at least 15 minutes (for a file of a kind we don't show, the
+     *                    download link); null once removed
+     * @param downloadUrl a link that saves it under its name; null once removed
+     * @param removed     deleted (6 months after the ticket was resolved or last written on, or the account deleted)
      */
-    public record MessageFile(UUID id, String contentType, long sizeBytes, String name, String url, boolean removed) {
+    public record MessageFile(UUID id, String contentType, long sizeBytes, String name, String url, String downloadUrl,
+                              boolean removed) {
     }
 
     /** @param actor null for the system */

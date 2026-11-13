@@ -51,4 +51,13 @@ class FileRefServiceTest {
         early.set(Instant.parse("2026-11-10T05:00:00Z"));
         assertThat(one.link(fileId)).contains("at=2026-11-10T05:00:00Z");
     }
+
+    @org.junit.jupiter.api.Test
+    void aFileThatRunsWhenOpenedIsNeverSavedUnderARunnableName() {
+        assertThat(FileRefService.safeDownloadName("invoice.EXE")).isEqualTo("invoice.EXE.download");
+        assertThat(FileRefService.safeDownloadName("page.html")).isEqualTo("page.html.download");
+        assertThat(FileRefService.safeDownloadName("quote.docx")).isEqualTo("quote.docx");
+        assertThat(FileRefService.safeDownloadName("IMG_0001.HEIC")).isEqualTo("IMG_0001.HEIC");
+        assertThat(FileRefService.safeDownloadName(null)).isEqualTo("file");
+    }
 }

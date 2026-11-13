@@ -51,6 +51,8 @@ public class FileRefService implements FileRefs {
     private final Clock clock;
     private final Duration linkValidity;
     private final Cache<UUID, Cached> cache = Caffeine.newBuilder().maximumSize(MAX_CACHED).build();
+    /** The same, for the links that download the file under its name. */
+    private final Cache<UUID, Cached> downloads = Caffeine.newBuilder().maximumSize(MAX_CACHED).build();
 
     public FileRefService(StoredFileRepository repository, in.apnidukan.files.repo.FileDeletionStore deletions,
                           FileStorage storage, Clock clock,
@@ -111,6 +113,31 @@ public class FileRefService implements FileRefs {
     }
 
     @Override
+    @Transactional(readOnly = true)
+    public Map<UUID, String> downloadLinks(Collection<UUID> fileIds) {
+        Map<UUID, String> out = new HashMap<>();
+        Instant hour = hour(clock.instant());
+        Set<UUID> missing = new HashSet<>();
+        for (UUID id : fileIds) {
+            Cached c = downloads.getIfPresent(id);
+            if (c != null && c.hour().equals(hour)) {
+                out.put(id, c.url());
+            } else {
+                missing.add(id);
+            }
+        }
+        if (!missing.isEmpty()) {
+            for (StoredFile f : repository.findAllById(missing)) {
+                String name = safeDownloadName(f.getOriginalName());
+                String url = storage.signedLinkAt(f.getStorageKey(), hour, linkValidity, name);
+                downloads.put(f.getId(), new Cached(url, hour));
+                out.put(f.getId(), url);
+            }
+        }
+        return out;
+    }
+
+    @Override
     @Transactional
     public void keep(UUID fileId) {
         StoredFile f = repository.findById(fileId).orElseThrow(FileRefService::gone);
@@ -160,7 +187,25 @@ public class FileRefService implements FileRefs {
             }
             deletions.queueNow(f.getStorageKey(), clock.instant());
             cache.invalidate(f.getId());
+            downloads.invalidate(f.getId());
         });
+    }
+
+    /**
+     * Kinds that run when opened (programs, scripts, web pages, macro documents): anyone can email support a file, so
+     * one of these is saved as "name.exe.download", never run by a double click. Everything else keeps its name.
+     */
+    static final java.util.Set<String> RUNS = java.util.Set.of("exe", "msi", "bat", "cmd", "com", "scr", "pif", "ps1",
+            "psm1", "vbs", "vbe", "js", "jse", "mjs", "wsf", "wsh", "hta", "html", "htm", "xhtml", "shtml", "svg",
+            "mht", "mhtml", "lnk", "url", "apk", "aab", "jar", "dll", "sys", "cpl", "msc", "reg", "sh", "bash", "command",
+            "app", "dmg", "pkg", "iso", "img", "vhd", "vhdx", "docm", "xlsm", "pptm", "dotm", "xltm", "xlam", "ppam",
+            "chm", "inf", "gadget", "appx", "msix", "py", "pyw", "pl", "rb", "php", "asp", "aspx", "jsp", "xml", "xsl");
+
+    static String safeDownloadName(String name) {
+        String n = name == null || name.isBlank() ? "file" : name.strip();
+        int dot = n.lastIndexOf('.');
+        String ext = dot < 0 ? "" : n.substring(dot + 1).toLowerCase(java.util.Locale.ROOT);
+        return RUNS.contains(ext) ? n + ".download" : n;
     }
 
     /** The start of the hour this moment falls in (the same on every server, whatever its own clock's seconds). */

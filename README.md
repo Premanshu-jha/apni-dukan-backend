@@ -946,6 +946,34 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### Support tickets, round 5: every kind of file, and many people at once (V54; admin app 0.15.0, customer app 0.20.0, partner app 0.21.0)
+
+- **Every kind of file**: besides photos (cleaned JPEG), PDFs and videos, any other file (Word, Excel, zip, an
+  iPhone HEIC photo, a forwarded email) is kept on its message, from the apps (`POST /files/ticket`, at most 10 MB)
+  and from emails (at most 30 an email, 25 MB in all), stored and served as `application/octet-stream` and linked
+  only to download (`downloadUrl`, signed with `response-content-disposition: attachment; filename=…`), so it never
+  opens or runs in a browser; a kind that runs when opened (exe, html, js, apk, macro documents…) is saved as
+  "name.exe.download". Every file also has a `downloadUrl` (a PDF's "Download"). Only an unreadable part, an image
+  pasted in the text that is a logo (under 10 KB, or a GIF/SVG/BMP banner), or past 30 stays only in the support
+  Gmail.
+- **Files of a ticket nobody resolves** go 6 months after its last message (TicketFileRetentionJob; resolved ones 6
+  months after resolving, as before).
+- **Many people at once** (thousands of salons and their customers):
+  - Writing on one's own request locks only that ticket (and the team lock shared): the helpdesk-wide lock (one
+    assignment at a time) is taken only when the ticket must go to a new support person
+    (`TicketAssigner.lockTeam`, `tryLockAssigning`, which never waits, so it can't deadlock). A ticket written on at
+    the very moment its person went away can stay with them: StrandedTicketJob (every 5 minutes) gives any open
+    ticket held by someone away or out of support to whoever is here.
+  - Limits that hold when requests arrive together (each counted under the person's own lock): 5 new tickets an
+    hour and 20 messages an hour per person, 30 uploads a day; and now 30 emails an hour per sender (more are dropped,
+    kept in the support Gmail, their files never stored).
+  - Heavy work bounded: photos cleaned a few at a time (PhotoCleaning), two big emails read at a time (InboundMail),
+    nothing slow (storage, email) inside a transaction or a lock.
+  - Polling: the apps re-read an open request every 30 s (an unchanged one answers 304, ETag), a resolved one and a
+    background tab never; the admin site stops re-reading a resolved ticket.
+  - Indexes (V54): the kept files by ticket and resolved tickets by when (the hourly retention job, two reads each led
+    by its index), a sender's emails by ticket and time (the flood limit).
+
 ### Support tickets, round 4b: files that come by email (V52–V53; admin app 0.14.0, customer app 0.19.0, partner app 0.20.0)
 
 - **What is kept**: the photos (JPEG, PNG; stored as a cleaned JPEG), PDFs (at most 10 MB) and videos (MP4, MOV,

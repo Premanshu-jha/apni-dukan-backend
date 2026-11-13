@@ -18,6 +18,12 @@ public interface FileRefs {
     java.util.Map<UUID, String> links(java.util.Collection<UUID> fileIds);
 
     /**
+     * As {@link #links}, but each downloaded under its file name (Content-Disposition: attachment), never opened in
+     * the browser: for a file of a kind we don't show (a Word file, a zip), or to save a PDF.
+     */
+    java.util.Map<UUID, String> downloadLinks(java.util.Collection<UUID> fileIds);
+
+    /**
      * The shop now uses this file (the salon video it was set to): it is no longer deleted as unused. Joins the
      * caller's transaction and locks the file's deletion entry first; 409 UPLOAD_GONE if the deletion job already
      * purged it (then nothing must be attached).

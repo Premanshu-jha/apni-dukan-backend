@@ -84,6 +84,7 @@ class HelpdeskIntegrationTest {
     @Autowired SessionRevocations sessions;
     @Autowired TicketEmailJob emailJob;
     @Autowired HelpdeskAccountDeletion deletion;
+    @Autowired org.springframework.transaction.support.TransactionOperations transactions;
 
     RestClient http;
     UUID boss;
@@ -319,7 +320,7 @@ class HelpdeskIntegrationTest {
         Reply moved = post("/admin/tickets/" + id + "/assign", Map.of("version", version, "assigneeId", ravi), boss);
         assertThat(moved.status()).as(moved.text()).isEqualTo(200);
         assertThat(field(field(moved.body(), "ticket"), "assigneeName")).isEqualTo("Ravi");
-        Reply late = post("/admin/tickets/" + id + "/reply", Map.of("seenSeq", 99, "body", "Hello"), neha);
+        Reply late = post("/admin/tickets/" + id + "/reply", Map.of("seenSeq", 999_999, "body", "Hello"), neha);
         assertThat(late.status()).isEqualTo(409);
         assertThat(field(late.body(), "code")).isEqualTo("NOT_YOURS");
         Reply stale = post("/admin/tickets/" + id + "/assign", Map.of("version", version, "assigneeId", neha), boss);
@@ -392,7 +393,7 @@ class HelpdeskIntegrationTest {
     void aReplyToAResolvedTicketOpensItAgainButOnlyFromTheSameAddress() {
         UUID neha = support("9800000001", "Neha");
         String id = ask(customer, "My offer was not applied to my booking");
-        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 99), neha);
+        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999), neha);
         inbound(email("9000000003@test.in", "Asha", "Re: [CLZ-1001] Your request", "Still not fixed", "<r2@x>"));
         Reply detail = get("/admin/tickets/" + id, neha);
         assertThat(field(field(detail.body(), "ticket"), "status")).isEqualTo("OPEN");
@@ -935,8 +936,9 @@ class HelpdeskIntegrationTest {
 
         assertThat(post("/files/ticket/videos", Map.of("sizeBytes", 101L * 1024 * 1024, "contentType", "video/mp4"),
                 customer).status()).isEqualTo(413);
-        assertThat(field(upload("hello".getBytes(StandardCharsets.UTF_8), "x.txt", customer).body(), "code"))
-                .isEqualTo("UNSUPPORTED_FILE_TYPE");
+        // A text file goes up too, kept only to download
+        assertThat(field(upload("hello".getBytes(StandardCharsets.UTF_8), "x.txt", customer).body(), "contentType"))
+                .isEqualTo("application/octet-stream");
     }
 
     @Test
@@ -1081,7 +1083,7 @@ class HelpdeskIntegrationTest {
     @Autowired in.apnidukan.files.storage.FileStorage storage;
 
     @Test
-    void anEmailsPhotosAndPdfsGoOnItsMessageOtherFilesAndLogosStayInGmail() throws Exception {
+    void everyFileOfAnEmailGoesOnItsMessageLogosAreSkipped() throws Exception {
         UUID neha = support("9800000001", "Neha");
         byte[] raw = withFiles("vikram@gmail.com", "<f1@x>", "The cut was uneven, photos attached",
                 new Part("IMG_1.jpg", "image/jpeg", noisyJpeg(), false),
@@ -1092,22 +1094,109 @@ class HelpdeskIntegrationTest {
         assertThat(inbound(raw).body()).isEqualTo(Map.of("result", "CREATED"));
         String id = jdbc.queryForObject("SELECT id::text FROM tickets", String.class);
         Reply detail = get("/admin/tickets/" + id, neha);
-        assertThat(detail.text()).contains("IMG_1.jpg").contains("bill.pdf").doesNotContain("logo.png")
-                .contains("\"url\":\"http");
+        assertThat(detail.text()).contains("IMG_1.jpg").contains("bill.pdf").contains("notes.docx")
+                .doesNotContain("logo.png").contains("\"url\":\"http")
+                .contains("response-content-disposition");   // the Word file (and each download link) saves it
         assertThat(jdbc.queryForList("SELECT name FROM ticket_message_files", String.class))
-                .containsExactlyInAnyOrder("IMG_1.jpg", "bill.pdf");   // the Word file is only named in the text
-        assertThat(count("ticket_message_files")).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT attachments FROM ticket_messages", Integer.class)).isEqualTo(1);
+                .containsExactlyInAnyOrder("IMG_1.jpg", "bill.pdf", "notes.docx");
+        assertThat(jdbc.queryForObject("SELECT attachments FROM ticket_messages", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT body FROM ticket_messages", String.class))
-                .isEqualTo("The cut was uneven, photos attached\n\n(Only in the email: notes.docx)");
-        // Kept like an app upload: off the deletion queue, a cleaned JPEG
+                .isEqualTo("The cut was uneven, photos attached");
+        // Kept like an app upload: off the deletion queue; a cleaned JPEG, the PDF, the Word file only to download
         assertThat(count("file_deletions WHERE storage_key LIKE 'tickets/email/%'")).isZero();
         assertThat(jdbc.queryForList("SELECT content_type FROM files ORDER BY content_type", String.class))
-                .containsExactly("application/pdf", "image/jpeg");
+                .containsExactly("application/octet-stream", "application/pdf", "image/jpeg");
 
         // The same email again (the worker tried twice): nothing more is stored
         inbound(raw);
-        assertThat(count("files")).isEqualTo(2);
+        assertThat(count("files")).isEqualTo(3);
+    }
+
+    @Test
+    void anyFileGoesUpFromTheAppAndIsOnlyDownloaded() throws Exception {
+        Reply word = upload("PK\u0003\u0004 a Word file".getBytes(StandardCharsets.UTF_8), "quote.docx", customer);
+        assertThat(word.status()).as(word.text()).isEqualTo(201);
+        assertThat(field(word.body(), "contentType")).isEqualTo("application/octet-stream");
+        String id = ask(customer, "Question about my booking");
+        Map<String, Object> add = new HashMap<>();
+        add.put("message", "");
+        add.put("fileIds", List.of(field(word.body(), "id")));
+        assertThat(post("/helpdesk/tickets/" + id + "/messages", add, customer).status()).isEqualTo(200);
+        String mine = get("/helpdesk/tickets/" + id, customer).text();
+        assertThat(mine).contains("quote.docx").contains("response-content-disposition").contains("downloadUrl");
+    }
+
+    @Test
+    void filesOfATicketNobodyResolvesGoSixMonthsAfterItsLastMessage() throws Exception {
+        String id = ask(customer, "Question about my booking");
+        String fileId = (String) field(upload(pdf(), "bill.pdf", customer).body(), "id");
+        Map<String, Object> add = new HashMap<>();
+        add.put("message", "");
+        add.put("fileIds", List.of(fileId));
+        post("/helpdesk/tickets/" + id + "/messages", add, customer);
+        assertThat(retention.runOnce()).isZero();
+        jdbc.update("UPDATE tickets SET last_message_at = ? WHERE id = ?::uuid",
+                java.sql.Timestamp.from(CLOCK.instant().minus(java.time.Duration.ofDays(183))), id);
+        assertThat(retention.runOnce()).isEqualTo(1);
+        assertThat(count("ticket_message_files WHERE removed_at IS NOT NULL")).isEqualTo(1);
+    }
+
+    @Test
+    void writingOnYourOwnTicketNeverWaitsOnTheHelpdeskWideLock() throws Exception {
+        support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        // Someone holds the helpdesk-wide lock (assigning a new ticket, a long team change): adding to one's own
+        // ticket, whose person still receives tickets, goes ahead all the same
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<Void> holder = CompletableFuture.runAsync(() -> transactions.executeWithoutResult(st -> {
+            jdbc.queryForObject("SELECT count(*) FROM (SELECT pg_advisory_xact_lock(7301)) l", Long.class);
+            held.countDown();
+            try {
+                release.await(20, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        assertThat(held.await(10, TimeUnit.SECONDS)).isTrue();
+        try {
+            long start = System.nanoTime();
+            Reply r = post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "Any news on this?"), customer);
+            assertThat(r.status()).as(r.text()).isEqualTo(200);
+            assertThat(java.time.Duration.ofNanos(System.nanoTime() - start)).isLessThan(java.time.Duration.ofSeconds(5));
+        } finally {
+            release.countDown();
+            holder.get(30, TimeUnit.SECONDS);
+        }
+    }
+
+    @Autowired in.apnidukan.helpdesk.service.StrandedTicketJob stranded;
+
+    @Test
+    void aTicketLeftWithSomeoneAwayGoesToSomeoneHereWithinMinutes() throws Exception {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        assertThat(jdbc.queryForObject("SELECT assignee_id FROM tickets WHERE id = ?::uuid", UUID.class, id))
+                .isEqualTo(neha);
+        UUID ravi = support("9800000002", "Ravi");
+        // Neha went away at the very moment the customer wrote (that write locks only the ticket): it stayed hers
+        jdbc.update("INSERT INTO support_away (user_id, since) VALUES (?, now())", neha);
+        assertThat(stranded.runOnce()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT assignee_id FROM tickets WHERE id = ?::uuid", UUID.class, id))
+                .isEqualTo(ravi);
+        assertThat(stranded.runOnce()).isZero();
+    }
+
+    @Test
+    void aFloodOfEmailsFromOneSenderIsCutOffAfterThirtyAnHour() throws Exception {
+        support("9800000001", "Neha");
+        for (int i = 0; i < 30; i++) {
+            assertThat(field(inbound(withFiles("robot@gmail.com", "<fl" + i + "@x>", "Spam number " + i)).body(),
+                    "result")).isIn("CREATED", "ADDED");
+        }
+        assertThat(inbound(withFiles("robot@gmail.com", "<fl30@x>", "Spam number 30")).body())
+                .isEqualTo(Map.of("result", "IGNORED"));
+        assertThat(count("ticket_messages")).isEqualTo(30);
     }
 
     @Test
@@ -1148,23 +1237,23 @@ class HelpdeskIntegrationTest {
     }
 
     @Test
-    void tenFilesAreKeptTheRestNamedAndABrokenFileNeverLosesTheEmail() throws Exception {
+    void thirtyFilesAreKeptTheRestNamedAndABrokenFileNeverLosesTheEmail() throws Exception {
         support("9800000001", "Neha");
         List<Part> parts = new ArrayList<>();
-        for (int i = 1; i <= 12; i++) {
+        for (int i = 1; i <= 32; i++) {
             parts.add(new Part("bill" + i + ".pdf", "application/pdf",
                     ("%PDF-1.4\n% bill " + i + "\n").getBytes(StandardCharsets.UTF_8), false));
         }
         byte[] raw = withFiles("vikram@gmail.com", "<many@x>", "All my bills", parts.toArray(new Part[0]));
-        // and a part whose base64 is cut short (it can't be decoded)
+        // and a part in an encoding nobody can decode
         raw = new String(raw, StandardCharsets.UTF_8).replace("--b1--", "--b1\r\nContent-Type: image/jpeg; "
                 + "name=\"x.jpg\"\r\nContent-Disposition: attachment; filename=\"x.jpg\"\r\n"
-                + "Content-Transfer-Encoding: base64\r\n\r\n/9j/4AAQSk=Z!!\r\n--b1--").getBytes(StandardCharsets.UTF_8);
+                + "Content-Transfer-Encoding: x-made-up\r\n\r\nabc\r\n--b1--").getBytes(StandardCharsets.UTF_8);
         assertThat(inbound(raw).body()).isEqualTo(Map.of("result", "CREATED"));
-        assertThat(count("ticket_message_files")).isEqualTo(10);
+        assertThat(count("ticket_message_files")).isEqualTo(30);
         assertThat(jdbc.queryForObject("SELECT attachments FROM ticket_messages", Integer.class)).isEqualTo(3);
         assertThat(jdbc.queryForObject("SELECT body FROM ticket_messages", String.class))
-                .endsWith("(Only in the email: bill11.pdf, bill12.pdf, x.jpg)");
+                .endsWith("(Only in the email: bill31.pdf, bill32.pdf, x.jpg)");
     }
 
     @Test
@@ -1305,7 +1394,7 @@ class HelpdeskIntegrationTest {
         UUID neha = support("9800000001", "Neha");
         String id = ask(customer, "Question one about bookings");
         ask(customer, "Question two about bookings");
-        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 99), neha);
+        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999), neha);
         Reply stats = get("/admin/tickets/stats", boss);
         Map<?, ?> row = (Map<?, ?>) ((List<?>) field(stats.body(), "people")).get(0);
         assertThat(row.get("name")).isEqualTo("Neha");
@@ -1344,9 +1433,9 @@ class HelpdeskIntegrationTest {
         assertThat(emailJob.runOnce()).isZero();
         Reply detail = get("/admin/tickets/" + id, boss);
         assertThat(field(detail.body(), "requesterEmail")).isNull();
-        Reply r = post("/admin/tickets/" + id + "/reply", Map.of("seenSeq", 99, "body", "Done"), boss);
+        Reply r = post("/admin/tickets/" + id + "/reply", Map.of("seenSeq", 999_999, "body", "Done"), boss);
         assertThat(field(r.body(), "code")).isEqualTo("REQUESTER_GONE");
-        assertThat(post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 99), boss).status()).isEqualTo(200);
+        assertThat(post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999), boss).status()).isEqualTo(200);
     }
 
     // ---------------- helpers ----------------
