@@ -871,6 +871,241 @@ class HelpdeskIntegrationTest {
         return jdbc.queryForObject("SELECT assignee_id FROM tickets WHERE id = ?::uuid", UUID.class, ticketId);
     }
 
+    // ---------------- round 4a: photos, videos and PDFs ----------------
+
+    @Autowired in.apnidukan.files.service.FileDeletionJob fileDeletions;
+    @Autowired in.apnidukan.helpdesk.service.TicketFileRetentionJob retention;
+
+    @Test
+    void aPhotoSentWithAMessageIsCleanedKeptAndShownToThemAndToSupport() throws Exception {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        Reply up = upload(jpeg(), "IMG_2041.jpg", customer);
+        assertThat(up.status()).as(up.text()).isEqualTo(201);
+        String fileId = (String) field(up.body(), "id");
+        assertThat(field(up.body(), "contentType")).isEqualTo("image/jpeg");
+        String key = jdbc.queryForObject("SELECT storage_key FROM files WHERE id = ?::uuid", String.class, fileId);
+        assertThat(count("file_deletions WHERE storage_key = '" + key + "'")).isEqualTo(1);   // unsent: due in a day
+
+        Map<String, Object> add = new HashMap<>();
+        add.put("message", "");   // words may be left out with a file
+        add.put("fileIds", List.of(fileId));
+        Reply r = post("/helpdesk/tickets/" + id + "/messages", add, customer);
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        assertThat(count("file_deletions WHERE storage_key = '" + key + "'")).isZero();   // sent: kept
+        assertThat(r.text()).contains(fileId).contains("IMG_2041.jpg").contains("\"url\":\"http");
+        assertThat(get("/admin/tickets/" + id, neha).text()).contains(fileId);
+
+        // Sent again a moment later (the answer was lost): kept once
+        assertThat(post("/helpdesk/tickets/" + id + "/messages", add, customer).status()).isEqualTo(200);
+        assertThat(count("ticket_message_files")).isEqualTo(1);
+        // Sent once: with other words it is refused, naming the file; someone else can't send it
+        add.put("message", "the photo again");
+        Reply again = post("/helpdesk/tickets/" + id + "/messages", add, customer);
+        assertThat(again.status()).isEqualTo(409);
+        assertThat(field(again.body(), "code")).isEqualTo("FILE_ALREADY_SENT");
+        assertThat(again.text()).contains("IMG_2041.jpg");
+        UUID other = person("9000000004");
+        String theirs = ask(other, "Another question about bookings");
+        Map<String, Object> steal = new HashMap<>(add);
+        steal.put("fileIds", List.of((String) field(upload(jpeg(), "a.jpg", customer).body(), "id")));
+        Reply stolen = post("/helpdesk/tickets/" + theirs + "/messages", steal, other);
+        assertThat(stolen.status()).isEqualTo(400);
+        assertThat(field(stolen.body(), "code")).isEqualTo("FILE_NOT_FOUND");
+    }
+
+    @Test
+    void aVideoGoesStraightToStorageIsCheckedAndSentWithANewQuestion() throws Exception {
+        byte[] video = new byte[4096];
+        System.arraycopy(new byte[] {0, 0, 0, 0x20, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, 0, video, 0, 12);
+        Reply link = post("/files/ticket/videos", Map.of("sizeBytes", video.length, "contentType", "video/mp4"),
+                customer);
+        assertThat(link.status()).as(link.text()).isEqualTo(201);
+        assertThat(putTo((String) field(link.body(), "uploadUrl"), video, "video/mp4")).isEqualTo(200);
+        Reply done = post("/files/ticket/videos/" + field(link.body(), "uploadId") + "/complete", Map.of(), customer);
+        assertThat(done.status()).as(done.text()).isEqualTo(200);
+        Map<String, Object> ask = new HashMap<>();
+        ask.put("app", "CUSTOMER");
+        ask.put("message", "The barber cut it wrong, see the video");
+        ask.put("fileIds", List.of(field(done.body(), "id")));
+        Reply r = post("/helpdesk/tickets", ask, customer);
+        assertThat(r.status()).as(r.text()).isEqualTo(201);
+        assertThat(get("/helpdesk/tickets/" + field(r.body(), "id"), customer).text()).contains("video/mp4");
+
+        assertThat(post("/files/ticket/videos", Map.of("sizeBytes", 101L * 1024 * 1024, "contentType", "video/mp4"),
+                customer).status()).isEqualTo(413);
+        assertThat(field(upload("hello".getBytes(StandardCharsets.UTF_8), "x.txt", customer).body(), "code"))
+                .isEqualTo("UNSUPPORTED_FILE_TYPE");
+    }
+
+    @Test
+    void aFileNeverSentIsDeletedAfterADayAndFilesGoSixMonthsAfterResolved() throws Exception {
+        UUID neha = support("9800000001", "Neha");
+        String unsent = (String) field(upload(jpeg(), "a.jpg", customer).body(), "id");
+        String kept = (String) field(upload(pdf(), "bill.pdf", customer).body(), "id");
+        Map<String, Object> ask = new HashMap<>();
+        ask.put("app", "CUSTOMER");
+        ask.put("message", "Here is the bill for my booking");
+        ask.put("fileIds", List.of(kept));
+        String id = (String) field(post("/helpdesk/tickets", ask, customer).body(), "id");
+
+        CLOCK.set(CLOCK.instant().plus(java.time.Duration.ofHours(25)));
+        fileDeletions.runOnce();
+        assertThat(count("files WHERE id = '" + unsent + "'")).isZero();
+        assertThat(count("files WHERE id = '" + kept + "'")).isEqualTo(1);
+
+        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999), neha);
+        jdbc.update("UPDATE tickets SET resolved_at = ? WHERE id = ?::uuid",
+                java.sql.Timestamp.from(CLOCK.instant().minus(java.time.Duration.ofDays(183))), id);
+        assertThat(retention.runOnce()).isEqualTo(1);
+        assertThat(count("files WHERE id = '" + kept + "'")).isZero();
+        assertThat(get("/helpdesk/tickets/" + id, customer).text()).contains("\"removed\":true");
+    }
+
+    @Test
+    void closingATicketThatChangedMeanwhileAsksToLookAgain() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        long version = ((Number) field(get("/admin/tickets/" + id, neha).body(), "version")).longValue();
+        post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999, "version", version), neha);
+        long now = ((Number) field(get("/admin/tickets/" + id, boss).body(), "version")).longValue();
+        post("/admin/tickets/" + id + "/reopen", Map.of("version", now), boss);
+        Reply stale = post("/admin/tickets/" + id + "/close", Map.of("seenSeq", 999_999, "version", version), neha);
+        assertThat(stale.status()).isEqualTo(409);
+        assertThat(field(stale.body(), "code")).isEqualTo("TICKET_CHANGED");
+    }
+
+    @Test
+    void anEmailFromAnAddressTheyGaveUpIsNeverShownAsTheirs() {
+        support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        // They moved to a new address; someone else verified the old one since and writes on the old ticket
+        jdbc.update("UPDATE users SET email = 'asha.new@test.in' WHERE id = ?", customer);
+        UUID other = person("9000000004");
+        jdbc.update("UPDATE users SET email = '9000000003@test.in' WHERE id = ?", other);
+        inbound(email("9000000003@test.in", "Someone", "Re: [CLZ-1001] Question", "Not Asha writing", "<g1@x>"));
+        assertThat(get("/helpdesk/tickets/" + id, customer).text()).doesNotContain("Not Asha writing");
+        // Support sees it isn't her, not proven as hers
+        List<?> messages = (List<?>) field(get("/admin/tickets/" + id, boss).body(), "messages");
+        Map<?, ?> last = (Map<?, ?>) messages.get(messages.size() - 1);
+        assertThat(last.get("body")).isEqualTo("Not Asha writing");
+        assertThat(last.get("author")).isEqualTo("Someone else (from an email address they no longer use)");
+        assertThat(last.get("senderVerified")).isEqualTo(false);
+    }
+
+    @Test
+    void realSizedPhotosAndPdfsGoUpPastTheSizeLimitForOtherRequests() throws Exception {
+        // Any request but an upload is refused over 64 KB; a phone photo or a bill is far bigger
+        java.awt.image.BufferedImage noisy = new java.awt.image.BufferedImage(800, 600,
+                java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.util.Random random = new java.util.Random(7);
+        for (int x = 0; x < 800; x++) {
+            for (int y = 0; y < 600; y++) {
+                noisy.setRGB(x, y, random.nextInt());
+            }
+        }
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(noisy, "jpeg", out);
+        assertThat(out.size()).isGreaterThan(200 * 1024);
+        Reply photo = upload(out.toByteArray(), "IMG_2042.jpg", customer);
+        assertThat(photo.status()).as(photo.text()).isEqualTo(201);
+
+        byte[] bill = new byte[300 * 1024];
+        byte[] head = pdf();
+        System.arraycopy(head, 0, bill, 0, head.length);
+        Reply pdf = upload(bill, "bill.pdf", customer);
+        assertThat(pdf.status()).as(pdf.text()).isEqualTo(201);
+        assertThat(field(pdf.body(), "sizeBytes")).isEqualTo(300 * 1024);
+    }
+
+    @Test
+    void supportSendsAFileWithAReplyButNeverToSomeoneWhoOnlyWroteByEmail() throws Exception {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        String fileId = (String) field(upload(pdf(), "refund.pdf", neha).body(), "id");
+        Map<String, Object> reply = new HashMap<>();
+        reply.put("body", "");   // a file alone
+        reply.put("seenSeq", 999_999);
+        reply.put("fileIds", List.of(fileId));
+        Reply r = post("/admin/tickets/" + id + "/reply", reply, neha);
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        assertThat(get("/helpdesk/tickets/" + id, customer).text()).contains(fileId).contains("refund.pdf");
+        assertThat(jdbc.queryForObject("SELECT body FROM ticket_emails WHERE ticket_id = ?::uuid AND body LIKE '%We sent 1 file%'",
+                String.class, id))
+                .contains("We sent 1 file with this reply. See them in the Clozest app");
+
+        inbound(email("vikram@gmail.com", "Vikram", "Refund", "Where is my refund for the haircut", "<v9@x>"));
+        String emailed = jdbc.queryForObject("SELECT id::text FROM tickets WHERE requester_email = 'vikram@gmail.com'",
+                String.class);
+        reply.put("fileIds", List.of((String) field(upload(pdf(), "refund.pdf", neha).body(), "id")));
+        Reply refused = post("/admin/tickets/" + emailed + "/reply", reply, neha);
+        assertThat(refused.status()).isEqualTo(400);
+        assertThat(field(refused.body(), "code")).isEqualTo("FILES_NEED_APP");
+    }
+
+    @Test
+    void aQuestionWithFilesSentAgainAfterALostAnswerIsOneQuestion() throws Exception {
+        String fileId = (String) field(upload(jpeg(), "a.jpg", customer).body(), "id");
+        Map<String, Object> ask = new HashMap<>();
+        ask.put("app", "CUSTOMER");
+        ask.put("message", "The barber cut it wrong, see the photo");
+        ask.put("fileIds", List.of(fileId));
+        Reply first = post("/helpdesk/tickets", ask, customer);
+        Reply again = post("/helpdesk/tickets", ask, customer);
+        assertThat(again.status()).as(again.text()).isEqualTo(201);
+        assertThat(field(again.body(), "id")).isEqualTo(field(first.body(), "id"));
+        assertThat(count("tickets")).isEqualTo(1);
+    }
+
+    @Test
+    void thirtyFilesADayAndAVideoCountsOnce() throws Exception {
+        byte[] video = new byte[4096];
+        System.arraycopy(new byte[] {0, 0, 0, 0x20, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, 0, video, 0, 12);
+        Reply link = post("/files/ticket/videos", Map.of("sizeBytes", video.length, "contentType", "video/mp4"),
+                customer);
+        assertThat(putTo((String) field(link.body(), "uploadUrl"), video, "video/mp4")).isEqualTo(200);
+        assertThat(post("/files/ticket/videos/" + field(link.body(), "uploadId") + "/complete", Map.of(), customer)
+                .status()).isEqualTo(200);
+        byte[] photo = jpeg();
+        for (int i = 0; i < 29; i++) {   // the video was the 1st
+            assertThat(upload(photo, "p" + i + ".jpg", customer).status()).as("upload " + (i + 2)).isEqualTo(201);
+        }
+        Reply over = upload(photo, "p30.jpg", customer);
+        assertThat(over.status()).isEqualTo(429);
+        assertThat(field(over.body(), "code")).isEqualTo("TOO_MANY_UPLOADS");
+    }
+
+    private Reply upload(byte[] bytes, String name, UUID who) {
+        org.springframework.util.LinkedMultiValueMap<String, Object> parts =
+                new org.springframework.util.LinkedMultiValueMap<>();
+        parts.add("file", new org.springframework.core.io.ByteArrayResource(bytes) {
+            @Override
+            public String getFilename() {
+                return name;
+            }
+        });
+        return http.post().uri("/files/ticket").headers(h -> h.setBearerAuth(token(who)))
+                .contentType(MediaType.MULTIPART_FORM_DATA).body(parts).exchange((rq, res) -> read(res));
+    }
+
+    private static int putTo(String url, byte[] bytes, String contentType) throws Exception {
+        return java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(
+                        java.net.URI.create(url)).header("Content-Type", contentType)
+                        .PUT(java.net.http.HttpRequest.BodyPublishers.ofByteArray(bytes)).build(),
+                java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode();
+    }
+
+    private static byte[] jpeg() throws java.io.IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(40, 30,
+                java.awt.image.BufferedImage.TYPE_INT_RGB), "jpeg", out);
+        return out.toByteArray();
+    }
+
+    private static byte[] pdf() {
+        return "%PDF-1.4\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n".getBytes(StandardCharsets.UTF_8);
+    }
+
     // ---------------- super admins ----------------
 
     @Test

@@ -315,6 +315,14 @@ class FilesIntegrationTest {
     }
 
     @Test
+    void aSupportTicketsFileIsNeverUploadedAsAShopsFile() {
+        // POST /files/ticket is the only way in (cleaned, limited per person, deleted unsent after a day)
+        Reply reply = upload(SHOP_A, fakeJpeg(), "photo.jpg", "TICKET_FILE");
+        assertThat(reply.status()).isEqualTo(400);
+        assertThat(reply.body().get("code")).isEqualTo("UNSUPPORTED_FILE_TYPE");
+    }
+
+    @Test
     void unknownPurposeSaysWhichValuesAreAllowed() {
         Reply reply = upload(SHOP_A, fakeJpeg(), "bill.jpg", "INVOICE");
         assertThat(reply.status()).isEqualTo(400);
