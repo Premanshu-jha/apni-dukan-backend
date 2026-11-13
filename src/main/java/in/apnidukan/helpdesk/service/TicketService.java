@@ -4,6 +4,7 @@ import in.apnidukan.common.context.ProfileFacts;
 import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.helpdesk.domain.Ticket;
 import in.apnidukan.helpdesk.domain.TicketEvent;
 import in.apnidukan.helpdesk.domain.TicketMessage;
@@ -63,6 +64,7 @@ public class TicketService {
     /** Opening a ticket again within this long isn't logged again as a profile view. */
     static final Duration VIEW_LOGGED_FOR = Duration.ofMinutes(30);
 
+    private final Notifications notifications;
     private final TicketStore store;
     private final TicketAssigner assigner;
     private final UserDirectory users;
@@ -72,6 +74,7 @@ public class TicketService {
     private final int emailsPerHour;
 
     public TicketService(TicketStore store, TicketAssigner assigner, UserDirectory users, List<ProfileFacts> facts,
+                         Notifications notifications,
                          Clock clock, @Value("${app.helpdesk.new-per-hour}") int newPerHour,
                          @Value("${app.helpdesk.emails-per-hour}") int emailsPerHour) {
         if (newPerHour < 1 || emailsPerHour < 1) {
@@ -82,6 +85,7 @@ public class TicketService {
         this.assigner = assigner;
         this.users = users;
         this.facts = facts;
+        this.notifications = notifications;
         this.clock = clock;
         this.newPerHour = newPerHour;
     }
@@ -215,7 +219,8 @@ public class TicketService {
             return false;
         }
         UUID assignee = t.assigneeId();
-        if (!assigner.mayHold(assignee)) {
+        // Coming back to someone no longer in support, or away: it goes to whoever is here with fewest
+        if (!assigner.mayReceive(assignee)) {
             assignee = assigner.next(t.requesterId());
             if (!Objects.equals(assignee, t.assigneeId())) {
                 store.addEvent(t.id(), null, assignee == null ? "UNASSIGNED" : "ASSIGNED",
@@ -343,8 +348,8 @@ public class TicketService {
         requireSuperAdmin(superAdminId);
         assigner.lock();
         requireSuperAdmin(superAdminId);   // again, under the team lock
-        if (to != null && (to.equals(from) || !assigner.mayHold(to))) {
-            throw ApiException.badRequest("NOT_SUPPORT", "Choose another support person.");
+        if (to != null && (to.equals(from) || !assigner.mayReceive(to))) {
+            throw ApiException.badRequest("NOT_SUPPORT", "Choose another support person (not someone away).");
         }
         int moved = assigner.moveAll(from, to, superAdminId);
         return new Moved(moved, store.notResolvedOf(from));
@@ -369,8 +374,9 @@ public class TicketService {
         if (t.status() == TicketStatus.RESOLVED) {
             Instant now = clock.instant();
             UUID assignee = t.assigneeId();
-            if (!assigner.mayHold(assignee)) {
-                // Resolved by someone no longer in support: it goes to whoever has fewest (never left with nobody)
+            // Resolved by someone no longer in support, or away: it goes to whoever is here with fewest (someone away
+            // who opens their own ticket again keeps it: they chose to)
+            if (!assigner.mayReceive(assignee) && !(adminId.equals(assignee) && assigner.mayHold(adminId))) {
                 assignee = assigner.next(t.requesterId());
                 if (!Objects.equals(assignee, t.assigneeId())) {
                     store.addEvent(t.id(), null, assignee == null ? "UNASSIGNED" : "ASSIGNED",
@@ -383,6 +389,86 @@ public class TicketService {
                     now);
         }
         return get(adminId, ticketId);
+    }
+
+    /**
+     * "Support replied" in the app's list and as a push to their phones (the email goes too): in the app the
+     * question came from (an emailed one: the customer app). Each reply is in the list; a push not sent yet is
+     * replaced by the newest (quick replies make one push). Only the ticket number shows: never the reply's or the
+     * subject's words (a phone's lock screen; a subject can be the first words of their message).
+     */
+    private void notifyReplied(Ticket t, boolean resolved, Instant now) {
+        if (t.requesterId() == null) {
+            return;   // an email from someone without an account: the email is all
+        }
+        String type = t.source() == TicketSource.PARTNER ? PARTNER_REPLIED : CUSTOMER_REPLIED;
+        notifications.cancelPending(t.id(), type);
+        notifications.queue(new Notifications.Notice(t.requesterId(), type, t.id(), now,
+                resolved ? "Support resolved " + t.label() : "Support replied on " + t.label(),
+                (resolved ? "We answered" : "We replied to") + " your question. Tap to read it.",
+                "/help/requests/" + t.id(), Map.of()));
+    }
+
+
+    /** The notification types (their first word puts them in the right app's list). */
+    static final String CUSTOMER_REPLIED = "CUSTOMERHELP_REPLIED";
+    static final String PARTNER_REPLIED = "PARTNERHELP_REPLIED";
+
+    /** Who is away (a super admin: everyone; a support person: themselves). */
+    @Transactional(readOnly = true)
+    public List<Away> away(UUID adminId) {
+        TeamRole role = requireHandles(adminId);
+        Map<UUID, Instant> away = role == TeamRole.SUPER_ADMIN ? store.awaySince()
+                : store.awaySince(List.of(adminId));
+        return away.entrySet().stream().map(e -> new Away(e.getKey(), e.getValue()))
+                .sorted(Comparator.comparing(Away::since)).toList();
+    }
+
+    /**
+     * A support person is away (leave, sick), set by a super admin or by themselves: their open tickets go to the
+     * others by the usual rule (what nobody else can take stays), and no new ones come to them until they are back.
+     * Back: they take their share of what waits in Unassigned. 400 NOT_SUPPORT when that person isn't in support;
+     * 404 for someone else's switch (a support person).
+     */
+    @Transactional
+    public AwayChange setAway(UUID adminId, UUID userId, boolean away) {
+        TeamRole role = requireHandles(adminId);
+        if (role != TeamRole.SUPER_ADMIN && !adminId.equals(userId)) {
+            throw ApiException.notFound("Page");
+        }
+        assigner.lock();
+        // Again, under the team lock: a super admin demoted meanwhile no longer sets anyone else's
+        TeamRole roleNow = requireHandles(adminId);
+        if (roleNow != TeamRole.SUPER_ADMIN && !adminId.equals(userId)) {
+            throw ApiException.notFound("Page");
+        }
+        boolean marked = store.isAway(userId);
+        // Being back always works for someone marked (even if they have become a super admin meanwhile)
+        if (users.teamRole(userId) != TeamRole.SUPPORT && (away || !marked)) {
+            throw ApiException.badRequest("NOT_SUPPORT", "Only a support person can be away.");
+        }
+        Instant now = clock.instant();
+        if (away) {
+            store.setAway(userId, now, adminId);
+            int moved = assigner.moveAll(userId, null, adminId);
+            return new AwayChange(true, moved, store.notResolvedOf(userId));
+        }
+        store.clearAway(userId);
+        if (users.teamRole(userId) == TeamRole.SUPPORT) {
+            assigner.joinedSupport(userId, adminId);
+        }
+        return new AwayChange(false, 0, store.notResolvedOf(userId));
+    }
+
+    /** @param since when they were marked away */
+    public record Away(UUID userId, Instant since) {
+    }
+
+    /**
+     * @param moved  their open tickets given to others (marked away)
+     * @param stayed open ones they still hold (nobody else could take them)
+     */
+    public record AwayChange(boolean away, int moved, long stayed) {
     }
 
     // ---------- the apps' own requests ----------
@@ -540,6 +626,7 @@ public class TicketService {
         // Signed with the support person's name only (never their phone)
         store.queueEmail(t.id(), to, TicketEmails.replySubject(t), TicketEmails.replyBody(t, requesterName(t), text,
                 resolve, me == null ? null : me.name(), lastIncoming(t.id())), now);
+        notifyReplied(t, resolve, now);
         return get(adminId, ticketId);
     }
 
@@ -579,6 +666,10 @@ public class TicketService {
         requireSuperAdmin(superAdminId);   // again, under the team lock: demoted meanwhile
         if (assigneeId != null && !assigner.mayHold(assigneeId)) {
             throw ApiException.badRequest("NOT_SUPPORT", "That person isn't in support. Choose a support person.");
+        }
+        if (assigneeId != null && !assigner.mayReceive(assigneeId)) {
+            // It would leave them on the customer's next message anyway: say so now
+            throw ApiException.badRequest("AWAY", "That person is away. Choose someone who is here.");
         }
         Ticket t = store.lock(ticketId).orElseThrow(() -> ApiException.notFound("Ticket"));
         if (assigneeId != null && assigneeId.equals(t.requesterId())) {
