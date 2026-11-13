@@ -6,3 +6,8 @@ compatibility_date = "2026-11-01"
 HELPDESK_URL = "https://api.clozest.in/api/v1/helpdesk/inbound"
 # GMAIL_COPY and HELPDESK_SECRET are set in the dashboard (Settings → Variables), not here: the secret must never be
 # committed, and the Gmail address is private.
+
+# Where an email over 1 MB is parked (inbound/<uuid>.eml) for the backend to read: the backend's R2_BUCKET.
+[[r2_buckets]]
+binding = "INBOX"
+bucket_name = "apnidukan-files"
