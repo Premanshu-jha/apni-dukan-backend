@@ -16,8 +16,8 @@ import java.io.IOException;
 
 /**
  * JSON bodies are small (a phone number, a code, an order). Anything over 64 KB is refused before it is read, so
- * nobody can tie up the server's memory with a huge body. Only the file upload (POST /api/v1/files) may be larger;
- * it has its own 10 MB limit. A support email from the Email Worker (POST /api/v1/helpdesk/inbound, the raw email)
+ * nobody can tie up the server's memory with a huge body. Only the file uploads (POST /api/v1/files and a support
+ * ticket's photo or PDF, POST /api/v1/files/ticket) may be larger; they have their own 10 MB limit. A support email from the Email Worker (POST /api/v1/helpdesk/inbound, the raw email)
  * may be up to 1 MB (the worker sends only the headers of a bigger one).
  */
 @Component
@@ -28,14 +28,16 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
     /** A raw support email (see the class comment). */
     static final long MAX_EMAIL_BYTES = 1024 * 1024;
     static final String INBOUND_EMAIL = "/api/v1/helpdesk/inbound";
+    /** The multipart uploads (see the class comment). */
+    static final java.util.Set<String> UPLOADS = java.util.Set.of("/api/v1/files", "/api/v1/files/ticket");
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         String type = request.getContentType();
-        // Only the file upload may send a big multipart body (it has its own 10 MB limit)
+        // Only the file uploads may send a big multipart body (they have their own 10 MB limit)
         if (type != null && type.toLowerCase(java.util.Locale.ROOT).startsWith("multipart/")
-                && "POST".equals(request.getMethod()) && "/api/v1/files".equals(request.getRequestURI())) {
+                && "POST".equals(request.getMethod()) && UPLOADS.contains(request.getRequestURI())) {
             chain.doFilter(request, response);
             return;
         }

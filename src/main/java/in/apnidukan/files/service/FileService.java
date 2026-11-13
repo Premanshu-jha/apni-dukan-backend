@@ -82,6 +82,10 @@ public class FileService {
             throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE",
                     "The salon video is sent with an upload link (POST /files/video-uploads), not here");
         }
+        if (purpose == FilePurpose.TICKET_FILE) {   // a person's, cleaned and limited there, never a shop's
+            throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE",
+                    "A file for support is sent with POST /files/ticket, not here");
+        }
         requireOwnerFor(user, purpose);
 
         if (upload == null || upload.isEmpty()) {
