@@ -18,8 +18,9 @@ public enum FilePurpose {
     BILL("bills"),
     RECEIPT("receipts"),
     /**
-     * A photo, video or PDF sent with a support ticket (from the apps or the admin website). It belongs to the person
-     * who sent it, not to a shop (its row has no shop); the helpdesk decides who may see it.
+     * Any file (a photo, video, PDF or anything else) sent with a support ticket (from the apps, the admin website or
+     * an email). It belongs to the person who sent it, not to a shop (its row has no shop); the helpdesk decides who may
+     * see it.
      */
     TICKET_FILE("tickets");
 

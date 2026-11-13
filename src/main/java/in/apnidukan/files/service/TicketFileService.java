@@ -30,6 +30,7 @@ import java.time.ZoneId;
 import java.util.HexFormat;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -51,6 +52,11 @@ public class TicketFileService {
     public static final long MAX_FILE_BYTES = FileService.MAX_BYTES;
     public static final long MAX_VIDEO_BYTES = 100L * 1024 * 1024;
     public static final int MAX_PER_DAY = 30;
+    /**
+     * A file of a kind we don't show (anything but a JPEG/PNG photo, a PDF or a video): stored and served as this, and
+     * linked only for download, so it never opens (or runs) in a browser.
+     */
+    public static final String DOWNLOAD_ONLY = "application/octet-stream";
     static final Duration UNUSED_KEPT = Duration.ofHours(24);
     static final int LINK_MINUTES = 15;
     static final int COMPLETE_MINUTES = LINK_MINUTES + 30;
@@ -91,7 +97,7 @@ public class TicketFileService {
         }
         if (upload.getSize() > MAX_FILE_BYTES) {
             throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "FILE_TOO_LARGE",
-                    "A photo or PDF can be at most 10 MB. Send a smaller one, or a screenshot of it.");
+                    "A file can be at most 10 MB (a video 100 MB). Send a smaller one, or a screenshot of it.");
         }
         byte[] bytes;
         try {
@@ -99,19 +105,26 @@ public class TicketFileService {
         } catch (IOException e) {
             throw new UncheckedIOException("Could not read the uploaded file", e);
         }
-        FileType type = FileType.detect(bytes, bytes.length).orElseThrow(() -> ApiException.badRequest(
-                "UNSUPPORTED_FILE_TYPE", "Send a photo (JPEG or PNG), a video or a PDF"));
-        if (type == FileType.WEBP) {
-            throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE", "Photos must be JPEG or PNG");
-        }
-        if (type != FileType.PDF) {
+        // A JPEG or PNG is cleaned to a JPEG and a PDF kept as it is (both shown); anything else (a Word file, a zip,
+        // an iPhone HEIC photo, a WebP) is kept as a plain file, only ever downloaded under its name
+        Optional<FileType> detected = FileType.detect(bytes, bytes.length);
+        String contentType;
+        String extension;
+        if (detected.isPresent() && (detected.get() == FileType.JPEG || detected.get() == FileType.PNG)) {
             bytes = photos.clean(bytes);   // no hidden details (where it was taken, the phone)
-            type = FileType.JPEG;
+            contentType = FileType.JPEG.contentType();
+            extension = FileType.JPEG.extension();
+        } else if (detected.isPresent() && detected.get() == FileType.PDF) {
+            contentType = FileType.PDF.contentType();
+            extension = FileType.PDF.extension();
+        } else {
+            contentType = DOWNLOAD_ONLY;
+            extension = "bin";
         }
         Instant now = clock.instant();
         UUID id = UUID.randomUUID();
-        String key = "%s/%s/%s.%s".formatted(FilePurpose.TICKET_FILE.folder(), user.userId(), id, type.extension());
-        StoredFile file = new StoredFile(id, null, FilePurpose.TICKET_FILE, key, type.contentType(), bytes.length,
+        String key = "%s/%s/%s.%s".formatted(FilePurpose.TICKET_FILE.folder(), user.userId(), id, extension);
+        StoredFile file = new StoredFile(id, null, FilePurpose.TICKET_FILE, key, contentType, bytes.length,
                 sha256(bytes), cleanName(upload.getOriginalFilename()), user.userId(), now);
         // Counted, recorded and queued (due in a day, until a message carries it) under the person's lock, so uploads
         // at the same moment can't pass the daily limit together; if the bytes then fail to go up, the queue deletes
@@ -122,7 +135,7 @@ public class TicketFileService {
             deletions.queueFrom(key, now, now.plus(UNUSED_KEPT));
             files.saveAndFlush(file);
         });
-        storage.put(key, new ByteArrayInputStream(bytes), bytes.length, type.contentType());
+        storage.put(key, new ByteArrayInputStream(bytes), bytes.length, contentType);
         return file;
     }
 

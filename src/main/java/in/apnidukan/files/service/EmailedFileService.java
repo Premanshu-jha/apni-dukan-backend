@@ -107,25 +107,31 @@ public class EmailedFileService implements EmailedFiles {
         return Optional.of(id);
     }
 
-    /** What we keep this as (told from its bytes, not the email's claim), or null when we don't keep it. */
+    /**
+     * What we keep this as (told from its bytes, not the email's claim): a photo (cleaned), a PDF or a video to show;
+     * anything else (Word, Excel, a zip, an iPhone HEIC photo, a forwarded email) as a plain file only ever downloaded.
+     * Null only for an image too small to be one (a logo or pixel) or a file over the size limits.
+     */
     private static Kept kind(byte[] bytes, String claimed) {
         Optional<FileType> type = FileType.detect(bytes, bytes.length);
-        if (type.isPresent()) {
-            return switch (type.get()) {
-                case JPEG, PNG -> bytes.length < MIN_IMAGE_BYTES ? null
-                        : new Kept(FileType.JPEG.contentType(), FileType.JPEG.extension(), true);
-                case PDF -> bytes.length > TicketFileService.MAX_FILE_BYTES ? null
-                        : new Kept(FileType.PDF.contentType(), FileType.PDF.extension(), false);
-                default -> null;   // WebP and anything else photos can't be cleaned from
-            };
+        if (type.isPresent() && (type.get() == FileType.JPEG || type.get() == FileType.PNG)) {
+            return bytes.length < MIN_IMAGE_BYTES ? null
+                    : new Kept(FileType.JPEG.contentType(), FileType.JPEG.extension(), true);
+        }
+        if (type.isPresent() && type.get() == FileType.PDF) {
+            return bytes.length > TicketFileService.MAX_FILE_BYTES ? null
+                    : new Kept(FileType.PDF.contentType(), FileType.PDF.extension(), false);
         }
         Optional<VideoFormat> video = VideoFormat.ofContentType(claimed == null ? "" : claimed);
-        if (video.isEmpty() || bytes.length > MAX_EMAILED_VIDEO_BYTES) {
-            return null;
+        if (video.isPresent() && bytes.length <= MAX_EMAILED_VIDEO_BYTES) {
+            byte[] head = java.util.Arrays.copyOf(bytes, Math.min(bytes.length, VideoFormat.HEAD_BYTES));
+            if (VideoFormat.looksLike(video.get(), head)) {
+                return new Kept(video.get().contentType(), video.get().extension(), false);
+            }
         }
-        byte[] head = java.util.Arrays.copyOf(bytes, Math.min(bytes.length, VideoFormat.HEAD_BYTES));
-        return VideoFormat.looksLike(video.get(), head)
-                ? new Kept(video.get().contentType(), video.get().extension(), false) : null;
+        // Anything else: kept to download (an email is at most 25 MB, so this is too)
+        return bytes.length > MAX_EMAILED_VIDEO_BYTES ? null
+                : new Kept(TicketFileService.DOWNLOAD_ONLY, "bin", false);
     }
 
     private record Kept(String contentType, String extension, boolean photo) {
