@@ -17,10 +17,10 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Every hour: the photos, videos and PDFs of tickets resolved more than {@link TicketService#FILES_KEPT} ago are
- * deleted (their words stay; "removed" shows in their place). They may show faces, bills and addresses, and nobody
- * needs them by then. {@value #SLICE} at a time, each slice in its own transaction, on one server at a time. A ticket
- * opened again before then keeps its files (it is no longer resolved).
+ * Every hour: the files of tickets resolved more than {@link TicketService#FILES_KEPT} ago, or never resolved and
+ * last written on that long ago, are deleted (their words stay; "removed" shows in their place). They may show faces,
+ * bills and addresses, and nobody needs them by then. {@value #SLICE} at a time, each slice in its own transaction, on
+ * one server at a time. A ticket opened again before then keeps its files (it is no longer resolved).
  */
 @Component
 public class TicketFileRetentionJob {
@@ -61,7 +61,7 @@ public class TicketFileRetentionJob {
         while (removed < MAX_PER_RUN) {
             Integer done = transactions.execute(status -> {
                 Instant now = clock.instant();
-                List<UUID> due = store.filesResolvedBefore(now.minus(TicketService.FILES_KEPT), SLICE);
+                List<UUID> due = store.filesExpired(now.minus(TicketService.FILES_KEPT), SLICE);
                 for (UUID id : due) {
                     files.release(id);   // the row now, the bytes queued (FileDeletionJob)
                     store.fileRemoved(id, now);
