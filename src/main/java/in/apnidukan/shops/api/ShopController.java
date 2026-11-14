@@ -214,9 +214,10 @@ public class ShopController {
     }
 
     /**
-     * Set a salon's registration document (owner): its type and a REG_DOC upload (photo or PDF). Send the version
-     * from GET /shops/me. Optional; an approved salon stays live, and customers see "Registered" once the field team
-     * has checked the new document.
+     * Set a salon's trade licence (owner): {"version", "type": "TRADE_LICENCE", "fileId"} (a REG_DOC upload, photo or
+     * PDF). Send the version from GET /shops/me. Optional; an approved salon stays live. It is checked automatically
+     * (licenceCheck PENDING, then PASSED or FAILED with licenceCheckReason); customers see "Licensed" once it passed.
+     * The same file again after it FAILED is checked again. 400 VALIDATION_FAILED naming type for any other type.
      */
     @PutMapping("/me/registration-document")
     public ShopResponse setRegistrationDoc(@Valid @RequestBody ShopRequests.SetRegistrationDoc body) {
@@ -251,7 +252,7 @@ public class ShopController {
 
     /**
      * Remove a salon's registration document (owner): `?version=` from GET /shops/me (409 SHOP_CHANGED if stale).
-     * Customers see "Unregistered" from now on; the salon stays as it is. 409 NOT_A_SALON for a kirana.
+     * No "Licensed" badge from now on; the salon stays as it is. 409 NOT_A_SALON for a kirana.
      */
     @DeleteMapping("/me/registration-document")
     public ShopResponse removeRegistrationDoc(@RequestParam long version) {

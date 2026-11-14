@@ -51,9 +51,8 @@ public final class BookingResponses {
      * @param today         today's opening hours; null if closed today or the salon hasn't set hours
      * @param openNow       true while open right now; false if closed now (or all day); null if no hours are set
      * @param closedToday   true on its weekly off or a closed day (holiday)
-     * @param registered    true if the salon has its registration document (shops and establishments certificate,
-     *                      trade licence or Udyam), checked by the field team; the card says "Registered", else
-     *                      "Unregistered"
+     * @param registered    true if the salon's trade licence passed the automatic check and is still valid today:
+     *                      the card says "Licensed"; false: no badge (the name is kept for older apps)
      * @param offer         the salon's offer running now or coming next (the card's badge); null if none
      */
     public record SalonSummary(UUID id, String name, String addressLine, String area, String city, double distanceKm,
@@ -121,11 +120,14 @@ public final class BookingResponses {
      * @param offers       its offers running now or still to come, soonest first
      * @param offerMessages whether this customer gets its offer messages: null if they haven't completed a visit
      *                     there (they don't get them anyway); otherwise false once they stopped them for this salon
+     * @param licensedUntil its trade licence's last valid day, when it passed our automatic check and is valid today
+     *                      (the page says "Licensed"); null otherwise
      */
     public record SalonDetails(UUID id, String name, String addressLine, String area, String city, String pincode,
                                BigDecimal latitude, BigDecimal longitude, String mapLink, List<DayHours> hours,
                                Instant pausedUntil, String photoUrl, int maxDaysAhead, List<LocalDate> closedDates,
-                               RatingSummary rating, List<OfferView> offers, Boolean offerMessages) {
+                               RatingSummary rating, List<OfferView> offers, Boolean offerMessages,
+                               LocalDate licensedUntil) {
 
         public SalonDetails {
             hours = List.copyOf(hours);

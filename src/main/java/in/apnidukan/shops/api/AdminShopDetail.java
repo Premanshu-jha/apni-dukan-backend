@@ -1,6 +1,8 @@
 package in.apnidukan.shops.api;
 
 import in.apnidukan.common.context.SalonFacts;
+import in.apnidukan.shops.domain.LicenceCheckReason;
+import in.apnidukan.shops.domain.LicenceCheckStatus;
 import in.apnidukan.shops.domain.RegistrationDocType;
 import in.apnidukan.shops.domain.ShopEventType;
 import in.apnidukan.shops.domain.VisitIssue;
@@ -63,13 +65,22 @@ public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> 
     }
 
     /**
-     * A salon's registration document, for the field team only.
-     * @param type  SHOPS_ESTABLISHMENT, TRADE_LICENCE or UDYAM
+     * A salon's registration document and its automatic check, for the field team only.
+     * @param type  TRADE_LICENCE (SHOPS_ESTABLISHMENT or UDYAM: one added before; it no longer counts)
      * @param label how to name it, e.g. "Trade licence"
      * @param url   a link to the photo or PDF (valid at least 15 more minutes); null if the file is gone
-     * @param checkedAt when the field team checked this document (customers then see "Registered"); null: not yet
+     * @param checkedAt when it passed the automatic check; null: not (yet)
+     * @param check PENDING (being checked, or no AI key set yet), PASSED, FAILED
+     * @param reason why it FAILED; null otherwise
+     * @param licenceNumber the number it passed with; null otherwise
+     * @param validUntil its last valid day once PASSED (customers see "Licensed" until then); null otherwise
+     * @param read what the AI read from it (LicenceExtract's fields); null if not read
+     * @param since when this check started (a PENDING one has waited since then)
      */
-    public record RegistrationDoc(RegistrationDocType type, String label, String url, java.time.Instant checkedAt) {
+    public record RegistrationDoc(RegistrationDocType type, String label, String url, java.time.Instant checkedAt,
+                                  LicenceCheckStatus check, LicenceCheckReason reason, String licenceNumber,
+                                  java.time.LocalDate validUntil, tools.jackson.databind.JsonNode read,
+                                  java.time.Instant since) {
     }
 
     /**
