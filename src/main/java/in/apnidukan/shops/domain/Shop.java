@@ -9,17 +9,26 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import org.hibernate.annotations.DynamicUpdate;
+import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.envers.Audited;
 import org.hibernate.envers.NotAudited;
+import org.hibernate.type.SqlTypes;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.UUID;
 
-/** A shop: a kirana or a salon. Every version is kept in shops_aud (Envers). */
+/**
+ * A shop: a kirana or a salon. Every version is kept in shops_aud (Envers). Saved with @DynamicUpdate (only the
+ * columns that changed): the licence check's answer is written by LicenceCheckStore meanwhile, and an owner saving
+ * something else must not write the old answer back.
+ */
 @Entity
 @Table(name = "shops")
 @Audited
+@DynamicUpdate
 public class Shop {
 
     /** Filled in by Hibernate when the row is first saved (a random UUID). */
@@ -90,9 +99,60 @@ public class Shop {
     @Column(name = "registration_doc_file_id")
     private UUID registrationDocFileId;
 
-    /** When the field team checked this document; null until then (customers see "Registered" only once checked). */
+    /** When the document passed the automatic licence check (LicenceCheckStore); null until then or if it failed. */
     @Column(name = "registration_doc_checked_at")
     private Instant registrationDocCheckedAt;
+
+    /** The automatic check of the document (V55): null without one, PENDING until LicenceCheckJob answers. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "licence_check_status", length = 10)
+    @NotAudited
+    private LicenceCheckStatus licenceCheckStatus;
+
+    /** Why it FAILED; null otherwise. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "licence_check_reason", length = 30)
+    @NotAudited
+    private LicenceCheckReason licenceCheckReason;
+
+    /** The licence number read from it, once PASSED (one salon each). */
+    @Column(name = "licence_number", length = 40)
+    @NotAudited
+    private String licenceNumber;
+
+    /** Its last valid day, once PASSED: customers see "Licensed" until then. */
+    @Column(name = "licence_valid_until")
+    @NotAudited
+    private LocalDate licenceValidUntil;
+
+    /** What the AI read from it (JSON, for the admin page); null until read. */
+    @Column(name = "licence_extract")
+    @JdbcTypeCode(SqlTypes.JSON)
+    @NotAudited
+    private String licenceExtract;
+
+    @Column(name = "licence_check_attempts", nullable = false)
+    @NotAudited
+    private int licenceCheckAttempts;
+
+    @Column(name = "licence_check_unusable", nullable = false)
+    @NotAudited
+    private int licenceCheckUnusable;
+
+    /** When this check started (how long it has been waiting). */
+    @Column(name = "licence_check_since")
+    @NotAudited
+    private Instant licenceCheckSince;
+
+    /** Messages sent about its last day: 1 (a month before), 2 (expired). */
+    @Column(name = "licence_expiry_notice", nullable = false)
+    @NotAudited
+    private short licenceExpiryNotice;
+
+    /** When the job reads it next (PENDING only). */
+    @Column(name = "licence_check_due_at")
+    @NotAudited
+    private Instant licenceCheckDueAt;
 
     /**
      * When a live shop started waiting for the field team's re-check (its owner changed what they checked); null when
@@ -172,8 +232,9 @@ public class Shop {
     }
 
     /**
-     * Sets the registration document (both set, or both null to remove it). Not checked yet: the field team checks
-     * it at the next visit or with "Mark as checked". A change of its kind alone counts as new too.
+     * Sets the registration document (both set, or both null to remove it). A new one waits for the automatic licence
+     * check (PENDING, due now, any earlier answer gone); removing it ends the check. A change of its kind alone counts
+     * as new too.
      */
     public void setRegistrationDoc(RegistrationDocType type, UUID fileId, Instant now) {
         if ((type == null) != (fileId == null)) {
@@ -182,15 +243,31 @@ public class Shop {
         this.registrationDocType = type;
         this.registrationDocFileId = fileId;
         this.registrationDocCheckedAt = null;
+        this.licenceCheckStatus = fileId == null ? null : LicenceCheckStatus.PENDING;
+        this.licenceCheckReason = null;
+        this.licenceNumber = null;
+        this.licenceValidUntil = null;
+        this.licenceExtract = null;
+        this.licenceCheckAttempts = 0;
+        this.licenceCheckUnusable = 0;
+        this.licenceCheckDueAt = fileId == null ? null : now;
+        this.licenceCheckSince = fileId == null ? null : now;
+        this.licenceExpiryNotice = 0;
         this.updatedAt = now;
     }
 
-    /** The field team checked the document now there. Does nothing without one. */
-    public void markRegistrationDocChecked(Instant now) {
-        if (registrationDocFileId != null) {
-            this.registrationDocCheckedAt = now;
-            this.updatedAt = now;
+    /**
+     * Checks the trade licence there again (PENDING, due now, the earlier answer gone): the salon's name, owner or
+     * address changed (the answer was about the old ones), or the field team asked. False (nothing changed) without
+     * one, or for a document of another kind (a Udyam or Shops and Establishments certificate added before only a
+     * trade licence counted: it stays FAILED NOT_TRADE_LICENCE and is never sent to the AI).
+     */
+    public boolean restartLicenceCheck(Instant now) {
+        if (registrationDocFileId == null || registrationDocType != RegistrationDocType.TRADE_LICENCE) {
+            return false;
         }
+        setRegistrationDoc(registrationDocType, registrationDocFileId, now);
+        return true;
     }
 
     /** What the field team needs before a visit: both photos, and for a salon its video too. */
@@ -287,17 +364,12 @@ public class Shop {
             throw new IllegalStateException("Only a shop waiting for a visit or a re-check can be approved, not "
                     + status);
         }
-        boolean liveRecheck = status == ShopStatus.APPROVED;
         this.recheckSince = null;   // a live shop's re-check: its changes are checked now
         this.checks++;
         this.status = ShopStatus.APPROVED;
         this.statusReason = null;
         this.updatedAt = now;
-        // A visit checks the document there; a live shop's re-check doesn't (a document added meanwhile waits for
-        // its own check, ShopAdminService.markDocumentChecked)
-        if (!liveRecheck && registrationDocFileId != null && registrationDocCheckedAt == null) {
-            this.registrationDocCheckedAt = now;
-        }
+        // The registration document isn't part of the visit: the automatic licence check decides on it
     }
 
     /**
@@ -351,6 +423,8 @@ public class Shop {
         this.recheckSince = null;
         this.status = ShopStatus.CLOSED;
         this.statusReason = reason;
+        // Never opened again: its licence goes, so its number never blocks a new registration of the same business
+        setRegistrationDoc(null, null, now);
         this.updatedAt = now;
     }
 
@@ -370,6 +444,12 @@ public class Shop {
     public UUID getRegistrationDocFileId() { return registrationDocFileId; }
     public Instant getRegistrationDocCheckedAt() { return registrationDocCheckedAt; }
     public Instant getRecheckSince() { return recheckSince; }
+    public LicenceCheckStatus getLicenceCheckStatus() { return licenceCheckStatus; }
+    public LicenceCheckReason getLicenceCheckReason() { return licenceCheckReason; }
+    public String getLicenceNumber() { return licenceNumber; }
+    public LocalDate getLicenceValidUntil() { return licenceValidUntil; }
+    public String getLicenceExtract() { return licenceExtract; }
+    public Instant getLicenceCheckSince() { return licenceCheckSince; }
     public boolean isEverApproved() { return everApproved; }
     public long getVersion() { return version; }
     public Instant getCreatedAt() { return createdAt; }
