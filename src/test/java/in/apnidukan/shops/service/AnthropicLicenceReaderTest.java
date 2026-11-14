@@ -62,17 +62,18 @@ class AnthropicLicenceReaderTest {
         }
     }
 
-    static String toolAnswer(String input) {
+    /** An answer as structured outputs give it: thinking first, then the JSON as the text block's text. */
+    static String answer(String input) {
+        String text = JSON.createObjectNode().put("t", input.replace("\n", " ")).path("t").toString();
         return """
-                {"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-5-5","stop_reason":"tool_use",
-                 "content":[{"type":"text","text":"Reading it."},
-                            {"type":"tool_use","id":"toolu_1","name":"record_licence","input":%s}],
-                 "usage":{"input_tokens":10,"output_tokens":10},"something_new":true}""".formatted(input);
+                {"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-5-5","stop_reason":"end_turn",
+                 "content":[{"type":"thinking","thinking":"","signature":"x"},{"type":"text","text":%s}],
+                 "usage":{"input_tokens":10,"output_tokens":10},"something_new":true}""".formatted(text);
     }
 
     @Test
-    void sendsThePhotoWithTheOneToolItMustCallAndReadsTheFacts() throws IOException {
-        body = toolAnswer("""
+    void sendsThePhotoWithTheJsonShapeItMustAnswerInAndReadsTheFacts() throws IOException {
+        body = answer("""
                 {"readable":true,"tradeLicence":true,"looksEdited":false,"provisional":false,"salonTrade":true,
                  "issuingBody":"Greater Hyderabad Municipal Corporation","licenceNumber":"TR-0934-422-0003",
                  "tradeName":"  Sharma Hair Studio ","ownerName":"Ravi","address":"Shop 4, Kondapur","pincode":"500084",
@@ -91,8 +92,15 @@ class AnthropicLicenceReaderTest {
         assertThat(versionHeader.get()).isEqualTo("2023-06-01");
         JsonNode sent = JSON.readTree(request.get());
         assertThat(sent.path("model").asString()).isEqualTo("claude-sonnet-5-5");
-        assertThat(sent.path("tool_choice").path("name").asString()).isEqualTo("record_licence");
-        assertThat(sent.path("tools").get(0).path("input_schema").path("required").size()).isEqualTo(13);
+        // Structured outputs, never forced tool use (Sonnet 5.5 refuses tool_choice "tool" with a 400) or temperature
+        assertThat(sent.has("tool_choice")).isFalse();
+        assertThat(sent.has("tools")).isFalse();
+        assertThat(sent.has("temperature")).isFalse();
+        assertThat(sent.path("output_config").path("effort").asString()).isEqualTo("low");
+        JsonNode schema = sent.path("output_config").path("format").path("schema");
+        assertThat(sent.path("output_config").path("format").path("type").asString()).isEqualTo("json_schema");
+        assertThat(schema.path("required").size()).isEqualTo(13);
+        assertThat(schema.path("additionalProperties").asBoolean(true)).isFalse();
         JsonNode file = sent.path("messages").get(0).path("content").get(0);
         assertThat(file.path("type").asString()).isEqualTo("image");
         assertThat(file.path("source").path("media_type").asString()).isEqualTo("image/jpeg");
@@ -101,7 +109,7 @@ class AnthropicLicenceReaderTest {
 
     @Test
     void aPdfGoesAsADocumentAndMissingOrBadValuesAreNull() throws IOException {
-        body = toolAnswer("""
+        body = answer("""
                 {"readable":true,"tradeLicence":false,"looksEdited":false,"provisional":false,"salonTrade":false,
                  "issuingBody":null,"licenceNumber":"","tradeName":null,"ownerName":null,"address":null,
                  "pincode":null,"tradeCategory":null,"validUntil":"31/03/2027"}""");
@@ -135,6 +143,15 @@ class AnthropicLicenceReaderTest {
                 .isInstanceOf(LicenceReader.ReaderUnavailableException.class);
         httpStatus = 200;
         body = "{\"content\":[{\"type\":\"text\",\"text\":\"I can't help with that.\"}]}";
+        assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
+                .isInstanceOf(LicenceReader.UnusableAnswerException.class);
+        body = answer("{\"readable\":true}").replace("end_turn", "refusal");   // may not match the shape
+        assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
+                .isInstanceOf(LicenceReader.UnusableAnswerException.class);
+        body = answer("{\"readable\":true}").replace("end_turn", "max_tokens");   // cut off
+        assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
+                .isInstanceOf(LicenceReader.UnusableAnswerException.class);
+        body = "{\"content\":[]}";
         assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
                 .isInstanceOf(LicenceReader.UnusableAnswerException.class);
         body = "not json";
