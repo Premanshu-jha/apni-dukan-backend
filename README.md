@@ -1532,8 +1532,14 @@ cancelling after it is a strike, at it is not); 3 strikes within 60 days block o
 `TOO_MANY_CHANGES`): each one messages the salon, so a book-and-cancel loop can't flood it or use up the SMS
 budget. Only changes that happened count; a refused attempt (a taken time, a closed day) never uses one up. One
 person can't hold two bookings at the same time (409 `OVERLAPS_YOUR_BOOKING`), booking or moving. The free times
-for a move (`GET /salons/{id}/availability?...&moving={bookingId}`, the customer's own booking only, else 404)
-count that booking's own time as free, so it can move by a few minutes. One person's bookings run one after the other (an advisory lock),
+for a move (`GET /salons/{id}/availability?...&moving={bookingId}`, the customer's own booking at that salon only, else 404)
+count that booking's own time as free, so it can move by a few minutes, and are for the services and lengths it was
+booked with (what the move keeps), not the salon's current ones: a haircut booked at 30 minutes and since made 45
+still moves as 30 (`durationMinutes` says 30), and a service switched off since doesn't stop its free times showing.
+A booking that can't move any more (cancelled, done, started) gets 409 `WRONG_STATUS` there, as reschedule would
+answer (no extra read: the booking is already read). Times that overlap the customer's own other booking are left
+out by the customer app from the bookings it already holds, not here: a read here would add a statement to every
+free-time check (see "Built for scale"); booking one is still refused 409 `OVERLAPS_YOUR_BOOKING`. One person's bookings run one after the other (an advisory lock),
 so tapping twice can't pass these limits.
 
 **Messages:** written to `notification_jobs` in the same transaction as the change; a job every 2 s sends what is
