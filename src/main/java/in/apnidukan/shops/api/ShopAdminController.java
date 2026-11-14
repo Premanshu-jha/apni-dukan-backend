@@ -196,19 +196,19 @@ public class ShopAdminController {
         return admin.reinstate(caller(), id, body.version(), body.note());
     }
 
-    /** Live salons with a new registration document to check (super admins), oldest change first, at most 100. */
-    @GetMapping("/shops/documents-to-check")
-    public List<AdminShopResponse> documentsToCheck() {
-        return admin.documentsToCheck(caller());
+    /**
+     * Send the salon's trade licence for the automatic check again. {"version"}. 409 NO_DOCUMENT, NOT_TRADE_LICENCE,
+     * SHOP_CHANGED, WRONG_STATUS (closed).
+     */
+    @PostMapping("/shops/{id}/registration-document/recheck")
+    public AdminShopResponse recheckLicence(@PathVariable UUID id, @Valid @RequestBody Approve body) {
+        return admin.recheckLicence(caller(), id, body.version());
     }
 
-    /**
-     * The salon's registration document is checked: customers see "Registered". {"version", "note"?}. 409
-     * NO_DOCUMENT, SHOP_CHANGED (the owner changed the shop since: maybe a new document), WRONG_STATUS (closed).
-     */
-    @PostMapping("/shops/{id}/registration-document/check")
-    public AdminShopResponse checkDocument(@PathVariable UUID id, @Valid @RequestBody Approve body) {
-        return admin.markDocumentChecked(caller(), id, body.version(), body.note());
+    /** Super admins: licences not accepted, or waiting over half an hour, longest first (at most 100). */
+    @GetMapping("/shops/licences-to-follow-up")
+    public List<AdminShopResponse> licencesToFollowUp() {
+        return admin.licencesToFollowUp(caller());
     }
 
     /**

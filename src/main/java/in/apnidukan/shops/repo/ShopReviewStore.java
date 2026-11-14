@@ -94,16 +94,6 @@ public class ShopReviewStore {
     }
 
     /**
-     * Live salons with a registration document not checked yet, oldest change first
-     * (ix_shops_registration_doc_to_check).
-     */
-    public List<UUID> documentsToCheck(int limit) {
-        return jdbc.queryForList("SELECT id FROM shops WHERE registration_doc_file_id IS NOT NULL "
-                + "AND registration_doc_checked_at IS NULL AND status = 'APPROVED' ORDER BY updated_at, id LIMIT ?",
-                UUID.class, limit);
-    }
-
-    /**
      * One page of shop ids in a group, longest in it first (status_since, then id), at most PAGE, after the cursor
      * (null: the first page). `q` (optional) matches the shop number exactly ("1042" or "#1042"), the owner's phone in
      * part (spaces, "+91" and dashes ignored), or the name or owner's name in part. {@code assignee}: only the shops

@@ -43,7 +43,8 @@ public record AdminShopResponse(UUID id, long shopCode, String name, String owne
                 d.area(), d.city(), d.pincode(), d.latitude(), d.longitude(), shop.getType(), shop.getStatus(),
                 shop.getStatusReason(), ownerPhotoUrl, shopPhotoUrl, shop.getVersion(), shop.getCreatedAt(),
                 ReviewGroup.of(shop.getStatus(), shop.getStatusReason(), everApproved, shop.getRecheckSince() != null),
-                ownerPhone, d.gstin(), d.udyamNumber(), statusSince == null ? shop.getCreatedAt() : statusSince,
+                ownerPhone, shop.getType() == ShopType.SALON ? null : d.gstin(),
+                shop.getType() == ShopType.SALON ? null : d.udyamNumber(), statusSince == null ? shop.getCreatedAt() : statusSince,
                 assignedTo, shop.waitingForVisit(), addressRequested);
     }
 

@@ -17,7 +17,9 @@ public final class TestData {
     public static void clean(JdbcTemplate jdbc) {
         // Photos point at files and files point at shops: let go of the photos first
         jdbc.update("UPDATE shops SET owner_photo_file_id = NULL, shop_photo_file_id = NULL, shop_video_file_id = NULL, "
-                + "registration_doc_type = NULL, registration_doc_file_id = NULL, registration_doc_checked_at = NULL");
+                + "registration_doc_type = NULL, registration_doc_file_id = NULL, registration_doc_checked_at = NULL, "
+                + "licence_check_status = NULL, licence_check_reason = NULL, licence_number = NULL, "
+                + "licence_valid_until = NULL, licence_extract = NULL, licence_check_due_at = NULL");
         jdbc.update("UPDATE salon_staff SET photo_file_id = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
         for (String table : new String[] {"ticket_emails", "ticket_events", "ticket_messages", "tickets", "salon_ratings", "salon_rating_totals", "visit_follow_ups",
@@ -96,8 +98,8 @@ public final class TestData {
         jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
                 + "uploaded_by, created_at) VALUES (?, ?, 'REG_DOC', ?, 'image/jpeg', 10, ?, ?, now())", doc, shopId,
                 "test/" + doc + ".jpg", doc.toString().replace("-", "") + "0".repeat(32), ownerId);
-        jdbc.update("UPDATE shops SET registration_doc_type = 'TRADE_LICENCE', registration_doc_file_id = ? "
-                + "WHERE id = ?", doc, shopId);
+        jdbc.update("UPDATE shops SET registration_doc_type = 'TRADE_LICENCE', registration_doc_file_id = ?, "
+                + "licence_check_status = 'PENDING', licence_check_due_at = now() WHERE id = ?", doc, shopId);
         jdbc.update("INSERT INTO salon_services (id, shop_id, name, duration_min, price_paise, price_is_from, active, "
                 + "sort_order, version, created_at, updated_at) VALUES (?, ?, 'Haircut', 30, 15000, false, true, 0, 0, "
                 + "now(), now())", UUID.randomUUID(), shopId);

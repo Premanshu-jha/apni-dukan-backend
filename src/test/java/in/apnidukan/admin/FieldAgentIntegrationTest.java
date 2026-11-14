@@ -472,8 +472,9 @@ class FieldAgentIntegrationTest {
         UUID sita = agent("9800000002", "500081");
         UUID shop = waitingSalon("500084");
         approveAs(shop, ravi);
-        // An approved salon's owner gives a new GSTIN: it stays live and waits for a re-check, by the rule
-        Reply edited = patch("/shops/me", Map.of("version", version(shop), "gstin", "27AAPFU0939F1ZV"), ownerOf(shop));
+        // An approved salon's owner sends a new photo: it stays live and waits for a re-check, by the rule
+        Reply edited = put("/shops/me/photos", Map.of("version", version(shop), "shopPhotoFileId",
+                file(shop, ownerOf(shop), "SHOP_PHOTO", "image/jpeg").toString()), ownerOf(shop));
         assertThat(field(edited.body(), "status")).as(edited.text()).isEqualTo("APPROVED");
         assertThat(field(edited.body(), "recheckSince")).isNotNull();
         assertThat(assignee(shop)).isEqualTo(ravi);
@@ -1022,6 +1023,9 @@ class FieldAgentIntegrationTest {
     }
 
     private Reply put(String path, Object body, UUID who) {
+        if (path.startsWith("/shops/me")) {
+            TestData.unlockEditing(jdbc, redis);   // the code before editing a verified shop: tested in AdminIT
+        }
         return call(HttpMethod.PUT, path, body, token(who));
     }
 

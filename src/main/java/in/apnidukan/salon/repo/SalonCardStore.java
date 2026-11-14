@@ -32,7 +32,7 @@ public class SalonCardStore {
      * @param closedDay  today is one of its closed days (holidays)
      * @param services   its active services that an active barber does
      * @param top        the first TOP_SERVICES of them in the salon's order
-     * @param registered the salon has a registration document (optional) and the field team has checked it
+     * @param registered the salon's trade licence (optional) passed the automatic check and is valid that day
      * @param worksToday a working barber has hours on today's weekday (none: the salon is closed today, whatever its
      *                   opening hours say)
      * @param offer      its offer running today or coming next (not ended early, its last day today or later, some
@@ -60,8 +60,8 @@ public class SalonCardStore {
                 h.open_min, h.close_min,
                 EXISTS (SELECT 1 FROM salon_closed_days c WHERE c.shop_id = u.id
                         AND c.starts_at >= ? AND c.starts_at < ?) AS closed_day,
-                EXISTS (SELECT 1 FROM shops r WHERE r.id = u.id AND r.registration_doc_file_id IS NOT NULL
-                        AND r.registration_doc_checked_at IS NOT NULL) AS registered,
+                EXISTS (SELECT 1 FROM shops r WHERE r.id = u.id AND r.licence_check_status = 'PASSED'
+                        AND r.licence_valid_until >= ?) AS registered,
                 EXISTS (SELECT 1 FROM salon_staff w JOIN staff_hours wh ON wh.staff_id = w.id
                         WHERE w.shop_id = u.id AND w.active AND wh.weekday = h.weekday) AS works_today,
                 sv.n, sv.names, sv.prices, sv.froms, f.percent_off, f.starts_on, f.ends_on
@@ -91,6 +91,15 @@ public class SalonCardStore {
     }
 
     /**
+     * The last valid day of the salon's trade licence if it passed the automatic check and is still valid
+     * {@code today} (the salon's page says "Licensed until …"); empty otherwise. One primary-key read.
+     */
+    public java.util.Optional<LocalDate> licensedUntil(UUID shopId, LocalDate today) {
+        return jdbc.queryForList("SELECT licence_valid_until FROM shops WHERE id = ? AND licence_check_status = 'PASSED' "
+                + "AND licence_valid_until >= ?", LocalDate.class, shopId, today).stream().findFirst();
+    }
+
+    /**
      * The card facts of these salons for one India day.
      * @param weekday  that day's weekday (1 = Monday)
      * @param dayStart that day's first moment
@@ -106,9 +115,10 @@ public class SalonCardStore {
         jdbc.query(SQL, ps -> {
             ps.setObject(1, AppointmentStore.at(dayStart));
             ps.setObject(2, AppointmentStore.at(dayEnd));
-            ps.setArray(3, ps.getConnection().createArrayOf("uuid", shopIds.toArray()));
-            ps.setInt(4, weekday);
-            ps.setObject(5, today);
+            ps.setObject(3, today);
+            ps.setArray(4, ps.getConnection().createArrayOf("uuid", shopIds.toArray()));
+            ps.setInt(5, weekday);
+            ps.setObject(6, today);
         }, rs -> {
             List<Top> top = new ArrayList<>();
             Object[] names = array(rs.getArray("names"));

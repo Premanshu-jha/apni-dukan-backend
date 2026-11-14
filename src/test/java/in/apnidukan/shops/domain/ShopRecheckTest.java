@@ -82,6 +82,35 @@ class ShopRecheckTest {
         shop.requestRecheck(T0);
         shop.approve(T0.plusSeconds(60));
         assertThat(shop.getRegistrationDocCheckedAt()).isNull();   // it waits for its own check
+        assertThat(shop.getLicenceCheckStatus()).isEqualTo(LicenceCheckStatus.PENDING);
+    }
+
+    @Test
+    void aNewDocumentWaitsForTheLicenceCheckAndRemovingItEndsTheCheck() {
+        Shop shop = liveSalon();
+        assertThat(shop.restartLicenceCheck(T0)).isFalse();   // nothing to check
+        assertThat(shop.getLicenceCheckStatus()).isNull();
+        UUID file = UUID.randomUUID();
+        shop.setRegistrationDoc(RegistrationDocType.TRADE_LICENCE, file, T0);
+        assertThat(shop.getLicenceCheckStatus()).isEqualTo(LicenceCheckStatus.PENDING);
+        assertThat(shop.getLicenceCheckReason()).isNull();
+        assertThat(shop.restartLicenceCheck(T0.plusSeconds(60))).isTrue();
+        assertThat(shop.getLicenceCheckStatus()).isEqualTo(LicenceCheckStatus.PENDING);
+        assertThat(shop.getRegistrationDocFileId()).isEqualTo(file);
+        shop.setRegistrationDoc(null, null, T0.plusSeconds(120));
+        assertThat(shop.getLicenceCheckStatus()).isNull();
+        assertThat(shop.getLicenceNumber()).isNull();
+        assertThat(shop.getLicenceValidUntil()).isNull();
+        assertThatThrownBy(() -> shop.setRegistrationDoc(RegistrationDocType.TRADE_LICENCE, null, T0))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        // Another kind of document is never checked again; closing lets go of the licence
+        shop.setRegistrationDoc(RegistrationDocType.UDYAM, file, T0);
+        assertThat(shop.restartLicenceCheck(T0)).isFalse();
+        shop.setRegistrationDoc(RegistrationDocType.TRADE_LICENCE, file, T0);
+        shop.close(null, T0.plusSeconds(180));
+        assertThat(shop.getRegistrationDocFileId()).isNull();
+        assertThat(shop.getLicenceCheckStatus()).isNull();
     }
 
     @Test

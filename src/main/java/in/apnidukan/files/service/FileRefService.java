@@ -71,6 +71,12 @@ public class FileRefService implements FileRefs {
     }
 
     @Override
+    public Optional<byte[]> read(UUID fileId, long maxBytes) {
+        // One short read of the row (no transaction kept open while the bytes download)
+        return repository.findById(fileId).map(f -> storage.read(f.getStorageKey(), maxBytes));
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public Optional<FileRef> find(UUID fileId) {
         return repository.findById(fileId).map(f -> new FileRef(f.getId(), f.getShopId(), f.getPurpose().name(),

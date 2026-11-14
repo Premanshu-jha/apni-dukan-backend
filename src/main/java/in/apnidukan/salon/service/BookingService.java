@@ -292,7 +292,8 @@ public class BookingService {
         return new SalonDetails(card.id(), card.name(), card.addressLine(), card.area(), card.city(), card.pincode(),
                 card.latitude(), card.longitude(), SalonNotices.mapLink(card), hours,
                 current.pausedAt(now) ? current.pausedUntil() : null, photo(card), current.setup().maxDaysAhead(),
-                closed, ratingSummary(ratings.totals(salonId), true), running, offerMessages);
+                closed, ratingSummary(ratings.totals(salonId), true), running, offerMessages,
+                cards.licensedUntil(salonId, LocalDate.ofInstant(now, SalonTime.ZONE)).orElse(null));
     }
 
     /** The salon's active services that at least one active barber does, in the salon's order. */
