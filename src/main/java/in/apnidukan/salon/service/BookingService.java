@@ -310,7 +310,7 @@ public class BookingService {
                 .map(s -> new SalonService(s.serviceId(), s.name(), s.durationMin(), s.pricePaise(), s.priceIsFrom(),
                         running.stream().filter(o -> o.covers(s.serviceId()))
                                 .max(Comparator.comparingInt(SalonOffer::percentOff))
-                                .map(o -> o.priceOf(s.pricePaise())).orElse(null)))
+                                .map(o -> o.priceOf(s.pricePaise())).orElse(null), setup.icon(s.serviceId())))
                 .toList();
     }
 

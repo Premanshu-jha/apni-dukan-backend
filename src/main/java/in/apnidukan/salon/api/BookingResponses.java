@@ -146,7 +146,7 @@ public final class BookingResponses {
      *                        that offer's days and hours: the free times give each start's price); null if none
      */
     public record SalonService(UUID id, String name, int durationMinutes, long pricePaise, boolean priceIsFrom,
-                               Long offerPricePaise) {
+                               Long offerPricePaise, String icon) {
     }
 
     /**
@@ -341,6 +341,16 @@ public final class BookingResponses {
     }
 
     public record HoursBlock(String start, String end) {
+    }
+
+    /**
+     * What a service costs for a walk-in starting now: {@code pricePaise} is what the customer pays (the salon's offer
+     * price when one applies now, as for a booking starting now), {@code listPricePaise} its own price when an offer
+     * applies (null otherwise), and {@code offerUntil} the India time today the offer's hours end ("14:00"; null when
+     * no offer applies or it runs all day).
+     */
+    public record WalkInPrice(UUID serviceId, long pricePaise, boolean priceIsFrom, Long listPricePaise,
+                              String offerUntil) {
     }
 
     /**

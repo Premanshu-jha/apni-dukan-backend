@@ -37,6 +37,7 @@ import in.apnidukan.salon.domain.SalonSettings;
 import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.domain.ServiceDetails;
+import in.apnidukan.salon.domain.ServiceIcon;
 import in.apnidukan.salon.domain.Shift;
 import in.apnidukan.salon.domain.StaffShift;
 import in.apnidukan.salon.domain.StaffSkill;
@@ -64,6 +65,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -169,7 +171,7 @@ public class SalonSetupService {
         List<ServiceDetails> all = new ArrayList<>();
         Set<String> names = new java.util.HashSet<>();
         for (int i = 0; i < in.size(); i++) {
-            ServiceDetails d = details(in.get(i), -1);
+            ServiceDetails d = details(in.get(i), -1, "services[" + i + "].icon");
             if (!names.add(d.name().toLowerCase(Locale.ROOT))) {
                 throw invalid("services[" + i + "].name", "is in the list twice");
             }
@@ -181,7 +183,7 @@ public class SalonSetupService {
             ServiceDetails d = all.get(i);
             if (in.get(i).sortOrder() == null) {   // without one: after the salon's services, in the order sent
                 all.set(i, new ServiceDetails(d.name(), d.durationMin(), d.pricePaise(), d.priceIsFrom(), d.active(),
-                        next + i, d.returnAfterDays()));
+                        next + i, d.returnAfterDays(), d.icon()));
             }
         }
         Instant now = now();
@@ -208,10 +210,33 @@ public class SalonSetupService {
 
     /** @param fallbackOrder the place when the request gives none */
     private static ServiceDetails details(CreateService in, int fallbackOrder) {
+        return details(in, fallbackOrder, "icon");
+    }
+
+    /** @param iconField the field a wrong icon is reported under (services[i].icon in a batch) */
+    private static ServiceDetails details(CreateService in, int fallbackOrder, String iconField) {
         return new ServiceDetails(clean(SERVICE_NAME, in.name()), duration(in.durationMinutes()),
                 in.pricePaise(), Boolean.TRUE.equals(in.priceIsFrom()), true,
                 in.sortOrder() == null ? fallbackOrder : in.sortOrder(),
-                in.returnAfterDays() == null ? ServiceDetails.DEFAULT_RETURN_AFTER_DAYS : in.returnAfterDays());
+                in.returnAfterDays() == null ? ServiceDetails.DEFAULT_RETURN_AFTER_DAYS : in.returnAfterDays(),
+                icon(in.icon(), iconField));
+    }
+
+    private static ServiceIcon icon(String value) {
+        return icon(value, "icon");
+    }
+
+    /** The icon asked for: null when none was sent; 400 VALIDATION_FAILED naming the field when it isn't one of the set. */
+    private static ServiceIcon icon(String value, String field) {
+        if (value == null) {
+            return null;
+        }
+        ServiceIcon icon = ServiceIcon.parse(value);
+        if (icon == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of(field, "must be one of " + Arrays.toString(ServiceIcon.values())));
+        }
+        return icon;
     }
 
     /** Edit a service. A stale version (someone saved in between) is refused rather than overwritten. */
@@ -231,7 +256,8 @@ public class SalonSetupService {
                 in.priceIsFrom() == null ? old.priceIsFrom() : in.priceIsFrom(),
                 in.active() == null ? old.active() : in.active(),
                 in.sortOrder() == null ? old.sortOrder() : in.sortOrder(),
-                in.returnAfterDays() == null ? old.returnAfterDays() : in.returnAfterDays());
+                in.returnAfterDays() == null ? old.returnAfterDays() : in.returnAfterDays(),
+                in.icon() == null ? old.icon() : icon(in.icon()));
         if (updated.equals(old)) {
             return ServiceResponse.from(item);
         }
