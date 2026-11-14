@@ -484,6 +484,18 @@ class SalonBookingIntegrationTest {
     }
 
     @Test
+    void aBookingThatCantMoveAnyMoreHasNoFreeTimesToMoveTo() {
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        String path = "/salons/" + salon + "/availability?services=" + haircut + "&date=2026-11-10&moving=" + b;
+        assertThat(startAts(get(path, customer))).contains(at("12:15").toString());
+        // Cancelled: it can't move, so no free times for it, as reschedule would answer
+        assertThat(post("/bookings/" + b + "/cancel", Map.of(), customer).status()).isEqualTo(200);
+        Reply dead = get(path, customer);
+        assertThat(dead.status()).as(dead.text()).isEqualTo(409);
+        assertThat(field(dead.body(), "code")).isEqualTo("WRONG_STATUS");
+    }
+
+    @Test
     void freeTimesForAMoveCountTheBookingsOwnTimeAsFree() {
         // Haircut + beard: only Raju does both. Booked 12:00-12:45
         UUID b = id(book(customer, at("12:00"), List.of(haircut, beard), UUID.randomUUID()));
@@ -493,6 +505,38 @@ class SalonBookingIntegrationTest {
         assertThat(startAts(get(path + "&moving=" + b, customer))).contains(at("12:15").toString());
         // Someone else's booking can't be used to see through it
         assertThat(get(path + "&moving=" + b, customer2).status()).isEqualTo(404);
+        // Nor their own booking with another live salon's free times (its services aren't that salon's): 404, as
+        // for someone else's, where it would otherwise go on to that salon's setup with this booking's services
+        UUID other = UUID.randomUUID();
+        TestData.salon(jdbc, other, person("9000000008"));
+        jdbc.update("UPDATE shops SET status = 'APPROVED' WHERE id = ?", other);
+        String elsewhere = "/salons/" + other + "/availability?services=" + haircut + "&date=2026-11-10";
+        Reply crossSalon = get(elsewhere + "&moving=" + b, customer);
+        assertThat(crossSalon.status()).as(crossSalon.text()).isEqualTo(404);
+        assertThat(field(crossSalon.body(), "code")).isEqualTo("NOT_FOUND");
+    }
+
+    @Test
+    void freeTimesForAMoveAreForTheLengthItWasBookedWithEvenAfterTheSalonChangesTheService() {
+        // Booked as a 30-minute haircut; then the salon makes haircuts 45 minutes, and later switches them off
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        assertThat(patch("/salon/services/" + haircut, Map.of("version", 0, "durationMinutes", 45), owner).status())
+                .isEqualTo(200);
+        String path = "/salons/" + salon + "/availability?services=" + haircut + "&date=2026-11-10";
+        assertThat(field(get(path, customer).body(), "durationMinutes")).isEqualTo(45);
+        // Moving keeps the booked 30 minutes (as the move itself does): the times and their end are for that
+        Reply moving = get(path + "&moving=" + b, customer);
+        assertThat(moving.status()).as(moving.text()).isEqualTo(200);
+        assertThat(field(moving.body(), "durationMinutes")).isEqualTo(30);
+        Reply moved = post("/bookings/" + b + "/reschedule", Map.of("startAt", at("13:00").toString()), customer);
+        assertThat(moved.status()).as(moved.text()).isEqualTo(200);
+        assertThat(field(moved.body(), "endsAt")).isEqualTo(at("13:30").toString());
+        // Switched off: a new booking can't have it, but the booked one can still see its free times to move
+        assertThat(patch("/salon/services/" + haircut, Map.of("version", 1, "active", false), owner).status())
+                .isEqualTo(200);
+        Reply stillMoving = get(path + "&moving=" + b, customer);
+        assertThat(stillMoving.status()).as(stillMoving.text()).isEqualTo(200);
+        assertThat(field(stillMoving.body(), "durationMinutes")).isEqualTo(30);
     }
 
     @Test
