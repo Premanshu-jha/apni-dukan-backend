@@ -950,12 +950,22 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### Fix: the licence reader asks for structured JSON, not a forced tool call (V59)
+
+Sonnet 5.5 refuses forced tool use (`tool_choice` "tool" or "any") with a 400, so every licence read after the key
+was set failed as NOT_READ ("we couldn't read it") after three tries. `AnthropicLicenceReader` now asks for the facts
+with structured outputs (`output_config.format`, a JSON schema with `additionalProperties: false`; no tools, no
+temperature) at low effort, with room in `max_tokens` (4096) for thinking, and reads the JSON from the answer's text
+block (an answer that stopped for `refusal` or `max_tokens` is unusable). **V59** checks again every licence that
+failed as NOT_READ, from the start (the owner is told the real answer), and makes waiting checks forget the refusals
+they counted.
+
 ### The trade licence, checked automatically; salons drop GSTIN and Udyam (V55–V58; partner app 0.23.0, customer app 0.22.0, admin app 0.16.0)
 
 **The trade licence check.** A salon's only document is now its municipal trade licence (GHMC, Cyberabad, Malkajgiri or
 another municipality), still optional. Nobody marks it as checked by hand any more: LicenceCheckJob (every 20 seconds,
-one server at a time) reads each new one with Anthropic's Messages API (`AnthropicLicenceReader`: the photo or PDF and
-one tool, `record_licence`, that the model must call; Sonnet 5.5 by default), and LicenceRules decide in code:
+one server at a time) reads each new one with Anthropic's Messages API (`AnthropicLicenceReader`: the photo or PDF, and the
+facts asked for as structured JSON output; Sonnet 5.5 by default), and LicenceRules decide in code:
 
 1. it can be read (`UNREADABLE`), is a municipal trade licence (`NOT_TRADE_LICENCE`) and shows no signs of editing
    (`LOOKS_EDITED`);
@@ -982,7 +992,7 @@ can't tell (a neighbour's real licence, same pincode, similar name) is left to t
   `LICENCE_AI_MODEL` changes the model. The key goes only in a header and is never logged.
 - **When the AI can't answer** (network, 429, 5xx, 529 overloaded; a wrong key or model, or out of credit, both
   logged as errors) the check is tried again after 1, 2, 4… minutes, at most every 6 hours, never the owner's fault;
-  after half an hour it shows in the super admins' follow-up list. An answer without the tool call, or a file the API
+  after half an hour it shows in the super admins' follow-up list. An answer that isn't the JSON asked for, or a file the API
   refuses (too big, too many pages), is tried 3 times, counted apart, then FAILED `NOT_READ`.
 - **The licence or the details change under the check:** the answer is written only for the check it was about (the
   same file, still PENDING, and the try the job took: `licence_check_attempts`, which a new check starts again from

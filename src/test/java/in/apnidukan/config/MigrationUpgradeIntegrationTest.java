@@ -276,6 +276,60 @@ class MigrationUpgradeIntegrationTest {
         }
     }
 
+    @Test
+    void licencesWronglyFailedAsNotReadAreCheckedAgain() {
+        String name = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
+        JdbcTemplate admin = new JdbcTemplate(new DriverManagerDataSource(TestContainers.jdbcUrl(),
+                TestContainers.DB_USER, TestContainers.DB_PASSWORD));
+        admin.execute("CREATE DATABASE " + name);
+        String url = TestContainers.jdbcUrl().replaceAll("/[^/]+$", "/" + name);
+        DriverManagerDataSource ds = new DriverManagerDataSource(url, TestContainers.DB_USER,
+                TestContainers.DB_PASSWORD);
+        try {
+            flyway(ds, MigrationVersion.fromVersion("58")).migrate();
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+            Timestamp now = Timestamp.from(Instant.parse("2026-11-14T11:30:00Z"));
+            UUID owner = UUID.randomUUID();
+            jdbc.update("INSERT INTO users (id, phone, admin, created_at, updated_at) VALUES (?, '9000000777', false, "
+                    + "?, ?)", owner, now, now);
+            UUID notRead = UUID.randomUUID();
+            UUID nameMismatch = UUID.randomUUID();
+            UUID waiting = UUID.randomUUID();
+            String[][] rows = {{notRead.toString(), "FAILED", "NOT_READ", "3"},
+                    {nameMismatch.toString(), "FAILED", "NAME_MISMATCH", "0"}, {waiting.toString(), "PENDING", null, "2"}};
+            for (String[] r : rows) {
+                UUID shop = UUID.fromString(r[0]);
+                jdbc.update("INSERT INTO shops (id, name, owner_name, address_line, area, city, pincode, latitude, "
+                        + "longitude, status, type, version, created_at, updated_at) VALUES (?, 'Hair', 'Owner', "
+                        + "'Shop 4', 'Kondapur', 'Hyderabad', '500084', 17.465, 78.364, 'APPROVED', 'SALON', 0, ?, ?)",
+                        shop, now, now);
+                UUID file = UUID.randomUUID();
+                jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
+                        + "uploaded_by, created_at) VALUES (?, ?, 'REG_DOC', ?, 'image/jpeg', 10, ?, ?, ?)", file, shop,
+                        "test/" + file, file.toString().replace("-", "") + "0".repeat(32), owner, now);
+                jdbc.update("UPDATE shops SET registration_doc_type = 'TRADE_LICENCE', registration_doc_file_id = ?, "
+                        + "licence_check_status = ?, licence_check_reason = ?, licence_check_unusable = ?, "
+                        + "licence_check_attempts = 3, licence_check_due_at = ?, licence_check_since = ? WHERE id = ?",
+                        file, r[1], r[2], Integer.parseInt(r[3]), Timestamp.from(now.toInstant().plusSeconds(3600)),
+                        now, shop);
+            }
+
+            flyway(ds, MigrationVersion.LATEST).migrate();
+
+            // Failed only because the reader asked in a way Sonnet 5.5 refuses: checked again from the start, now;
+            // a real answer stays; a waiting check forgets the refusals it counted and is read now
+            assertThat(jdbc.queryForList("SELECT licence_check_status || ' ' || coalesce(licence_check_reason, '-') "
+                    + "|| ' ' || licence_check_unusable || ' ' || (licence_check_due_at <= now()) FROM shops "
+                    + "WHERE id IN (?, ?, ?) ORDER BY array_position(ARRAY[?, ?, ?]::uuid[], id)", String.class,
+                    notRead, nameMismatch, waiting, notRead, nameMismatch, waiting))
+                    .containsExactly("PENDING - 0 true", "FAILED NAME_MISMATCH 0 false", "PENDING - 0 true");
+            assertThat(jdbc.queryForObject("SELECT licence_check_attempts FROM shops WHERE id = ?", Integer.class,
+                    notRead)).isZero();
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
+        }
+    }
+
     /** As the app runs Flyway (application.properties): mixed files, no transactional lock, no statement limit. */
     private static Flyway flyway(DriverManagerDataSource ds, MigrationVersion target) {
         return Flyway.configure().dataSource(ds).locations("classpath:db/migration").target(target).mixed(true)
