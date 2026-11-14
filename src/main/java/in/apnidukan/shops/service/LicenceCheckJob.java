@@ -75,11 +75,12 @@ public class LicenceCheckJob {
     private final JobLeases leases;
     private final TransactionTemplate transactions;
     private final Clock clock;
+    private final LicenceAiWatch watch;
     private final boolean enabled;
 
     public LicenceCheckJob(LicenceCheckStore store, ObjectProvider<LicenceReader> reader, FileRefs files,
                            ShopReviewStore review, Notifications notifications, JobLeases leases,
-                           PlatformTransactionManager transactions, Clock clock,
+                           PlatformTransactionManager transactions, Clock clock, LicenceAiWatch watch,
                            @Value("${app.jobs.enabled:true}") boolean enabled) {
         this.store = store;
         this.reader = reader;
@@ -89,6 +90,7 @@ public class LicenceCheckJob {
         this.leases = leases;
         this.transactions = new TransactionTemplate(transactions);
         this.clock = clock;
+        this.watch = watch;
         this.enabled = enabled;
     }
 
@@ -106,6 +108,11 @@ public class LicenceCheckJob {
         LicenceReader ai = reader.getIfAvailable();
         if (ai == null) {
             return 0;
+        }
+        try {
+            watch.retryOwed();   // a "working again" email that reached nobody before
+        } catch (RuntimeException e) {
+            log.warn("Licence AI email not retried: {}", e.getClass().getSimpleName());
         }
         Instant started = clock.instant();
         int done = 0;
@@ -131,7 +138,11 @@ public class LicenceCheckJob {
                 return;
             }
             read = ai.read(bytes, type);
+            answered();
         } catch (LicenceReader.UnusableAnswerException e) {
+            if (e.answered()) {
+                answered();   // it answered (and billed): the account works; a refused file says nothing about it
+            }
             // Counted apart from the times the AI didn't answer: only answers it gave and we couldn't use fail it
             if (check.unusable() + 1 >= MAX_UNUSABLE) {
                 fail(check, LicenceCheckReason.NOT_READ, null);
@@ -140,8 +151,10 @@ public class LicenceCheckJob {
             }
             return;
         } catch (RuntimeException e) {   // the AI or storage didn't answer: never the owner's fault, try later
-            if (!(e instanceof LicenceReader.ReaderUnavailableException)) {
+            if (!(e instanceof LicenceReader.ReaderUnavailableException unavailable)) {
                 log.warn("Licence check of shop {} failed: {}", check.shopId(), e.getClass().getSimpleName());
+            } else if (unavailable.problem() != null) {
+                alert(unavailable.problem());   // out of credit or a wrong key: the super admins are told
             }
             store.retryAt(check, now().plus(wait(check.attempt())));
             return;
@@ -176,6 +189,23 @@ public class LicenceCheckJob {
             }
         } catch (DuplicateKeyException taken) {   // another salon has it (or passed with it at this very moment)
             fail(check, LicenceCheckReason.DUPLICATE, extract);
+        }
+    }
+
+    /** The AI answered: a refusal emailed about is over (LicenceAiWatch says so once). */
+    private void answered() {
+        try {
+            watch.working();
+        } catch (RuntimeException e) {   // the alert's bookkeeping never stops a check
+            log.warn("Licence AI alert not updated: {}", e.getClass().getSimpleName());
+        }
+    }
+
+    private void alert(LicenceAiWatch.Problem problem) {
+        try {
+            watch.problem(problem);
+        } catch (RuntimeException e) {
+            log.warn("Licence AI alert not sent: {}", e.getClass().getSimpleName());
         }
     }
 
