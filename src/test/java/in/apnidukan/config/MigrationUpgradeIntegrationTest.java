@@ -289,6 +289,7 @@ class MigrationUpgradeIntegrationTest {
             flyway(ds, MigrationVersion.fromVersion("58")).migrate();
             JdbcTemplate jdbc = new JdbcTemplate(ds);
             Timestamp now = Timestamp.from(Instant.parse("2026-11-14T11:30:00Z"));
+            // due a day from the real clock (the migration compares with now()), so a check not re-queued stays waiting
             UUID owner = UUID.randomUUID();
             jdbc.update("INSERT INTO users (id, phone, admin, created_at, updated_at) VALUES (?, '9000000777', false, "
                     + "?, ?)", owner, now, now);
@@ -310,7 +311,7 @@ class MigrationUpgradeIntegrationTest {
                 jdbc.update("UPDATE shops SET registration_doc_type = 'TRADE_LICENCE', registration_doc_file_id = ?, "
                         + "licence_check_status = ?, licence_check_reason = ?, licence_check_unusable = ?, "
                         + "licence_check_attempts = 3, licence_check_due_at = ?, licence_check_since = ? WHERE id = ?",
-                        file, r[1], r[2], Integer.parseInt(r[3]), Timestamp.from(now.toInstant().plusSeconds(3600)),
+                        file, r[1], r[2], Integer.parseInt(r[3]), Timestamp.from(Instant.now().plusSeconds(86_400)),
                         now, shop);
             }
 
