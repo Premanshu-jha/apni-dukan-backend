@@ -18,8 +18,8 @@ public class LicenceReaderConfig {
     @ConditionalOnExpression("!'${app.licence.ai-key:}'.isBlank()")
     LicenceReader anthropicLicenceReader(@Value("${app.licence.ai-key}") String key,
                                          @Value("${app.licence.ai-model:claude-sonnet-5-5}") String model,
-                                         @Value("${app.licence.ai-url:}") String url) {
+                                         @Value("${app.licence.ai-url:}") String url, LicenceAiWatch watch) {
         return new AnthropicLicenceReader(key.strip(), model.strip(),
-                url.isBlank() ? AnthropicLicenceReader.ANTHROPIC : URI.create(url.strip()));
+                url.isBlank() ? AnthropicLicenceReader.ANTHROPIC : URI.create(url.strip()), watch);
     }
 }

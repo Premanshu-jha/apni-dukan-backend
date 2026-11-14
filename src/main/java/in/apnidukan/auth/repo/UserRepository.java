@@ -68,4 +68,10 @@ public interface UserRepository extends JpaRepository<User, UUID> {
     @Query(value = "SELECT id FROM users WHERE admin_role = 'ADMIN' AND admin_designation = 'SUPPORT' "
             + "AND deleted_at IS NULL ORDER BY admin_since, id", nativeQuery = true)
     java.util.List<UUID> findSupportStaff();
+
+    /** The verified emails of the live super admins, oldest admins first (the team's own alerts go there). */
+    @Query(value = "SELECT email FROM users WHERE admin_role = 'SUPER_ADMIN' AND deleted_at IS NULL "
+            + "AND email IS NOT NULL AND email_verified_at IS NOT NULL ORDER BY admin_since NULLS LAST, id",
+            nativeQuery = true)
+    java.util.List<String> findSuperAdminEmails();
 }

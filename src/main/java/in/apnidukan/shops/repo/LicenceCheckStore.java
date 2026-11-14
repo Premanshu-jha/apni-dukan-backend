@@ -42,6 +42,16 @@ public class LicenceCheckStore {
     }
 
     /**
+     * Makes every waiting check due now (the AI works again after refusing our account): the licences that waited,
+     * some for hours between tries, are read in the next rounds instead of at their next try. Uses
+     * ix_shops_licence_due; the job still reads them {@code BATCH} at a time.
+     */
+    public int dueNow(Instant now) {
+        return jdbc.update("UPDATE shops SET licence_check_due_at = ? WHERE licence_check_status = 'PENDING' "
+                + "AND licence_check_due_at > ?", Timestamp.from(now), Timestamp.from(now));
+    }
+
+    /**
      * Starts the check of the trade licence now there (PENDING, due {@code dueAt}, any earlier answer gone), whatever
      * the row says: called by ShopService after saving a new (or the same, failed) licence or new details, in the same
      * transaction. Written here and not only by the entity, which leaves out a column it thinks unchanged: had the job

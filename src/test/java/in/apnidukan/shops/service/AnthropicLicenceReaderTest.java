@@ -29,7 +29,11 @@ class AnthropicLicenceReaderTest {
     private volatile int httpStatus = 200;
     private volatile String body = "";
     private volatile long delayMillis = 0;
+    /** The retry-after header the fake answers with (a rate limit has one; the tier's spend cap doesn't). */
+    private volatile String retryAfter = null;
     private HttpServer fake;
+    /** The tokens the reader reported, per answer: {input, output}. */
+    private final java.util.List<long[]> counted = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     private AnthropicLicenceReader reader() throws IOException {
         fake = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -44,6 +48,9 @@ class AnthropicLicenceReaderTest {
             }
             byte[] out = body.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Content-Type", "application/json");
+            if (retryAfter != null) {
+                exchange.getResponseHeaders().add("retry-after", retryAfter);
+            }
             exchange.sendResponseHeaders(httpStatus, out.length == 0 ? -1 : out.length);
             if (out.length > 0) {
                 exchange.getResponseBody().write(out);
@@ -52,7 +59,8 @@ class AnthropicLicenceReaderTest {
         });
         fake.start();
         URI endpoint = URI.create("http://127.0.0.1:" + fake.getAddress().getPort() + "/v1/messages");
-        return new AnthropicLicenceReader(KEY, "claude-sonnet-5-5", endpoint, Duration.ofSeconds(2));
+        return new AnthropicLicenceReader(KEY, "claude-sonnet-5-5", endpoint, Duration.ofSeconds(2),
+                (in, out) -> counted.add(new long[] {in, out}));
     }
 
     @AfterEach
@@ -123,28 +131,50 @@ class AnthropicLicenceReaderTest {
     }
 
     @Test
-    void busyOrFailingServiceIsTriedLaterAndARefusedFileOrNoToolCallIsUnusable() throws IOException {
+    void busyOrFailingServiceIsTriedLaterAndARefusedFileOrAnAnswerNotInTheShapeIsUnusable() throws IOException {
         AnthropicLicenceReader reader = reader();
-        for (int status : new int[] {429, 500, 529, 401, 404}) {
+        java.util.Map<Integer, LicenceAiWatch.Problem> problems = new java.util.HashMap<>();
+        problems.put(401, LicenceAiWatch.Problem.KEY);
+        problems.put(403, LicenceAiWatch.Problem.KEY);
+        problems.put(404, LicenceAiWatch.Problem.MODEL);   // the model's name, not the key
+        problems.put(402, LicenceAiWatch.Problem.CREDIT);   // billing_error
+        retryAfter = "30";   // a rate limit: just later
+        for (int status : new int[] {429, 500, 529, 401, 403, 404, 402}) {
             httpStatus = status;
             body = "{\"type\":\"error\"}";
             assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
                     .as("HTTP " + status).isInstanceOf(LicenceReader.ReaderUnavailableException.class)
-                    .hasMessageNotContaining(KEY);
+                    .hasMessageNotContaining(KEY)
+                    // the account's, ours to fix (the super admins are emailed); busy is just later
+                    .extracting(e -> ((LicenceReader.ReaderUnavailableException) e).problem())
+                    .isEqualTo(problems.get(status));
         }
+        // The usage tier's monthly spend cap: a 429 without retry-after, failing until access resumes
+        retryAfter = null;
+        httpStatus = 429;
+        assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
+                .isInstanceOf(LicenceReader.ReaderUnavailableException.class)
+                .extracting(e -> ((LicenceReader.ReaderUnavailableException) e).problem())
+                .isEqualTo(LicenceAiWatch.Problem.CREDIT);
         httpStatus = 400;
         body = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"image exceeds 5 MB maximum\"}}";
         assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
-                .isInstanceOf(LicenceReader.UnusableAnswerException.class);
+                .isInstanceOf(LicenceReader.UnusableAnswerException.class)
+                // the request was refused: nothing about whether the account works
+                .extracting(e -> ((LicenceReader.UnusableAnswerException) e).answered()).isEqualTo(false);
         // Out of credit is the account's problem, not the file's: tried later, never the owner's fault
         body = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit "
                 + "balance is too low to access the Anthropic API.\"}}";
         assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
-                .isInstanceOf(LicenceReader.ReaderUnavailableException.class);
+                .isInstanceOf(LicenceReader.ReaderUnavailableException.class)
+                .extracting(e -> ((LicenceReader.ReaderUnavailableException) e).problem())
+                .isEqualTo(LicenceAiWatch.Problem.CREDIT);
+        assertThat(counted).isEmpty();   // refused requests aren't billed
         httpStatus = 200;
         body = "{\"content\":[{\"type\":\"text\",\"text\":\"I can't help with that.\"}]}";
         assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
-                .isInstanceOf(LicenceReader.UnusableAnswerException.class);
+                .isInstanceOf(LicenceReader.UnusableAnswerException.class)
+                .extracting(e -> ((LicenceReader.UnusableAnswerException) e).answered()).isEqualTo(true);
         body = answer("{\"readable\":true}").replace("end_turn", "refusal");   // may not match the shape
         assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
                 .isInstanceOf(LicenceReader.UnusableAnswerException.class);
@@ -176,5 +206,17 @@ class AnthropicLicenceReaderTest {
         assertThat(AnthropicLicenceReader.accountProblem(
                 "{\"error\":{\"message\":\"Could not process image: see explanation\"}}")).isFalse();
         assertThat(AnthropicLicenceReader.accountProblem("not json")).isFalse();
+    }
+
+    @Test
+    void everyAnswerBilledReportsItsTokensUsableOrNot() throws IOException {
+        AnthropicLicenceReader reader = reader();
+        body = answer("{\"readable\":false}").replace("\"input_tokens\":10,\"output_tokens\":10",
+                "\"input_tokens\":1800,\"cache_read_input_tokens\":5,\"output_tokens\":240");
+        reader.read(new byte[] {1}, "image/jpeg");
+        body = "{\"content\":[],\"usage\":{\"input_tokens\":900,\"output_tokens\":3}}";   // no facts: still billed
+        assertThatThrownBy(() -> reader.read(new byte[] {1}, "image/jpeg"))
+                .isInstanceOf(LicenceReader.UnusableAnswerException.class);
+        assertThat(counted).extracting(c -> c[0] + "/" + c[1]).containsExactly("1805/240", "900/3");
     }
 }

@@ -21,6 +21,8 @@ public final class TestData {
                 + "licence_check_status = NULL, licence_check_reason = NULL, licence_number = NULL, "
                 + "licence_valid_until = NULL, licence_extract = NULL, licence_check_due_at = NULL");
         jdbc.update("UPDATE salon_staff SET photo_file_id = NULL");
+        jdbc.update("DELETE FROM licence_ai_spend");
+        jdbc.update("UPDATE licence_ai_alert SET problem = NULL, problem_since = NULL, emailed_at = NULL, announced = false, owed_problem = NULL, owed_since = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
         for (String table : new String[] {"ticket_emails", "ticket_events", "ticket_messages", "tickets", "salon_ratings", "salon_rating_totals", "visit_follow_ups",
                 "salon_customer_prefs", "customer_places", "salon_offer_mutes", "salon_hours_aud", "salon_hours", "salon_closed_days", "earlier_slot_alerts", "shop_assignments", "admin_pincodes", "video_uploads", "shop_invites", "salon_closings", "salon_message_purges", "shop_handovers", "job_leases", "account_wipes", "file_deletions", "shop_events", "admin_events", "test_emails", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",

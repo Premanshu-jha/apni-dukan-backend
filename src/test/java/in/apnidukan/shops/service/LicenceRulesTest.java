@@ -103,6 +103,23 @@ class LicenceRulesTest {
     }
 
     @Test
+    void theAddressMatchesInAnyWordOrderCaseOrPunctuation() {
+        LicenceRules.Salon salon = new LicenceRules.Salon("Sharma Hair Studio", "Ravi Kumar Sharma",
+                "Plot 23, Hitech City Road", "Madhapur", "Hyderabad", "500081");
+        LicenceExtract g = genuine();
+        // The pincode decides wherever it stands in the licence's address
+        assertThat(LicenceRules.decide(with(g, g.tradeName(), g.ownerName(),
+                "500081, Madhapur, Hitech City Road, Plot No. 23", null), salon, TODAY).passed()).isTrue();
+        // No pincode at all: a shared place word counts in any order, case or punctuation
+        assertThat(LicenceRules.decide(with(g, g.tradeName(), g.ownerName(),
+                "HITECH CITY RD. / PLOT-23 / MADHAPUR", null), salon, TODAY).passed()).isTrue();
+        assertThat(LicenceRules.decide(with(g, g.tradeName(), g.ownerName(), "Madhapur Hitech", null), salon, TODAY)
+                .passed()).isTrue();
+        // The names too: "SHARMA RAVI KUMAR" is "Ravi Kumar Sharma"
+        assertThat(LicenceRules.sameName("SHARMA RAVI KUMAR", "Ravi Kumar Sharma")).isTrue();
+    }
+
+    @Test
     void oneCommonNameAloneIsNotTheSamePersonButTwoSharedWordsAre() {
         LicenceRules.Salon syedAli = new LicenceRules.Salon("Style Point", "Syed Ali", "Shop 4, Main Road", "Tolichowki",
                 "Hyderabad", "500008");
