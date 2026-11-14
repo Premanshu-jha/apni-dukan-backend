@@ -11,7 +11,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `common` | Error format, security (JWT check, CORS), current user/shop, clock |
 | `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery; admin roles (one super admin, admins) and OTP test mode |
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
-| `shops` | Registration (details, GPS pin, GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and registration document, Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
+| `shops` | Registration (details, GPS pin, a kirana's GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and trade licence (checked automatically with AI), Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
 | `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
@@ -385,18 +385,17 @@ sequenceDiagram
 | `POST /api/v1/shops/geocode` | Someone without a shop (registration comes before the shop exists) or a shop's owner; a helper or barber gets 403 `OWNER_ONLY`. `{addressLine, area, city, pincode}` (the same limits as `POST /shops`) → 200 `{latitude, longitude, precision: EXACT\|STREET\|AREA, formattedAddress}` for the pin the owner then drags onto the door. 404 `ADDRESS_NOT_FOUND`, 429 `TRY_LATER` (20 searches an hour, 10 new addresses a day, each), 503 `GEOCODING_OFF` (no `GOOGLE_GEOCODING_KEY`), 503 `GEOCODING_UNAVAILABLE`. See "Finding the salon from its address" |
 | `POST /api/v1/shops/reverse-geocode` | The same people and limits as `/geocode` (one budget for both). `{latitude, longitude}` (inside India, else 400 `VALIDATION_FAILED`) → 200 `{addressLine, area, city, pincode, formattedAddress}`, `""` for any part Google didn't give, so the app can fill the form's empty fields from the GPS point. 404 `ADDRESS_NOT_FOUND`; 403, 429 and 503 as for `/geocode` |
 | `GET /api/v1/shops/me` | Your shop, its status and your role (`myRole`). 404 `NO_SHOP` if none |
-| `PATCH /api/v1/shops/me` | Owner only (403 `OWNER_ONLY`). Send `version` and only the fields to change; `""` removes GSTIN/Udyam |
+| `PATCH /api/v1/shops/me` | Owner only (403 `OWNER_ONLY`). Send `version` and only the fields to change; `""` removes a kirana's GSTIN/Udyam (a salon has none: they are ignored). A salon's new name, owner, address, area or pincode checks its trade licence again (`licenceCheck` PENDING) |
 | `PUT /api/v1/shops/me/photos` | Owner. `{version, ownerPhotoFileId?, shopPhotoFileId?}`: ids of photos uploaded to `POST /files` with purpose `OWNER_PHOTO` / `SHOP_PHOTO` |
 | `GET /api/v1/shops/me/members` | Owner. Everyone in the shop: name, phone, role (OWNER, HELPER, BARBER), joined |
 | `POST /api/v1/shops/me/helpers` · `DELETE /api/v1/shops/me/helpers/{userId}` | Owner. `{phone}`: **invites** a helper (see "Helpers and barbers join by invitation"). 202 `{message, invite: {id, phone, role, staffId, createdAt, expiresAt}}`, the same `message` for any number; no account is made, nobody joins until they accept. 409 `TOO_MANY_HELPERS` (helpers + waiting helper invitations reach 10), 409 `ALREADY_A_MEMBER` (already in this shop), 429 `TOO_MANY_REQUESTS` after 20 invitations a day, 400 `VALIDATION_FAILED` (`details.phone`: your own number). Remove: membership and walk-in access go, their sessions end at once. A salon's helper sees every barber, starts (also without code), cancels, reassigns and adds breaks; in a kirana the helper's billing and stock rights come with the kirana work |
 | `GET /api/v1/shops/me/invites` · `DELETE /api/v1/shops/me/invites/{id}` | Owner. The shop's invitations still waiting (helpers and barbers), by the phone typed, never a name: `[{id, phone, role, staffId, createdAt, expiresAt}]`. `DELETE`: cancel one (204; 404 `INVITE_NOT_FOUND` for another shop's) |
 | `GET /api/v1/me/invites` · `POST /api/v1/me/invites/{id}/accept` · `.../decline` | Anyone signed in: invitations waiting for their phone, `[{id, shopId, shopCode, shopName, type, area, city, role, createdAt, expiresAt}]`. Accept: 200 with the shop (`myRole` HELPER or BARBER), then `POST /auth/refresh`. Decline: 204 (the owner is told). 404 `INVITE_NOT_FOUND` (not for your phone), 409 `INVITE_GONE` with `details.status` (`ACCEPTED`, `DECLINED`, `CANCELLED`, `EXPIRED`, `CLOSED`, `CHANGED`, `STAFF_CHANGED`), 409 `ALREADY_IN_A_SHOP` (leave your shop first), 409 `TOO_MANY_HELPERS` |
 | `POST /api/v1/shops/me/leave` | A helper or barber leaves the shop (204), e.g. a phone added without asking. A barber's profile, hours and bookings stay with the salon; only his sign-in goes. 409 `OWNER_CANT_LEAVE` |
-| `PUT /api/v1/shops/me/registration-document` | A salon's owner (403 `OWNER_ONLY`; 409 `NOT_A_SALON` for a kirana). Optional (many salons aren't registered), and the owner can add, replace or remove it at any time: the salon's card says "Registered" only while it has one that the field team checked, else "Unregistered". `{version, type, fileId}`: `type` `SHOPS_ESTABLISHMENT`, `TRADE_LICENCE` or `UDYAM` (any one will do), `fileId` a `POST /files` upload with purpose `REG_DOC` (a photo, cleaned like the others, or a PDF; only the owner uploads, opens or deletes it). 200 with the shop (`registrationDocType`, `registrationDocFileId`, `registrationDocCheckedAt`: the owner's only). The salon's status doesn't change (an approved one stays live); a new document, or a new kind for the same file, waits for the field team's check. 400 `VALIDATION_FAILED` naming `fileId`, 409 `SHOP_CHANGED` |
-| `DELETE /api/v1/shops/me/registration-document?version=` | The owner removes it: customers see "Unregistered"; the status doesn't change; the upload stays for him to delete. 409 `SHOP_CHANGED`, 409 `NOT_A_SALON` |
-| `GET /api/v1/admin/shops/documents-to-check` | Super admins: live salons whose document was added or changed since the last check, oldest change first, at most 100 (`ix_shops_registration_doc_to_check`) |
-| `POST /api/v1/admin/shops/{id}/registration-document/check` | `{version, note?}`: checked, customers see "Registered" (approving a salon after its visit checks the document there too). Any status but CLOSED; a field agent only for a business assigned to them. 409 `NO_DOCUMENT`, `SHOP_CHANGED`, `WRONG_STATUS` |
-| `POST /api/v1/admin/shops/{id}/registration-document/remove` | `{version, reason}`: a wrong or expired one comes off; the owner gets `SHOP_DOCUMENT_REMOVED` with the reason; a note on the timeline. Same rules |
+| `PUT /api/v1/shops/me/registration-document` | A salon's owner (403 `OWNER_ONLY`; 409 `NOT_A_SALON` for a kirana): its **trade licence**. Optional (many salons have none), and the owner can add, replace or remove it at any time. `{version, type: "TRADE_LICENCE", fileId}` (any other `type`: 400 `VALIDATION_FAILED` naming `type`), `fileId` a `POST /files` upload with purpose `REG_DOC` (a photo, cleaned like the others, or a PDF kept as it came; only the owner uploads, opens or deletes it). 200 with the shop: `registrationDocType`, `registrationDocFileId`, `licenceCheck` (`PENDING` now), `licenceCheckReason`, `licenceValidUntil`, `registrationDocCheckedAt` (the owner's only). Checked automatically (see "The trade licence, checked automatically" below); the salon's status doesn't change (an approved one stays live). The same file again: nothing changes, unless its check FAILED (then it is checked again). 400 `VALIDATION_FAILED` naming `fileId`, 409 `SHOP_CHANGED` |
+| `DELETE /api/v1/shops/me/registration-document?version=` | The owner removes it: no "Licensed" badge; the status doesn't change; the upload stays for him to delete. 409 `SHOP_CHANGED`, 409 `NOT_A_SALON` |
+| `POST /api/v1/admin/shops/{id}/registration-document/recheck` · `GET /api/v1/admin/shops/licences-to-follow-up` | Send the licence for checking again; the super admins' list of licences not accepted or waiting long. See "The trade licence, checked automatically" |
+| `POST /api/v1/admin/shops/{id}/registration-document/remove` | `{version, reason}`: a wrong or someone else's licence comes off; the owner gets `SHOP_DOCUMENT_REMOVED` with the reason; a note on the timeline. Any status but CLOSED; a field agent only for a business assigned to them. 409 `NO_DOCUMENT`, `SHOP_CHANGED`, `WRONG_STATUS`. (No one marks a licence as checked: the automatic check decides) |
 | `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos (and a salon's video) are set; then, for a salon, 409 `REGISTRATION_INCOMPLETE` with `details` naming each of `services` (at least one active), `hours` (the opening hours) still missing. The registration document is optional |
 | `POST /api/v1/shops/me/close` | Owner. `{version, reason?}` (reason 2–200 characters, for the field team): closes the shop for good, see "Closing a shop or handing it over". 200 with the shop (`status: CLOSED`). 409 `SHOP_CHANGED` for a stale version, 403 `OWNER_ONLY` |
 | `POST /api/v1/shops/me/handover` · `GET` · `DELETE` | Owner. `{phone, version}`: asks the person with that phone to take the shop over. 202 `{message, handover: {id, phone, createdAt, expiresAt}}`, the same `message` for any number. 409 `HANDOVER_PENDING` while one waits, 429 `TOO_MANY_REQUESTS` after 5 a day, 400 `INVALID_PHONE` / `VALIDATION_FAILED` (`details.phone`: your own number). `GET`: the waiting one (404 `NO_HANDOVER`). `DELETE`: cancel it (204, also when none waits) |
@@ -555,12 +554,13 @@ allowed. A helper accepting while deleting their account: either the deletion is
 now) or the accept is (401, or 409 `TRY_AGAIN` when the database broke a tie); the shop always has exactly one live
 owner.
 
-Rules: the GPS pin is required and must be inside India; pincode is 6 digits; GSTIN and Udyam are optional, checked,
-and stored in capitals; text is trimmed. Unknown fields are refused with 400 `UNKNOWN_FIELD`, so nobody can send
+Rules: the GPS pin is required and must be inside India; pincode is 6 digits; a kirana's GSTIN and Udyam are optional,
+checked, and stored in capitals (a salon has none: anything sent is ignored, and an old value is never shown); text is
+trimmed. Unknown fields are refused with 400 `UNKNOWN_FIELD`, so nobody can send
 `"status": "APPROVED"` for their own shop. Status moves DRAFT → (both photos, Submit) → PENDING_VISIT → (field team
 visits and approves) → APPROVED; from any status the owner can close it for good (CLOSED). **Once approved, the
 address and pin are the field team's to change** (409 `ADDRESS_LOCKED` for the owner; `PATCH /admin/shops/{id}/address`).
-A new photo, salon video, GSTIN or Udyam number on an APPROVED shop puts it in the field team's **re-check** (V41): it
+A new photo, salon video, or a kirana's GSTIN or Udyam number on an APPROVED shop puts it in the field team's **re-check** (V41): it
 stays APPROVED, live and bookable (its helpers and barbers work as usual) and `recheckSince` (owner's
 `GET /shops/me`) says since when it waits. The first change sets it; further changes while it waits keep its place in
 the queue (the field team sees every change since the last check). The field team then approves it (`recheckSince`
@@ -732,7 +732,8 @@ first, the first page with the `summary`. A deleted account's comments go; its s
 **The salon list's cards.** Each salon in `GET /salons` also carries `addressLine`, `rating {count, average, tags: []}`,
 `topServices` (its first 3 services a barber does, with prices), `serviceCount`, `today` (its hours today, null when
 closed or not set), `openNow` (null when no hours are set), `closedToday` (weekly off, a closed day, or no working barber has hours that day) and
-`registered` (it has its registration document, checked by the field team: "Registered", else "Unregistered"). One more
+`registered` (its trade licence passed the automatic check and is still valid today: the card says "Licensed"; no
+badge otherwise; the name stays for older apps). One more
 query per page however many salons (`SalonCardStore`). The salon's page (`GET /salons/{id}`) shows the salon's own
 hours (a salon without any yet: from its barbers, as before), `closedDates` within its booking window and its
 `rating` with the tags customers ticked most.
@@ -833,6 +834,9 @@ one query per page (`SalonCardStore`). A deleted account's mutes go (`SalonAccou
    - Optional: `GOOGLE_GEOCODING_KEY`, a Google Maps Platform key restricted to the Geocoding API, for "Find my
      salon on the map" at registration (see "Finding the salon from its address"). Without it that button is hidden
      and owners place the pin with their phone's location, as before.
+   - Optional: `ANTHROPIC_API_KEY` (console.anthropic.com), for checking salons' trade licences with AI (see "The
+     trade licence, checked automatically"); `LICENCE_AI_MODEL` (default `claude-sonnet-5-5`). Without the key,
+     licences wait as "Checking".
    - Optional: `CORS_ALLOWED_ORIGINS`
      (default `http://localhost:5173`, the shop app's dev server; separate several with commas).
    - On the real server only: `APP_PRODUCTION=true`. The app then refuses to start unless everything a real
@@ -945,6 +949,79 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
+
+### The trade licence, checked automatically; salons drop GSTIN and Udyam (V55–V58; partner app 0.23.0, customer app 0.22.0, admin app 0.16.0)
+
+**The trade licence check.** A salon's only document is now its municipal trade licence (GHMC, Cyberabad, Malkajgiri or
+another municipality), still optional. Nobody marks it as checked by hand any more: LicenceCheckJob (every 20 seconds,
+one server at a time) reads each new one with Anthropic's Messages API (`AnthropicLicenceReader`: the photo or PDF and
+one tool, `record_licence`, that the model must call; Sonnet 5.5 by default), and LicenceRules decide in code:
+
+1. it can be read (`UNREADABLE`), is a municipal trade licence (`NOT_TRADE_LICENCE`) and shows no signs of editing
+   (`LOOKS_EDITED`);
+2. it has a licence number (`NO_NUMBER`), is for a salon, barber shop or beauty parlour (`NOT_A_SALON_TRADE`), and is
+   valid today and not more than 10 years ahead, which would be a misreading (`NO_VALIDITY`, `EXPIRED`). A
+   provisional licence (issued on payment, before the inspection) passes;
+3. the business name or the holder's name matches the salon's name or owner, salon words ("Hair", "Studio", "Unisex"…)
+   left out: one name holds the other, or a shared word that isn't a common name ("Sharma", "Lakshmi"), or two shared
+   words ("Syed Ali" / "Ali Syed"; "Syed Rafi" doesn't match) (`NAME_MISMATCH`); and its pincode (never taken from a
+   plot, road or phone number) is the salon's, or with no pincode on it, its address shares a word that isn't in every
+   Hyderabad address ("Hills", "Road", "Colony"…) (`ADDRESS_MISMATCH`);
+4. no other salon passed with the same number, compared as letters and digits only ("TR-0934-422-0003" and
+   "TR 0934 422 0003" are one licence) (`DUPLICATE`; a unique index stops two at the same moment).
+
+The first that fails is the reason. PASSED: customers see "Licensed" on the card and the salon's page
+(`licensedUntil`) until `licence_valid_until` (from India's next midnight, no badge), and the owner gets
+`SHOP_LICENCE_PASSED`. FAILED: `SHOP_LICENCE_FAILED` with what to do; the owner's `GET /shops/me` has `licenceRead`
+(the name, holder, address read) to compare with his own details. A timeline note in words either way. The model only
+reads: text on a document that talks to it can't approve anything, because the rules are code. What the page alone
+can't tell (a neighbour's real licence, same pincode, similar name) is left to the field team's visit and Remove.
+
+- **Without `ANTHROPIC_API_KEY`** there is no reader: uploads work and wait as PENDING ("Checking"); the key is read
+  at start, so they are read once the service restarts with it (setting a variable on Railway redeploys).
+  `LICENCE_AI_MODEL` changes the model. The key goes only in a header and is never logged.
+- **When the AI can't answer** (network, 429, 5xx, 529 overloaded; a wrong key or model, or out of credit, both
+  logged as errors) the check is tried again after 1, 2, 4… minutes, at most every 6 hours, never the owner's fault;
+  after half an hour it shows in the super admins' follow-up list. An answer without the tool call, or a file the API
+  refuses (too big, too many pages), is tried 3 times, counted apart, then FAILED `NOT_READ`.
+- **The licence or the details change under the check:** the answer is written only for the check it was about (the
+  same file, still PENDING, and the try the job took: `licence_check_attempts`, which a new check starts again from
+  0), in plain SQL in LicenceCheckStore, which doesn't change the shop's version (the owner's next save isn't refused).
+  Starting a check is plain SQL too (the entity, saved with @DynamicUpdate, would leave out a column it thinks
+  unchanged). Every owner and admin save of a shop now locks and reads its row fresh, so an answer written a moment
+  ago is never undone or broken by a stale copy. A new name, owner, address, area or pincode, by the owner or the field
+  team (an approved address request too), checks the licence again; so does the same file sent after it failed. A
+  Udyam or Shops and Establishments certificate is never sent to the AI.
+- **Limits:** each check is a paid AI read, so a salon starts at most 10 a day: past them a new upload answers 429
+  `TOO_MANY_CHECKS`, and a details change is saved and its check waits for the next day.
+- **Closing a salon** lets go of its licence (its number never blocks the same business registering again).
+- **Its last day:** LicenceExpiryJob (hourly, 9:00–21:00 India time) tells the owner a month before
+  (`SHOP_LICENCE_EXPIRING`) and the day after (`SHOP_LICENCE_EXPIRED`), each once.
+- **Under load:** uploads never wait for the AI; one licence is read at a time for the whole app, 5 taken per slice,
+  a round stops after 10 minutes (its lease lasts 20), so a flood only makes the queue longer. A server that dies
+  mid-read gives the check back after 15 minutes. Nothing slow runs inside a transaction. The partner app re-reads the
+  shop every 8 seconds only while a screen shows a licence being checked (every 30 after 3 minutes).
+- **Data:** V55 adds the licence columns to `shops` (not in `shops_aud`: the timeline keeps each result), checks NOT
+  VALID; V56 fills the rows that have a document (a closed salon's goes; trade licences are read again, since the field
+  team's check gave no number or last day; a Udyam or Shops and Establishments certificate stays but no longer
+  counts: FAILED `NOT_TRADE_LICENCE`); V57 builds `ix_shops_licence_due` (the job's queue), `ux_shops_licence_number`,
+  `ix_shops_licence_expiry`, `ix_shops_licence_follow_up` and drops the old to-check index; V58 validates the checks.
+
+| Call | Before | Now |
+| --- | --- | --- |
+| `PUT /shops/me/registration-document` | any of three types; waited for the field team | `TRADE_LICENCE` only (400 naming `type` otherwise); checked automatically; the same file after a failure is checked again; 429 `TOO_MANY_CHECKS` past 10 a day |
+| `GET /shops/me` | `registrationDocCheckedAt` set by the field team | also `licenceCheck`, `licenceCheckReason`, `licenceValidUntil`, `licenceCheckSince`, `licenceRead` (the owner's only); a salon's `gstin`/`udyamNumber` always null |
+| `POST /shops`, `PATCH /shops/me` | a salon's GSTIN/Udyam checked; a new one started a re-check | ignored for a salon (a kirana as before); a salon's new name, owner or address checks its licence again |
+| `GET /salons` · `GET /salons/{id}` | `registered`: the field team checked a document | `registered`: the licence passed and is valid today (the card says "Licensed") · new `licensedUntil` |
+| `GET /admin/shops/documents-to-check`, `POST /admin/shops/{id}/registration-document/check` | the field team's list and "Mark as checked" | gone |
+| `POST /admin/shops/{id}/registration-document/recheck` | | new: `{version}` sends the licence for checking again (a field agent for an assigned business, a super admin); 409 `NO_DOCUMENT`, `NOT_TRADE_LICENCE`, `SHOP_CHANGED`, `WRONG_STATUS` |
+| `GET /admin/shops/licences-to-follow-up` | | new (super admins): salons whose licence wasn't accepted or has waited over half an hour, longest first, at most 100 |
+| `GET /admin/shops/{id}` | `registrationDoc {type, label, url, checkedAt}` | also `check`, `reason`, `licenceNumber`, `validUntil`, `read`, `since`; a salon's `gstin`/`udyamNumber` null; approving a visit no longer marks the document checked |
+| messages | | new `SHOP_LICENCE_PASSED`, `SHOP_LICENCE_FAILED`, `SHOP_LICENCE_EXPIRING`, `SHOP_LICENCE_EXPIRED` (salon owner), opening `/setup/document` (`/register/photos` while still registering); `SHOP_DOCUMENT_REMOVED` now says "Trade licence removed" |
+
+Deploy the backend first (an old partner app that sends a Udyam or Shops and Establishments certificate gets 400 naming
+`type`; an old admin site's "Mark as checked" and documents list stop working), then the apps, then set
+`ANTHROPIC_API_KEY` in Railway.
 
 ### Support tickets, round 5: every kind of file, and many people at once (V54; admin app 0.15.0, customer app 0.20.0, partner app 0.21.0)
 
@@ -1674,6 +1751,8 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
   phone's upload is refused by the browser and owners can't submit.
 - **Address search (optional):** `GOOGLE_GEOCODING_KEY` on Railway, a key restricted to the Geocoding API, with
   the API's daily quota set in Google Cloud (300 a day: v3 requests per day; the v4 ones at 0) and a budget alert.
+- **Trade licence check:** `ANTHROPIC_API_KEY` on Railway (and a monthly spend limit in the Anthropic console); one
+  licence is read at a time. Without it salons' licences wait as "Checking".
 - **Email:** Resend recommended (`RESEND_API_KEY`); with Gmail the real server starts but logs a WARN, since Gmail
   carries a few hundred emails a day. With Resend, `EMAIL_FROM` must be set to an address on your verified domain
   (the real server refuses Resend's test address).
