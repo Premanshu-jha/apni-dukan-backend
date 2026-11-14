@@ -45,4 +45,19 @@ public interface FileStorage {
 
     /** The object's first bytes (fewer if it is shorter), to tell what it really is. */
     byte[] firstBytes(String key, int count);
+
+    /**
+     * The whole object, if it is at most {@code maxBytes} long (only that much plus one byte is ever downloaded);
+     * IllegalStateException if it is longer.
+     */
+    default byte[] read(String key, long maxBytes) {
+        if (maxBytes < 1 || maxBytes >= Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("maxBytes must be between 1 and " + (Integer.MAX_VALUE - 1));
+        }
+        byte[] bytes = firstBytes(key, (int) maxBytes + 1);
+        if (bytes.length > maxBytes) {
+            throw new IllegalStateException("The stored file is larger than " + maxBytes + " bytes");
+        }
+        return bytes;
+    }
 }

@@ -49,6 +49,13 @@ public interface FileRefs {
     void release(UUID fileId);
 
     /**
+     * The file's bytes (for reading a registration document), if it exists and is at most {@code maxBytes} long;
+     * empty if there is no such file. IllegalStateException if it is longer. Call it outside a transaction: it
+     * downloads from storage.
+     */
+    Optional<byte[]> read(UUID fileId, long maxBytes);
+
+    /**
      * @param shopId      null for a ticket file (it belongs to a person)
      * @param purpose     SHOP_PHOTO, OWNER_PHOTO, STAFF_PHOTO, SHOP_VIDEO, REG_DOC, BILL, RECEIPT or TICKET_FILE
      * @param contentType e.g. image/jpeg
