@@ -212,6 +212,16 @@ public class ShopAdminController {
     }
 
     /**
+     * Super admins (403 SUPER_ADMIN_ONLY for other admins): the licence-reading AI this credit period: {"periodStart",
+     * "periodEnd", "reads", "spentUsd", "budgetUsd", "problem" (null, CREDIT, KEY or MODEL), "problemSince", "keySet",
+     * "alertRecipients"}. Counted by the app from each answer's tokens.
+     */
+    @GetMapping("/shops/licence-ai-usage")
+    public in.apnidukan.shops.service.LicenceAiWatch.Usage licenceAiUsage() {
+        return admin.licenceAiUsage(caller());
+    }
+
+    /**
      * Take a wrong or expired registration document off the salon, with the reason the owner is told. {"version",
      * "reason"}. The salon's status doesn't change. 409 NO_DOCUMENT, SHOP_CHANGED, WRONG_STATUS.
      */

@@ -83,12 +83,15 @@ public class ShopAdminService {
     private final in.apnidukan.shops.repo.LicenceCheckStore licences;
     private final Clock clock;
 
+    private final LicenceAiWatch licenceAi;
+
     public ShopAdminService(ShopRepository shops, ShopMemberRepository members, UserDirectory users, FileRefs files,
                             Notifications notifications, List<ShopChangeListener> listeners, ShopReviewStore review,
                             SalonFacts salons, DashboardCounts dashboardCounts, ShopAssignments assignments,
                             ShopService shopService, AddressRequestStore addressRequests, Clock clock,
-                            in.apnidukan.shops.repo.LicenceCheckStore licences) {
+                            in.apnidukan.shops.repo.LicenceCheckStore licences, LicenceAiWatch licenceAi) {
         this.licences = licences;
+        this.licenceAi = licenceAi;
         this.shopService = shopService;
         this.addressRequests = addressRequests;
         this.dashboardCounts = dashboardCounts;
@@ -281,6 +284,16 @@ public class ShopAdminService {
         review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null, "Trade licence sent for checking again",
                 List.of());
         return view(shop);
+    }
+
+    /**
+     * Super admins: what the licence-reading AI has cost this credit period, against its budget, and whether
+     * Anthropic is refusing our account now (out of credit, a wrong key or model). 403 for other admins.
+     */
+    @Transactional(readOnly = true)
+    public LicenceAiWatch.Usage licenceAiUsage(UUID adminId) {
+        assignments.requireSuperAdmin(adminId);
+        return licenceAi.usage();
     }
 
     /**
