@@ -320,20 +320,27 @@ public class BookingService {
      * @param moving one of the customer's own bookings being moved (or null): its own time counts as free, so a
      *               move by a few minutes onto it is offered, and the times are for the services and lengths it was
      *               booked with (what the move will keep), not the salon's current ones. 404 if it isn't theirs, or
-     *               isn't at this salon.
+     *               isn't at this salon; 409 WRONG_STATUS once it can't move (cancelled, done, started). Times that
+     *               overlap the customer's own other booking are left out by the app, from the bookings it holds:
+     *               reading them here would add a statement to every check (SalonScaleIntegrationTest).
      */
     @Transactional(readOnly = true)
     public Slots availability(UUID customerId, UUID salonId, List<UUID> serviceIds, LocalDate date, UUID moving) {
         requireReadsLeft(customerId);
         // Theirs, and a booking at this salon: another salon's booking is no booking here (its services aren't this
         // salon's), 404 as for someone else's
-        UUID except = moving == null ? null
-                : mine(customerId, appointments.find(moving).filter(a -> salonId.equals(a.shopId()))).id();
+        Instant now = now();
+        Appointment movingOne = moving == null ? null
+                : mine(customerId, appointments.find(moving).filter(a -> salonId.equals(a.shopId())));
+        // Cancelled, done, missed or started: it can't move, so it has no free times (as reschedule answers)
+        if (movingOne != null) {
+            requireChangeable(movingOne, now);
+        }
+        UUID except = movingOne == null ? null : movingOne.id();
         // Three reads: the salon, its counters with its pause, and that day's busy time. The barbers, what they do,
         // their weeks and the booking settings come from memory while the salon's setup is unchanged
         visible(salonId);
         SalonSetups.Current current = setups.current(salonId);
-        Instant now = now();
         requireNotPaused(current, now);
         SalonSetups.Setup setup = current.setup();
         // A booking being moved keeps the services (and their lengths) it was booked with, as move() does: the free
