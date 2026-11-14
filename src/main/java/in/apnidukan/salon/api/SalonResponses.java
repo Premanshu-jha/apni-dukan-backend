@@ -24,13 +24,13 @@ public final class SalonResponses {
      */
     public record ServiceResponse(UUID id, String name, int durationMinutes, long pricePaise, boolean priceIsFrom,
                                   boolean active, int sortOrder, int returnAfterDays, long version, Instant createdAt,
-                                  Instant updatedAt) {
+                                  Instant updatedAt, String icon) {
 
         public static ServiceResponse from(SalonServiceItem item) {
             ServiceDetails d = item.details();
             return new ServiceResponse(item.getId(), d.name(), d.durationMin(), d.pricePaise(), d.priceIsFrom(),
                     d.active(), d.sortOrder(), d.returnAfterDays(), item.getVersion(), item.getCreatedAt(),
-                    item.getUpdatedAt());
+                    item.getUpdatedAt(), d.icon() == null ? null : d.icon().name());
         }
     }
 

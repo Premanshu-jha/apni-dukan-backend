@@ -35,7 +35,8 @@ public final class SalonRequests {
             @NotNull @Min(0) @Max(10_000_000) Long pricePaise,
             Boolean priceIsFrom,
             @Min(0) @Max(999) Integer sortOrder,
-            @Min(0) @Max(180) Integer returnAfterDays) {
+            @Min(0) @Max(180) Integer returnAfterDays,
+            String icon) {
     }
 
     /**
@@ -57,7 +58,8 @@ public final class SalonRequests {
             Boolean priceIsFrom,
             Boolean active,
             @Min(0) @Max(999) Integer sortOrder,
-            @Min(0) @Max(180) Integer returnAfterDays) {
+            @Min(0) @Max(180) Integer returnAfterDays,
+            String icon) {
     }
 
     /**

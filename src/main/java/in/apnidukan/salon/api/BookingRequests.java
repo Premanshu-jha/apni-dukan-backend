@@ -8,6 +8,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
@@ -65,10 +66,13 @@ public final class BookingRequests {
     /**
      * Add a walk-in: it starts now with a barber who is free now. Send an Idempotency-Key header.
      * @param name    optional, the customer's name
+     * @param expectedPricePaise optional, the total the screen showed: when the price now differs (an offer started or
+     *                           ended since), nothing is added and the answer is 409 PRICE_CHANGED with the new total
      */
     public record WalkIn(@NotEmpty @Size(max = 10) List<@NotNull UUID> serviceIds,
                          @NotNull UUID staffId,
-                         @Size(max = 60) String name) {
+                         @Size(max = 60) String name,
+                         @PositiveOrZero Long expectedPricePaise) {
     }
 
     /**

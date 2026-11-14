@@ -25,6 +25,7 @@ import in.apnidukan.salon.api.BookingResponses.MemberView;
 import in.apnidukan.salon.api.BookingResponses.PauseView;
 import in.apnidukan.salon.api.BookingResponses.UpcomingChanges;
 import in.apnidukan.salon.api.BookingResponses.WalkInOption;
+import in.apnidukan.salon.api.BookingResponses.WalkInPrice;
 import in.apnidukan.salon.domain.Appointment;
 import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.domain.AppointmentKind;
@@ -36,6 +37,7 @@ import in.apnidukan.salon.domain.BlockType;
 import in.apnidukan.salon.domain.BookedService;
 import in.apnidukan.salon.domain.DayCursor;
 import in.apnidukan.salon.domain.Interval;
+import in.apnidukan.salon.domain.SalonOffer;
 import in.apnidukan.salon.domain.SalonStaff;
 import in.apnidukan.salon.domain.SalonTime;
 import in.apnidukan.salon.domain.StaffShift;
@@ -64,6 +66,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -474,9 +477,38 @@ public class SalonDayService {
     }
 
     /**
+     * Every active service's price for a walk-in starting now (owner and people with walk-in access): with the salon's
+     * offer where one applies now, as {@link #addWalkIn} prices it. The walk-in screen reads it again every minute.
+     */
+    @Transactional(readOnly = true)
+    public List<WalkInPrice> walkInPrices(UUID userId) {
+        Caller c = access.walkIns(userId);
+        Instant start = now().truncatedTo(ChronoUnit.MINUTES);
+        SalonSetups.Setup setup = setups.of(c.shopId());
+        List<SalonOffer> offers = setup.offersFrom(today(start));
+        Map<UUID, SalonOffer> byId = offers.stream().collect(Collectors.toMap(SalonOffer::id, o -> o));
+        return SalonOffer.price(setup.services(), offers, start)
+                .stream()
+                .map(s -> new WalkInPrice(s.serviceId(), s.pricePaise(),
+                        s.priceIsFrom(), s.listPricePaise(), s.offerId() == null ? null : until(byId.get(s.offerId()))))
+                .toList();
+    }
+
+    /** When the offer's hours end today, as "14:00" (India time); null when it runs all day. */
+    private static String until(SalonOffer o) {
+        if (o == null || o.toMin() == null || o.toMin() >= SalonTime.END_OF_DAY) {
+            return null;
+        }
+        return String.format(Locale.ROOT, "%02d:%02d", o.toMin() / 60, o.toMin() % 60);
+    }
+
+    /**
      * Adds a walk-in with the chosen barber, starting now (IN_SERVICE at once; the customer is in the chair, so no
-     * code). Walk-ins are never booked for later. If he isn't free now (taken in between): 409 BARBER_BUSY with his
-     * next free start. The same Idempotency-Key again returns the walk-in already added.
+     * code). Walk-ins are never booked for later. Priced like a booking starting now: the salon's offer applies when
+     * it covers this moment and the service (its price kept on the walk-in whatever happens to the offer later). When
+     * the request says the total it showed and the price now differs: 409 PRICE_CHANGED, nothing added. If he isn't
+     * free now (taken in between): 409 BARBER_BUSY with his next free start. The same Idempotency-Key again returns
+     * the walk-in already added.
      */
     @Transactional
     public AppointmentView addWalkIn(UUID userId, String idempotencyKey, WalkIn in) {
@@ -495,16 +527,30 @@ public class SalonDayService {
             return salonView(c, e);
         }
         Instant now = now();
+        // The shop's row held in shared mode until the walk-in is saved, as a booking holds it (ShopDirectory
+        // .findForBooking): publishing or ending an offer (holdAgainstBookings) waits for it, and one that committed
+        // first is in the setup read below, so a walk-in is never priced with an offer that just ended
+        if (shops.findForBooking(c.shopId()).isEmpty()) {
+            throw staffNotFound();
+        }
         // From the setup in memory (SalonSetups), with the same checks; once his row is locked below, that he is still
         // active, and (if the setup changed meanwhile) that he still does these services, against the database
         SalonSetups.Setup setup = setups.of(c.shopId());
-        List<BookedService> chosen = calendar.chosenServices(setup, in.serviceIds());
+        Instant start = now.truncatedTo(ChronoUnit.MINUTES);
+        List<BookedService> chosen = SalonOffer.price(
+                calendar.chosenServices(setup, in.serviceIds()), setup.offersFrom(today(start)), start);
+        long total = chosen.stream().mapToLong(BookedService::pricePaise).sum();
+        if (in.expectedPricePaise() != null && in.expectedPricePaise() != total) {
+            // An offer started or ended (or a price was edited) after the screen read the prices: nothing is added
+            throw new ApiException(HttpStatus.CONFLICT, "PRICE_CHANGED",
+                    "The price changed just now. Check the new total with the customer, then add again.",
+                    Map.of("pricePaise", total));
+        }
         Duration length = SalonCalendar.length(chosen);
         SalonSetups.Barber barber = setup.barber(in.staffId()).orElseThrow(SalonDayService::staffNotFound);
         if (calendar.barbersFor(setup, ids(chosen)).stream().noneMatch(b -> b.id().equals(barber.id()))) {
             throw SalonCalendar.invalid("staffId", "this barber doesn't do all of the chosen services");
         }
-        Instant start = now.truncatedTo(ChronoUnit.MINUTES);
         String guest = in.name() == null || in.name().isBlank() ? null : clean(GUEST_NAME, in.name());
         Appointment a = new Appointment(UUID.randomUUID(), c.shopId(), barber.id(), AppointmentKind.WALK_IN, null,
                 null, null, null, guest, null, start, start.plus(length), AppointmentStatus.IN_SERVICE, now,

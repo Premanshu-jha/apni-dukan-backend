@@ -11,6 +11,7 @@ import in.apnidukan.salon.domain.Shift;
 import in.apnidukan.salon.domain.StaffShift;
 import in.apnidukan.salon.domain.StaffSkill;
 import in.apnidukan.salon.repo.SalonOfferStore;
+import in.apnidukan.salon.domain.SalonServiceItem;
 import in.apnidukan.salon.repo.SalonServiceItemRepository;
 import in.apnidukan.salon.repo.SalonSettingsRepository;
 import in.apnidukan.salon.repo.SalonStaffRepository;
@@ -68,14 +69,21 @@ public class SalonSetups {
      * @param maxDaysAhead latest booking, days from today
      * @param offers       its offers not ended early that lasted until the day it was read or later (each says itself
      *                     when it applies: SalonOffer.appliesAt), soonest first
+     * @param icons        the active services' icons (ServiceIcon names; a service without one is left out)
      */
     public record Setup(long version, List<Barber> barbers, List<BookedService> services, int minLeadMin,
-                        int maxDaysAhead, List<SalonOffer> offers) {
+                        int maxDaysAhead, List<SalonOffer> offers, Map<UUID, String> icons) {
 
         public Setup {
             barbers = List.copyOf(barbers);
             services = List.copyOf(services);
             offers = List.copyOf(offers);
+            icons = Map.copyOf(icons);
+        }
+
+        /** The icon of this service, or null. */
+        public String icon(UUID serviceId) {
+            return icons.get(serviceId);
         }
 
         /** Its offers that still last until this date or later. */
@@ -184,16 +192,20 @@ public class SalonSetups {
         List<Barber> barbers = active.stream().map(b -> new Barber(b.getId(), b.getName(), b.getCreatedAt(),
                 does.getOrDefault(b.getId(), Set.of()), weeks.getOrDefault(b.getId(), List.of()), b.getUserId()))
                 .toList();
-        List<BookedService> offered = services.findByShopIdAndActiveTrueOrderBySortOrderAscNameAsc(shopId).stream()
+        List<SalonServiceItem> activeServices = services.findByShopIdAndActiveTrueOrderBySortOrderAscNameAsc(shopId);
+        List<BookedService> offered = activeServices.stream()
                 .map(s -> new BookedService(s.getId(), s.details().name(), s.details().durationMin(),
                         s.details().pricePaise(), s.details().priceIsFrom()))
                 .toList();
+        Map<UUID, String> icons = new java.util.HashMap<>();
+        activeServices.stream().filter(s -> s.details().icon() != null)
+                .forEach(s -> icons.put(s.getId(), s.details().icon().name()));
         Optional<SalonSettings> saved = settings.findById(shopId);
         // From yesterday: a server's clock a moment behind the database's day still has today's
         LocalDate yesterday = LocalDate.ofInstant(clock.instant(), SalonTime.ZONE).minusDays(1);
         return new Setup(version, barbers, offered,
                 saved.map(SalonSettings::getMinLeadMin).orElse(SalonSettings.DEFAULT_MIN_LEAD_MIN),
                 saved.map(SalonSettings::getMaxDaysAhead).orElse(SalonSettings.DEFAULT_MAX_DAYS_AHEAD),
-                stillOn(offers.current(shopId, yesterday), offered));
+                stillOn(offers.current(shopId, yesterday), offered), icons);
     }
 }

@@ -759,8 +759,8 @@ likes, only from one time to another each day (15-minute steps). Bookings that *
 (`SalonOffer.price`: each covered service, to the rupee, half up, never below ₹1); the booking keeps that price
 (`appointment_services.list_price_paise` and `offer_id`), whatever happens to the offer later. A **move** prices the
 booking again for its new time, from the prices it was booked at before any offer: the offer there if one applies,
-the price without one if not (so an offer's days and hours can't be carried to any time by moving). Walk-ins are at
-the list price (the salon gives a discount in person if it likes). Publishing or ending an offer takes the shop's row
+the price without one if not (so an offer's days and hours can't be carried to any time by moving). A walk-in is
+priced the same way at the minute it starts: inside the offer's days and hours, the offer price. Publishing or ending an offer takes the shop's row
 against bookings (like a pause): a booking in progress finishes first, and one after it sees the change.
 
 | Call | Who | What |
@@ -940,6 +940,7 @@ The customer picks services and a time; the backend picks the barber. Another pe
 | `GET /day?date=` | owner, helper, and anyone with walk-in access: all barbers; other barbers: their own | A column per barber with his hours and appointments (`notStarted` once its time passed), and `myStaffId` (the caller's own barber profile, null for owner and helpers). Never the start code. Answers carry an `ETag`; send it back as `If-None-Match` and an unchanged board is `304` (see "ETags of the day board and upcoming list"). With `&since=<seq>`: only what changed (see "Day board deltas") |
 | `GET /upcoming?afterStart=&afterId=` | owner, helper, anyone with walk-in access: the salon; other barbers: their own | Online bookings still to come today and the next 31 days, soonest first, 100 a page (see "Pages"), including ones running late. `ETag` and `304` as for the day board |
 | `GET /history?from=&to=&afterStart=&afterId=` | owner, helper | India dates, at most 31 days: bookings and walk-ins latest first, 100 a page with `next` (see "Pages"); how many ended in each status, and what the completed ones were worth at list price (both over the whole range, on the first page only: later pages carry `counts: null, completedPaise: null`, keep the first page's) |
+| `GET /walk-ins/prices` | owner, and people he gave walk-in access | Every active service's price for a walk-in starting now: `[{serviceId, pricePaise, priceIsFrom, listPricePaise, offerUntil}]`, the salon's offer applied where it covers this minute (`listPricePaise` its own price then, else null; `offerUntil` "14:00" when the offer's hours end today, null when none applies or it runs all day) |
 | `GET /walk-ins/options?services=` · `POST /walk-ins` | owner, and people he gave walk-in access | Per barber: free now, or when he is next free today (exact minutes, for information). A walk-in always starts now with a barber who is free now (IN_SERVICE at once, no code: the customer is in the chair); there is no booking a walk-in for later. 409 `BARBER_BUSY` with his next free time |
 | `GET /members` · `PUT /members/{userId}/walk-in-access {allowed}` | owner | Who may add walk-ins besides the owner (a helper or barber) |
 | `POST /appointments/{id}/start` | owner, helper; barber: own | From 15 min before until 10 min after the start (then it is a no-show). A booking needs `{code}` (400 `WRONG_START_CODE` with `triesLeft`; 5 wrong → 429 `START_CODE_LOCKED`) or `{withoutCode: true}` (owner, helper). Started early, it holds the barber from now for its length; if someone (or a break) still holds his chair, 409 `BARBER_BUSY` (`reason: STILL_BUSY`). Started late, it runs its full length from now when he is free for that, else keeps its planned end |
@@ -953,6 +954,37 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
+
+### Walk-ins at the offer price; a picture for every service (V61–V62; partner app 0.24.0, customer app 0.23.0)
+
+- **Walk-ins get the salon's offer.** A walk-in starting inside an offer's days and hours is priced with it, as a
+  booking starting then would be (`SalonOffer.price`, kept on the walk-in as booked). New `GET /salon/walk-ins/prices`
+  gives every active service's price now (and when the offer's hours end today), so the walk-in screen shows it and
+  the total before adding. Before, walk-ins were always at the service's own price.
+  - **The price shown is the price charged.** `POST /salon/walk-ins` takes an optional `expectedPricePaise` (the total
+    the screen showed): if the price now differs (an offer started or ended, a price was edited), nothing is added and
+    the answer is 409 `PRICE_CHANGED` with `details.pricePaise`, the total now.
+  - **Never an offer that just ended.** The add holds the shop's row in shared mode, as a booking does
+    (`ShopDirectory.findForBooking`): ending or publishing an offer (`holdAgainstBookings`) waits for a walk-in being
+    added, and one added after reads the new setup. Tested with the end held open while a walk-in arrives.
+  - **An offer's "bookings" count online bookings only**, not walk-ins priced with it.
+- **A picture for every service** (`ServiceIcon`, 26: scissors, moustache, razor, colour, hair dryer, straightener,
+  curl, hair spa, hair wash, face, sparkle, massage, eyebrow, eyelashes, wax strip, hand, nail polish, feet, lipstick,
+  crown, child, henna cone, lotus, ear, package, and the salon's own). The owner picks it from those that fit the
+  service's name (the apps decide which fit; the backend keeps the name, `salon_services.icon`, V61, checked in V62).
+  `POST`/`PATCH /salon/services` and the batch take `icon` (any case; 400 `VALIDATION_FAILED` naming `icon`, or
+  `services[i].icon` in the batch, for one not in the set; left out on an edit: unchanged; there is no "none" once
+  set); `GET /salon/services` and the customer's `GET /salons/{id}/services`
+  give it. A service saved before has none (null): the apps draw the one its name fits. The database's list and the
+  enum are checked against each other (`ServiceIconTest`).
+
+| Call | Change |
+|---|---|
+| `GET /salon/walk-ins/prices` | new (owner, walk-in access): prices now, with the offer |
+| `POST /salon/walk-ins` | priced with the offer applying at its start; optional `expectedPricePaise`, 409 `PRICE_CHANGED` |
+| `GET /salon/offers` | `bookings` counts online bookings only |
+| `POST /salon/services`, `/services/batch`, `PATCH /salon/services/{id}` | optional `icon` |
+| `GET /salon/services`, `GET /salons/{id}/services` | `icon` (null for a service saved before) |
 
 ### Credit alerts for the licence checks (V60; admin app 0.17.0)
 

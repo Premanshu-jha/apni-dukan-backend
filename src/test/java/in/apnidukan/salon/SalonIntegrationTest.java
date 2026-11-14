@@ -145,6 +145,32 @@ class SalonIntegrationTest {
     }
 
     @Test
+    void aServiceKeepsTheIconTheOwnerPickedAndAnOldOneHasNone() {
+        String owner = salonOwner(OWNER_PHONE);
+        Map<String, Object> haircut = service("Haircut", 30, 15000, 0);
+        haircut.put("icon", "haircut");   // any case
+        Reply added = post("/salon/services", haircut, owner);
+        assertThat(added.status()).as(added.body().toString()).isEqualTo(201);
+        assertThat(added.body().get("icon")).isEqualTo("HAIRCUT");
+        Reply old = post("/salon/services", service("Beard trim", 15, 8000, 1), owner);
+        assertThat(old.body().get("icon")).isNull();   // the apps suggest one from the name
+
+        Reply changed = patch("/salon/services/" + old.body().get("id"), Map.of("version", 0, "icon", "BEARD"), owner);
+        assertThat(changed.status()).as(changed.body().toString()).isEqualTo(200);
+        assertThat(changed.body().get("icon")).isEqualTo("BEARD");
+        // Saving without the icon keeps it
+        Reply priced = patch("/salon/services/" + old.body().get("id"), Map.of("version", 1, "pricePaise", 9000), owner);
+        assertThat(priced.body().get("icon")).isEqualTo("BEARD");
+
+        Map<String, Object> wrong = service("Facial", 45, 50000, 2);
+        wrong.put("icon", "ROCKET");
+        assertInvalidService(owner, wrong, "icon");
+        Reply wrongEdit = patch("/salon/services/" + old.body().get("id"), Map.of("version", 2, "icon", "x"), owner);
+        assertThat(wrongEdit.status()).isEqualTo(400);
+        assertThat(((Map<?, ?>) wrongEdit.body().get("details")).get("icon")).isNotNull();
+    }
+
+    @Test
     void twoActiveServicesCantShareANameButASwitchedOffOneFreesIt() {
         String owner = salonOwner(OWNER_PHONE);
         Map<?, ?> first = post("/salon/services", service("Haircut", 30, 15000, 0), owner).body();

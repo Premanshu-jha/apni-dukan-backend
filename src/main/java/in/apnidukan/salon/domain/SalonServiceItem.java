@@ -2,6 +2,8 @@ package in.apnidukan.salon.domain;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -50,6 +52,10 @@ public class SalonServiceItem {
     @Column(name = "return_after_days", nullable = false)
     private int returnAfterDays;
 
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20)
+    private ServiceIcon icon;
+
     @Version
     @Column(nullable = false)
     private long version;
@@ -78,11 +84,12 @@ public class SalonServiceItem {
         this.active = details.active();
         this.sortOrder = details.sortOrder();
         this.returnAfterDays = details.returnAfterDays();
+        this.icon = details.icon();
         this.updatedAt = now;
     }
 
     public ServiceDetails details() {
-        return new ServiceDetails(name, durationMin, pricePaise, priceIsFrom, active, sortOrder, returnAfterDays);
+        return new ServiceDetails(name, durationMin, pricePaise, priceIsFrom, active, sortOrder, returnAfterDays, icon);
     }
 
     public UUID getId() { return id; }
