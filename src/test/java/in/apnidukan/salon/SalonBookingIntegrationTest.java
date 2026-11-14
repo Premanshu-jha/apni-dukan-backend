@@ -1144,15 +1144,15 @@ class SalonBookingIntegrationTest {
         assertThat(field(put("/shops/me/photos", Map.of("version", version, "ownerPhotoFileId",
                 newOwnerPhoto.toString()), newOwner).body(), "recheckSince")).isNotNull();
         assertThat(approve(newSalon, admin).status()).isEqualTo(200);
-        // A new GSTIN or Udyam number is re-checked too
+        // A salon has no GSTIN or Udyam number now: one sent is ignored, and nothing waits for a re-check
         version = ((Number) field(get("/shops/me", newOwner).body(), "version")).longValue();
-        Reply gstin = patch("/shops/me", Map.of("version", version, "gstin", "27AAPFU0939F1ZV"), newOwner);
+        Reply gstin = patch("/shops/me", Map.of("version", version, "gstin", "27AAPFU0939F1ZV", "udyamNumber",
+                "UDYAM-TS-02-0012345"), newOwner);
         assertThat(field(gstin.body(), "status")).as(gstin.text()).isEqualTo("APPROVED");
-        assertThat(field(gstin.body(), "recheckSince")).isNotNull();
-        assertThat(approve(newSalon, admin).status()).isEqualTo(200);
-        version = ((Number) field(get("/shops/me", newOwner).body(), "version")).longValue();
-        assertThat(field(patch("/shops/me", Map.of("version", version, "udyamNumber", "UDYAM-TS-02-0012345"),
-                newOwner).body(), "recheckSince")).isNotNull();
+        assertThat(field(gstin.body(), "gstin")).isNull();
+        assertThat(field(gstin.body(), "udyamNumber")).isNull();
+        assertThat(field(gstin.body(), "recheckSince")).isNull();
+        assertThat(field(gstin.body(), "version")).isEqualTo(field(get("/shops/me", newOwner).body(), "version"));
     }
 
     @Test

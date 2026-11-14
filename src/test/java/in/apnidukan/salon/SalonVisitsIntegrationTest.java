@@ -193,11 +193,17 @@ class SalonVisitsIntegrationTest {
                 "TRADE_LICENCE", "fileId", photo.toString()), newOwner);
         assertThat(wrong.status()).isEqualTo(400);
         UUID doc = file(draft, newOwner, "REG_DOC", "application/pdf");
-        Reply docSet = put("/shops/me/registration-document", Map.of("version", version(draft), "type",
+        // Only a trade licence counts now
+        Reply otherKind = put("/shops/me/registration-document", Map.of("version", version(draft), "type",
                 "SHOPS_ESTABLISHMENT", "fileId", doc.toString()), newOwner);
+        assertThat(otherKind.status()).isEqualTo(400);
+        assertThat(otherKind.text()).contains("type");
+        Reply docSet = put("/shops/me/registration-document", Map.of("version", version(draft), "type",
+                "TRADE_LICENCE", "fileId", doc.toString()), newOwner);
         assertThat(docSet.status()).as(docSet.text()).isEqualTo(200);
-        assertThat(field(docSet.body(), "registrationDocType")).isEqualTo("SHOPS_ESTABLISHMENT");
+        assertThat(field(docSet.body(), "registrationDocType")).isEqualTo("TRADE_LICENCE");
         assertThat(field(docSet.body(), "registrationDocFileId")).isEqualTo(doc.toString());
+        assertThat(field(docSet.body(), "licenceCheck")).isEqualTo("PENDING");   // the job checks it
         // In use: can't be deleted
         Reply inUse = http.method(HttpMethod.DELETE).uri("/files/" + doc)
                 .headers(h -> h.setBearerAuth(jwt.issue(new AuthPrincipal(newOwner, draft, "OWNER", false),
@@ -211,63 +217,68 @@ class SalonVisitsIntegrationTest {
         Reply detail = get("/admin/shops/" + draft, admin);
         assertThat(detail.status()).as(detail.text()).isEqualTo(200);
         Map<?, ?> regDoc = (Map<?, ?>) field(detail.body(), "registrationDoc");
-        assertThat(regDoc.get("label")).isEqualTo("Shops and Establishments certificate");
+        assertThat(regDoc.get("label")).isEqualTo("Trade licence");
+        assertThat(regDoc.get("check")).isEqualTo("PENDING");
         assertThat((String) regDoc.get("url")).isNotBlank();
         Map<?, ?> facts = (Map<?, ?>) field(detail.body(), "salon");
         assertThat((List<?>) facts.get("hours")).hasSize(6);
         assertThat((List<?>) facts.get("serviceList")).extracting(s -> field(s, "name"))
                 .containsExactly("Haircut", "Hair wash");
 
-        // Approved: the visit checked the document there
+        // Approved: the visit doesn't decide on the licence (the automatic check does)
         assertThat(post("/admin/shops/" + draft + "/approve", Map.of("version", version(draft)), admin).status())
                 .isEqualTo(200);
-        assertThat(field(get("/shops/me", newOwner).body(), "registrationDocCheckedAt")).isNotNull();
+        Reply mine = get("/shops/me", newOwner);
+        assertThat(field(mine.body(), "registrationDocCheckedAt")).isNull();
+        assertThat(field(mine.body(), "licenceCheck")).isEqualTo("PENDING");
     }
 
     @Test
-    void aLiveSalonChangesItsDocumentAndStaysLiveRegisteredOnlyOnceTheFieldTeamCheckedIt() {
+    void aLiveSalonChangesItsLicenceAndStaysLiveLicensedOnlyWhileItsCheckPassedAndItIsValid() {
         assertThat(card().get("registered")).isEqualTo(false);
         UUID licence = file(salon, owner, "REG_DOC", "image/jpeg");
         Reply added = put("/shops/me/registration-document", Map.of("version", version(salon), "type",
                 "TRADE_LICENCE", "fileId", licence.toString()), owner);
         assertThat(field(added.body(), "status")).as(added.text()).isEqualTo("APPROVED");   // stays live
-        assertThat(field(added.body(), "registrationDocCheckedAt")).isNull();
+        assertThat(field(added.body(), "licenceCheck")).isEqualTo("PENDING");
         assertThat(card().get("registered")).isEqualTo(false);   // not checked yet
-
-        // The field team's list of documents to check (super admins), then "Mark as checked"
-        Reply toCheck = get("/admin/shops/documents-to-check", admin);
-        assertThat(toCheck.status()).as(toCheck.text()).isEqualTo(200);
-        assertThat((List<?>) toCheck.body()).extracting(s -> field(s, "id")).containsExactly(salon.toString());
+        // The field team's manual check is gone (the job checks it)
         assertThat(post("/admin/shops/" + salon + "/registration-document/check", Map.of("version", version(salon)),
-                admin).status()).isEqualTo(200);
-        assertThat(card().get("registered")).isEqualTo(true);
-        assertThat((List<?>) get("/admin/shops/documents-to-check", admin).body()).isEmpty();
-        Map<?, ?> doc = (Map<?, ?>) field(get("/admin/shops/" + salon, admin).body(), "registrationDoc");
-        assertThat(doc.get("checkedAt")).isNotNull();
+                admin).status()).isNotEqualTo(200);
+        assertThat(get("/admin/shops/documents-to-check", admin).status()).isNotEqualTo(200);
 
-        // Only the kind changes (the same file): not checked any more
-        Reply retyped = put("/shops/me/registration-document", Map.of("version", version(salon), "type", "UDYAM",
-                "fileId", licence.toString()), owner);
-        assertThat(field(retyped.body(), "status")).isEqualTo("APPROVED");
-        assertThat(card().get("registered")).isEqualTo(false);
+        // Passed (as LicenceCheckJob writes it): "Licensed" until its last valid day, then no badge
+        jdbc.update("UPDATE shops SET licence_check_status = 'PASSED', licence_number = 'TL-1', "
+                + "licence_valid_until = '2026-11-10', registration_doc_checked_at = now() WHERE id = ?", salon);
+        assertThat(card().get("registered")).isEqualTo(true);
+        CLOCK.set(TUESDAY_10_00.plus(Duration.ofDays(1)));
+        assertThat(card().get("registered")).isEqualTo(false);   // expired
+        CLOCK.set(TUESDAY_10_00);
+        Map<?, ?> doc = (Map<?, ?>) field(get("/admin/shops/" + salon, admin).body(), "registrationDoc");
+        assertThat(doc.get("check")).isEqualTo("PASSED");
+        assertThat(doc.get("licenceNumber")).isEqualTo("TL-1");
 
         // The field team takes a wrong one off, with the reason the owner is told
         Reply removed = post("/admin/shops/" + salon + "/registration-document/remove", Map.of("version",
-                version(salon), "reason", "This certificate is for another shop."), admin);
+                version(salon), "reason", "This licence is for another shop."), admin);
         assertThat(removed.status()).as(removed.text()).isEqualTo(200);
-        assertThat(field(get("/shops/me", owner).body(), "registrationDocFileId")).isNull();
+        Reply mine = get("/shops/me", owner);
+        assertThat(field(mine.body(), "registrationDocFileId")).isNull();
+        assertThat(field(mine.body(), "licenceCheck")).isNull();
+        assertThat(card().get("registered")).isEqualTo(false);
         assertThat(count("notification_jobs WHERE type = 'SHOP_DOCUMENT_REMOVED' AND url = '/setup/document' "
                 + "AND user_id = '" + owner + "'")).isPositive();
-        assertThat(field(post("/admin/shops/" + salon + "/registration-document/check", Map.of("version",
-                version(salon)), admin).body(), "code")).isEqualTo("NO_DOCUMENT");
+        assertThat(field(post("/admin/shops/" + salon + "/registration-document/remove", Map.of("version",
+                version(salon), "reason", "Again please"), admin).body(), "code")).isEqualTo("NO_DOCUMENT");
 
         // The owner adds one again, then removes it himself
-        put("/shops/me/registration-document", Map.of("version", version(salon), "type", "UDYAM", "fileId",
+        put("/shops/me/registration-document", Map.of("version", version(salon), "type", "TRADE_LICENCE", "fileId",
                 licence.toString()), owner);
         Reply gone = call(HttpMethod.DELETE, "/shops/me/registration-document?version=" + version(salon), null, owner,
                 null);
         assertThat(gone.status()).as(gone.text()).isEqualTo(200);
         assertThat(field(gone.body(), "registrationDocType")).isNull();
+        assertThat(field(gone.body(), "licenceCheck")).isNull();
         assertThat(field(gone.body(), "status")).isEqualTo("APPROVED");
         assertThat(call(HttpMethod.DELETE, "/shops/me/registration-document?version=0", null, owner, null).status())
                 .isEqualTo(409);   // stale version
@@ -278,20 +289,23 @@ class SalonVisitsIntegrationTest {
         UUID helper = person();
         TestData.member(jdbc, salon, helper, "HELPER");
         UUID doc = file(salon, owner, "REG_DOC", "application/pdf");
-        Reply byHelper = put("/shops/me/registration-document", Map.of("version", version(salon), "type", "UDYAM",
+        Reply byHelper = put("/shops/me/registration-document", Map.of("version", version(salon), "type",
+                "TRADE_LICENCE",
                 "fileId", doc.toString()), helper);
         assertThat(byHelper.status()).isEqualTo(403);
         assertThat(get("/files/" + doc + "/link", helper).status()).isEqualTo(403);
         // A barber never sees it on My shop; a helper doesn't either
-        put("/shops/me/registration-document", Map.of("version", version(salon), "type", "UDYAM", "fileId",
+        put("/shops/me/registration-document", Map.of("version", version(salon), "type", "TRADE_LICENCE", "fileId",
                 doc.toString()), owner);
         assertThat(field(get("/shops/me", helper).body(), "registrationDocFileId")).isNull();
+        assertThat(field(get("/shops/me", helper).body(), "licenceCheck")).isNull();
 
         UUID kiranaOwner = person();
         UUID kirana = UUID.randomUUID();
         TestData.shop(jdbc, kirana, kiranaOwner);
         UUID kiranaDoc = file(kirana, kiranaOwner, "REG_DOC", "application/pdf");
-        Reply notSalon = put("/shops/me/registration-document", Map.of("version", version(kirana), "type", "UDYAM",
+        Reply notSalon = put("/shops/me/registration-document", Map.of("version", version(kirana), "type",
+                "TRADE_LICENCE",
                 "fileId", kiranaDoc.toString()), kiranaOwner);
         assertThat(field(notSalon.body(), "code")).isEqualTo("NOT_A_SALON");
     }
@@ -342,9 +356,9 @@ class SalonVisitsIntegrationTest {
         assertThat(field(card.get("rating"), "average")).isNull();
         assertThat(card.get("registered")).isEqualTo(false);   // no registration document
         UUID doc = file(salon, owner, "REG_DOC", "application/pdf");
-        jdbc.update("UPDATE shops SET registration_doc_type = 'UDYAM', registration_doc_file_id = ?, "
-                + "registration_doc_checked_at = now() WHERE id = ?", doc,
-                salon);
+        jdbc.update("UPDATE shops SET registration_doc_type = 'TRADE_LICENCE', registration_doc_file_id = ?, "
+                + "registration_doc_checked_at = now(), licence_check_status = 'PASSED', licence_number = 'TL-9', "
+                + "licence_valid_until = '2027-03-31' WHERE id = ?", doc, salon);
         assertThat(card().get("registered")).isEqualTo(true);
 
         CLOCK.set(at("21:30"));

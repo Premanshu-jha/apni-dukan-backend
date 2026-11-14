@@ -208,6 +208,74 @@ class MigrationUpgradeIntegrationTest {
         }
     }
 
+    @Test
+    void registrationDocumentsGetTheirLicenceCheckOnlyATradeLicenceCounts() {
+        String name = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
+        JdbcTemplate admin = new JdbcTemplate(new DriverManagerDataSource(TestContainers.jdbcUrl(),
+                TestContainers.DB_USER, TestContainers.DB_PASSWORD));
+        admin.execute("CREATE DATABASE " + name);
+        String url = TestContainers.jdbcUrl().replaceAll("/[^/]+$", "/" + name);
+        DriverManagerDataSource ds = new DriverManagerDataSource(url, TestContainers.DB_USER,
+                TestContainers.DB_PASSWORD);
+        try {
+            flyway(ds, MigrationVersion.fromVersion("54")).migrate();
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+            Timestamp now = Timestamp.from(Instant.parse("2026-11-14T04:30:00Z"));
+            UUID owner = UUID.randomUUID();
+            jdbc.update("INSERT INTO users (id, phone, admin, created_at, updated_at) VALUES (?, '9000000888', false, "
+                    + "?, ?)", owner, now, now);
+            UUID checkedLicence = UUID.randomUUID();
+            UUID newLicence = UUID.randomUUID();
+            UUID udyam = UUID.randomUUID();
+            UUID none = UUID.randomUUID();
+            UUID closed = UUID.randomUUID();
+            for (UUID s : new UUID[] {checkedLicence, newLicence, udyam, none, closed}) {
+                jdbc.update("INSERT INTO shops (id, name, owner_name, address_line, area, city, pincode, latitude, "
+                        + "longitude, status, type, version, created_at, updated_at) VALUES (?, 'Hair', 'Owner', "
+                        + "'Shop 4', 'Kondapur', 'Hyderabad', '500084', 17.465, 78.364, 'APPROVED', 'SALON', 0, ?, ?)",
+                        s, now, now);
+            }
+            String[][] docs = {{checkedLicence.toString(), "TRADE_LICENCE", "now()"},
+                    {newLicence.toString(), "TRADE_LICENCE", "NULL"}, {udyam.toString(), "UDYAM", "now()"},
+                    {closed.toString(), "TRADE_LICENCE", "now()"}};
+            for (String[] d : docs) {
+                UUID shop = UUID.fromString(d[0]);
+                UUID file = UUID.randomUUID();
+                jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
+                        + "uploaded_by, created_at) VALUES (?, ?, 'REG_DOC', ?, 'image/jpeg', 10, ?, ?, ?)", file, shop,
+                        "test/" + file, file.toString().replace("-", "") + "0".repeat(32), owner, now);
+                jdbc.update("UPDATE shops SET registration_doc_type = ?, registration_doc_file_id = ?, "
+                        + "registration_doc_checked_at = " + d[2] + " WHERE id = ?", d[1], file, shop);
+            }
+
+            jdbc.update("UPDATE shops SET status = 'CLOSED' WHERE id = ?", closed);
+
+            flyway(ds, MigrationVersion.LATEST).migrate();
+
+            // A closed salon's document goes (its number must never block a new registration)
+            assertThat(jdbc.queryForObject("SELECT registration_doc_file_id IS NULL AND licence_check_status IS NULL "
+                    + "FROM shops WHERE id = ?", Boolean.class, closed)).isTrue();
+            // Every trade licence is read again by the job (the field team's check gave no number or last day);
+            // another kind no longer counts; no document, no check
+            assertThat(jdbc.queryForList("SELECT licence_check_status || ' ' || coalesce(licence_check_reason, '-') "
+                    + "|| ' ' || (registration_doc_checked_at IS NULL) || ' ' || (licence_check_due_at IS NOT NULL) "
+                    + "FROM shops WHERE id IN (?, ?, ?) ORDER BY array_position(ARRAY[?, ?, ?]::uuid[], id)",
+                    String.class, checkedLicence, newLicence, udyam, checkedLicence, newLicence, udyam))
+                    .containsExactly("PENDING - true true", "PENDING - true true", "FAILED NOT_TRADE_LICENCE true false");
+            assertThat(jdbc.queryForObject("SELECT licence_check_status IS NULL FROM shops WHERE id = ?",
+                    Boolean.class, none)).isTrue();
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_indexes WHERE indexname IN "
+                    + "('ix_shops_licence_due', 'ux_shops_licence_number', 'ix_shops_licence_expiry', "
+                    + "'ix_shops_licence_follow_up')", Long.class)).isEqualTo(4L);
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_indexes WHERE indexname = "
+                    + "'ix_shops_registration_doc_to_check'", Long.class)).isZero();
+            assertThat(jdbc.queryForObject("SELECT bool_and(convalidated) FROM pg_constraint WHERE conname LIKE "
+                    + "'ck_shops_licence%'", Boolean.class)).isTrue();
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
+        }
+    }
+
     /** As the app runs Flyway (application.properties): mixed files, no transactional lock, no statement limit. */
     private static Flyway flyway(DriverManagerDataSource ds, MigrationVersion target) {
         return Flyway.configure().dataSource(ds).locations("classpath:db/migration").target(target).mixed(true)

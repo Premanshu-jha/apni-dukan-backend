@@ -677,7 +677,7 @@ class AdminIntegrationTest {
         UUID first = shop("SALON", "PENDING_VISIT", "Raju Hair", "9200000001");
         UUID recheck = shop("SALON", "PENDING_VISIT", "Sharma Salon", "9200000002");
         approve(recheck);
-        newGstin(recheck);
+        newShopPhoto(recheck);
         shop("SALON", "APPROVED", "Live Cuts", "9200000003");
         UUID sentBack = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000004");
         assertThat(post("/admin/shops/" + sentBack + "/reject", Map.of("version", version(sentBack), "reason",
@@ -734,8 +734,13 @@ class AdminIntegrationTest {
         assertThat(field(movedByTeam.body(), "waitingForVisit")).isEqualTo(false);   // they checked it
         assertThat(get("/shops/me", owner).text()).contains("Shop 4, Main Road");
         assertThat(count("notification_jobs WHERE type = 'SHOP_ADDRESS_CHANGED'")).isPositive();
-        Reply edited = patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair Studio",
+        // A salon has no GSTIN now: one sent is ignored (nothing to re-check for it)
+        Reply renamed = patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair Studio",
                 "gstin", "27AAPFU0939F1ZV"), owner);
+        assertThat(field(renamed.body(), "gstin")).as(renamed.text()).isNull();
+        assertThat(field(renamed.body(), "recheckSince")).isNull();
+        Reply edited = put("/shops/me/photos", Map.of("version", version(salon), "shopPhotoFileId",
+                file(salon, owner, "SHOP_PHOTO").toString()), owner);
         // A live salon stays live while the field team re-checks it
         assertThat(field(edited.body(), "status")).as(edited.text()).isEqualTo("APPROVED");
         assertThat(field(edited.body(), "recheckSince")).isNotNull();
@@ -743,7 +748,7 @@ class AdminIntegrationTest {
         Reply page = get("/admin/shops/" + salon, boss);
         assertThat(page.status()).as(page.text()).isEqualTo(200);
         List<?> changes = (List<?>) field(page.body(), "changes");
-        assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "location", "gstin");
+        assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "location", "shopPhoto");
         assertThat(field(changes.get(0), "before")).isEqualTo("Sharma Salon");
         assertThat(field(changes.get(0), "after")).isEqualTo("Sharma Hair Studio");
         assertThat(((Number) field(page.body(), "pinMovedMetres")).longValue()).isBetween(105L, 120L);
@@ -792,14 +797,32 @@ class AdminIntegrationTest {
                 "reason", "Board not visible."), boss);
         assertThat(field(wrong.body(), "code")).as(wrong.text()).isEqualTo("WRONG_STATUS");
 
-        // The owner fixes the GSTIN: the ask is answered (the reason goes), still waiting for the field team
-        Reply fixed = patch("/shops/me", Map.of("version", version(salon), "gstin", "36AAPFU0939F1ZW"), owner);
+        // The owner fixes it (another photo): the ask is answered (the reason goes), still waiting for the field team
+        Reply fixed = put("/shops/me/photos", Map.of("version", version(salon), "shopPhotoFileId",
+                file(salon, owner, "SHOP_PHOTO").toString()), owner);
         assertThat(fixed.status()).as(fixed.text()).isEqualTo(200);
         assertThat(field(fixed.body(), "statusReason")).isNull();
         assertThat(field(fixed.body(), "recheckSince")).isNotNull();
         approve(salon);
         Reply checked = get("/shops/me", owner);
         assertThat(field(checked.body(), "recheckSince")).isNull();
+    }
+
+    @Test
+    void aKiranasNewGstinOrUdyamNumberStillWaitsForAReCheckWhileLive() {
+        UUID kirana = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000021");
+        approve(kirana);
+        UUID owner = ownerOf(kirana);
+        Reply gstin = patch("/shops/me", Map.of("version", version(kirana), "gstin", "27AAPFU0939F1ZV"), owner);
+        assertThat(field(gstin.body(), "gstin")).as(gstin.text()).isEqualTo("27AAPFU0939F1ZV");
+        assertThat(field(gstin.body(), "status")).isEqualTo("APPROVED");
+        assertThat(field(gstin.body(), "recheckSince")).isNotNull();
+        List<?> changes = (List<?>) field(get("/admin/shops/" + kirana, boss).body(), "changes");
+        assertThat(changes).extracting(c -> field(c, "field")).containsExactly("gstin");
+        approve(kirana);
+        Reply udyam = patch("/shops/me", Map.of("version", version(kirana), "udyamNumber", "UDYAM-TS-02-0012345"),
+                owner);
+        assertThat(field(udyam.body(), "recheckSince")).as(udyam.text()).isNotNull();
     }
 
     @Test
@@ -826,8 +849,8 @@ class AdminIntegrationTest {
         assertThat(field(photo.body(), "code")).as(photo.text()).isEqualTo("EDIT_LOCKED");
         Reply address = post("/shops/me/address-request", newAddress(salon, "Shop 9, New Market Road"), owner);
         assertThat(field(address.body(), "code")).as(address.text()).isEqualTo("EDIT_LOCKED");
-        Reply doc = put("/shops/me/registration-document", Map.of("version", version(salon), "type", "UDYAM",
-                "fileId", file(salon, owner, "REG_DOC").toString()), owner);
+        Reply doc = put("/shops/me/registration-document", Map.of("version", version(salon), "type",
+                "TRADE_LICENCE", "fileId", file(salon, owner, "REG_DOC").toString()), owner);
         assertThat(field(doc.body(), "code")).as(doc.text()).isEqualTo("EDIT_LOCKED");
         // Only an owner can ask for the code
         assertThat(field(post("/auth/me/edit-code", Map.of(), customer).body(), "code")).isEqualTo("OWNER_ONLY");
@@ -1040,7 +1063,7 @@ class AdminIntegrationTest {
         assertThat(field(field(late.body(), "details"), "status")).isEqualTo("APPROVED");
 
         // The same for a live shop's re-check: it stays APPROVED, so "nothing waits any more" is the answer
-        newGstin(shop);
+        newShopPhoto(shop);
         long recheckSeen = version(shop);
         approve(shop);
         Reply lateAgain = post("/admin/shops/" + shop + "/reject", Map.of("version", recheckSeen, "reason",
@@ -1061,9 +1084,9 @@ class AdminIntegrationTest {
         UUID owner = ownerOf(salon);
         patch("/shops/me", Map.of("version", version(salon), "name", "Sharma Hair Studio"), owner);
         assertThat(((List<?>) field(get("/admin/shops/" + salon, boss).body(), "changes"))).hasSize(1);
-        newGstin(salon);
+        newShopPhoto(salon);
         List<?> changes = (List<?>) field(get("/admin/shops/" + salon, boss).body(), "changes");
-        assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "gstin");
+        assertThat(changes).extracting(c -> field(c, "field")).containsExactly("name", "shopPhoto");
 
         // The waiting shop sent first stays first, even after its owner fixes a typo (which saves the shop again)
         UUID newer = shop("SALON", "PENDING_VISIT", "Second In", "9200000008");
@@ -1354,9 +1377,11 @@ class AdminIntegrationTest {
         assertThat(r.status()).as(r.text()).isEqualTo(200);
     }
 
-    /** The owner of a live shop gives a new GSTIN: it waits for a re-check, staying live. */
-    private void newGstin(UUID shop) {
-        Reply r = patch("/shops/me", Map.of("version", version(shop), "gstin", "27AABCU9603R1ZN"), ownerOf(shop));
+    /** The owner of a live shop sends a new photo of it: it waits for a re-check, staying live. */
+    private void newShopPhoto(UUID shop) {
+        UUID owner = ownerOf(shop);
+        Reply r = put("/shops/me/photos", Map.of("version", version(shop), "shopPhotoFileId",
+                file(shop, owner, "SHOP_PHOTO").toString()), owner);
         assertThat(field(r.body(), "status")).as(r.text()).isEqualTo("APPROVED");   // live, waiting for a re-check
         assertThat(field(r.body(), "recheckSince")).isNotNull();
     }
