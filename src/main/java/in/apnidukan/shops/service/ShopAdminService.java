@@ -64,6 +64,9 @@ public class ShopAdminService {
 
     static final TextField REASON = new TextField("reason", 2, 200);
     static final TextField NOTE = new TextField("note", 2, 500);
+    /** Reads the stored licence extract (JSON written by LicenceCheckJob) for the shop page. */
+    private static final tools.jackson.databind.json.JsonMapper READ_JSON =
+            tools.jackson.databind.json.JsonMapper.builder().build();
 
     private final ShopRepository shops;
     private final ShopMemberRepository members;
@@ -77,12 +80,15 @@ public class ShopAdminService {
     private final ShopAssignments assignments;
     private final ShopService shopService;
     private final AddressRequestStore addressRequests;
+    private final in.apnidukan.shops.repo.LicenceCheckStore licences;
     private final Clock clock;
 
     public ShopAdminService(ShopRepository shops, ShopMemberRepository members, UserDirectory users, FileRefs files,
                             Notifications notifications, List<ShopChangeListener> listeners, ShopReviewStore review,
                             SalonFacts salons, DashboardCounts dashboardCounts, ShopAssignments assignments,
-                            ShopService shopService, AddressRequestStore addressRequests, Clock clock) {
+                            ShopService shopService, AddressRequestStore addressRequests, Clock clock,
+                            in.apnidukan.shops.repo.LicenceCheckStore licences) {
+        this.licences = licences;
         this.shopService = shopService;
         this.addressRequests = addressRequests;
         this.dashboardCounts = dashboardCounts;
@@ -188,7 +194,10 @@ public class ShopAdminService {
         AdminShopDetail.RegistrationDoc doc = shop.getRegistrationDocType() == null ? null
                 : new AdminShopDetail.RegistrationDoc(shop.getRegistrationDocType(),
                         shop.getRegistrationDocType().label(), existingLink(shop.getRegistrationDocFileId()),
-                        shop.getRegistrationDocCheckedAt());
+                        shop.getRegistrationDocCheckedAt(), shop.getLicenceCheckStatus(),
+                        shop.getLicenceCheckReason(), shop.getLicenceNumber(), shop.getLicenceValidUntil(),
+                        shop.getLicenceExtract() == null ? null : READ_JSON.readTree(shop.getLicenceExtract()),
+                        shop.getLicenceCheckSince());
         TimelinePage timeline = timelinePage(shopId, null);
         // The salon video only here (the field team's shop page), never in lists or anything customers see
         String video = shop.getShopVideoFileId() == null ? null : existingLink(shop.getShopVideoFileId());
@@ -251,43 +260,47 @@ public class ShopAdminService {
     }
 
     /**
-     * Live salons whose registration document was added or replaced since the field team last checked one (super
-     * admins only), oldest change first, at most 100. Salons waiting for a visit (PENDING_VISIT) aren't listed: the
-     * visit checks it. A live salon waiting for its re-check is: approving the re-check doesn't check the document.
+     * Sends a salon's trade licence for the automatic check again (a field agent for a business assigned to them, or a
+     * super admin): the owner's details were fixed by the field team, or the AI got it wrong once. Counts towards the
+     * salon's checks a day (past it, read tomorrow). Any status but CLOSED. 409 NO_DOCUMENT without one, 409
+     * NOT_TRADE_LICENCE for a document of another kind (it is never sent to the AI), 409 SHOP_CHANGED.
+     */
+    @Transactional
+    public AdminShopResponse recheckLicence(UUID adminId, UUID shopId, long version) {
+        Shop shop = checked(adminId, shopId, version, "changed", false, ShopStatus.DRAFT, ShopStatus.PENDING_VISIT,
+                ShopStatus.APPROVED, ShopStatus.SUSPENDED);
+        if (shop.getRegistrationDocFileId() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "NO_DOCUMENT", "This salon has no registration document.");
+        }
+        if (!shop.restartLicenceCheck(now())) {
+            throw new ApiException(HttpStatus.CONFLICT, "NOT_TRADE_LICENCE", "Only a trade licence is checked; this is "
+                    + "a " + shop.getRegistrationDocType().label().toLowerCase(java.util.Locale.ROOT) + ".");
+        }
+        save(shop);
+        shopService.startCheck(shopId);
+        review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null, "Trade licence sent for checking again",
+                List.of());
+        return view(shop);
+    }
+
+    /**
+     * Salons whose trade licence wasn't accepted, or has waited more than half an hour for its check (no AI key, the
+     * AI down), longest first, at most 100 (super admins): to follow up with the owner or look at the AI.
      */
     @Transactional(readOnly = true)
-    public List<AdminShopResponse> documentsToCheck(UUID adminId) {
+    public List<AdminShopResponse> licencesToFollowUp(UUID adminId) {
         assignments.requireSuperAdmin(adminId);
-        List<UUID> ids = review.documentsToCheck(100);
+        List<UUID> ids = licences.followUp(now().minus(java.time.Duration.ofMinutes(30)), 100);
         Map<UUID, Shop> byId = shops.findAllById(ids).stream().collect(Collectors.toMap(Shop::getId,
                 Function.identity()));
         return views(ids.stream().map(byId::get).filter(Objects::nonNull).toList());
     }
 
     /**
-     * The field team checked the salon's registration document: customers see "Registered" from now on. Any status
-     * but CLOSED (a field agent only for a business assigned to them). 409 NO_DOCUMENT without one, 409 SHOP_CHANGED
-     * if the owner changed the shop since the page was loaded (maybe a new document).
-     */
-    @Transactional
-    public AdminShopResponse markDocumentChecked(UUID adminId, UUID shopId, long version, String noteInput) {
-        Shop shop = checked(adminId, shopId, version, "changed", false, ShopStatus.DRAFT, ShopStatus.PENDING_VISIT,
-                ShopStatus.APPROVED, ShopStatus.SUSPENDED);
-        if (shop.getRegistrationDocFileId() == null) {
-            throw new ApiException(HttpStatus.CONFLICT, "NO_DOCUMENT", "This salon has no registration document.");
-        }
-        String note = optionalNote(noteInput);
-        shop.markRegistrationDocChecked(now());
-        save(shop);
-        review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null,
-                "Registration document checked (" + shop.getRegistrationDocType().label() + ")"
-                        + (note == null ? "" : ": " + note), List.of());
-        return view(shop);
-    }
-
-    /**
      * Takes a wrong, someone else's or expired registration document off the salon, with the reason the owner is told:
-     * customers see "Unregistered". The salon's status doesn't change. Same rules as markDocumentChecked.
+     * no "Licensed" badge from now on. Any status but CLOSED (a field agent only for a business assigned to them). 409
+     * NO_DOCUMENT without one, 409 SHOP_CHANGED if the owner changed the shop since the page was loaded. The salon's
+     * status doesn't change.
      */
     @Transactional
     public AdminShopResponse removeDocument(UUID adminId, UUID shopId, long version, String reasonInput) {
@@ -302,11 +315,20 @@ public class ShopAdminService {
         save(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null,
                 "Registration document removed (" + label + "): " + reason, List.of());
-        tellOwner(shop, "SHOP_DOCUMENT_REMOVED", "Registration document removed",
+        tellOwner(shop, "SHOP_DOCUMENT_REMOVED", "Trade licence removed",
                 "We removed the " + label.toLowerCase(java.util.Locale.ROOT) + " from " + shop.details().name() + ": "
-                        + reason + " Add the right one in More → Salon → Registration document.",
-                "/setup/document");
+                        + reason + " " + afterRemoval(shop.getStatus()),
+                shop.getStatus() == ShopStatus.DRAFT ? "/register/photos" : "/setup/document");
         return view(shop);
+    }
+
+    /** What a removed licence means for the salon now, and where to add the right one. */
+    static String afterRemoval(ShopStatus status) {
+        return switch (status) {
+            case APPROVED -> "Your salon stays open for bookings. Add the right one in Salon → Trade licence.";
+            case DRAFT -> "You can add the right one in your registration, under Photos.";
+            default -> "Nothing else changes. Add the right one in Salon → Trade licence.";
+        };
     }
 
     /**
@@ -346,7 +368,9 @@ public class ShopAdminService {
      */
     private Shop checkedWaiting(UUID adminId, UUID shopId, long version, String what) {
         assignments.requireCanDecide(adminId, shopId);
-        Shop shop = shops.findById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
+        // Its row locked and read fresh: the licence check's answer (plain SQL, no new version) written a moment ago
+        // is in what this saves, never undone or broken by a stale copy
+        Shop shop = shops.lockById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
         requireNotOwnShop(adminId, shopId);
         if (!shop.waitingForVisit()) {
             throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
@@ -537,7 +561,9 @@ public class ShopAdminService {
             assignments.requireSuperAdmin(adminId);
         }
         assignments.requireCanDecide(adminId, shopId);
-        Shop shop = shops.findById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
+        // Its row locked and read fresh: the licence check's answer (plain SQL, no new version) written a moment ago
+        // is in what this saves, never undone or broken by a stale copy
+        Shop shop = shops.lockById(shopId).orElseThrow(() -> ApiException.notFound("Shop"));
         requireNotOwnShop(adminId, shopId);
         // Status first: when another admin decided meanwhile, say so (not "the owner changed it")
         if (!java.util.Arrays.asList(allowed).contains(shop.getStatus())) {

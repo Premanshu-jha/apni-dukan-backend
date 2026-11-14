@@ -14,6 +14,10 @@ import in.apnidukan.shops.api.ShopRequests.CreateShop;
 import in.apnidukan.shops.api.ShopRequests.SetPhotos;
 import in.apnidukan.shops.api.ShopRequests.UpdateShop;
 import in.apnidukan.shops.api.ShopResponse;
+import in.apnidukan.common.security.RateLimiter;
+import in.apnidukan.shops.domain.LicenceCheckStatus;
+import in.apnidukan.shops.repo.LicenceCheckStore;
+import in.apnidukan.shops.domain.RegistrationDocType;
 import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopDetails;
 import in.apnidukan.shops.domain.ShopEventType;
@@ -33,6 +37,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
@@ -78,11 +83,19 @@ public class ShopService implements ShopMemberships {
     private final ShopAssignments assignments;
     private final SalonFacts salons;
     private final EditUnlocks editUnlocks;
+    private final LicenceCheckStore licences;
+    private final RateLimiter limits;
+    /** How many licence checks one salon may start a day (each is a paid AI read). */
+    static final int CHECKS_PER_DAY = 10;
+    static final String CHECKS_KEY = "licence-checks:";
 
     public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files, UserDirectory users,
                        List<ShopChangeListener> listeners, ShopReviewStore review, Clock clock,
                        ShopInvitesService invites,
-                       ShopAssignments assignments, SalonFacts salons, EditUnlocks editUnlocks) {
+                       ShopAssignments assignments, SalonFacts salons, EditUnlocks editUnlocks,
+                       LicenceCheckStore licences, RateLimiter limits) {
+        this.licences = licences;
+        this.limits = limits;
         this.salons = salons;
         this.editUnlocks = editUnlocks;
         this.invites = invites;
@@ -113,11 +126,14 @@ public class ShopService implements ShopMemberships {
             throw alreadyHasShop();
         }
         Instant now = now();
+        ShopType type = in.type() == null ? ShopType.KIRANA : in.type();
+        boolean salon = type == ShopType.SALON;
+        // A salon has no GSTIN or Udyam number (its trade licence is what counts): anything sent is ignored
         ShopDetails details = new ShopDetails(clean(NAME, in.name()), clean(OWNER_NAME, in.ownerName()),
                 clean(ADDRESS_LINE, in.addressLine()), clean(AREA, in.area()), clean(CITY, in.city()),
                 in.pincode(), coordinate(in.latitude()), coordinate(in.longitude()),
-                gstin(in.gstin()), udyam(in.udyamNumber()));
-        Shop shop = new Shop(shops.nextShopCode(), in.type() == null ? ShopType.KIRANA : in.type(), details, now);
+                salon ? null : gstin(in.gstin()), salon ? null : udyam(in.udyamNumber()));
+        Shop shop = new Shop(shops.nextShopCode(), type, details, now);
         try {
             shops.saveAndFlush(shop);   // new entity (id still null) → INSERT; Hibernate fills shop.getId()
             members.saveAndFlush(new ShopMember(shop.getId(), userId, ShopRole.OWNER, now));
@@ -148,11 +164,12 @@ public class ShopService implements ShopMemberships {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can change these details.");
         }
         assignments.lockForAssignment();   // before the shop's row: a new address may assign it below
-        Shop shop = shops.findById(member.getShopId()).orElseThrow();
+        Shop shop = shops.lockById(member.getShopId()).orElseThrow();   // fresh: see ownedShop
         if (in.version() != shop.getVersion()) {
             throw shopChanged();
         }
         ShopDetails old = shop.details();
+        boolean salon = shop.getType() == ShopType.SALON;
         ShopDetails updated = new ShopDetails(
                 in.name() == null ? old.name() : clean(NAME, in.name()),
                 in.ownerName() == null ? old.ownerName() : clean(OWNER_NAME, in.ownerName()),
@@ -162,8 +179,9 @@ public class ShopService implements ShopMemberships {
                 in.pincode() == null ? old.pincode() : in.pincode(),
                 in.latitude() == null ? old.latitude() : coordinate(in.latitude()),
                 in.longitude() == null ? old.longitude() : coordinate(in.longitude()),
-                in.gstin() == null ? old.gstin() : gstin(in.gstin()),
-                in.udyamNumber() == null ? old.udyamNumber() : udyam(in.udyamNumber()));
+                // A salon's are never changed (a salon has none now; one saved before stays as it was, unshown)
+                in.gstin() == null || salon ? old.gstin() : gstin(in.gstin()),
+                in.udyamNumber() == null || salon ? old.udyamNumber() : udyam(in.udyamNumber()));
         if (updated.equals(old)) {
             return ShopResponse.from(shop, member.getRole());
         }
@@ -175,6 +193,8 @@ public class ShopService implements ShopMemberships {
         }
         requireUnlocked(shop, userId);
         shop.apply(updated, now());
+        // The trade licence was checked against the old name, owner or address: checked again against the new ones
+        boolean recheckLicence = salon && !sameLicenceFacts(old, updated) && shop.restartLicenceCheck(now());
         // The field team checked the old papers: a live shop waits for them to check the new ones (a shop not live yet
         // is checked at its visit anyway)
         boolean waitsNow = !sameRegistrations(old, updated) && recheck(shop, userId);
@@ -182,6 +202,9 @@ public class ShopService implements ShopMemberships {
             shops.saveAndFlush(shop);
         } catch (ObjectOptimisticLockingFailureException e) {
             throw shopChanged();
+        }
+        if (recheckLicence) {
+            startCheck(shop.getId());
         }
         if (moved) {
             listeners.forEach(l -> l.locationChanged(shop.getId()));   // e.g. salon reminders with the new address
@@ -273,10 +296,11 @@ public class ShopService implements ShopMemberships {
     }
 
     /**
-     * Sets a salon's registration document (owner only; 409 NOT_A_SALON for a kirana): its type and a REG_DOC file of
-     * this shop (a photo or a PDF); otherwise 400 naming fileId. The salon stays as it is (an approved one stays
-     * live): the document is optional, and the new one waits for the field team's check (customers see "Registered"
-     * once it is checked). The document it replaces stays as an upload the owner can delete.
+     * Sets a salon's trade licence (owner only; 409 NOT_A_SALON for a kirana): type TRADE_LICENCE (any other: 400
+     * naming type) and a REG_DOC file of this shop (a photo or a PDF); otherwise 400 naming fileId. The salon stays as
+     * it is (an approved one stays live): the licence is optional. The new one waits for the automatic check
+     * (LicenceCheckJob); customers see "Licensed" once it passed. The document it replaces stays as an upload the
+     * owner can delete.
      */
     @Transactional
     public ShopResponse setRegistrationDoc(UUID userId, ShopRequests.SetRegistrationDoc in) {
@@ -284,26 +308,42 @@ public class ShopService implements ShopMemberships {
         if (shop.getType() != ShopType.SALON) {
             throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The registration document is only for salons.");
         }
+        if (in.type() != RegistrationDocType.TRADE_LICENCE) {
+            throw invalid("type", "must be TRADE_LICENCE: only a municipal trade licence counts");
+        }
         UUID doc = files.find(in.fileId())
                 .filter(x -> shop.getId().equals(x.shopId()) && "REG_DOC".equals(x.purpose()))
                 .map(FileRef::id)
                 .orElseThrow(() -> invalid("fileId", "must be a photo or PDF uploaded with purpose REG_DOC"));
-        if (doc.equals(shop.getRegistrationDocFileId()) && in.type() == shop.getRegistrationDocType()) {
+        boolean same = doc.equals(shop.getRegistrationDocFileId()) && in.type() == shop.getRegistrationDocType();
+        // The same licence again (a double tap, a retry): as it is, unless it failed, then it is checked again (the
+        // owner may have fixed the salon's name or address it was matched against)
+        if (same && shop.getLicenceCheckStatus() != LicenceCheckStatus.FAILED) {
             return ShopResponse.from(shop, ShopRole.OWNER);
         }
         requireUnlocked(shop, userId);
+        // Each check is a paid AI read: at most CHECKS_PER_DAY a day per salon (a real owner needs a few)
+        if (!limits.tryHit(CHECKS_KEY + shop.getId(), CHECKS_PER_DAY, Duration.ofDays(1))) {
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_CHECKS", "Your licence was sent for "
+                    + "checking " + CHECKS_PER_DAY + " times today. Try again tomorrow, or write to support.");
+        }
         shop.setRegistrationDoc(in.type(), doc, now());
         try {
             saveShop(shop);
+            licences.start(shop.getId(), now(), now());
         } catch (DataIntegrityViolationException deletedMeanwhile) {
+            limits.giveBack(CHECKS_KEY + shop.getId());   // nothing was sent for checking
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                     Map.of("fileId", "may have just been deleted; upload it again"));
+        } catch (RuntimeException notSaved) {   // SHOP_CHANGED and the like: a retry mustn't use up the day's checks
+            limits.giveBack(CHECKS_KEY + shop.getId());
+            throw notSaved;
         }
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
 
     /**
-     * Removes a salon's registration document (owner only): customers see "Unregistered" from now on. The salon
+     * Removes a salon's registration document (owner only): no "Licensed" badge from now on. The salon
      * stays as it is. The upload stays, for the owner to delete. Nothing to remove: the shop as it is.
      */
     @Transactional
@@ -412,7 +452,9 @@ public class ShopService implements ShopMemberships {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can change these details.");
         }
         assignments.lockForAssignment();   // before the shop's row: the change may assign it to a field agent
-        Shop shop = shops.findById(member.getShopId()).orElseThrow();
+        // Its row locked and read fresh: the licence check's answer (plain SQL, no new version) written a moment ago
+        // is in what this saves, never undone or broken by a stale copy
+        Shop shop = shops.lockById(member.getShopId()).orElseThrow();
         if (version != shop.getVersion()) {
             throw shopChanged();
         }
@@ -516,10 +558,15 @@ public class ShopService implements ShopMemberships {
             return null;
         }
         shop.apply(moved, now());
+        // The trade licence was matched against the old address: checked again against the new one
+        boolean recheckLicence = !sameLicenceFacts(old, moved) && shop.restartLicenceCheck(now());
         try {
             shops.saveAndFlush(shop);
         } catch (ObjectOptimisticLockingFailureException e) {
             throw shopChanged();
+        }
+        if (recheckLicence) {
+            startCheck(shop.getId());
         }
         listeners.forEach(l -> l.locationChanged(shop.getId()));
         if (!old.pincode().equals(moved.pincode())) {
@@ -576,6 +623,23 @@ public class ShopService implements ShopMemberships {
                 && java.util.Objects.equals(checked.shopVideoFileId(), shop.getShopVideoFileId())) {
             shop.endRecheck(now());
         }
+    }
+
+    /**
+     * Starts the check of the salon's trade licence again after its details changed: due now, or, past
+     * CHECKS_PER_DAY today, tomorrow (the change itself is never refused; the AI reads are what is limited).
+     */
+    void startCheck(UUID shopId) {
+        Instant now = now();
+        boolean allowed = limits.tryHit(CHECKS_KEY + shopId, CHECKS_PER_DAY, Duration.ofDays(1));
+        licences.start(shopId, now, allowed ? now : now.plus(Duration.ofDays(1)));
+    }
+
+    /** What a salon's trade licence is matched against (LicenceRules): its name, owner, address, area and pincode. */
+    private static boolean sameLicenceFacts(ShopDetails a, ShopDetails b) {
+        return a.name().equals(b.name()) && a.ownerName().equals(b.ownerName())
+                && a.addressLine().equals(b.addressLine()) && a.area().equals(b.area())
+                && a.pincode().equals(b.pincode());
     }
 
     /** The GSTIN and Udyam number: the field team checks them like the address. */
