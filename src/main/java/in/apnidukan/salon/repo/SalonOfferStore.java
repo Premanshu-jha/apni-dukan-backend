@@ -36,7 +36,8 @@ public class SalonOfferStore {
     private static final String LISTED = COLUMNS + """
             , (SELECT count(DISTINCT s.appointment_id) FROM appointment_services s
                JOIN appointments a ON a.id = s.appointment_id
-               WHERE s.offer_id = o.id AND a.status NOT IN ('CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SALON')) AS bookings
+               WHERE s.offer_id = o.id AND a.kind = 'BOOKING'
+                 AND a.status NOT IN ('CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SALON')) AS bookings
             FROM salon_offers o WHERE o.shop_id = ?
             ORDER BY (o.ended_at IS NULL AND o.ends_on >= ?) DESC, o.created_at DESC, o.id LIMIT ?""";
 
@@ -88,10 +89,10 @@ public class SalonOfferStore {
         return jdbc.query(LISTED, (rs, i) -> new Listed(offer(rs, i), rs.getInt("bookings")), shopId, today, limit);
     }
 
-    /** How many bookings (not cancelled) were made with this offer. */
+    /** How many online bookings (not cancelled) were made with this offer; walk-ins priced with it don't count. */
     public int bookings(UUID offerId) {
         Integer n = jdbc.queryForObject("SELECT count(DISTINCT s.appointment_id) FROM appointment_services s "
-                + "JOIN appointments a ON a.id = s.appointment_id WHERE s.offer_id = ? AND a.status NOT IN "
+                + "JOIN appointments a ON a.id = s.appointment_id WHERE s.offer_id = ? AND a.kind = 'BOOKING' AND a.status NOT IN "
                 + "('CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SALON')", Integer.class, offerId);
         return n == null ? 0 : n;
     }

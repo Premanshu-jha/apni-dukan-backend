@@ -88,6 +88,7 @@ class SalonVisitsIntegrationTest {
     @Autowired VisitFollowUpJob followUps;
     @Autowired List<AccountDeletionListener> deletionListeners;
     @Autowired TransactionTemplate tx;
+    @Autowired in.apnidukan.salon.service.SalonOfferService offers;
 
     RestClient http;
     UUID owner;
@@ -157,9 +158,19 @@ class SalonVisitsIntegrationTest {
         assertThat(twice.text()).contains("services[1].name");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM salon_services WHERE shop_id = ?", Integer.class, draft))
                 .isZero();
+        // A picture that isn't one of the set is named with its row
+        Map<String, Object> rocket = service("Hair wash", 15, 5000, 0);
+        rocket.put("icon", "ROCKET");
+        Reply wrongIcon = post("/salon/services/batch", Map.of("services", List.of(service("Haircut", 30, 15000, null),
+                rocket)), newOwner);
+        assertThat(wrongIcon.status()).isEqualTo(400);
+        assertThat(wrongIcon.text()).contains("services[1].icon");
+        Map<String, Object> typedIn = service("Hair wash", 15, 5000, 0);
+        typedIn.put("icon", "HAIR_WASH");   // a service typed in at registration keeps the picture picked for it
         Reply added = post("/salon/services/batch", Map.of("services", List.of(service("Haircut", 30, 15000, null),
-                service("Hair wash", 15, 5000, 0))), newOwner);
+                typedIn)), newOwner);
         assertThat(added.status()).as(added.text()).isEqualTo(201);
+        assertThat((List<?>) added.body()).extracting(s -> field(s, "icon")).containsExactly(null, "HAIR_WASH");
         assertThat((List<?>) added.body()).extracting(s -> field(s, "returnAfterDays")).containsExactly(14, 0);
         // In the order sent, after any the salon has (not alphabetical: Haircut is the main one)
         assertThat((List<?>) added.body()).extracting(s -> field(s, "sortOrder")).containsExactly(0, 1);
@@ -457,6 +468,114 @@ class SalonVisitsIntegrationTest {
         // ... and nothing more is sent about their visits
         assertThat(count("visit_follow_ups WHERE customer_id = '" + customer + "'")).isZero();
         assertThat(count("salon_customer_prefs WHERE user_id = '" + customer + "'")).isZero();
+    }
+
+    @Test
+    void aWalkInInsideAnOffersHoursGetsItsPriceAndThePricesSayItBeforehand() {
+        // Today (Tuesday) 10:00-12:00, 20% off the haircut only
+        Reply published = post("/salon/offers", offer(20, List.of(haircut), "2026-11-10", "2026-11-10", "10:00", "12:00"),
+                owner);
+        assertThat(published.status()).as(published.text()).isEqualTo(201);
+        UUID offerId = UUID.fromString((String) field(field(published.body(), "offer"), "id"));
+        CLOCK.set(at("10:00"));   // its first minute
+        assertThat(byService(get("/salon/walk-ins/prices", owner).body(), haircut).get("pricePaise")).isEqualTo(12000);
+        CLOCK.set(at("10:15"));
+        Reply prices = get("/salon/walk-ins/prices", owner);
+        assertThat(prices.status()).as(prices.text()).isEqualTo(200);
+        Map<?, ?> cut = byService(prices.body(), haircut);
+        Map<?, ?> trim = byService(prices.body(), beard);
+        assertThat(cut.get("pricePaise")).isEqualTo(12000);   // the offer price now, till 12:00
+        assertThat(cut.get("listPricePaise")).isEqualTo(15000);
+        assertThat(cut.get("offerUntil")).isEqualTo("12:00");
+        assertThat(trim.get("pricePaise")).isEqualTo(8000);   // not in the offer
+        assertThat(trim.get("listPricePaise")).isNull();
+        assertThat(trim.get("offerUntil")).isNull();
+
+        // The screen showed the own prices (read before the offer started): nothing is added, and the new total is said
+        Reply stale = call(HttpMethod.POST, "/salon/walk-ins", Map.of("staffId", raju.toString(), "serviceIds",
+                List.of(haircut, beard), "expectedPricePaise", 23000), owner, UUID.randomUUID());
+        assertThat(stale.status()).as(stale.text()).isEqualTo(409);
+        assertThat(field(stale.body(), "code")).isEqualTo("PRICE_CHANGED");
+        assertThat(field(field(stale.body(), "details"), "pricePaise")).isEqualTo(20000);
+        assertThat(count("appointments")).isZero();
+
+        Reply walkIn = call(HttpMethod.POST, "/salon/walk-ins", Map.of("staffId", raju.toString(), "serviceIds",
+                List.of(haircut, beard), "expectedPricePaise", 20000), owner, UUID.randomUUID());
+        assertThat(walkIn.status()).as(walkIn.text()).isEqualTo(201);
+        assertThat(jdbc.queryForList("SELECT price_paise || '/' || coalesce(list_price_paise::text, '-') FROM "
+                + "appointment_services ORDER BY position", String.class)).containsExactly("12000/15000", "8000/-");
+        // The owner's offer list counts online bookings only, not walk-ins priced with it
+        Map<?, ?> mine = (Map<?, ?>) ((List<?>) get("/salon/offers", owner).body()).stream()
+                .filter(o -> offerId.toString().equals(field(field(o, "offer"), "id"))).findFirst().orElseThrow();
+        assertThat(mine.get("bookings")).isEqualTo(0);
+
+        // From its last minute (12:00 is no longer in it): the walk-in pays the service's own price, and the prices say so
+        CLOCK.set(at("12:00"));
+        Map<?, ?> later = byService(get("/salon/walk-ins/prices", owner).body(), haircut);
+        assertThat(later.get("pricePaise")).isEqualTo(15000);
+        assertThat(later.get("listPricePaise")).isNull();
+        assertThat(later.get("offerUntil")).isNull();
+        // A customer can't read the salon's walk-in prices
+        assertThat(get("/salon/walk-ins/prices", person()).status()).isIn(403, 404);
+    }
+
+    @Test
+    void aWalkInAddedWhileTheOwnerEndsTheOfferWaitsAndPaysTheOwnPrice() throws Exception {
+        Reply published = post("/salon/offers", offer(20, List.of(haircut), "2026-11-10", "2026-11-10", "10:00", "12:00"),
+                owner);
+        assertThat(published.status()).as(published.text()).isEqualTo(201);
+        UUID offerId = UUID.fromString((String) field(field(published.body(), "offer"), "id"));
+        CLOCK.set(at("10:15"));
+        get("/salon/walk-ins/prices", owner);   // the setup with the offer, in memory
+        java.util.concurrent.CountDownLatch ending = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService threads = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            // The owner's "End offer" has ended it but not yet committed when the walk-in arrives
+            java.util.concurrent.Future<?> end = threads.submit(() -> tx.executeWithoutResult(s -> {
+                offers.end(owner, offerId);
+                ending.countDown();
+                try {
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+            assertThat(ending.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            java.util.concurrent.Future<Reply> walkIn = threads.submit(() -> call(HttpMethod.POST, "/salon/walk-ins",
+                    Map.of("staffId", raju.toString(), "serviceIds", List.of(haircut)), owner, UUID.randomUUID()));
+            for (int i = 0; i < 100 && waitingForTheShop() < 1; i++) {
+                Thread.sleep(50);
+            }
+            assertThat(waitingForTheShop()).isEqualTo(1);   // it waits for the end instead of reading the offer
+            release.countDown();
+            end.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            Reply added = walkIn.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(added.status()).as(added.text()).isEqualTo(201);
+        } finally {
+            release.countDown();
+            threads.shutdown();
+        }
+        assertThat(jdbc.queryForList("SELECT price_paise || '/' || coalesce(offer_id::text, '-') FROM "
+                + "appointment_services", String.class)).containsExactly("15000/-");
+    }
+
+    private int waitingForTheShop() {
+        Integer n = jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                + "AND query ILIKE '%from shops%for share%'", Integer.class);
+        return n == null ? 0 : n;
+    }
+
+    @Test
+    void customersSeeEachServicesIconAndNoneForOneSavedBefore() {
+        Reply set = call(HttpMethod.PATCH, "/salon/services/" + haircut, Map.of("version", 0, "icon", "HAIRCUT"), owner,
+                null);
+        assertThat(set.status()).as(set.text()).isEqualTo(200);
+        Reply services = get("/salons/" + salon + "/services", person());
+        assertThat(services.status()).as(services.text()).isEqualTo(200);
+        assertThat(byId(services.body(), haircut).get("icon")).isEqualTo("HAIRCUT");
+        assertThat(byId(services.body(), beard).get("icon")).isNull();   // the app picks one from the name
+        assertThat(byId(get("/salon/services", owner).body(), haircut).get("icon")).isEqualTo("HAIRCUT");
     }
 
     @Test
@@ -1232,6 +1351,16 @@ class SalonVisitsIntegrationTest {
     }
 
     private static final tools.jackson.databind.ObjectMapper JSON = new tools.jackson.databind.ObjectMapper();
+
+    private static Map<?, ?> byId(Object list, UUID id) {
+        return ((List<?>) list).stream().map(x -> (Map<?, ?>) x)
+                .filter(x -> id.toString().equals(x.get("id"))).findFirst().orElseThrow();
+    }
+
+    private static Map<?, ?> byService(Object list, UUID serviceId) {
+        return ((List<?>) list).stream().map(x -> (Map<?, ?>) x)
+                .filter(x -> serviceId.toString().equals(x.get("serviceId"))).findFirst().orElseThrow();
+    }
 
     private static Object field(Object json, String name) {
         return ((Map<?, ?>) json).get(name);

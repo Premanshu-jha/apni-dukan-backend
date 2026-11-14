@@ -17,6 +17,7 @@ import in.apnidukan.salon.api.BookingResponses.DayView;
 import in.apnidukan.salon.api.BookingResponses.MemberView;
 import in.apnidukan.salon.api.BookingResponses.PauseView;
 import in.apnidukan.salon.api.BookingResponses.WalkInOption;
+import in.apnidukan.salon.api.BookingResponses.WalkInPrice;
 import in.apnidukan.salon.domain.AppointmentCursor;
 import in.apnidukan.salon.service.SalonDayService;
 import in.apnidukan.salon.service.SalonEtags;
@@ -164,7 +165,19 @@ public class SalonDayController {
         return day.walkInOptions(me(), services);
     }
 
-    /** Add a walk-in (Idempotency-Key header required). 201. 409 BARBER_BUSY if his time was just taken. */
+    /**
+     * What each active service costs for a walk-in starting now: [{serviceId, pricePaise, priceIsFrom, listPricePaise,
+     * offerUntil}], with the salon's offer where one applies now (listPricePaise its own price then, else null).
+     */
+    @GetMapping("/walk-ins/prices")
+    public List<WalkInPrice> walkInPrices() {
+        return day.walkInPrices(me());
+    }
+
+    /**
+     * Add a walk-in (Idempotency-Key header required). 201. 409 BARBER_BUSY if his time was just taken; 409
+     * PRICE_CHANGED if expectedPricePaise isn't the price now.
+     */
     @PostMapping("/walk-ins")
     @ResponseStatus(HttpStatus.CREATED)
     public AppointmentView addWalkIn(@RequestHeader(value = "Idempotency-Key", required = false) String key,
