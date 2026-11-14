@@ -318,12 +318,17 @@ public class BookingService {
      * booking window, each with what the services cost at that start (the salon's offer, where one applies). 409
      * NO_BARBER_FOR_SERVICES if no single barber does them all.
      * @param moving one of the customer's own bookings being moved (or null): its own time counts as free, so a
-     *               move by a few minutes onto it is offered. 404 if it isn't theirs.
+     *               move by a few minutes onto it is offered, and the times are for the services and lengths it was
+     *               booked with (what the move will keep), not the salon's current ones. 404 if it isn't theirs, or
+     *               isn't at this salon.
      */
     @Transactional(readOnly = true)
     public Slots availability(UUID customerId, UUID salonId, List<UUID> serviceIds, LocalDate date, UUID moving) {
         requireReadsLeft(customerId);
-        UUID except = moving == null ? null : mine(customerId, appointments.find(moving)).id();
+        // Theirs, and a booking at this salon: another salon's booking is no booking here (its services aren't this
+        // salon's), 404 as for someone else's
+        UUID except = moving == null ? null
+                : mine(customerId, appointments.find(moving).filter(a -> salonId.equals(a.shopId()))).id();
         // Three reads: the salon, its counters with its pause, and that day's busy time. The barbers, what they do,
         // their weeks and the booking settings come from memory while the salon's setup is unchanged
         visible(salonId);
@@ -331,7 +336,11 @@ public class BookingService {
         Instant now = now();
         requireNotPaused(current, now);
         SalonSetups.Setup setup = current.setup();
-        List<BookedService> chosen = calendar.chosenServices(setup, serviceIds);
+        // A booking being moved keeps the services (and their lengths) it was booked with, as move() does: the free
+        // times and their end are for that length, even after the salon changed or switched off a service since
+        List<BookedService> booked = except == null ? List.of()
+                : appointments.services(List.of(except)).getOrDefault(except, List.of());
+        List<BookedService> chosen = booked.isEmpty() ? calendar.chosenServices(setup, serviceIds) : booked;
         Duration length = SalonCalendar.length(chosen);
         List<SalonSetups.Barber> barbers = calendar.barbersFor(setup, SalonDayService.ids(chosen));
         Interval window = calendar.window(setup, now);
@@ -342,8 +351,7 @@ public class BookingService {
                         : calendar.setupDays(barbers, date, except), length, day.start(), day.end());
         List<SalonOffer> running = setup.offersFrom(date);   // from memory with the setup: no read
         // A booking being moved is priced as the move will price it: from the prices it was booked at
-        List<BookedService> base = except == null ? chosen
-                : listPrices(appointments.services(List.of(except)).getOrDefault(except, chosen));
+        List<BookedService> base = booked.isEmpty() ? chosen : listPrices(booked);
         return new Slots(date, (int) length.toMinutes(), (int) FREE_CANCEL_AFTER_BOOKING.toMinutes(),
                 starts.stream().map(t -> Slot.of(t, t.minus(LATE_CANCEL), SalonOffer.price(base, running, t)))
                         .toList());
