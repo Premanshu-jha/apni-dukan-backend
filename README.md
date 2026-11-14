@@ -394,6 +394,7 @@ sequenceDiagram
 | `POST /api/v1/shops/me/leave` | A helper or barber leaves the shop (204), e.g. a phone added without asking. A barber's profile, hours and bookings stay with the salon; only his sign-in goes. 409 `OWNER_CANT_LEAVE` |
 | `PUT /api/v1/shops/me/registration-document` | A salon's owner (403 `OWNER_ONLY`; 409 `NOT_A_SALON` for a kirana): its **trade licence**. Optional (many salons have none), and the owner can add, replace or remove it at any time. `{version, type: "TRADE_LICENCE", fileId}` (any other `type`: 400 `VALIDATION_FAILED` naming `type`), `fileId` a `POST /files` upload with purpose `REG_DOC` (a photo, cleaned like the others, or a PDF kept as it came; only the owner uploads, opens or deletes it). 200 with the shop: `registrationDocType`, `registrationDocFileId`, `licenceCheck` (`PENDING` now), `licenceCheckReason`, `licenceValidUntil`, `registrationDocCheckedAt` (the owner's only). Checked automatically (see "The trade licence, checked automatically" below); the salon's status doesn't change (an approved one stays live). The same file again: nothing changes, unless its check FAILED (then it is checked again). 400 `VALIDATION_FAILED` naming `fileId`, 409 `SHOP_CHANGED` |
 | `DELETE /api/v1/shops/me/registration-document?version=` | The owner removes it: no "Licensed" badge; the status doesn't change; the upload stays for him to delete. 409 `SHOP_CHANGED`, 409 `NOT_A_SALON` |
+| `GET /api/v1/admin/shops/licence-ai-usage` | Super admins: the licence checks' AI this credit period (reads, cost of the budget), whether Anthropic refuses our account, whether the key is set and who the alerts reach. See "Credit alerts for the licence checks" |
 | `POST /api/v1/admin/shops/{id}/registration-document/recheck` · `GET /api/v1/admin/shops/licences-to-follow-up` | Send the licence for checking again; the super admins' list of licences not accepted or waiting long. See "The trade licence, checked automatically" |
 | `POST /api/v1/admin/shops/{id}/registration-document/remove` | `{version, reason}`: a wrong or someone else's licence comes off; the owner gets `SHOP_DOCUMENT_REMOVED` with the reason; a note on the timeline. Any status but CLOSED; a field agent only for a business assigned to them. 409 `NO_DOCUMENT`, `SHOP_CHANGED`, `WRONG_STATUS`. (No one marks a licence as checked: the automatic check decides) |
 | `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos (and a salon's video) are set; then, for a salon, 409 `REGISTRATION_INCOMPLETE` with `details` naming each of `services` (at least one active), `hours` (the opening hours) still missing. The registration document is optional |
@@ -836,7 +837,10 @@ one query per page (`SalonCardStore`). A deleted account's mutes go (`SalonAccou
      and owners place the pin with their phone's location, as before.
    - Optional: `ANTHROPIC_API_KEY` (console.anthropic.com), for checking salons' trade licences with AI (see "The
      trade licence, checked automatically"); `LICENCE_AI_MODEL` (default `claude-sonnet-5-5`). Without the key,
-     licences wait as "Checking".
+     licences wait as "Checking". `LICENCE_AI_BUDGET_USD` (default 100, the Max plan's monthly API credit),
+     `LICENCE_AI_BUDGET_DAY` (1–28, default 1: the day of the month the credit arrives, Console > Billing) and
+     `LICENCE_AI_INPUT_USD_PER_MTOK` / `LICENCE_AI_OUTPUT_USD_PER_MTOK` (defaults 2 and 10, Sonnet 5.5's prices)
+     for the credit alerts (see "Credit alerts for the licence checks").
    - Optional: `CORS_ALLOWED_ORIGINS`
      (default `http://localhost:5173`, the shop app's dev server; separate several with commas).
    - On the real server only: `APP_PRODUCTION=true`. The app then refuses to start unless everything a real
@@ -949,6 +953,42 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
+
+### Credit alerts for the licence checks (V60; admin app 0.17.0)
+
+The trade licence checks run on the Max plan's monthly API credit ($100, arriving the same day each month). So the
+team hears before and when the checks stop, the backend keeps count and emails **every super admin with a verified
+email** (`TeamEmails`, through the sign-in codes' email provider):
+
+- **What it costs.** Every answer Anthropic bills (a 200, usable or not) reports its tokens; `AnthropicLicenceReader`
+  passes them to `LicenceAiWatch`, which prices them (`LICENCE_AI_INPUT_USD_PER_MTOK`, `LICENCE_AI_OUTPUT_USD_PER_MTOK`,
+  Sonnet 5.5's $2 and $10 by default: change them with `LICENCE_AI_MODEL`; a price per million tokens is micro-dollars
+  per token) and adds them to the credit period (`licence_ai_spend`, one row per period, starting on
+  `LICENCE_AI_BUDGET_DAY` in India). One email at **80%** of `LICENCE_AI_BUDGET_USD` and one at **100%**, each once a
+  period. The count is exact for this app's key; anything else spending the same Console organization isn't counted
+  (nor an answer billed after our 90-second wait gave up), so the emails point to Console's Billing page for the
+  official balance.
+- **When Anthropic refuses the account.** `CREDIT`: out of credit or billing (400 naming credit, billing, plan or a
+  spend limit; 402 `billing_error`; a 429 without `retry-after`, the usage tier's monthly spend cap). `KEY`: 401/403.
+  `MODEL`: 404 (`LICENCE_AI_MODEL` misspelt or retired). An email at once with what to do (links to Console's Billing
+  or API keys, the Railway variable to change); again a day later for credit (it may wait for next month's), 6 hours
+  for a key or model; a different problem at once. When an answer comes back, every waiting licence is due at once
+  (some waited hours between tries) and, only if the problem was emailed, one "working again". A file refused before
+  reaching the account (400/413 about the file) says nothing either way. Licences are never failed for this: they
+  wait as "Checking".
+- **Never twice, never lost.** Each email is claimed by one statement (`licence_ai_alert`, one row; the period's
+  `budget_notice`) after its text is built, and handed back when it reached nobody, so the next answer or refusal
+  sends it (a "working again" is owed and tried at the job's next round, every 20 seconds, even with nothing
+  to read; the dashboard already shows the checks working). While the provider fails for everyone, no
+  email is tried for 10 minutes, so checks don't wait on it. Sent from the licence job's thread (one server at a
+  time), with no transaction open; a failure in this bookkeeping never stops a check.
+- **The admin dashboard** (Businesses, super admins) shows "Licence checks (AI)" on the Salon tab: the period,
+  licences read and dollars of the budget; and, on both tabs, in red why the checks stopped and what to do, no
+  ANTHROPIC_API_KEY, or no super admin with a verified email (nobody would get these emails).
+
+| Call | Change |
+|---|---|
+| `GET /admin/shops/licence-ai-usage` | new (super admins; 403 `SUPER_ADMIN_ONLY` for other admins, 404 for anyone else): `{periodStart, periodEnd, reads, spentUsd, budgetUsd, problem (null, CREDIT, KEY, MODEL), problemSince, keySet, alertRecipients}` |
 
 ### Fix: the licence reader asks for structured JSON, not a forced tool call (V59)
 
