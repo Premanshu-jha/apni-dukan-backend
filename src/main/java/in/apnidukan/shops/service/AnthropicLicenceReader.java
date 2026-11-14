@@ -61,13 +61,18 @@ public class AnthropicLicenceReader implements LicenceReader {
     private final URI endpoint;
     private final Duration answerTimeout;
     private final HttpClient http;
+    private final LicenceAiUsage usage;
 
-    /** @param endpoint {@link #ANTHROPIC}; a local fake in tests */
-    public AnthropicLicenceReader(String apiKey, String model, URI endpoint) {
-        this(apiKey, model, endpoint, ANSWER_TIMEOUT);
+    /**
+     * @param endpoint {@link #ANTHROPIC}; a local fake in tests
+     * @param usage    told each answer's tokens (LicenceAiWatch)
+     */
+    public AnthropicLicenceReader(String apiKey, String model, URI endpoint, LicenceAiUsage usage) {
+        this(apiKey, model, endpoint, ANSWER_TIMEOUT, usage);
     }
 
-    AnthropicLicenceReader(String apiKey, String model, URI endpoint, Duration answerTimeout) {
+    AnthropicLicenceReader(String apiKey, String model, URI endpoint, Duration answerTimeout, LicenceAiUsage usage) {
+        this.usage = usage;
         this.apiKey = apiKey;
         this.model = model;
         this.endpoint = endpoint;
@@ -98,26 +103,57 @@ public class AnthropicLicenceReader implements LicenceReader {
             throw new ReaderUnavailableException("Interrupted");
         }
         int status = response.statusCode();
-        if ((status == 400 || status == 413) && accountProblem(response.body())) {
-            // Out of credit or billing: our problem, not the file's; tried again later (and seen in the logs)
-            log.error("Licence reading refused for the account (check credit and billing in the Anthropic console): "
+        if (status == 402 || (status == 400 || status == 413) && accountProblem(response.body())
+                || status == 429 && spendCap(response)) {
+            // Out of credit, billing, our spend limit or the tier's monthly spend cap: our problem, not the file's;
+            // tried again later, and the super admins are emailed (LicenceAiWatch)
+            log.error("Licence reading refused for the account (check credit and billing in the Claude Console): "
                     + "HTTP {}", status);
-            throw new ReaderUnavailableException("The AI service refused the account (HTTP " + status + ")");
+            throw new ReaderUnavailableException("The AI service refused the account (HTTP " + status + ")",
+                    LicenceAiWatch.Problem.CREDIT);
         }
         if (status == 400 || status == 413) {
             log.warn("Licence reading refused the file: HTTP {}", status);
-            throw new UnusableAnswerException("The AI service refused the file (HTTP " + status + ")");
+            throw new UnusableAnswerException("The AI service refused the file (HTTP " + status + ")", false);
         }
         if (status == 401 || status == 403 || status == 404) {
             log.error("Licence reading is misconfigured (check ANTHROPIC_API_KEY and LICENCE_AI_MODEL): HTTP {}",
                     status);
-            throw new ReaderUnavailableException("The AI service refused the request (HTTP " + status + ")");
+            throw new ReaderUnavailableException("The AI service refused the request (HTTP " + status + ")",
+                    status == 404 ? LicenceAiWatch.Problem.MODEL : LicenceAiWatch.Problem.KEY);
         }
         if (status != 200) {
             log.warn("Licence reading failed: HTTP {}", status);
             throw new ReaderUnavailableException("The AI service answered HTTP " + status);
         }
+        countTokens(response.body());   // billed whether or not the answer can be used
         return extract(response.body());
+    }
+
+    /** Tells {@link LicenceAiUsage} the answer's tokens (its usage: input, cache writes and reads, output). */
+    void countTokens(String answer) {
+        JsonNode u;
+        try {
+            u = JSON.readTree(answer).path("usage");
+        } catch (JacksonException e) {
+            return;
+        }
+        if (!u.isObject()) {
+            return;
+        }
+        // No prompt caching is asked for, so cache tokens are normally 0; any there are counted as input (a little
+        // over, never under)
+        long input = u.path("input_tokens").asLong(0) + u.path("cache_creation_input_tokens").asLong(0)
+                + u.path("cache_read_input_tokens").asLong(0);
+        usage.record(input, u.path("output_tokens").asLong(0));
+    }
+
+    /**
+     * A 429 that is the usage tier's monthly spend cap, not a rate limit: it comes without retry-after and keeps
+     * failing until access resumes (Anthropic's API errors page).
+     */
+    static boolean spendCap(HttpResponse<String> response) {
+        return response.headers().firstValue("retry-after").isEmpty();
     }
 
     /**
