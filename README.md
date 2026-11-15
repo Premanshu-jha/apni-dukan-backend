@@ -955,6 +955,31 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### Service pictures, second set (V63–V64; partner app 0.25.0, customer app 0.24.0)
+
+- **28 pictures, each checked with a blind recognition test.** Fresh reviewers saw only the numbered, shuffled
+  pictures and named the salon service each shows; the ones they couldn't name or mixed up were redrawn or merged.
+  The set: haircut, trim (clipper), beard, moustache, shave, hair wash, hair spa, head massage (champi), hair colour,
+  blow-dry, straightening, curls, braids, facial, threading, waxing, eyelashes, make-up, bridal/groom (wedding rings),
+  mehendi, manicure/nails, pedicure, body massage, body spa, piercing, kids, package, and OTHER: a salon chair, for
+  any service none of them shows (saree draping, tattoo, hair extensions…).
+- **New:** `TRIM`, `MOUSTACHE`, `HEAD_MASSAGE`, `BRAIDS`. **Retired:** `CLEANUP` (now `FACIAL`) and `NAIL_ART` (now
+  `MANICURE`): V63 moves every service and its history to the new name, then checks the new list (NOT VALID, validated
+  in V64). A head massage the first set saved as `MASSAGE` (name with head, champi, maalish, oil, सिर; not body, foot, back, leg or hand) gets
+  `HEAD_MASSAGE`, a trim saved as `HAIRCUT` (name with trim, not cut) gets `TRIM`. In three steps, so bookings keep
+  reading services: the retired names (under row locks), then the check swapped in a moment, then the head massages
+  and trims (names only the new check allows). A retired name still sent by an app that hasn't updated is saved as its new picture (`ServiceIcon.parse`),
+  so an owner on the old app never sees an error.
+- **Deploying V63–V64: with one replica, at a quiet moment.** While the old version still serves next to the new
+  one, it can't read a service whose picture is one of the new names (its enum doesn't have them), so a salon's
+  services fail to load there for that minute; and it would still save a retired name, which the new check refuses.
+  Phones on the partner app before 0.25.0 should reload to the new version: an old one can't open a service whose
+  picture is one of the new names (from 0.25.0 an unknown picture is drawn as the one the name fits).
+- Nothing else changes in the API: `icon` is taken and given as before. Tested: `MigrationUpgradeIntegrationTest`
+  (retired names moved, old head massages and trims get their own, the setups reload, the check validated, a new
+  name saved and a retired one refused by the database), `SalonIntegrationTest` (a new one saved, a retired one
+  saved as its new picture), `ServiceIconTest` (enum and database list the same).
+
 ### Walk-ins at the offer price; a picture for every service (V61–V62; partner app 0.24.0, customer app 0.23.0)
 
 - **Walk-ins get the salon's offer.** A walk-in starting inside an offer's days and hours is priced with it, as a
@@ -968,7 +993,7 @@ On the salon's screens a booking shows the customer's name and, for the owner an
     (`ShopDirectory.findForBooking`): ending or publishing an offer (`holdAgainstBookings`) waits for a walk-in being
     added, and one added after reads the new setup. Tested with the end held open while a walk-in arrives.
   - **An offer's "bookings" count online bookings only**, not walk-ins priced with it.
-- **A picture for every service** (`ServiceIcon`, 26: scissors, moustache, razor, colour, hair dryer, straightener,
+- **A picture for every service** (`ServiceIcon`, first set of 26, replaced by the second set above: scissors, moustache, razor, colour, hair dryer, straightener,
   curl, hair spa, hair wash, face, sparkle, massage, eyebrow, eyelashes, wax strip, hand, nail polish, feet, lipstick,
   crown, child, henna cone, lotus, ear, package, and the salon's own). The owner picks it from those that fit the
   service's name (the apps decide which fit; the backend keeps the name, `salon_services.icon`, V61, checked in V62).
