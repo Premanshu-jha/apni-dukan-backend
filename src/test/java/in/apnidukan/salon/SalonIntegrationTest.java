@@ -165,6 +165,16 @@ class SalonIntegrationTest {
         Map<String, Object> wrong = service("Facial", 45, 50000, 2);
         wrong.put("icon", "ROCKET");
         assertInvalidService(owner, wrong, "icon");
+        Map<String, Object> retired = service("Nail art", 45, 50000, 2);
+        retired.put("icon", "NAIL_ART");   // retired in V63, sent by an app not yet updated: saved as its new picture
+        Reply nails = post("/salon/services", retired, owner);
+        assertThat(nails.status()).as(nails.body().toString()).isEqualTo(201);
+        assertThat(nails.body().get("icon")).isEqualTo("MANICURE");
+        Map<String, Object> champi = service("Champi", 15, 10000, 3);
+        champi.put("icon", "HEAD_MASSAGE");   // one of the second set
+        Reply headMassage = post("/salon/services", champi, owner);
+        assertThat(headMassage.status()).as(headMassage.body().toString()).isEqualTo(201);
+        assertThat(headMassage.body().get("icon")).isEqualTo("HEAD_MASSAGE");
         Reply wrongEdit = patch("/salon/services/" + old.body().get("id"), Map.of("version", 2, "icon", "x"), owner);
         assertThat(wrongEdit.status()).isEqualTo(400);
         assertThat(((Map<?, ?>) wrongEdit.body().get("details")).get("icon")).isNotNull();
