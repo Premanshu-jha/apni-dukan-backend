@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The upgrade production goes through: a database at V20 (what is live) holding rows of every kind, then every later
@@ -326,6 +327,62 @@ class MigrationUpgradeIntegrationTest {
                     .containsExactly("PENDING - 0 true", "FAILED NAME_MISMATCH 0 false", "PENDING - 0 true");
             assertThat(jdbc.queryForObject("SELECT licence_check_attempts FROM shops WHERE id = ?", Integer.class,
                     notRead)).isZero();
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
+        }
+    }
+
+    @Test
+    void serviceIconsRetiredInTheSecondSetBecomeTheirClosestPicture() {
+        String name = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
+        JdbcTemplate admin = new JdbcTemplate(new DriverManagerDataSource(TestContainers.jdbcUrl(),
+                TestContainers.DB_USER, TestContainers.DB_PASSWORD));
+        admin.execute("CREATE DATABASE " + name);
+        String url = TestContainers.jdbcUrl().replaceAll("/[^/]+$", "/" + name);
+        DriverManagerDataSource ds = new DriverManagerDataSource(url, TestContainers.DB_USER,
+                TestContainers.DB_PASSWORD);
+        try {
+            flyway(ds, MigrationVersion.fromVersion("62")).migrate();
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+            Timestamp now = Timestamp.from(Instant.parse("2026-11-15T02:00:00Z"));
+            UUID salon = UUID.randomUUID();
+            jdbc.update("INSERT INTO shops (id, name, owner_name, address_line, area, city, pincode, latitude, "
+                    + "longitude, status, type, version, created_at, updated_at) VALUES (?, 'Hair', 'Owner', "
+                    + "'Shop 4', 'Kondapur', 'Hyderabad', '500084', 17.465, 78.364, 'APPROVED', 'SALON', 0, ?, ?)",
+                    salon, now, now);
+            Long rev = jdbc.queryForObject("INSERT INTO revinfo (revtstmp) VALUES (0) RETURNING rev", Long.class);
+            String[][] saved = {{"Clean-up", "CLEANUP"}, {"Nail art", "NAIL_ART"}, {"Head massage", "MASSAGE"},
+                    {"Champi", "MASSAGE"}, {"Body massage", "MASSAGE"}, {"Foot maalish", "MASSAGE"}, {"Hair trim", "HAIRCUT"}, {"Haircut", "HAIRCUT"},
+                    {"Old", null}};
+            for (int i = 0; i < saved.length; i++) {
+                UUID id = UUID.randomUUID();
+                jdbc.update("INSERT INTO salon_services (id, shop_id, name, duration_min, price_paise, price_is_from, "
+                        + "active, sort_order, version, created_at, updated_at, icon) VALUES (?, ?, ?, 30, 15000, "
+                        + "false, true, ?, 0, ?, ?, ?)", id, salon, saved[i][0], i, now, now, saved[i][1]);
+                jdbc.update("INSERT INTO salon_services_aud (id, rev, revtype, shop_id, name, icon) VALUES (?, ?, 0, ?, "
+                        + "?, ?)", id, rev, salon, saved[i][0], saved[i][1]);
+            }
+            Long setupBefore = jdbc.queryForObject("SELECT setup_version FROM salon_versions WHERE shop_id = ?",
+                    Long.class, salon);
+
+            flyway(ds, MigrationVersion.LATEST).migrate();
+
+            // Clean-up's picture is the facial's now, nail art's the manicure's; a head massage or a trim saved with the
+            // nearest picture the first set had gets its own; the others are as they were
+            assertThat(jdbc.queryForList("SELECT coalesce(icon, '-') FROM salon_services ORDER BY sort_order",
+                    String.class)).containsExactly("FACIAL", "MANICURE", "HEAD_MASSAGE", "HEAD_MASSAGE", "MASSAGE",
+                    "MASSAGE", "TRIM", "HAIRCUT", "-");
+            assertThat(jdbc.queryForList("SELECT DISTINCT icon FROM salon_services_aud WHERE icon IS NOT NULL ORDER BY 1",
+                    String.class)).containsExactly("FACIAL", "HAIRCUT", "MANICURE", "MASSAGE");
+            // The servers' setups reload (the pictures changed), the check is validated, a second-set name is saved and
+            // a retired one refused by the database
+            assertThat(jdbc.queryForObject("SELECT setup_version FROM salon_versions WHERE shop_id = ?", Long.class,
+                    salon)).isGreaterThan(setupBefore);
+            assertThat(jdbc.queryForObject("SELECT convalidated FROM pg_constraint WHERE conname = "
+                    + "'ck_salon_services_icon'", Boolean.class)).isTrue();
+            jdbc.update("UPDATE salon_services SET icon = 'BRAIDS' WHERE name = 'Old'");
+            assertThatThrownBy(() -> jdbc.update("UPDATE salon_services SET icon = 'NAIL_ART' WHERE name = 'Old'"))
+                    .hasMessageContaining("ck_salon_services_icon");
         } finally {
             admin.execute("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
         }
