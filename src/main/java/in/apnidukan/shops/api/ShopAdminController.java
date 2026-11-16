@@ -236,6 +236,21 @@ public class ShopAdminController {
         return ResponseEntity.status(HttpStatus.CREATED).body(admin.addNote(caller(), id, body.note()));
     }
 
+    /** The salon's subscription: trial, AutoPay, paid up to, hidden from (see SubscriptionService.View). */
+    @GetMapping("/shops/{id}/subscription")
+    public in.apnidukan.shops.service.SubscriptionService.View subscription(@PathVariable UUID id) {
+        return admin.subscription(caller(), id);
+    }
+
+    /**
+     * Super admins: a test salon's free trial ends now (its owner a test account), so Razorpay's reviewer signed in with
+     * its test number sees the payment screen. 409 NOT_A_TEST_SALON, 409 SUBSCRIPTION_NOT_STARTED.
+     */
+    @PostMapping("/shops/{id}/subscription/end-trial")
+    public in.apnidukan.shops.service.SubscriptionService.View endTrial(@PathVariable UUID id) {
+        return admin.endTrialNow(caller(), id);
+    }
+
     private UUID caller() {
         return currentUser.get().userId();
     }
