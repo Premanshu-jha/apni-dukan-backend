@@ -955,6 +955,69 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### How the salon subscription works (V65; partner app 0.27.0, customer app 0.25.2, admin app 0.18.0)
+
+- **Price and trial.** A salon pays ₹500 a month (no GST added) after a **30-day free trial** that starts at its
+  first approval by the field team (`ShopAdminService.approve` → `SubscriptionService.startTrial`, in the approval's
+  transaction; the approval message says until when, and that nothing is due now). Approving it again later keeps the
+  trial it had. Kiranas have none.
+- **Paying** (owner only, in the partner app): `POST /shops/me/subscription/checkout` creates a Razorpay subscription
+  (plan `RAZORPAY_PLAN_ID`, 120 months, `start_at` = the trial's or paid month's end, or at once when it has ended,
+  `notes.shop_id`) and returns what the app opens Razorpay's checkout with: Clozest's name, logo
+  (`app.subscriptions.logo-url`), navy `#0B0F26`, the owner's details. The key secret never leaves the backend; the
+  app gets only the public key id. Razorpay is called **outside any transaction**: a first transaction locks the
+  salon's row and marks "creating" (a second tap within 30 s gets 409 `PAYMENT_STARTING`); one made in the last hour
+  and not approved is offered again. **A salon never has two live subscriptions**: any other one still able to
+  charge (unapproved for an hour, a failed AutoPay being retried, an overdue one) is cancelled at Razorpay first (503
+  `PAYMENTS_UNAVAILABLE` and nothing new if that fails). If anything changes while the new one is being made (a payment
+  arrives, a later tap, the salon closes or changes owner), the new one is never offered and is cancelled (409
+  `SUBSCRIPTION_CHANGED`). After the owner approves, `POST .../confirm` checks Razorpay's
+  signature (HMAC-SHA256 of `payment_id|subscription_id` with the key secret; 400 `PAYMENT_NOT_CONFIRMED`) and shows
+  AutoPay as on, without a status time of its own, so Razorpay's own events always count after it.
+- **Webhooks** (`POST /api/v1/payments/razorpay/webhook`, no sign-in): checked with `RAZORPAY_WEBHOOK_SECRET`
+  (403 `BAD_SIGNATURE`; with no secret set every webhook is refused), each event once (`X-Razorpay-Event-Id` kept 30
+  days in `razorpay_events`), older events never overwrite newer ones. `subscription.charged` moves "paid until" to
+  Razorpay's `current_end` (never backwards; the owner is told only when it moved, so a replay tells nobody twice),
+  also for a subscription the salon has since replaced (found by `notes.shop_id`: money taken always counts). Any event
+  about a subscription no salon has any more that is still live at Razorpay gets it cancelled, so nothing keeps
+  charging unseen.
+  authenticated, activated, pending, halted, cancelled update the status; the owners are told about AutoPay starting,
+  a failed charge and AutoPay stopping. The salon counts as paid when Razorpay reports the charge, not when Razorpay
+  settles the money to the bank days later.
+- **AutoPay that goes quiet.** AutoPay counts as on until a day after the period ends (or after it was set up, when
+  later) without a charge arriving; then the salon is treated as unpaid (`autoPayFailed`), so the owner is told and
+  can pay another way instead of being hidden while the app says "AutoPay on".
+- **When it ends.** Access ends at the later of the trial end and paid-until. The salon stays visible until
+  **midnight, India time, ending the third day after** (`SubscriptionStore.bookableAfter`), so "pay by 13 Dec" holds
+  for the whole of 13 Dec. Then, while `SUBSCRIPTIONS_ENFORCED=true`, it is left out of customer search, new online
+  bookings are refused like a paused salon, its page says `notTakingBookings: true`, and customers aren't sent "come
+  back" reminders for it. **Bookings already made stay and may still be moved** (and offered earlier times). With the
+  flag off (the default, until live payments) nothing is hidden and no reminders are sent.
+- **Switching hiding on.** The first server to start with `SUBSCRIPTIONS_ENFORCED=true` (before it takes requests)
+  records the moment
+  (`subscription_enforcement`, once) and, in the same transaction, counts every salon's trial from then if that is
+  later than its own (keeping what it paid), restarts its reminders, and gives live salons without a row (approved by
+  an older version) one. Nobody is hidden without the reminders first.
+- **Reminders** (`SubscriptionNoticeJob`, hourly 9:00–21:00 India time under the `subscription-notices` lease, 200
+  salons a run): 7 days before the end, at the end ("pay by <day>", or "your AutoPay payment didn't go through"), and
+  when hidden; never while AutoPay is running.
+- **Closing or handing over** a salon cancels the owner's AutoPay at Razorpay (`SubscriptionService.stopAutoPay`,
+  in the closing's or hand-over's transaction; Razorpay is called right after the commit and, if it can't be reached,
+  `razorpay_cancellations` keeps it for the job, which retries every hour). Days already paid stay with the salon; a
+  new owner sets up his own AutoPay. The old owner is told his AutoPay stopped.
+- **Endpoints:** `GET /shops/me/subscription` (anyone in the salon: state NONE/TRIAL/PAID/AUTOPAY/GRACE/HIDDEN,
+  dates, `canPay`, `paymentsReady`, `testMode`, `autoPayFailed`) · `POST /shops/me/subscription/checkout` ·
+  `POST .../confirm` (owner: 403 `OWNER_ONLY`; 409 `ALREADY_SUBSCRIBED`, `SUBSCRIPTION_NOT_STARTED`,
+  `PAYMENT_STARTING`, `SUBSCRIPTION_CHANGED`; 503 `SUBSCRIPTIONS_OFF` without keys, `PAYMENTS_UNAVAILABLE` with
+  `Retry-After: 30` when Razorpay is down or slow) · admin `GET /admin/shops/{id}/subscription` (also `testSalon`) ·
+  super admin `POST /admin/shops/{id}/subscription/end-trial` (only a salon whose owner is an OTP test number, else
+  409 `NOT_A_TEST_SALON`: lets Razorpay's reviewer reach the payment screen; a checkout opened before is dropped and
+  cancelled at Razorpay;
+  noted on the salon's timeline).
+- **Deploying V65:** four new tables and a backfill, no change to existing tables; safe while the old version runs.
+- **Tests:** the test database now allows 400 connections (`TestContainers`): every test class's cached Spring
+  context keeps its own pool, and the default 100 ran out once this suite's context was added.
+
 ### Service pictures, second set (V63–V64; partner app 0.25.0, customer app 0.24.0)
 
 - **28 pictures, each checked with a blind recognition test.** Fresh reviewers saw only the numbered, shuffled
@@ -1866,6 +1929,10 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
 - **Database extensions:** the migrations create `postgis` (V12) and `pg_trgm` (V13), which needs the CREATE
   privilege on the database. On Neon the default owner role (the one in `DB_USER`) has it; a restricted role must have
   them created by the owner first.
+- **Salon subscription (Razorpay):** create the ₹500 monthly plan, then set `RAZORPAY_KEY_ID`,
+  `RAZORPAY_KEY_SECRET`, `RAZORPAY_PLAN_ID` and `RAZORPAY_WEBHOOK_SECRET` on Railway, and a webhook in Razorpay to
+  `https://<backend>/api/v1/payments/razorpay/webhook` for the `subscription.*` events. Test keys (`rzp_test_…`) first;
+  live keys once the website is approved. Only then `SUBSCRIPTIONS_ENFORCED=true` (hides unpaid salons).
 - **Alerts:** on the log lines "80% of the daily SMS limit used", "SMS for new numbers paused", "Daily SMS limit",
   "80% of the daily booking-SMS limit used", "Daily booking-SMS limit" and "A transaction has been open for".
 - **Migrations through the direct URL:** set `DB_URL_DIRECT` to Neon's direct connection string (no `-pooler` in

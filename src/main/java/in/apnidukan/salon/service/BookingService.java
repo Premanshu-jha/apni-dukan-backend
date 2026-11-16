@@ -293,7 +293,8 @@ public class BookingService {
                 card.latitude(), card.longitude(), SalonNotices.mapLink(card), hours,
                 current.pausedAt(now) ? current.pausedUntil() : null, photo(card), current.setup().maxDaysAhead(),
                 closed, ratingSummary(ratings.totals(salonId), true), running, offerMessages,
-                cards.licensedUntil(salonId, LocalDate.ofInstant(now, SalonTime.ZONE)).orElse(null));
+                cards.licensedUntil(salonId, LocalDate.ofInstant(now, SalonTime.ZONE)).orElse(null),
+                current.lapsedAt(now));
     }
 
     /** The salon's active services that at least one active barber does, in the salon's order. */
@@ -342,7 +343,8 @@ public class BookingService {
         // their weeks and the booking settings come from memory while the salon's setup is unchanged
         visible(salonId);
         SalonSetups.Current current = setups.current(salonId);
-        requireNotPaused(current, now);
+        // Moving a booking already made is allowed while the salon's subscription lapsed (only new ones aren't)
+        requireNotPaused(current, now, movingOne != null);
         SalonSetups.Setup setup = current.setup();
         // A booking being moved keeps the services (and their lengths) it was booked with, as move() does: the free
         // times and their end are for that length, even after the salon changed or switched off a service since
@@ -611,6 +613,7 @@ public class BookingService {
                     "Less than 1 hour to go: this booking can't be moved any more. You can still cancel it.");
         }
         SalonSetups.Current current = setups.current(a.shopId());
+        // A lapsed subscription stops new bookings only: one already made may still move
         if (!"APPROVED".equals(salon.status()) || current.pausedAt(now)) {
             throw new ApiException(HttpStatus.CONFLICT, "SALON_NOT_BOOKABLE",
                     "The salon isn't taking online changes right now (paused, or its details are being checked "
@@ -790,9 +793,17 @@ public class BookingService {
         return Optional.empty();
     }
 
-    /** 409 SALON_NOT_BOOKABLE while the salon has paused online bookings (read with its counters: SalonSetups). */
+    /**
+     * 409 SALON_NOT_BOOKABLE while the salon has paused online bookings, or its subscription lapsed (read with its
+     * counters: SalonSetups).
+     */
     private static void requireNotPaused(SalonSetups.Current current, Instant now) {
-        if (current.pausedAt(now)) {
+        requireNotPaused(current, now, false);
+    }
+
+    /** As above; {@code moving} a booking already made: only the pause counts (a lapsed subscription doesn't). */
+    private static void requireNotPaused(SalonSetups.Current current, Instant now, boolean moving) {
+        if (moving ? current.pausedAt(now) : current.closedAt(now)) {
             throw new ApiException(HttpStatus.CONFLICT, "SALON_NOT_BOOKABLE",
                     "This salon isn't taking online bookings right now. Try again later.");
         }

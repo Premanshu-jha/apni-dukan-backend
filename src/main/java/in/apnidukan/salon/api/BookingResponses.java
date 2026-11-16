@@ -122,12 +122,14 @@ public final class BookingResponses {
      *                     there (they don't get them anyway); otherwise false once they stopped them for this salon
      * @param licensedUntil its trade licence's last valid day, when it passed our automatic check and is valid today
      *                      (the page says "Licensed"); null otherwise
+     * @param notTakingBookings the salon isn't taking new online bookings for now (its Clozest subscription lapsed);
+     *                          the page says so instead of offering times. Bookings already made stay
      */
     public record SalonDetails(UUID id, String name, String addressLine, String area, String city, String pincode,
                                BigDecimal latitude, BigDecimal longitude, String mapLink, List<DayHours> hours,
                                Instant pausedUntil, String photoUrl, int maxDaysAhead, List<LocalDate> closedDates,
                                RatingSummary rating, List<OfferView> offers, Boolean offerMessages,
-                               LocalDate licensedUntil) {
+                               LocalDate licensedUntil, boolean notTakingBookings) {
 
         public SalonDetails {
             hours = List.copyOf(hours);

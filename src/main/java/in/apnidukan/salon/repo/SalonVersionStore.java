@@ -25,13 +25,21 @@ public class SalonVersionStore {
      * The counters and the pause, read together.
      * @param pausedUntil null if online bookings were never paused (or resumed); may be in the past
      */
-    public record Now(Versions versions, java.time.Instant pausedUntil) {
+    /**
+     * @param bookableUntil while SUBSCRIPTIONS_ENFORCED is on: when the salon's subscription lapses (salon_subscriptions,
+     *                      V65; no new online bookings from then on); null otherwise, or without a subscription row
+     */
+    public record Now(Versions versions, java.time.Instant pausedUntil, java.time.Instant bookableUntil) {
     }
 
     private final JdbcTemplate jdbc;
+    private final boolean subscriptionsEnforced;
 
-    public SalonVersionStore(JdbcTemplate jdbc) {
+    public SalonVersionStore(JdbcTemplate jdbc,
+                             @org.springframework.beans.factory.annotation.Value("${app.subscriptions.enforce:false}")
+                             boolean subscriptionsEnforced) {
         this.jdbc = jdbc;
+        this.subscriptionsEnforced = subscriptionsEnforced;
     }
 
     /** The salon's counters; 0 and 0 if nothing of it changed since V17 (no row yet). */
@@ -42,16 +50,21 @@ public class SalonVersionStore {
     }
 
     /**
-     * find() and the salon's pause (salon_pauses) in one query: a customer's free-time check needs both, and the setup
-     * kept in memory under setup_version (SalonSetups) needs nothing else.
+     * find(), the salon's pause (salon_pauses) and its subscription's end (salon_subscriptions) in one query: a
+     * customer's free-time check needs them all, and the setup kept in memory under setup_version (SalonSetups) needs
+     * nothing else.
      */
     public Now findWithPause(UUID shopId) {
-        return jdbc.queryForObject("SELECT v.version, v.setup_version, p.paused_until FROM (SELECT ?::uuid AS id) s "
-                        + "LEFT JOIN salon_versions v ON v.shop_id = s.id LEFT JOIN salon_pauses p ON p.shop_id = s.id",
+        return jdbc.queryForObject("SELECT v.version, v.setup_version, p.paused_until, ss.bookable_until "
+                        + "FROM (SELECT ?::uuid AS id) s "
+                        + "LEFT JOIN salon_versions v ON v.shop_id = s.id LEFT JOIN salon_pauses p ON p.shop_id = s.id "
+                        + "LEFT JOIN salon_subscriptions ss ON ss.shop_id = s.id",
                 (rs, i) -> {
                     java.sql.Timestamp paused = rs.getTimestamp(3);
+                    java.sql.Timestamp bookable = rs.getTimestamp(4);
                     return new Now(new Versions(rs.getLong(1), rs.getLong(2)),
-                            paused == null ? null : paused.toInstant());
+                            paused == null ? null : paused.toInstant(),
+                            bookable == null || !subscriptionsEnforced ? null : bookable.toInstant());
                 }, shopId);
     }
 

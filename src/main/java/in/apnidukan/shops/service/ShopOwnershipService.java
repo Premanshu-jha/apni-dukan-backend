@@ -122,13 +122,15 @@ public class ShopOwnershipService implements TestAccountShops {
     private final ShopAssignments assignments;
     private final AddressRequestStore addressRequests;
     private final ShopService shopService;
+    private final SubscriptionService subscriptions;
 
     public ShopOwnershipService(ShopRepository shops, ShopMemberRepository members, ShopHandoverStore handovers,
                                 ShopReviewStore review, UserDirectory users, Notifications notifications,
                                 List<ShopChangeListener> listeners, SessionRevocations sessions, RateLimiter limits,
                                 DashboardCounts dashboardCounts, ShopInvitesService invites,
                                 ShopAssignments assignments, AddressRequestStore addressRequests,
-                                ShopService shopService, Clock clock) {
+                                ShopService shopService, SubscriptionService subscriptions, Clock clock) {
+        this.subscriptions = subscriptions;
         this.addressRequests = addressRequests;
         this.shopService = shopService;
         this.assignments = assignments;
@@ -212,6 +214,7 @@ public class ShopOwnershipService implements TestAccountShops {
         handovers.cancelFor(shopId, by, now);
         invites.cancelAll(shopId, by, now);
         addressRequests.decide(shopId, "CANCELLED", null, by, now);   // nobody can decide it any more
+        subscriptions.stopAutoPay(shopId);   // the owner's AutoPay is cancelled at Razorpay: no more charges
         listeners.forEach(l -> l.closed(shopId));
         // Everyone leaves: helpers and barbers as if removed (sessions end), then the owner (keeps their sessions).
         // At most a few dozen people; what each module does for them is done for all together.
@@ -371,9 +374,12 @@ public class ShopOwnershipService implements TestAccountShops {
         endSessionsAfterCommit(oldOwner.getUserId());   // their token names the shop as its owner
         invites.cancelAll(shop.getId(), userId, now);   // the old owner's invitations: the new owner invites again
         review.addEvent(shop.getId(), now, userId, false, ShopEventType.HANDED_OVER, null, null, List.of());
+        // The old owner's AutoPay is his: cancelled at Razorpay. Days already paid stay with the salon
+        boolean autoPayStopped = subscriptions.stopAutoPay(shop.getId());
         String name = shop.details().name();
         notifications.queue(new Notice(oldOwner.getUserId(), "SHOP_HANDOVER_ACCEPTED", handoverId, now,
-                "Shop handed over", name + " now belongs to the person you chose. You are no longer in it.",
+                "Shop handed over", name + " now belongs to the person you chose. You are no longer in it."
+                        + (autoPayStopped ? " Your Clozest AutoPay for it is stopped: nothing more is taken." : ""),
                 "/shops/me", Map.of()));
         notifications.queue(new Notice(userId, "SHOP_HANDOVER_DONE", handoverId, now, "The shop is yours",
                 "You now own " + name + " on Clozest. Check its details and photos.", "/shops/me", Map.of()));

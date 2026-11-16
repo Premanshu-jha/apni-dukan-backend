@@ -84,12 +84,15 @@ public class ShopAdminService {
     private final Clock clock;
 
     private final LicenceAiWatch licenceAi;
+    private final SubscriptionService subscriptions;
 
     public ShopAdminService(ShopRepository shops, ShopMemberRepository members, UserDirectory users, FileRefs files,
                             Notifications notifications, List<ShopChangeListener> listeners, ShopReviewStore review,
                             SalonFacts salons, DashboardCounts dashboardCounts, ShopAssignments assignments,
                             ShopService shopService, AddressRequestStore addressRequests, Clock clock,
-                            in.apnidukan.shops.repo.LicenceCheckStore licences, LicenceAiWatch licenceAi) {
+                            in.apnidukan.shops.repo.LicenceCheckStore licences, LicenceAiWatch licenceAi,
+                            SubscriptionService subscriptions) {
+        this.subscriptions = subscriptions;
         this.licences = licences;
         this.licenceAi = licenceAi;
         this.shopService = shopService;
@@ -360,6 +363,8 @@ public class ShopAdminService {
         String note = optionalNote(noteInput);
         shop.approve(now());
         save(shop);   // the row is locked from here: the owner's request can't change under us
+        // A salon's first approval: its free trial starts (later ones keep the trial it had)
+        java.util.Optional<java.time.Instant> trialEnds = subscriptions.startTrial(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.APPROVED, null, note, List.of());
         // After approving: no longer waiting, so a new pincode doesn't send it to another agent's visit list
         addressRequests.pending(shopId).ifPresent(r -> applyAddressRequest(adminId, shop, r));
@@ -367,6 +372,12 @@ public class ShopAdminService {
         if (wasLive) {
             tellOwner(shop, "SHOP_RECHECKED", "Your changes are checked",
                     "Our field team checked the changes to " + shop.details().name() + ". Nothing more to do.");
+        } else if (shop.getType() == in.apnidukan.shops.domain.ShopType.SALON) {
+            tellOwner(shop, "SHOP_APPROVED", "Your shop is live",
+                    shop.details().name() + " is approved. Customers nearby can find it now."
+                            + trialEnds.map(ends -> " Your free trial runs until " + SubscriptionService.day(ends)
+                                    + "; then ₹" + SubscriptionService.PRICE_RUPEES + " a month. Nothing to pay now.")
+                                    .orElse(""));
         } else {
             tellOwner(shop, "SHOP_APPROVED", "Your shop is live",
                     shop.details().name() + " is approved. Customers nearby can find it now.");
@@ -717,5 +728,25 @@ public class ShopAdminService {
             throw ApiException.notFound("Page");
         }
         return role;
+    }
+
+    /** The salon's subscription, for anyone on the team who can see the salon (a field agent: assigned to them). */
+    @Transactional(readOnly = true)
+    public SubscriptionService.View subscription(UUID adminId, UUID shopId) {
+        assignments.requireCanSee(adminId, shopId);
+        return subscriptions.forAdmin(shopId);
+    }
+
+    /**
+     * Super admins: a test salon's trial ends now, so Razorpay's reviewer (signed in with its test number) lands on the
+     * payment screen. Logged on the salon's timeline.
+     */
+    @Transactional
+    public SubscriptionService.View endTrialNow(UUID adminId, UUID shopId) {
+        assignments.requireSuperAdmin(adminId);
+        SubscriptionService.View view = subscriptions.endTrialNow(shopId);
+        review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null,
+                "Test salon: free trial ended now (for the payment review)", List.of());
+        return view;
     }
 }
