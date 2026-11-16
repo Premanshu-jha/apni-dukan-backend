@@ -185,6 +185,7 @@ public class EarlierSlotAlerts {
             return 0;
         }
         SalonSetups.Current current = setups.current(shopId);
+        // Offers an earlier time to bookings already made: a lapsed subscription doesn't stop that, a pause does
         if (current.pausedAt(now)) {
             return 0;
         }

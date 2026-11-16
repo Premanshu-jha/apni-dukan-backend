@@ -4,6 +4,7 @@ import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopDetails;
 import in.apnidukan.shops.repo.ShopRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -41,16 +42,26 @@ public class ShopDirectoryService implements ShopDirectory {
     private static final String NOT_PAUSED = " AND NOT EXISTS (SELECT 1 FROM salon_pauses sp "
             + "WHERE sp.shop_id = s.id AND sp.paused_until > ?)";
 
+ /**
+     * Salons whose subscription lapsed (trial or paid month over, and the 3 days' grace too: salon_subscriptions,
+     * V65), while SUBSCRIPTIONS_ENFORCED is on. A salon without a row is never left out by it.
+     */
+    private static final String NOT_LAPSED = " AND NOT EXISTS (SELECT 1 FROM salon_subscriptions ss "
+            + "WHERE ss.shop_id = s.id AND ss.bookable_until <= ?)";
+
     private static final String AFTER = " AND (ST_Distance(s.location, p.g, false), s.id) > (?, ?)";
 
     private final ShopRepository shops;
     private final JdbcTemplate jdbc;
     private final Clock clock;
+    private final boolean subscriptionsEnforced;
 
-    public ShopDirectoryService(ShopRepository shops, JdbcTemplate jdbc, Clock clock) {
+    public ShopDirectoryService(ShopRepository shops, JdbcTemplate jdbc, Clock clock,
+                                @Value("${app.subscriptions.enforce:false}") boolean subscriptionsEnforced) {
         this.shops = shops;
         this.jdbc = jdbc;
         this.clock = clock;
+        this.subscriptionsEnforced = subscriptionsEnforced;
     }
 
     @Override
@@ -91,6 +102,10 @@ public class ShopDirectoryService implements ShopDirectory {
         if (skipPausedSalons) {
             sql.append(NOT_PAUSED);
             args.add(Timestamp.from(Instant.now(clock)));
+            if (subscriptionsEnforced) {
+                sql.append(NOT_LAPSED);
+                args.add(Timestamp.from(Instant.now(clock)));
+            }
         }
         if (after != null) {
             sql.append(AFTER);

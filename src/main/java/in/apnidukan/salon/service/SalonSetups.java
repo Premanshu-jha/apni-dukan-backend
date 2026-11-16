@@ -99,15 +99,26 @@ public class SalonSetups {
 
     /**
      * The setup and the pause, read together.
-     * @param pausedUntil set while online bookings are (or were) paused; it may have run out already
-     * @param shopId      the salon
-     * @param version     the salon's change counter when this was read (salon_versions.version): the barbers' busy
-     *                    time kept in memory (SalonCalendar) is used only while it is the same
+     * @param pausedUntil   set while online bookings are (or were) paused; it may have run out already
+     * @param shopId        the salon
+     * @param version       the salon's change counter when this was read (salon_versions.version): the barbers' busy
+     *                      time kept in memory (SalonCalendar) is used only while it is the same
+     * @param bookableUntil while SUBSCRIPTIONS_ENFORCED is on: when its subscription lapses; null otherwise
      */
-    public record Current(Setup setup, Instant pausedUntil, UUID shopId, long version) {
+    public record Current(Setup setup, Instant pausedUntil, UUID shopId, long version, Instant bookableUntil) {
 
         public boolean pausedAt(Instant now) {
             return pausedUntil != null && pausedUntil.isAfter(now);
+        }
+
+        /** The salon's subscription lapsed (not paid after its trial or month and 3 days' grace): no new bookings. */
+        public boolean lapsedAt(Instant now) {
+            return bookableUntil != null && !bookableUntil.isAfter(now);
+        }
+
+        /** No new online bookings now: paused by the salon, or its subscription lapsed (moves: only the pause). */
+        public boolean closedAt(Instant now) {
+            return pausedAt(now) || lapsedAt(now);
         }
     }
 
@@ -171,7 +182,7 @@ public class SalonSetups {
             kept = load(shopId, version);
             cache.put(shopId, kept);
         }
-        return new Current(kept, now.pausedUntil(), shopId, now.versions().version());
+        return new Current(kept, now.pausedUntil(), shopId, now.versions().version(), now.bookableUntil());
     }
 
     /** The offers that still cover some active service (one whose services were all switched off since offers none). */

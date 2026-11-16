@@ -1,5 +1,6 @@
 package in.apnidukan.salon.repo;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -53,8 +54,12 @@ public class VisitFollowUpStore {
 
     private final JdbcTemplate jdbc;
 
-    public VisitFollowUpStore(JdbcTemplate jdbc) {
+    /** SUBSCRIPTIONS_ENFORCED: a salon whose subscription lapsed takes no new bookings, so isn't suggested either. */
+    private final boolean subscriptionsEnforced;
+
+    public VisitFollowUpStore(JdbcTemplate jdbc, @Value("${app.subscriptions.enforce:false}") boolean subscriptionsEnforced) {
         this.jdbc = jdbc;
+        this.subscriptionsEnforced = subscriptionsEnforced;
     }
 
     /**
@@ -158,7 +163,9 @@ public class VisitFollowUpStore {
                             EXISTS (SELECT 1 FROM appointments b WHERE b.customer_id = t.customer_id
                                     AND b.status IN ('CONFIRMED', 'IN_SERVICE') AND b.ends_at > ?) AS has_upcoming,
                             s.status = 'APPROVED' AND NOT EXISTS (SELECT 1 FROM salon_pauses sp
-                                WHERE sp.shop_id = t.shop_id AND sp.paused_until > ?) AS salon_approved,
+                                WHERE sp.shop_id = t.shop_id AND sp.paused_until > ?)
+                                AND (NOT ? OR NOT EXISTS (SELECT 1 FROM salon_subscriptions sub
+                                    WHERE sub.shop_id = t.shop_id AND sub.bookable_until <= ?)) AS salon_approved,
                             EXISTS (SELECT 1 FROM visit_follow_ups n WHERE n.customer_id = t.customer_id
                                     AND n.completed_at > t.completed_at) AS visited_since,
                             ARRAY(SELECT aps.service_id FROM appointment_services aps
@@ -190,7 +197,8 @@ public class VisitFollowUpStore {
                             rs.getBoolean("visited_since"), due.stream().map(ids::get).toList(),
                             due.stream().map(names::get).toList());
                 },
-                AppointmentStore.at(now), limit, AppointmentStore.at(now), AppointmentStore.at(now));
+                AppointmentStore.at(now), limit, AppointmentStore.at(now), AppointmentStore.at(now),
+                subscriptionsEnforced, AppointmentStore.at(now));
     }
 
     /**
