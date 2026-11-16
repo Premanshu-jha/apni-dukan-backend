@@ -51,7 +51,9 @@ public class SecurityConfig {
                                 "/api/v1/auth/recover/start",
                                 "/api/v1/auth/recover/complete",
                                 // Signed by the Email Worker (HMAC), checked by InboundEmailController
-                                "/api/v1/helpdesk/inbound").permitAll()
+                                "/api/v1/helpdesk/inbound",
+                                // Signed by Razorpay (HMAC), checked by SubscriptionService.webhook
+                                "/api/v1/payments/razorpay/webhook").permitAll()
                         .requestMatchers("/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
