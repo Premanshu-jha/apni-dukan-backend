@@ -58,6 +58,9 @@ public final class TestContainers {
                     .withEnv("POSTGRES_USER", DB_USER)
                     .withEnv("POSTGRES_PASSWORD", DB_PASSWORD)
                     .withExposedPorts(5432)
+                    // Spring keeps every test class's context (and its connection pool, 5 idle connections at least)
+                    // open for reuse; Postgres' default of 100 connections runs out with this many contexts.
+                    .withCommand("postgres", "-c", "max_connections=400")
                     .waitingFor(Wait.forLogMessage(".*database system is ready to accept connections.*\\s", 2)
                             .withStartupTimeout(Duration.ofMinutes(2)));
             postgres.start();
