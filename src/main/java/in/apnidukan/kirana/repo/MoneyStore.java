@@ -261,6 +261,33 @@ public class MoneyStore {
                 status, limit);
     }
 
+    /**
+     * One delivered order part's earning, as the owner sees it.
+     * @param payoutStatus null while not paid out yet
+     */
+    public record EarningRow(UUID partId, long orderNo, long amountPaise, Instant deliveredAt, LocalDate dueOn,
+                             UUID payoutId, String payoutStatus, String payoutUpiId, String payoutFailure) {
+    }
+
+    /** A shop's earnings, newest delivery first, after the cursor; one more than limit. */
+    public List<EarningRow> earnings(UUID shopId, Instant beforeAt, UUID beforePartId, int limit) {
+        StringBuilder sql = new StringBuilder("SELECT e.part_id, o.order_no, e.amount_paise, e.created_at, e.due_on, "
+                + "e.payout_id, p.status, p.upi_id, p.failure FROM kirana_earnings e JOIN kirana_order_parts pt ON pt.id = e.part_id "
+                + "JOIN kirana_orders o ON o.id = pt.order_id LEFT JOIN kirana_payouts p ON p.id = e.payout_id "
+                + "WHERE e.shop_id = ?");
+        List<Object> args = new java.util.ArrayList<>(List.of(shopId));
+        if (beforeAt != null) {
+            sql.append(" AND (e.created_at, e.part_id) < (?, ?)");
+            args.add(at(beforeAt));
+            args.add(beforePartId);
+        }
+        sql.append(" ORDER BY e.created_at DESC, e.part_id DESC LIMIT ?");
+        args.add(limit + 1);
+        return jdbc.query(sql.toString(), (rs, i) -> new EarningRow(rs.getObject(1, UUID.class), rs.getLong(2),
+                rs.getLong(3), rs.getObject(4, OffsetDateTime.class).toInstant(), rs.getDate(5).toLocalDate(),
+                rs.getObject(6, UUID.class), rs.getString(7), rs.getString(8), rs.getString(9)), args.toArray());
+    }
+
     /** What the shop is owed and not paid yet: {due by today, not due yet}. */
     public long[] owed(UUID shopId, LocalDate today) {
         return jdbc.queryForObject("SELECT coalesce(sum(amount_paise) FILTER (WHERE due_on <= ?), 0), "

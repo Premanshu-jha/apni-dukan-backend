@@ -24,7 +24,7 @@ public class OnlineStore {
 
     private static final String COLUMNS = "SELECT shop_id, taking_orders, fssai_number, fssai_file_id, fssai_status, "
             + "fssai_reason, fssai_valid_until, fssai_checked_at, fssai_tries, upi_recheck, upi_checked_at, rating_sum, "
-            + "rating_count, updated_at FROM kirana_online";
+            + "rating_count, updated_at, fssai_kept_until, fssai_kept_file_id FROM kirana_online";
 
     private final JdbcTemplate jdbc;
 
@@ -36,15 +36,24 @@ public class OnlineStore {
      * A shop's online-order row.
      * @param fssaiStatus NONE, CHECKING (the AI reads it), VERIFIED or REJECTED (fssaiReason says why)
      * @param upiRecheck  its UPI ID changed after approval: payouts wait until the field team checks it
+     * @param fssaiKeptUntil while a renewed certificate is checked or was refused: the last day of the earlier verified
+     *                    licence (the same number), which keeps the shop taking orders until then
+     * @param fssaiKeptFileId that earlier licence's certificate, kept on record meanwhile
      */
     public record Online(UUID shopId, boolean takingOrders, String fssaiNumber, UUID fssaiFileId, String fssaiStatus,
                          String fssaiReason, LocalDate fssaiValidUntil, Instant fssaiCheckedAt, int fssaiTries,
                          boolean upiRecheck, Instant upiCheckedAt, long ratingSum, int ratingCount,
-                         Instant updatedAt) {
+                         Instant updatedAt, LocalDate fssaiKeptUntil, UUID fssaiKeptFileId) {
 
-        /** Its FSSAI licence was checked and is still valid on this day. */
+        /** Its FSSAI licence was checked and is still valid on this day (or an earlier one is, during a renewal). */
         public boolean fssaiValidOn(LocalDate day) {
-            return "VERIFIED".equals(fssaiStatus) && fssaiValidUntil != null && !fssaiValidUntil.isBefore(day);
+            return ("VERIFIED".equals(fssaiStatus) && fssaiValidUntil != null && !fssaiValidUntil.isBefore(day))
+                    || keptOn(day);
+        }
+
+        /** A renewal is being checked or was refused while the earlier licence still holds on this day. */
+        public boolean keptOn(LocalDate day) {
+            return fssaiKeptUntil != null && !fssaiKeptUntil.isBefore(day);
         }
     }
 
@@ -73,11 +82,58 @@ public class OnlineStore {
                 shopId);
     }
 
-    /** A new certificate (or number) to check: the AI reads it next. */
-    public void setFssai(UUID shopId, String number, UUID fileId, Instant now) {
-        jdbc.update("UPDATE kirana_online SET fssai_number = ?, fssai_file_id = ?, fssai_status = 'CHECKING', "
+    /**
+     * A new certificate (or number) to check: the AI reads it next. {@code renewalOn}: the owner's own upload on that
+     * day. A renewal of the same licence (the same number) while the verified one is still valid keeps that one's last
+     * day and certificate, so the shop keeps taking orders until then; a different number keeps nothing (a renewal is
+     * of the same licence). Null for the team's re-decision, which changes nothing kept.
+     */
+    public void setFssai(UUID shopId, String number, UUID fileId, LocalDate renewalOn, UUID setBy, Instant now) {
+        jdbc.update("UPDATE kirana_online SET "
+                        + "fssai_kept_file_id = CASE WHEN ?::date IS NULL THEN fssai_kept_file_id "
+                        + "WHEN fssai_status = 'VERIFIED' AND fssai_valid_until >= ?::date AND fssai_number = ? "
+                        + "THEN fssai_file_id WHEN fssai_number = ? THEN fssai_kept_file_id END, "
+                        + "fssai_kept_until = CASE WHEN ?::date IS NULL THEN fssai_kept_until "
+                        + "WHEN fssai_status = 'VERIFIED' AND fssai_valid_until >= ?::date AND fssai_number = ? "
+                        + "THEN fssai_valid_until WHEN fssai_number = ? THEN fssai_kept_until END, "
+                        + "fssai_number = ?, fssai_file_id = ?, fssai_status = 'CHECKING', "
+                        + "fssai_set_by = coalesce(?, fssai_set_by), "
                         + "fssai_reason = NULL, fssai_valid_until = NULL, fssai_checked_at = NULL, fssai_tries = 0, "
-                        + "updated_at = ? WHERE shop_id = ?", number, fileId, at(now), shopId);
+                        + "updated_at = ? WHERE shop_id = ?", date(renewalOn), date(renewalOn), number, number,
+                date(renewalOn), date(renewalOn), number, number, number, fileId, setBy, at(now), shopId);
+    }
+
+    /**
+     * Nothing kept any more (the renewal is verified, or the team ends the earlier licence). Returns the certificate
+     * that was kept, to be let go.
+     */
+    public Optional<UUID> endKept(UUID shopId, Instant now) {
+        List<UUID> kept = jdbc.query("SELECT fssai_kept_file_id FROM kirana_online WHERE shop_id = ? "
+                + "AND fssai_kept_file_id IS NOT NULL", (rs, i) -> rs.getObject(1, UUID.class), shopId);
+        jdbc.update("UPDATE kirana_online SET fssai_kept_until = NULL, fssai_kept_file_id = NULL, updated_at = ? "
+                + "WHERE shop_id = ? AND (fssai_kept_until IS NOT NULL OR fssai_kept_file_id IS NOT NULL)", at(now),
+                shopId);
+        return kept.stream().findFirst();
+    }
+
+    /**
+     * The owner who added the FSSAI licence left the shop (handed over): it was issued to him as the food business
+     * operator, so it is forgotten and orders stop until the new owner adds his own. Returns its certificates to let
+     * go (none when someone else added it, or there is none).
+     */
+    public List<UUID> forgetFssaiSetBy(UUID shopId, UUID userId, Instant now) {
+        List<UUID> files = jdbc.query("SELECT unnest(ARRAY[fssai_file_id, fssai_kept_file_id]) FROM kirana_online "
+                + "WHERE shop_id = ? AND fssai_set_by = ?", (rs, i) -> rs.getObject(1, UUID.class), shopId, userId)
+                .stream().filter(java.util.Objects::nonNull).toList();
+        jdbc.update("UPDATE kirana_online SET fssai_number = NULL, fssai_file_id = NULL, fssai_status = 'NONE', "
+                + "fssai_reason = NULL, fssai_valid_until = NULL, fssai_checked_at = NULL, fssai_tries = 0, "
+                + "fssai_kept_until = NULL, fssai_kept_file_id = NULL, fssai_set_by = NULL, taking_orders = false, "
+                + "updated_at = ? WHERE shop_id = ? AND fssai_set_by = ?", at(now), shopId, userId);
+        return files;
+    }
+
+    private static Date date(LocalDate d) {
+        return d == null ? null : Date.valueOf(d);
     }
 
     /**
@@ -86,10 +142,11 @@ public class OnlineStore {
      */
     public boolean fssaiResult(UUID shopId, String number, UUID fileId, String status, String reason,
                                LocalDate validUntil, Instant now) {
+        // Refused: the earlier licence still holds (the caller ends what is kept once a renewal is verified)
         return jdbc.update("UPDATE kirana_online SET fssai_status = ?, fssai_reason = ?, fssai_valid_until = ?, "
                         + "fssai_checked_at = ?, updated_at = ? WHERE shop_id = ? AND fssai_number = ? "
-                        + "AND fssai_file_id = ? AND fssai_status = 'CHECKING'", status, reason, validUntil == null
-                        ? null : Date.valueOf(validUntil), at(now), at(now), shopId, number, fileId) > 0;
+                        + "AND fssai_file_id = ? AND fssai_status = 'CHECKING'", status, reason, date(validUntil),
+                at(now), at(now), shopId, number, fileId) > 0;
     }
 
     /** The certificate goes to a person (the AI couldn't decide, or the owner asks again after a refusal). */
@@ -100,7 +157,7 @@ public class OnlineStore {
 
     /** A shop's certificate as the admin website lists it. */
     public record FssaiCheck(UUID shopId, String shopName, String number, UUID fileId, String status, String reason,
-                             int tries, Instant checkedAt) {
+                             int tries, Instant checkedAt, LocalDate keptUntil) {
     }
 
     /**
@@ -109,7 +166,9 @@ public class OnlineStore {
      */
     public List<FssaiCheck> fssaiChecks(String status, int minTries, int limit) {
         StringBuilder sql = new StringBuilder("SELECT o.shop_id, s.name, o.fssai_number, o.fssai_file_id, "
-                + "o.fssai_status, o.fssai_reason, o.fssai_tries, o.fssai_checked_at FROM kirana_online o "
+                + "o.fssai_status, o.fssai_reason, o.fssai_tries, o.fssai_checked_at, "
+                + "CASE WHEN o.fssai_kept_until >= current_date THEN o.fssai_kept_until END "
+                + "FROM kirana_online o "
                 + "JOIN shops s ON s.id = o.shop_id WHERE o.fssai_status = ? AND o.fssai_tries >= ?");
         if ("CHECKING".equals(status)) {
             sql.append(" ORDER BY o.fssai_checked_at NULLS FIRST, o.shop_id LIMIT ?");
@@ -120,7 +179,8 @@ public class OnlineStore {
             OffsetDateTime checked = rs.getObject(8, OffsetDateTime.class);
             return new FssaiCheck(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3),
                     rs.getObject(4, UUID.class), rs.getString(5), rs.getString(6), rs.getInt(7),
-                    checked == null ? null : checked.toInstant());
+                    checked == null ? null : checked.toInstant(),
+                    rs.getDate(9) == null ? null : rs.getDate(9).toLocalDate());
         }, status, minTries, limit);
     }
 
@@ -191,6 +251,8 @@ public class OnlineStore {
                 rs.getString("fssai_reason"), valid == null ? null : valid.toLocalDate(),
                 checked == null ? null : checked.toInstant(), rs.getInt("fssai_tries"), rs.getBoolean("upi_recheck"),
                 upi == null ? null : upi.toInstant(), rs.getLong("rating_sum"), rs.getInt("rating_count"),
-                rs.getObject("updated_at", OffsetDateTime.class).toInstant());
+                rs.getObject("updated_at", OffsetDateTime.class).toInstant(),
+                rs.getDate("fssai_kept_until") == null ? null : rs.getDate("fssai_kept_until").toLocalDate(),
+                rs.getObject("fssai_kept_file_id", UUID.class));
     }
 }

@@ -42,7 +42,9 @@ public class OrderStore {
 
     /** A kirana that takes online orders now: approved, with a UPI ID, a valid FSSAI licence and its switch on. */
     private static final String READY = "s.status = 'APPROVED' AND s.type = 'KIRANA' AND o.taking_orders "
-            + "AND o.fssai_status = 'VERIFIED' AND o.fssai_valid_until >= ? "
+            // verified and valid, or during a renewal the earlier licence still valid (greatest skips NULLs)
+            + "AND greatest(CASE WHEN o.fssai_status = 'VERIFIED' THEN o.fssai_valid_until END, "
+            + "o.fssai_kept_until) >= ? "
             + "AND k.upi_id IS NOT NULL";
 
     private final JdbcTemplate jdbc;
@@ -306,6 +308,22 @@ public class OrderStore {
                 o.status(), cut(o.cancelReason()), o.otpWrong(), at(o.otpLockedUntil()), at(o.placedAt()),
                 at(o.acceptedAt()), at(o.packedAt()), at(o.outAt()), at(o.deliveredAt()), at(o.cancelledAt()),
                 o.version(), o.id());
+    }
+
+    /**
+     * The customer corrects the address text of an order not sent out yet (the pin stays), at most {@code max} times.
+     * Whether it was changed (false: the corrections are used up).
+     */
+    public boolean setAddress(UUID orderId, String addressLine, int max) {
+        return jdbc.update("UPDATE kirana_orders SET address_line = ?, address_changes = address_changes + 1, "
+                + "version = version + 1 WHERE id = ? AND address_changes < ?", addressLine, orderId, max) > 0;
+    }
+
+    /** How many times the order's address was corrected. */
+    public int addressChanges(UUID orderId) {
+        Integer n = jdbc.queryForObject("SELECT address_changes FROM kirana_orders WHERE id = ?", Integer.class,
+                orderId);
+        return n == null ? 0 : n;
     }
 
     /** The customer's rating of a delivered order; false when it was rated already. */
