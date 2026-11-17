@@ -9,6 +9,8 @@ import in.apnidukan.common.text.TextCleaner;
 import in.apnidukan.kirana.api.OrderRequests.Fssai;
 import in.apnidukan.kirana.api.OrderRequests.FssaiDecision;
 import in.apnidukan.kirana.api.OrderResponses.AdminPayoutView;
+import in.apnidukan.kirana.api.OrderResponses.EarningPage;
+import in.apnidukan.kirana.api.OrderResponses.EarningView;
 import in.apnidukan.kirana.api.OrderResponses.FailedRefundView;
 import in.apnidukan.kirana.api.OrderResponses.FssaiCheckView;
 import in.apnidukan.kirana.api.OrderResponses.FssaiView;
@@ -16,6 +18,7 @@ import in.apnidukan.kirana.api.OrderResponses.OnlineView;
 import in.apnidukan.kirana.api.OrderResponses.OpenOrderView;
 import in.apnidukan.kirana.api.OrderResponses.PayoutView;
 import in.apnidukan.kirana.api.OrderResponses.UpiRecheckView;
+import in.apnidukan.kirana.domain.Cursors;
 import in.apnidukan.kirana.repo.KiranaSettingsStore;
 import in.apnidukan.kirana.repo.MoneyStore;
 import in.apnidukan.kirana.repo.OnlineStore;
@@ -132,11 +135,45 @@ public class OnlineService {
             return view(c, o);   // sent again: nothing new to check
         }
         files.keep(file.id());
-        if (o.fssaiFileId() != null && !o.fssaiFileId().equals(file.id())) {
+        LocalDate today = KiranaChecks.today(now);
+        // A renewal (the same number) of the licence verified now: that one keeps the shop taking orders until its
+        // last day whatever the new one gets, and its certificate stays on record meanwhile
+        boolean renewal = number.equals(o.fssaiNumber());
+        boolean keepsCurrent = renewal && "VERIFIED".equals(o.fssaiStatus()) && o.fssaiValidUntil() != null
+                && !o.fssaiValidUntil().isBefore(today);
+        if (o.fssaiFileId() != null && !o.fssaiFileId().equals(file.id()) && !keepsCurrent
+                && !o.fssaiFileId().equals(o.fssaiKeptFileId())) {
             files.release(o.fssaiFileId());
         }
-        online.setFssai(c.shopId(), number, file.id(), now);
+        if (!renewal && o.fssaiKeptFileId() != null) {
+            files.release(o.fssaiKeptFileId());   // another licence: nothing of the earlier one is kept
+        }
+        online.setFssai(c.shopId(), number, file.id(), today, userId, now);
         return view(c, online.find(c.shopId()).orElseThrow());
+    }
+
+    /** The owner's earnings, one row per delivered order, newest first, 50 a page (403 OWNER_ONLY for helpers). */
+    @Transactional(readOnly = true)
+    public EarningPage earnings(UUID userId, String cursor) {
+        Caller c = access.owner(userId);
+        java.util.Optional<String[]> before = Cursors.decode(cursor);
+        Instant beforeAt = before.flatMap(b -> instant(b[0])).orElse(null);
+        List<MoneyStore.EarningRow> rows = money.earnings(c.shopId(), beforeAt,
+                beforeAt == null ? null : ProductService.uuid(before.get()[1]), KiranaChecks.PAGE);
+        boolean more = rows.size() > KiranaChecks.PAGE;
+        List<MoneyStore.EarningRow> page = more ? rows.subList(0, KiranaChecks.PAGE) : rows;
+        MoneyStore.EarningRow last = page.isEmpty() ? null : page.get(page.size() - 1);
+        return new EarningPage(page.stream().map(e -> new EarningView(e.orderNo(), e.amountPaise(), e.deliveredAt(),
+                e.dueOn(), e.payoutId(), e.payoutStatus(), e.payoutUpiId(), e.payoutFailure())).toList(),
+                more ? Cursors.encode(last.deliveredAt().toString(), last.partId().toString()) : null);
+    }
+
+    private static java.util.Optional<Instant> instant(String s) {
+        try {
+            return java.util.Optional.of(Instant.parse(s));
+        } catch (java.time.format.DateTimeParseException e) {
+            return java.util.Optional.empty();
+        }
     }
 
     // ---------- the admin website ----------
@@ -156,10 +193,15 @@ public class OnlineService {
         }
         String reason = verified ? null
                 : in.reason() == null || in.reason().isBlank() ? "The certificate couldn't be accepted." : in.reason().strip();
-        online.setFssai(shopId, o.fssaiNumber(), o.fssaiFileId(), now);
+        online.setFssai(shopId, o.fssaiNumber(), o.fssaiFileId(), null, null, now);
         String status = verified ? "VERIFIED" : "REJECTED";
         online.fssaiResult(shopId, o.fssaiNumber(), o.fssaiFileId(), status, reason, verified ? in.validUntil() : null,
                 now);
+        if (verified || Boolean.TRUE.equals(in.endCurrent())) {
+            // Verified: the renewal replaces the earlier licence. endCurrent: the team ends that one too (cancelled,
+            // not genuine), so the shop stops taking orders now
+            online.endKept(shopId, now).filter(f -> !f.equals(o.fssaiFileId())).ifPresent(files::release);
+        }
         fssaiJob.tellDecision(shopId, status, reason, now);
         return fssai(online.find(shopId).orElseThrow());
     }
@@ -174,7 +216,7 @@ public class OnlineService {
         boolean rejected = "REJECTED".equals(status);
         return online.fssaiChecks(rejected ? "REJECTED" : "CHECKING", rejected ? 0 : FssaiCheckJob.MAX_TRIES, LIST_MAX)
                 .stream().map(f -> new FssaiCheckView(f.shopId(), f.shopName(), f.number(), f.fileId(), f.status(),
-                        f.reason(), f.tries(), f.checkedAt())).toList();
+                        f.reason(), f.tries(), f.checkedAt(), f.keptUntil())).toList();
     }
 
     /** UPI IDs changed after approval, waiting for the field team (payouts to them wait too). */
@@ -258,7 +300,7 @@ public class OnlineService {
                 p.amountPaise(), p.upiId(), p.status(), p.failure(), p.createdAt())).toList() : List.of();
         List<String> missing = missing(c.shopId(), o, false);
         return new OnlineView(o != null && o.takingOrders(), missing.isEmpty(), missing,
-                o == null ? new FssaiView(null, null, "NONE", null, null, null) : fssai(o), o != null && o.upiRecheck(),
+                o == null ? new FssaiView(null, null, "NONE", null, null, null, null) : fssai(o), o != null && o.upiRecheck(),
                 o == null || o.ratingCount() == 0 ? null : Math.round(10.0 * o.ratingSum() / o.ratingCount()) / 10.0,
                 o == null ? 0 : o.ratingCount(), owed[0], owed[1], payouts);
     }
@@ -270,12 +312,19 @@ public class OnlineService {
         if ("CHECKING".equals(status) && o.fssaiTries() >= FssaiCheckJob.MAX_TRIES) {
             reason = "Our team is checking it, usually within a day.";
         }
+        if (o.fssaiKeptUntil() != null && !"VERIFIED".equals(status)) {
+            String until = KiranaChecks.day(o.fssaiKeptUntil());
+            String keptNote = o.keptOn(today) ? "Your current licence keeps your shop open until " + until + "."
+                    : "Your earlier licence ended on " + until + ": orders start again once the new one is verified.";
+            reason = reason == null ? keptNote : reason + " " + keptNote;
+        }
         if ("VERIFIED".equals(status) && !o.fssaiValidOn(today)) {
             status = "REJECTED";
             reason = "Your FSSAI licence expired on " + KiranaChecks.day(o.fssaiValidUntil())
                     + ". Add the renewed certificate.";
         }
-        return new FssaiView(o.fssaiNumber(), o.fssaiFileId(), status, reason, o.fssaiValidUntil(),
+        LocalDate kept = o.keptOn(today) ? o.fssaiKeptUntil() : null;
+        return new FssaiView(o.fssaiNumber(), o.fssaiFileId(), status, reason, o.fssaiValidUntil(), kept,
                 o.fssaiCheckedAt());
     }
 

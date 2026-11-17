@@ -179,6 +179,10 @@ public class FssaiCheckJob {
         transactions.executeWithoutResult(s -> {
             // Kept only for the certificate and number read: a newer upload or a corrected number is checked afresh
             if (online.fssaiResult(c.shopId(), c.fssaiNumber(), c.fileId(), status, reason, validUntil, now)) {
+                if ("VERIFIED".equals(status)) {
+                    // The renewal replaces the licence kept meanwhile: its certificate is let go
+                    online.endKept(c.shopId(), now).filter(f -> !f.equals(c.fileId())).ifPresent(files::release);
+                }
                 tellDecision(c.shopId(), status, reason, now);
             }
         });
@@ -186,8 +190,15 @@ public class FssaiCheckJob {
 
     /** Tells the owner how the certificate was decided. The caller holds a transaction. */
     void tellDecision(UUID shopId, String status, String reason, Instant now) {
+        String body = reason;
+        if (!"VERIFIED".equals(status)) {
+            // A refused renewal: the licence verified before still holds; say until when, so no one thinks it closed
+            LocalDate today = KiranaChecks.today(now);
+            body = online.find(shopId).filter(o -> o.keptOn(today)).map(o -> reason + " Your current licence keeps "
+                    + "your shop open until " + KiranaChecks.day(o.fssaiKeptUntil()) + ".").orElse(reason);
+        }
         tellOwner(shopId, now, "VERIFIED".equals(status) ? "FSSAI licence verified" : "FSSAI certificate not accepted",
-                "VERIFIED".equals(status) ? "Customers can order from your shop once online orders are on." : reason);
+                "VERIFIED".equals(status) ? "Customers can order from your shop once online orders are on." : body);
     }
 
     private void tellOwner(UUID shopId, Instant now, String title, String body) {
