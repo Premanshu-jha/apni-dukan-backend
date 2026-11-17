@@ -2,6 +2,7 @@ package in.apnidukan.kirana.api;
 
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.kirana.api.OrderRequests.CancelOrder;
+import in.apnidukan.kirana.api.OrderRequests.ChangeAddress;
 import in.apnidukan.kirana.api.OrderRequests.PaymentDone;
 import in.apnidukan.kirana.api.OrderRequests.PlaceOrder;
 import in.apnidukan.kirana.api.OrderRequests.Quote;
@@ -16,6 +17,7 @@ import in.apnidukan.kirana.api.OrderResponses.ShopPage;
 import in.apnidukan.kirana.service.CheckoutService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -93,6 +95,15 @@ public class KiranaCustomerController {
     @GetMapping("/orders/{id}")
     public OrderView order(@PathVariable UUID id) {
         return checkouts.order(me(), id);
+    }
+
+    /**
+     * Corrects the address text until the order goes out (the shop is told once it accepted), at most 3 times. 409
+     * CANT_CHANGE_ADDRESS after.
+     */
+    @PatchMapping("/orders/{id}/address")
+    public OrderView changeAddress(@PathVariable UUID id, @Valid @RequestBody ChangeAddress body) {
+        return checkouts.changeAddress(me(), id, body.addressLine());
     }
 
     /** Cancels an order the shop hasn't accepted. 409 CANT_CANCEL. */
