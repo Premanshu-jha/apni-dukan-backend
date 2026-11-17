@@ -809,7 +809,7 @@ class AdminIntegrationTest {
     }
 
     @Test
-    void aKiranasNewGstinOrUdyamNumberStillWaitsForAReCheckWhileLive() {
+    void aKiranasNewGstinStillWaitsForAReCheckWhileLiveAndAUdyamNumberIsIgnored() {
         UUID kirana = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000021");
         approve(kirana);
         UUID owner = ownerOf(kirana);
@@ -820,9 +820,12 @@ class AdminIntegrationTest {
         List<?> changes = (List<?>) field(get("/admin/shops/" + kirana, boss).body(), "changes");
         assertThat(changes).extracting(c -> field(c, "field")).containsExactly("gstin");
         approve(kirana);
+        // Udyam is no longer asked for: one sent is ignored, so nothing waits for a re-check
         Reply udyam = patch("/shops/me", Map.of("version", version(kirana), "udyamNumber", "UDYAM-TS-02-0012345"),
                 owner);
-        assertThat(field(udyam.body(), "recheckSince")).as(udyam.text()).isNotNull();
+        assertThat(udyam.status()).as(udyam.text()).isEqualTo(200);
+        assertThat(field(udyam.body(), "udyamNumber")).isNull();
+        assertThat(field(udyam.body(), "recheckSince")).isNull();
     }
 
     @Test

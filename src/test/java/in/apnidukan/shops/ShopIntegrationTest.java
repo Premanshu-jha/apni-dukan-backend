@@ -105,7 +105,7 @@ class ShopIntegrationTest {
     }
 
     @Test
-    void textIsTidiedAndGstinIsStoredInCapitals() {
+    void textIsTidiedGstinIsStoredInCapitalsAndAUdyamNumberIsIgnored() {
         String access = token(OWNER_PHONE);
         Map<String, Object> shop = validShop();
         shop.put("name", "  Sharma    Kirana   ");
@@ -117,7 +117,9 @@ class ShopIntegrationTest {
         assertThat(r.status()).as(r.body().toString()).isEqualTo(201);
         assertThat(r.body().get("name")).isEqualTo("Sharma Kirana");
         assertThat(r.body().get("gstin")).isEqualTo("27AAPFU0939F1ZV");
-        assertThat(r.body().get("udyamNumber")).isEqualTo("UDYAM-TS-02-0012345");
+        // Udyam is no longer asked for (2026-11-17): one sent by an older app is ignored, not stored
+        assertThat(r.body().get("udyamNumber")).isNull();
+        assertThat(jdbc.queryForObject("SELECT udyam_number FROM shops", String.class)).isNull();
         assertThat(new BigDecimal(r.body().get("latitude").toString())).isEqualByComparingTo("17.465123");
     }
 
@@ -245,7 +247,6 @@ class ShopIntegrationTest {
         assertInvalid(access, "gstin", "27AAPFU0939F1Z");                 // 14 characters
         assertInvalid(access, "gstin", "27AAPFU0939F1ZW");                // typo: check character doesn't match
         assertInvalid(access, "gstin", "00AAPFU0939F1ZB");                // no state 00 (check character is right)
-        assertInvalid(access, "udyamNumber", "UDYAM-12345");
         assertInvalid(access, "name", "   ");
         assertInvalid(access, "name", " a ");
         assertInvalid(access, "city", null);
