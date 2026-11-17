@@ -94,6 +94,11 @@ public final class OrderRequests {
                               @NotBlank String razorpaySignature) {
     }
 
+    /** The customer's corrected address text (flat, tower, landmark); the pin on the map stays. */
+    public record ChangeAddress(@NotBlank(message = "Enter your flat and building")
+                                @Size(min = 3, max = 200, message = "Use 3 to 200 letters") String addressLine) {
+    }
+
     /** Why the customer cancels (optional). */
     public record CancelOrder(@Size(max = 200, message = "At most 200 letters") String reason) {
     }
@@ -140,7 +145,10 @@ public final class OrderRequests {
      * look).
      * @param reason     shown to the owner when refused
      * @param validUntil as printed, when verified
+     * @param endCurrent with a refusal during a renewal: also ends the licence verified before (cancelled, not
+     *                   genuine), so the shop stops taking orders now instead of on its last day
      */
-    public record FssaiDecision(@NotNull Boolean verified, @Size(max = 300) String reason, LocalDate validUntil) {
+    public record FssaiDecision(@NotNull Boolean verified, @Size(max = 300) String reason, LocalDate validUntil,
+                                Boolean endCurrent) {
     }
 }
