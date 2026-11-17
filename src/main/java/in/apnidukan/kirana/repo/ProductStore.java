@@ -155,10 +155,23 @@ public class ProductStore {
                 "kirana-barcode:" + shopId + ":" + code);
     }
 
+    /** Links the product to a shared catalogue entry (the same item in every shop). */
+    public void setCatalogueItem(UUID productId, UUID itemId) {
+        jdbc.update("UPDATE kirana_products SET catalogue_item_id = ? WHERE id = ?", itemId, productId);
+    }
+
+    /** The product's shared catalogue entry, if it has one. */
+    public UUID catalogueItemOf(UUID productId) {
+        List<UUID> ids = jdbc.queryForList("SELECT catalogue_item_id FROM kirana_products WHERE id = ?", UUID.class,
+                productId);
+        return ids.isEmpty() ? null : ids.get(0);
+    }
+
     /** Whether the product was sold on any bill. */
     public boolean everSold(UUID productId) {
         return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM kirana_bill_lines "
-                + "WHERE product_id = ?)", Boolean.class, productId));
+                + "WHERE product_id = ?) OR EXISTS (SELECT 1 FROM kirana_order_lines WHERE product_id = ?)",
+                Boolean.class, productId, productId));
     }
 
     /** Whether another active product of the shop (not {@code self}) has this name, case aside. */
@@ -260,6 +273,26 @@ public class ProductStore {
                     ps.setObject(9, m.clientRef());
                     ps.setObject(10, by);
                     ps.setObject(11, at(now));
+                });
+    }
+
+    /** Records an online order part's stock changes (ORDER taken on accepting, ORDER_BACK given back) in one round trip. */
+    public void addOrderMoves(UUID shopId, UUID partId, List<Move> moves, UUID by, Instant now) {
+        if (moves.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("INSERT INTO kirana_stock_moves (id, shop_id, product_id, change, stock_after, reason, "
+                        + "order_part_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", moves, moves.size(),
+                (ps, m) -> {
+                    ps.setObject(1, UUID.randomUUID());
+                    ps.setObject(2, shopId);
+                    ps.setObject(3, m.productId());
+                    ps.setBigDecimal(4, m.change());
+                    ps.setBigDecimal(5, m.stockAfter());
+                    ps.setString(6, m.reason());
+                    ps.setObject(7, partId);
+                    ps.setObject(8, by);
+                    ps.setObject(9, at(now));
                 });
     }
 
