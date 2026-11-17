@@ -66,6 +66,12 @@ public class ShopDirectoryService implements ShopDirectory {
 
     @Override
     @Transactional(readOnly = true)
+    public boolean needsEditCode(UUID shopId) {
+        return shops.needsEditCode(shopId);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public Optional<ShopCard> find(UUID shopId) {
         return shops.findById(shopId).map(ShopDirectoryService::card);
     }

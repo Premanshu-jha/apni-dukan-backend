@@ -13,6 +13,12 @@ public interface ShopDirectory {
 
     Optional<ShopCard> find(UUID shopId);
 
+    /**
+     * Whether the shop is verified (approved now or before, and not a draft): its owner then confirms changes to its
+     * checked details with a code to his phone first (EditUnlocks), so a phone left signed in can't change them.
+     */
+    boolean needsEditCode(UUID shopId);
+
     /** find() for many shops in one query, by id (unknown ids are left out). */
     java.util.Map<UUID, ShopCard> findAll(java.util.Collection<UUID> shopIds);
 
