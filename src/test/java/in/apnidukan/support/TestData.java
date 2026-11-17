@@ -24,7 +24,8 @@ public final class TestData {
         jdbc.update("DELETE FROM licence_ai_spend");
         jdbc.update("UPDATE licence_ai_alert SET problem = NULL, problem_since = NULL, emailed_at = NULL, announced = false, owed_problem = NULL, owed_since = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
-        for (String table : new String[] {"salon_subscriptions", "razorpay_events", "razorpay_cancellations", "subscription_enforcement", "ticket_emails", "ticket_events", "ticket_messages", "tickets", "salon_ratings", "salon_rating_totals", "visit_follow_ups",
+        for (String table : new String[] {"kirana_khata_entries", "kirana_stock_moves", "kirana_bill_return_lines",
+                "kirana_bill_returns", "kirana_bill_changes", "kirana_bill_lines", "kirana_bills", "kirana_barcodes", "kirana_khata_customers", "kirana_products", "kirana_settings", "salon_subscriptions", "razorpay_events", "razorpay_cancellations", "subscription_enforcement", "ticket_emails", "ticket_events", "ticket_messages", "tickets", "salon_ratings", "salon_rating_totals", "visit_follow_ups",
                 "salon_customer_prefs", "customer_places", "salon_offer_mutes", "salon_hours_aud", "salon_hours", "salon_closed_days", "earlier_slot_alerts", "shop_assignments", "admin_pincodes", "video_uploads", "shop_invites", "salon_closings", "salon_message_purges", "shop_handovers", "job_leases", "account_wipes", "file_deletions", "shop_events", "admin_events", "test_emails", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
                 "salon_offer_services", "salon_offers",
                 "appointments", "walk_in_access", "salon_pauses", "notification_jobs", "push_subscriptions",
@@ -47,6 +48,13 @@ public final class TestData {
             // Test tokens carry no device session ("-"), see EditUnlockStore
             redis.opsForValue().set("edit-unlock:" + id + ":-", until, java.time.Duration.ofHours(1));
         }
+    }
+
+    /** Gives a kirana its UPI ID, as its owner would in the app (needed before Submit for visit). */
+    public static void kiranaUpiId(JdbcTemplate jdbc, UUID shopId) {
+        jdbc.update("INSERT INTO kirana_settings (shop_id, next_bill_no, upi_id, upi_updated_at) VALUES (?, 1, "
+                + "'teststore@okhdfcbank', now()) ON CONFLICT (shop_id) DO UPDATE SET upi_id = EXCLUDED.upi_id, "
+                + "upi_updated_at = EXCLUDED.upi_updated_at", shopId);
     }
 
     /** A person who finished sign-up: a verified email (phone@test.in) and the name "Test person". */
