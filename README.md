@@ -13,6 +13,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, a kirana's GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and trade licence (checked automatically with AI), Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
+| `kirana` | The kirana's own counter (on the `kirana` branch until the kirana flow is finished): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit) |
 | `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
@@ -397,7 +398,7 @@ sequenceDiagram
 | `GET /api/v1/admin/shops/licence-ai-usage` | Super admins: the licence checks' AI this credit period (reads, cost of the budget), whether Anthropic refuses our account, whether the key is set and who the alerts reach. See "Credit alerts for the licence checks" |
 | `POST /api/v1/admin/shops/{id}/registration-document/recheck` · `GET /api/v1/admin/shops/licences-to-follow-up` | Send the licence for checking again; the super admins' list of licences not accepted or waiting long. See "The trade licence, checked automatically" |
 | `POST /api/v1/admin/shops/{id}/registration-document/remove` | `{version, reason}`: a wrong or someone else's licence comes off; the owner gets `SHOP_DOCUMENT_REMOVED` with the reason; a note on the timeline. Any status but CLOSED; a field agent only for a business assigned to them. 409 `NO_DOCUMENT`, `SHOP_CHANGED`, `WRONG_STATUS`. (No one marks a licence as checked: the automatic check decides) |
-| `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos (and a salon's video) are set; then, for a salon, 409 `REGISTRATION_INCOMPLETE` with `details` naming each of `services` (at least one active), `hours` (the opening hours) still missing. The registration document is optional |
+| `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos (and a salon's video) are set; then 409 `REGISTRATION_INCOMPLETE` with `details` naming what is still missing: for a salon each of `services` (at least one active) and `hours` (the opening hours); for a kirana `upiId` (set with `PUT /kirana/settings/upi-id`). The registration document is optional |
 | `POST /api/v1/shops/me/close` | Owner. `{version, reason?}` (reason 2–200 characters, for the field team): closes the shop for good, see "Closing a shop or handing it over". 200 with the shop (`status: CLOSED`). 409 `SHOP_CHANGED` for a stale version, 403 `OWNER_ONLY` |
 | `POST /api/v1/shops/me/handover` · `GET` · `DELETE` | Owner. `{phone, version}`: asks the person with that phone to take the shop over. 202 `{message, handover: {id, phone, createdAt, expiresAt}}`, the same `message` for any number. 409 `HANDOVER_PENDING` while one waits, 429 `TOO_MANY_REQUESTS` after 5 a day, 400 `INVALID_PHONE` / `VALIDATION_FAILED` (`details.phone`: your own number). `GET`: the waiting one (404 `NO_HANDOVER`). `DELETE`: cancel it (204, also when none waits) |
 | `GET /api/v1/me/handover` · `POST /api/v1/me/handover/{id}/accept` · `.../decline` | Anyone signed in: requests waiting for their phone, `[{id, shopId, shopCode, shopName, type, area, city, ownerName, createdAt, expiresAt}]`. Accept: 200 with the shop (`myRole: OWNER`), then `POST /auth/refresh`. Decline: 204. 404 `HANDOVER_NOT_FOUND` (not for your phone), 409 `HANDOVER_GONE` with `details.status` (`ACCEPTED`, `DECLINED`, `CANCELLED`, `EXPIRED`, `CLOSED`, `OWNER_CHANGED`), 409 `ALREADY_IN_A_SHOP` (you work in another shop: leave it first), 403 `PROFILE_INCOMPLETE` |
@@ -555,8 +556,9 @@ allowed. A helper accepting while deleting their account: either the deletion is
 now) or the accept is (401, or 409 `TRY_AGAIN` when the database broke a tie); the shop always has exactly one live
 owner.
 
-Rules: the GPS pin is required and must be inside India; pincode is 6 digits; a kirana's GSTIN and Udyam are optional,
-checked, and stored in capitals (a salon has none: anything sent is ignored, and an old value is never shown); text is
+Rules: the GPS pin is required and must be inside India; pincode is 6 digits; a kirana's GSTIN is optional,
+checked, and stored in capitals (a salon has none; no shop is asked for a Udyam number: anything sent is ignored, and an
+old value is never shown); text is
 trimmed. Unknown fields are refused with 400 `UNKNOWN_FIELD`, so nobody can send
 `"status": "APPROVED"` for their own shop. Status moves DRAFT → (both photos, Submit) → PENDING_VISIT → (field team
 visits and approves) → APPROVED; from any status the owner can close it for good (CLOSED). **Once approved, the
@@ -809,6 +811,104 @@ free time (`pricePaise`, and `listPricePaise` when an offer applies at that star
 publishing or ending one moves the salon's `setup_version` (triggers in V37, like a change to its services), so every
 server prices free times and bookings with the current offers at its next read. The cards read the badge in their
 one query per page (`SalonCardStore`). A deleted account's mutes go (`SalonAccountDeletion`).
+
+## The kirana counter (V66–V67, `kirana` branch)
+
+The kirana's own counter in the partner app: what it stocks, what it sells to walk-in customers, and who owes it on
+khata. **No money passes through Clozest here**: a walk-in customer pays the shop directly (cash, or the shop's own UPI
+QR) or buys on the shop's khata, and the app only records it. Online orders (Clozest's Razorpay, splitting across
+shops, payouts) come in the next round. Everything is under `/api/v1/kirana`, for the shop's owner and helpers; anyone
+else gets 404 `NO_SHOP`, and **salon people 409 `NOT_A_KIRANA`**: no kirana screen or data ever reaches a salon.
+
+```mermaid
+sequenceDiagram
+    participant A as Partner app (counter)
+    participant B as Backend
+    participant D as Neon
+    A->>B: GET /kirana/products/barcode/8901262150019 (scan)
+    B-->>A: the product and its pack (or 404 PRODUCT_NOT_FOUND: link the barcode)
+    A->>B: POST /kirana/bills {clientRef, lines, payment}
+    B->>D: lock kirana_settings (bills one at a time) → same clientRef? return it
+    B->>D: lock the products (id order) → bill + lines, stock down, kirana_stock_moves (SALE)
+    B->>D: KHATA: lock the customer → limit check → kirana_khata_entries (SALE), balance up
+    B-->>A: 201 bill + each product's stock before/after
+```
+
+**The tables** (V66; V67 validates the keys to `shops` and `users`):
+
+| Table | What it holds |
+| --- | --- |
+| `kirana_settings` | One row per kirana: the next bill number, the shop's **UPI ID** (owner only) and when it was set |
+| `kirana_products` | The catalogue: name (one active product per name, case aside), unit `PIECE` or `KG`, price per piece or kg in paise, **stock** (NUMERIC(12,3); may go below zero), "running out" alert, `active` (removed products stay for old bills) |
+| `kirana_barcodes` | A product's barcodes (up to 10: MRP batches, pack designs, a carton), each with its **pack**: how many pieces (or kg) one scan means (1 for a single pack, 12 for a carton of 12). One active product per barcode in a shop; a removed product keeps its barcodes inactive and gets them back when restored (except any another product has meanwhile) |
+| `kirana_stock_moves` | Every stock change with its reason: `SALE`, `VOID` (a cancelled sale), `RETURN` (items brought back), `RESTOCK`, `DAMAGED`, `COUNT` (a count by hand), the stock after it, the bill, a note, who and when |
+| `kirana_bills` + `kirana_bill_lines` | Walk-in bills: the shop's running number, the app's `client_ref` (a double tap finds the first bill), subtotal, **discount**, total, payment `CASH`/`UPI`/`KHATA`, the khata customer, what of a khata bill was **paid now** (cash or UPI), what was refunded for returns; lines copy the name, unit and price, so a later price change never changes an old bill (a line without a product is an item not in the list; a loose item sold by amount keeps the amount asked for), with how much of each came back; `voided_at`/`void_reason` when cancelled |
+| `kirana_bill_returns` + `kirana_bill_return_lines` | Items brought back: which lines and how much, each line's value, the refund split into what came off the khata and what was handed back (cash or UPI), the app's `client_ref` |
+| `kirana_bill_changes` | A bill's payment changed after saving: from what to what (payment, khata customer, paid now), who and when; the day's totals count it on that day |
+| `kirana_khata_customers` | The khata book: name, optional phone (for the WhatsApp reminder) and note, credit limit (**₹2,000 for a new customer** unless the owner sets another or none), **balance** (what they owe; below zero it is their advance, used up by their next khata bill) |
+| `kirana_khata_entries` | Each sale on khata (+, the part not paid now), payment received (−, cash or UPI, with the app's `client_ref`), cancelled sale (−), return (−), bill moved on or off the khata (`CHANGE`, ±), a payment undone (`REVERSAL`, +, naming the payment) and an advance given back (`REFUND`, +), with the balance after it |
+
+**Who may do what:** the owner and helpers bill, scan, link barcodes, add products and stock, add khata customers and
+take their payments. A helper may take up to ₹10 off a bill (a round-off), cancel, take a return on or change the
+payment of **a bill he made, within 10 minutes**, and undo **a khata payment he recorded, within 10 minutes** (a
+mistake fixed on the spot). Only the owner changes a product (name, price, unit before its first sale, alert, removing
+it), unlinks a barcode or corrects its pack, sets a credit limit or none, undoes anyone's khata payment, gives an
+advance back, sets the UPI ID, takes more off a bill, and changes any bill at any time (403 `OWNER_ONLY`; the window
+ones say a helper can within 10 minutes).
+
+| Call | What it does |
+| --- | --- |
+| `GET /kirana/settings` · `PUT /kirana/settings/upi-id` | The shop's name (the QR's payee) and UPI ID; the helper sees it too (he shows the QR). `PUT {upiId}` (owner): spaces removed, lower case, must look like `name@bank` (400 naming `upiId`). Once the shop is verified, a change needs the edit code like every checked detail (403 `EDIT_LOCKED`). The field team sees it (and when it was set) on the shop's page (`kirana` in `GET /admin/shops/{id}`). **A hand-over forgets it**: it was the old owner's account, so the new owner sets his own |
+| `GET /kirana/products?q=&cursor=` | The catalogue in name order, 50 a page (`next` for the following page; a broken token is the first page). `q`: a name containing it anywhere ("salt" finds "Tata Salt 1 kg"), or a barcode starting with it (digits typed from a pack that won't scan); `%` and `_` are plain letters |
+| `GET /kirana/products/running-out` | Products at or below their alert, or below zero (up to 200) |
+| `GET /kirana/products/barcode/{code}` | A scan: `{product, pack}`: the active product with it and how many one scan means (the app adds that many to the bill), or 404 `PRODUCT_NOT_FOUND` (also for a misread code) |
+| `GET /kirana/products/{id}` | The product and its latest 50 stock changes (who, why, the bill number) |
+| `POST /kirana/products` | `{name, barcode?, pack?, unit, pricePaise, stock?, lowStockAt?}` → 201 (products carry `barcodes: [{code, pack}]`). Pieces whole, kg to the gram (3 decimals), 0 to 9999; price ₹0.01–₹1,00,000; `pack` 1 if left out (400 without a barcode). 409 `NAME_TAKEN`, `BARCODE_TAKEN` (with the product that has it). A first stock is recorded as a count |
+| `PATCH /kirana/products/{id}` | Owner. `{version, name?, unit?, pricePaise?, lowStockAt?, noLowStockAlert?, active?}`. `unit` only until it is first sold (409 `PRODUCT_SOLD`; to piece its stock, alert and packs must be whole, 400 naming `unit`). 409 `PRODUCT_CHANGED` (stale version), `NAME_TAKEN` (also when putting a removed product back). Restoring a product brings its barcodes back except any another product has now |
+| `POST /kirana/products/{id}/barcodes` · `DELETE /kirana/products/{id}/barcodes/{code}` | Link a barcode `{code, pack?}` (owner or helper; the same code and pack again changes nothing; the owner sending another pack corrects it) → the product. 409 `BARCODE_TAKEN` (another product has it, or a helper sends another pack), `TOO_MANY_BARCODES` (10), `PRODUCT_REMOVED`; 400 naming `code` or `pack` (whole for pieces). Unlink: owner, 404 `BARCODE_NOT_FOUND` |
+| `POST /kirana/products/{id}/stock` | `{clientRef, reason: RESTOCK\|DAMAGED\|COUNT, quantity, note?}`: adds (up to 9999 at a time), takes off, or sets the stock to the count (up to 999999). The same `clientRef` again (a retry) changes nothing. A count equal to the stock records nothing. 409 `PRODUCT_REMOVED` |
+| `POST /kirana/bills` | `{clientRef, lines (1–100), payment: CASH\|UPI\|KHATA, khataCustomerId?, discountPaise?, paidNowPaise?, paidNowBy?: CASH\|UPI}` → 201 `{bill, stock: [{before, after, runningOut}], khata, upi, repeated: false}`. A line is `{productId, quantity}`, a loose (kg) product by the amount asked for `{productId, amountPaise}` (the weight worked out to the gram), or an item not in the list `{name, amountPaise (each), quantity? (pieces, 1 if left out)}` (no stock kept; 409 `ITEM_IN_LIST` with the `productId` when it is the name of a product in the list, which must be scanned or picked). `discountPaise`: off the whole bill, at most its lines' total; a helper up to ₹10 (403 `OWNER_ONLY` past it). `paidNowPaise`/`paidNowBy`: a KHATA bill part paid at the counter, less than the total; only the rest goes on the khata. `khata` is the customer after a KHATA bill (balance, what is still available), `upi` the QR (`upiId`, `payeeName`, `amountPaise`, `uri` = `upi://pay?pa=…&pn=…&am=…&cu=INR&tn=Bill%20N`, ready to draw) for a UPI bill's total or a khata bill's part paid by UPI; null otherwise or before the UPI ID is set. `upiIdMissing`: true when a QR was needed but the UPI ID isn't set. The same `clientRef` again → 200 with the first bill and its stock changes, `repeated: true`, nothing billed. Listed prices from the catalogue. 400 naming `lines[i]…`, `discountPaise`, `paidNowPaise`, `paidNowBy` or `khataCustomerId`; 409 `PRODUCT_GONE` (`details.productIds`: removed meanwhile or not this shop's); 404 `KHATA_CUSTOMER_NOT_FOUND`; 409 `KHATA_LIMIT` (`details.availablePaise`, `limitPaise`, `balancePaise`). A sale is never refused for the app's stock count |
+| `GET /kirana/bills?cursor=` · `GET /kirana/bills/{id}` | Bills newest first, 50 a page (line count, the first three names, cancelled or not, refunded); one bill with its lines (`lineNo`, `returnedQuantity`), `subtotalPaise`, `discountPaise`, `paidNowPaise`, `onKhataPaise`, `refundedPaise`, its `returns` and payment `changes` |
+| `POST /kirana/bills/{id}/void` | `{reason}` (2–200) → `{bill, stock, khata}`: stock back (`VOID` moves), what it put on a khata comes off, its cash and UPI (a khata bill's part paid now too) counted as handed back on the day of cancelling. A customer taken out of the book meanwhile comes back into it (without their phone if someone else has it now), so their advance stays in sight. 409 `BILL_VOIDED`, `BILL_HAS_RETURNS` (return the rest instead) |
+| `POST /kirana/bills/{id}/payment` | `{version, payment, khataCustomerId?, paidNowPaise?, paidNowBy?, advance?}` → `{bill, khata: [customers it touched], upi, upiIdMissing}`: UPI failed and they paid cash, put on khata after all, moved to another customer's khata. Same bill number; the khata moves with `CHANGE` entries; the change is kept in `bill.changes` and counts in the day's totals on the day it was made. The same payment as now changes nothing (also with an old version). The limit is checked only when it puts more on a khata. 409 `BILL_CHANGED` (stale version), `KHATA_LIMIT` (nothing moved), `KHATA_ALREADY_PAID` (the customer's payments already cover it, so they'd be left an advance: `details.advanceAfterPaise`; send `advance: true` to keep it), `BILL_VOIDED`, `BILL_HAS_RETURNS` |
+| `POST /kirana/bills/{id}/returns` | `{clientRef, lines: [{lineNo, quantity}], reason?}` → 201 `{bill, returned, stock, khata, repeated}`: listed products back into stock (`RETURN` moves); the refund is each line's share of the bill after its discount, and the last return gives back exactly what is left of the total; it goes back the way the bill was paid: `handBackPaise` in `handBackBy` (`CASH`/`UPI`) for a cash or UPI bill; for a khata bill `offKhataPaise` first (up to what the bill still has on the khata) and the rest, its part paid now, handed back as it was paid. The same `clientRef` → 200, made once. 400 naming `lines[i].lineNo` (no such line, or twice) or `lines[i].quantity` (more than is left); 409 `BILL_VOIDED` |
+| `GET /kirana/day?date=` | One India day (today without `date`; 400 more than 2 years away). **Everything counts on the day it happened, so a day's figures never change after its drawer was counted**: bills made that day as they were paid then, cancelled since or not (count, sales after discounts, `discountPaise`; cash and UPI include the part paid now of khata bills; khata is what went on it); **payment changes made that day** (`paymentChanges`, what moved into cash, UPI and khata, ± ); khata payments received less those undone and advances given back that day (cash and UPI apart); **returns made that day** (handed back in cash or UPI, or off the khata); **bills cancelled that day** (their cash and UPI handed back, their khata part taken off); and `cashInPaise` / `upiInPaise`: what the drawer and the shop's UPI should have gained that day |
+| `GET /kirana/khata?q=&owing=&cursor=` | The book in name order, 50 a page, with `owedPaise` (everyone together); `owing=true`: only those who owe. `q`: a name or note containing it ("1204" finds "Tower B 1204"), or digits of their phone |
+| `GET /kirana/khata/{id}?cursor=` | A customer and their entries, newest first (50 a page), with each sale's bill number |
+| `POST /kirana/khata` · `PATCH /kirana/khata/{id}` | `{name, phone?, note?, creditLimitPaise?, noLimit?}` (limit ₹2,000 unless the owner sets another or `noLimit`; the phone as people type or paste it: "+91 98480-12345", "098480 12345"; kept as 10 digits); edits `{version, …, noLimit?, active?}`. 409 `PHONE_TAKEN` (with the customer), `KHATA_CHANGED`, `STILL_OWES` (taking out someone who owes, or is owed) |
+| `POST /kirana/khata/{id}/payments` | `{clientRef, amountPaise, method: CASH\|UPI, note?, advance?}` → 201 `{customer, entry, repeated}`; the same `clientRef` → 200, recorded once. Customers carry `owesPaise` and `advancePaise`; the book `advancesPaise` (all advances held). More than they owe: 409 `MORE_THAN_OWED` (`details.balancePaise`, `advancePaise`, `advanceAfterPaise`: "Keep ₹25 as their advance?"); sent again with `advance: true` the extra is kept as their advance (balance below zero) |
+| `POST /kirana/khata/{id}/payments/{entryId}/reverse` | The owner, or the helper who recorded it within 10 minutes. `{reason}` → 201 `{customer, entry}`: a payment recorded by mistake (on the wrong customer, ₹500 for ₹50) is undone with a `REVERSAL` entry; the payment stays in the history marked `reversed`. 404 `KHATA_ENTRY_NOT_FOUND` (not one of this customer's payments), 409 `PAYMENT_REVERSED` |
+| `POST /kirana/khata/{id}/advance-back` | Owner. `{clientRef, amountPaise, method}` → 201: gives a customer's advance back (all or part; e.g. before taking them out of the book), a `REFUND` entry; counted off the day's khata money. The same `clientRef` → 200. 409 `MORE_THAN_ADVANCE` (`details.advancePaise`) |
+
+**Many at once.** Every bill of a shop first locks its `kirana_settings` row, so a shop's bills are saved one after
+the other (a counter does one at a time; two helpers billing together wait milliseconds): each gets the next number,
+and a double tap or a retry finds the first bill. Products are locked in id order (bills, cancellations), so two bills
+with the same products never wait on each other in a circle; the khata customer is locked last. Different shops never
+wait on each other. Lists are pages of 50 read by index (`(shop, lower(name) COLLATE "C", id)` for names;
+`(shop, created_at DESC, id DESC)` for bills and entries); "running out" reads
+the shop's catalogue (no index mentions `stock`, so a sale updates the product row in place without touching any
+index). Searches use `pg_trgm` GIN indexes (a word anywhere in a product's name, or a customer's name and note). One
+bill's stock changes are written in one batch. Changes to a saved bill (cancel, return, payment change) lock the bill's
+row first, then its products in id order, then khata customers in id order (a payment change between two customers
+locks both in that order), so the same return or change sent twice waits for the first and then sees it. Product pages
+read their barcodes in one query for the page; a scan is one lookup on the unique `(shop, code)` key, whose `C`
+collation also serves the search by a barcode's first digits. Two requests about the same barcode (linking it, restoring
+a product that has it) or the same khata phone (adding a customer, changing a phone, putting a customer back in the
+book) wait for each other on a transaction-level advisory lock, so their "is it free?" checks never race into an error.
+A stock change's `clientRef` sent for another product is a 409 `STOCK_CHANGE_REPEATED`; a stock that would leave its
+column's range a 409 `STOCK_OUT_OF_RANGE`. Messages write money as people in India do (₹2,000, ₹1,00,000). Page tokens carry Postgres's own `lower(name)`, so no name is skipped
+or shown twice across pages. Times are kept to the microsecond, as Postgres stores them. Quantities go out as plain
+JSON numbers (`10`, never `1E+1`). Validation messages are in a shopkeeper's words ("The price can be at most
+₹1,00,000").
+
+**Registration.** A kirana needs its UPI ID before Submit for visit (409 `REGISTRATION_INCOMPLETE`, `details.upiId`;
+the field team checks it at the visit, on the shop's page). The shops module asks through `KiranaFacts` (common,
+implemented by `KiranaFactsService`, which needs only the settings store: anything more would make a constructor loop
+with `ShopService`, which the kirana access check needs), so it doesn't depend on
+the kirana module. A kirana's GSTIN stays optional (a GST-registered shop shows it on its bills); **no shop is asked
+for a Udyam number any more** (2026-11-17): one sent by an older app is ignored, one stored before stays unshown.
+
+**Deploying V66–V67:** new tables only, nothing existing is changed; safe while the old version runs.
 
 ## Run it on your laptop
 

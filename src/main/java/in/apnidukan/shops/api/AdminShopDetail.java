@@ -25,7 +25,8 @@ import java.util.List;
  * @param timelineNext           where the next 50 start (GET /admin/shops/{id}/timeline with these); null when the
  *                               timeline has no more
  */
-public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> changes, Long pinMovedMetres,
+public record AdminShopDetail(AdminShopResponse shop, Salon salon, Kirana kirana, List<Change> changes,
+                              Long pinMovedMetres,
                               String previousOwnerPhotoUrl, String previousShopPhotoUrl, String videoUrl,
                               RegistrationDoc registrationDoc, AddressRequestView addressRequest,
                               List<TimelineEntry> timeline,
@@ -34,6 +35,14 @@ public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> 
     public AdminShopDetail {
         changes = List.copyOf(changes);
         timeline = List.copyOf(timeline);
+    }
+
+    /**
+     * A kirana's counter details the field team checks at the visit (null for a salon).
+     * @param upiId          the shop's UPI ID (its walk-in QR, later Clozest's payouts); null until set
+     * @param upiUpdatedAt   when it was last set (a change after approval shows up here)
+     */
+    public record Kirana(String upiId, Instant upiUpdatedAt) {
     }
 
     /** The next timeline page's query values: afterAt and afterSeq, exactly as given. */

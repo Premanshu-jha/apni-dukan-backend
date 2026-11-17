@@ -199,6 +199,7 @@ class SalonVideoIntegrationTest {
         Reply set = call(HttpMethod.PUT, "/shops/me/video", Map.of("version", version(KIRANA),
                 "fileId", UUID.randomUUID().toString()), KIRANA_OWNER);
         assertThat(code(set)).isEqualTo("NOT_A_SALON");
+        TestData.kiranaUpiId(jdbc, KIRANA);   // a kirana's other need (KiranaIntegrationTest checks it)
         Reply submitted = post("/shops/me/submit", Map.of("version", version(KIRANA)), KIRANA_OWNER);
         assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
         assertThat(submitted.body().get("status")).isEqualTo("PENDING_VISIT");

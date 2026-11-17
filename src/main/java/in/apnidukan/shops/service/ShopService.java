@@ -1,6 +1,7 @@
 package in.apnidukan.shops.service;
 
 import in.apnidukan.common.context.EditUnlocks;
+import in.apnidukan.common.context.KiranaFacts;
 import in.apnidukan.common.context.SalonFacts;
 import in.apnidukan.common.context.UserDirectory;
 import in.apnidukan.common.context.ShopChangeListener;
@@ -63,7 +64,6 @@ public class ShopService implements ShopMemberships {
     private static final String GSTIN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     /** Unique key that allows one shop per person (named in V3). */
     static final String ONE_SHOP_PER_PERSON = "ux_shop_members_user";
-    private static final Pattern UDYAM = Pattern.compile("UDYAM-[A-Z]{2}-[0-9]{2}-[0-9]{7}");
 
     /** Each text field's allowed length after cleaning; max is the column size in V3. */
     static final TextField NAME = new TextField("name", 2, 100);
@@ -82,6 +82,7 @@ public class ShopService implements ShopMemberships {
     private final ShopInvitesService invites;
     private final ShopAssignments assignments;
     private final SalonFacts salons;
+    private final KiranaFacts kiranas;
     private final EditUnlocks editUnlocks;
     private final LicenceCheckStore licences;
     private final RateLimiter limits;
@@ -92,11 +93,12 @@ public class ShopService implements ShopMemberships {
     public ShopService(ShopRepository shops, ShopMemberRepository members, FileRefs files, UserDirectory users,
                        List<ShopChangeListener> listeners, ShopReviewStore review, Clock clock,
                        ShopInvitesService invites,
-                       ShopAssignments assignments, SalonFacts salons, EditUnlocks editUnlocks,
-                       LicenceCheckStore licences, RateLimiter limits) {
+                       ShopAssignments assignments, SalonFacts salons, KiranaFacts kiranas,
+                       EditUnlocks editUnlocks, LicenceCheckStore licences, RateLimiter limits) {
         this.licences = licences;
         this.limits = limits;
         this.salons = salons;
+        this.kiranas = kiranas;
         this.editUnlocks = editUnlocks;
         this.invites = invites;
         this.assignments = assignments;
@@ -128,11 +130,12 @@ public class ShopService implements ShopMemberships {
         Instant now = now();
         ShopType type = in.type() == null ? ShopType.KIRANA : in.type();
         boolean salon = type == ShopType.SALON;
-        // A salon has no GSTIN or Udyam number (its trade licence is what counts): anything sent is ignored
+        // No shop gives a Udyam number now, and a salon no GSTIN either (its trade licence is what counts): anything
+        // sent is ignored. A kirana's GSTIN stays optional (a GST-registered shop shows it on its bills)
         ShopDetails details = new ShopDetails(clean(NAME, in.name()), clean(OWNER_NAME, in.ownerName()),
                 clean(ADDRESS_LINE, in.addressLine()), clean(AREA, in.area()), clean(CITY, in.city()),
                 in.pincode(), coordinate(in.latitude()), coordinate(in.longitude()),
-                salon ? null : gstin(in.gstin()), salon ? null : udyam(in.udyamNumber()));
+                salon ? null : gstin(in.gstin()), null);
         Shop shop = new Shop(shops.nextShopCode(), type, details, now);
         try {
             shops.saveAndFlush(shop);   // new entity (id still null) → INSERT; Hibernate fills shop.getId()
@@ -179,9 +182,10 @@ public class ShopService implements ShopMemberships {
                 in.pincode() == null ? old.pincode() : in.pincode(),
                 in.latitude() == null ? old.latitude() : coordinate(in.latitude()),
                 in.longitude() == null ? old.longitude() : coordinate(in.longitude()),
-                // A salon's are never changed (a salon has none now; one saved before stays as it was, unshown)
+                // A salon's GSTIN and anyone's Udyam number are never changed (none is asked for now; one saved before
+                // stays as it was, unshown)
                 in.gstin() == null || salon ? old.gstin() : gstin(in.gstin()),
-                in.udyamNumber() == null || salon ? old.udyamNumber() : udyam(in.udyamNumber()));
+                old.udyamNumber());
         if (updated.equals(old)) {
             return ShopResponse.from(shop, member.getRole());
         }
@@ -363,8 +367,8 @@ public class ShopService implements ShopMemberships {
     /**
      * Registration step 2: the owner asks for the field team's visit. DRAFT → PENDING_VISIT. Needs the owner's and
      * the shop's photo, and a salon's video (409 PHOTOS_REQUIRED, naming what is missing); then a salon also
-     * needs at least one active service and its opening hours (409 REGISTRATION_INCOMPLETE, naming what is
-     * missing). The registration document is optional. From any other status, 409 WRONG_STATUS.
+     * needs at least one active service and its opening hours, and a kirana its UPI ID (409 REGISTRATION_INCOMPLETE,
+     * naming what is missing). The registration document is optional. From any other status, 409 WRONG_STATUS.
      */
     @Transactional
     public ShopResponse submitForVisit(UUID userId, long version) {
@@ -391,6 +395,10 @@ public class ShopService implements ShopMemberships {
         }
         if (shop.getType() == ShopType.SALON) {
             requireSalonSetUp(shop);
+        } else if (!kiranas.hasUpiId(shop.getId())) {
+            // The walk-in QR shows it, and Clozest's payouts will go to it: the field team checks it at the visit
+            throw new ApiException(HttpStatus.CONFLICT, "REGISTRATION_INCOMPLETE", "Add the shop's UPI ID first.",
+                    Map.of("upiId", "add the shop's UPI ID"));
         }
         shop.submitForVisit(now());
         saveShop(shop);
@@ -677,18 +685,6 @@ public class ShopService implements ShopMemberships {
         }
         if (!GSTIN.matcher(v).matches() || !validGstinState(v) || gstinCheckChar(v) != v.charAt(14)) {
             throw invalid("gstin", "is not a valid GSTIN (15 characters, e.g. 27AAPFU0939F1ZV); check for a typo");
-        }
-        return v;
-    }
-
-    /** Optional. Blank → none. Otherwise UDYAM-XX-00-0000000; stored upper-case. */
-    static String udyam(String value) {
-        String v = compact(value);
-        if (v == null) {
-            return null;
-        }
-        if (!UDYAM.matcher(v).matches()) {
-            throw invalid("udyamNumber", "is not a valid Udyam number (e.g. UDYAM-TS-02-0012345)");
         }
         return v;
     }

@@ -85,13 +85,15 @@ public class ShopAdminService {
 
     private final LicenceAiWatch licenceAi;
     private final SubscriptionService subscriptions;
+    private final in.apnidukan.common.context.KiranaFacts kiranas;
 
     public ShopAdminService(ShopRepository shops, ShopMemberRepository members, UserDirectory users, FileRefs files,
                             Notifications notifications, List<ShopChangeListener> listeners, ShopReviewStore review,
                             SalonFacts salons, DashboardCounts dashboardCounts, ShopAssignments assignments,
                             ShopService shopService, AddressRequestStore addressRequests, Clock clock,
                             in.apnidukan.shops.repo.LicenceCheckStore licences, LicenceAiWatch licenceAi,
-                            SubscriptionService subscriptions) {
+                            SubscriptionService subscriptions, in.apnidukan.common.context.KiranaFacts kiranas) {
+        this.kiranas = kiranas;
         this.subscriptions = subscriptions;
         this.licences = licences;
         this.licenceAi = licenceAi;
@@ -209,7 +211,12 @@ public class ShopAdminService {
         String video = shop.getShopVideoFileId() == null ? null : existingLink(shop.getShopVideoFileId());
         AddressRequestView addressRequest = addressRequests.pending(shopId).map(AddressRequestService::view)
                 .orElse(null);
-        return new AdminShopDetail(views(List.of(shop)).get(0), salon, changes, moved, oldOwnerPhoto, oldShopPhoto,
+        AdminShopDetail.Kirana kirana = shop.getType() == ShopType.KIRANA
+                ? kiranas.upiId(shopId).map(u -> new AdminShopDetail.Kirana(u.upiId(), u.updatedAt()))
+                        .orElse(new AdminShopDetail.Kirana(null, null))
+                : null;
+        return new AdminShopDetail(views(List.of(shop)).get(0), salon, kirana, changes, moved, oldOwnerPhoto,
+                oldShopPhoto,
                 video, doc, addressRequest, timeline.items(), timeline.next());
     }
 

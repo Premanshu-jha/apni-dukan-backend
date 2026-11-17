@@ -15,8 +15,8 @@ import java.time.LocalDate;
 import java.util.UUID;
 
 /**
- * A shop as the app sees it. myRole is the caller's role in it; type says kirana or salon. A salon's gstin and
- * udyamNumber are always null (a salon has none now: its trade licence counts).
+ * A shop as the app sees it. myRole is the caller's role in it; type says kirana or salon. udyamNumber is always
+ * null (no shop gives one now); a salon's gstin too (its trade licence counts), a kirana's is optional.
  * @param ownerPhotoFileId the owner's photo, or null until set (needed before Submit for visit)
  * @param shopPhotoFileId  the shop's photo, or null until set (needed before Submit for visit)
  * @param shopVideoFileId  the salon video, or null until set (needed before Submit for visit); the owner's only
@@ -70,7 +70,7 @@ public record ShopResponse(UUID id, long shopCode, String name, String ownerName
         boolean owner = myRole == ShopRole.OWNER;
         return new ShopResponse(shop.getId(), shop.getShopCode(), d.name(), d.ownerName(), d.addressLine(), d.area(),
                 d.city(), d.pincode(), d.latitude(), d.longitude(), salon ? null : d.gstin(),
-                salon ? null : d.udyamNumber(), shop.getStatus(),
+                null, shop.getStatus(),
                 shop.getStatusReason(), shop.getType(), myRole, shop.getOwnerPhotoFileId(), shop.getShopPhotoFileId(),
                 myRole == ShopRole.OWNER ? shop.getShopVideoFileId() : null,
                 myRole == ShopRole.OWNER ? shop.getRegistrationDocType() : null,
