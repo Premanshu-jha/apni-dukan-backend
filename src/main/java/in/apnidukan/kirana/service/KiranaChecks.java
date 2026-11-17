@@ -137,6 +137,11 @@ final class KiranaChecks {
         return d.length() >= 4 && q.strip().matches("[0-9 +()-]+") ? d : null;
     }
 
+    /** A day as people read it: "31 Mar 2026". */
+    static String day(LocalDate d) {
+        return d.format(java.time.format.DateTimeFormatter.ofPattern("d MMM uuuu", java.util.Locale.ENGLISH));
+    }
+
     static LocalDate today(Instant now) {
         return LocalDate.ofInstant(now, ZONE);
     }

@@ -1,5 +1,6 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.context.RazorpayEvents;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.common.notify.Notifications.Notice;
@@ -115,6 +116,8 @@ public class SubscriptionService implements SmartInitializingSingleton {
     }
 
     private final SubscriptionStore store;
+    /** Handlers of Razorpay events that aren't about subscriptions (kirana online orders). */
+    private final java.util.List<RazorpayEvents> otherEvents;
     private final ShopMemberRepository members;
     private final RazorpayGateway razorpay;
     private final Notifications notifications;
@@ -129,7 +132,8 @@ public class SubscriptionService implements SmartInitializingSingleton {
                                Notifications notifications, PlatformTransactionManager transactions, Clock clock,
                                @Value("${app.subscriptions.enforce:false}") boolean enforced,
                                @Value("${app.subscriptions.logo-url:https://partner.clozest.in/icon-512.png}")
-                               String logoUrl) {
+                               String logoUrl, java.util.List<RazorpayEvents> otherEvents) {
+        this.otherEvents = java.util.List.copyOf(otherEvents);
         this.store = store;
         this.members = members;
         this.razorpay = razorpay;
@@ -301,6 +305,13 @@ public class SubscriptionService implements SmartInitializingSingleton {
         JsonNode sub = root.path("payload").path("subscription").path("entity");
         String subscriptionId = sub.path("id").asString("");
         if (!event.startsWith("subscription.") || subscriptionId.isEmpty()) {
+            // Payments, orders and refunds of other modules (kirana online orders): theirs to handle
+            for (RazorpayEvents handler : otherEvents) {
+                String result = handler.handle(event, body, eventId);
+                if (result != null) {
+                    return result;
+                }
+            }
             return "IGNORED";
         }
         String status = sub.path("status").asString("").toUpperCase(Locale.ROOT);

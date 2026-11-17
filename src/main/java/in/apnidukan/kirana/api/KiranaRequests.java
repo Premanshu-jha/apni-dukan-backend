@@ -26,6 +26,8 @@ public final class KiranaRequests {
      * @param barcode     optional, as printed (letters and digits, 4–32); one active product per barcode in a shop.
      *                    More barcodes are linked later (POST /products/{id}/barcodes)
      * @param pack        how many pieces (or kg) one scan of that barcode means: 1 if left out, 12 for a carton of 12
+     * @param mrpPaise    the MRP printed on the pack (optional): kept in the shared catalogue when this barcode is new
+     *                    there, so the next shop's scan fills it in
      * @param pricePaise  per piece, or per kg for KG: ₹0.01 to ₹1,00,000
      * @param stock       how many (or how much) is in the shop now; 0 if left out
      * @param lowStockAt  "running out" at or below this; left out: no alert
@@ -34,6 +36,8 @@ public final class KiranaRequests {
                              @Size(min = 2, max = 100, message = "Use 2 to 100 letters") String name,
                              @Size(max = 32, message = "A barcode has at most 32 characters") String barcode,
                              BigDecimal pack,
+                             @Min(value = 1, message = "The MRP must be more than ₹0")
+                             @Max(value = 10_000_000, message = "The MRP can be at most ₹1,00,000") Long mrpPaise,
                              @NotNull(message = "Choose piece or kg") Unit unit,
                              @NotNull(message = "Enter the price")
                              @Min(value = 1, message = "The price must be more than ₹0")

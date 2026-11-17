@@ -58,12 +58,15 @@ public class ProductService {
 
     private final KiranaAccess access;
     private final ProductStore products;
+    private final CatalogueService catalogue;
     private final UserDirectory users;
     private final Clock clock;
 
-    public ProductService(KiranaAccess access, ProductStore products, UserDirectory users, Clock clock) {
+    public ProductService(KiranaAccess access, ProductStore products, CatalogueService catalogue, UserDirectory users,
+                          Clock clock) {
         this.access = access;
         this.products = products;
+        this.catalogue = catalogue;
         this.users = users;
         this.clock = clock;
     }
@@ -118,7 +121,8 @@ public class ProductService {
         Caller c = access.caller(userId);
         Product p = products.find(c.shopId(), productId).orElseThrow(ProductService::notFound);
         List<MoveRow> moves = products.moves(p.id(), PAGE);
-        Map<UUID, String> names = KiranaChecks.names(users, moves.stream().map(MoveRow::by).distinct().toList());
+        Map<UUID, String> names = KiranaChecks.names(users, moves.stream().map(MoveRow::by).filter(Objects::nonNull)
+                .distinct().toList());
         return new ProductDetail(view(p), moves.stream()
                 .map(m -> new MoveView(Quantities.json(m.change()), Quantities.json(m.stockAfter()),
                         m.reason(), m.billId(), m.billNo(), m.note(), names.get(m.by()), m.at()))
@@ -156,6 +160,9 @@ public class ProductService {
             }
         } catch (DataIntegrityViolationException e) {
             throw taken(e);
+        }
+        for (Barcode b : barcodes) {
+            catalogue.linkBarcode(c.shopId(), p, null, b.code(), b.pack(), in.mrpPaise(), now);
         }
         if (stock.signum() != 0) {
             products.addMoves(c.shopId(), List.of(new Move(p.id(), stock, stock, "COUNT", null, "First count", null)),
@@ -258,11 +265,13 @@ public class ProductService {
             throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_BARCODES",
                     "A product can have at most " + MAX_BARCODES + " barcodes. Ask the owner to remove an old one.");
         }
+        Instant now = KiranaChecks.now(clock);
         try {
-            products.addBarcode(c.shopId(), p.id(), new Barcode(code, pack), userId, KiranaChecks.now(clock));
+            products.addBarcode(c.shopId(), p.id(), new Barcode(code, pack), userId, now);
         } catch (DataIntegrityViolationException e) {
             throw taken(e);
         }
+        catalogue.linkBarcode(c.shopId(), p, products.catalogueItemOf(p.id()), code, pack, null, now);
         return view(p);
     }
 

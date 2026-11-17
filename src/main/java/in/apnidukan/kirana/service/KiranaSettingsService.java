@@ -6,6 +6,7 @@ import in.apnidukan.common.error.ApiException;
 import in.apnidukan.kirana.api.KiranaResponses.Settings;
 import in.apnidukan.kirana.domain.UpiIds;
 import in.apnidukan.kirana.repo.KiranaSettingsStore;
+import in.apnidukan.kirana.repo.OnlineStore;
 import in.apnidukan.kirana.service.KiranaAccess.Caller;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -26,10 +27,12 @@ public class KiranaSettingsService {
     private final KiranaSettingsStore settings;
     private final ShopDirectory shops;
     private final EditUnlocks editUnlocks;
+    private final OnlineStore online;
     private final Clock clock;
 
     public KiranaSettingsService(KiranaAccess access, KiranaSettingsStore settings, ShopDirectory shops,
-                                 EditUnlocks editUnlocks, Clock clock) {
+                                 EditUnlocks editUnlocks, OnlineStore online, Clock clock) {
+        this.online = online;
         this.access = access;
         this.settings = settings;
         this.shops = shops;
@@ -62,11 +65,17 @@ public class KiranaSettingsService {
         Instant now = KiranaChecks.now(clock);
         KiranaSettingsStore.Settings s = settings.find(c.shopId());
         if (!upi.equals(s.upiId())) {
-            if (shops.needsEditCode(c.shopId()) && editUnlocks.unlockedUntil(userId).isEmpty()) {
+            boolean verified = shops.needsEditCode(c.shopId());
+            if (verified && editUnlocks.unlockedUntil(userId).isEmpty()) {
                 throw new ApiException(HttpStatus.FORBIDDEN, "EDIT_LOCKED",
                         "Your shop is verified: confirm it's you with the code we send to your phone first.");
             }
             settings.setUpiId(c.shopId(), upi, userId, now);
+            if (verified) {
+                // Payouts go to it: they wait until the field team checks the new UPI ID with the owner (also the
+                // first one a new owner sets after a hand-over: the money still owed may be the old owner's)
+                online.markUpiRecheck(c.shopId(), now);
+            }
             s = new KiranaSettingsStore.Settings(upi, now);
         }
         return new Settings(shopName(c.shopId()), s.upiId(), s.upiUpdatedAt());

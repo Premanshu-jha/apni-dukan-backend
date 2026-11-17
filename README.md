@@ -817,7 +817,7 @@ one query per page (`SalonCardStore`). A deleted account's mutes go (`SalonAccou
 The kirana's own counter in the partner app: what it stocks, what it sells to walk-in customers, and who owes it on
 khata. **No money passes through Clozest here**: a walk-in customer pays the shop directly (cash, or the shop's own UPI
 QR) or buys on the shop's khata, and the app only records it. Online orders (Clozest's Razorpay, splitting across
-shops, payouts) come in the next round. Everything is under `/api/v1/kirana`, for the shop's owner and helpers; anyone
+shops, payouts) are in "Kirana online orders" below. Everything is under `/api/v1/kirana`, for the shop's owner and helpers; anyone
 else gets 404 `NO_SHOP`, and **salon people 409 `NOT_A_KIRANA`**: no kirana screen or data ever reaches a salon.
 
 ```mermaid
@@ -909,6 +909,129 @@ the kirana module. A kirana's GSTIN stays optional (a GST-registered shop shows 
 for a Udyam number any more** (2026-11-17): one sent by an older app is ignored, one stored before stays unshown.
 
 **Deploying V66–V67:** new tables only, nothing existing is changed; safe while the old version runs.
+
+## Kirana online orders (V68–V69, `kirana` branch)
+
+Customers order from a kirana near them in the customer app and pay Clozest by Razorpay (UPI or Pay Later); the shop
+packs and delivers; Clozest keeps **₹10 per checkout** and pays each shop its items to its UPI ID by RazorpayX, two
+working days after delivery. When the chosen shop lacks something, **shops near it fill in** (see the plans below).
+Scenario list: `docs/scenarios-kirana-orders.md`.
+
+```mermaid
+sequenceDiagram
+    participant C as Customer app
+    participant B as Backend
+    participant R as Razorpay
+    participant S as Shop (partner app)
+    C->>B: POST /kirana/quote {shopId, where, cart}
+    B-->>C: combined / separate plans with totals (or what isn't available)
+    C->>B: POST /kirana/checkouts {clientRef, plan, expectedTotalPaise}
+    B->>R: create order (outside the transaction)
+    B-->>C: {checkoutId, razorpayOrderId, keyId}
+    C->>R: pay (Razorpay checkout)
+    C->>B: POST /kirana/checkouts/{id}/paid {signature}  (or R→B webhook payment.captured)
+    B-->>S: "New order" (3 minutes to accept)
+    S->>B: accept → packed → (nearby shop: handed) → out → deliver {otp}
+    B->>B: earnings due in 2 working days → RazorpayX payout to the shop's UPI ID
+```
+
+**When a shop takes orders.** All of: approved by the field team, its UPI ID set, its **FSSAI licence verified and
+not expired**, and the owner's "Taking orders" switch on. `GET /kirana/online` lists what is `missing`
+(`APPROVAL`, `UPI_ID`, `FSSAI`, `SWITCHED_OFF`). The owner adds the 14-digit number and a photo or PDF of the
+certificate (a file uploaded as `REG_DOC`); within a minute the AI reads it (`FssaiCheckJob`, at most
+`KIRANA_AI_CALLS_PER_DAY` calls a day, 5 tries) and verifies it when it is an FSSAI certificate, its number is the
+one typed, it hasn't expired, and the business or operator name shares a word with the shop's or the owner's name
+(the usual shop words like "General", "Stores" don't count); otherwise it is refused with the reason in plain words.
+A licence is only verified with its last day (read by the AI, or typed by the super admin), and stops orders the day
+after it. When the AI can't decide (5 tries without an answer) the owner is told "our team will check it" and it waits
+on the admin website (`GET /admin/kirana/fssai`); an owner sending the same certificate again after a refusal asks for
+a person's look the same way. A corrected number is read afresh, and a read already under way for the old number is
+thrown away. **A verified shop changing its UPI ID** (also the first one a new owner sets after a hand-over: the money
+still owed may be the old owner's) holds its payouts until the field team checks the new ID with the owner; then any
+payout that had failed goes to the new ID.
+
+**The shared catalogue.** The first shop to add a product with a barcode makes a catalogue item (name, brand, size,
+unit, MRP, category); every shop that scans that barcode later gets its details filled in, and its product is linked
+to the item. That link is how the customer app finds the same item at nearby shops. Super admins correct items.
+
+**Plans.** A cart line is one of the shop's products, or a catalogue item the shop doesn't list (from
+`nearby-items`).
+
+- *Quantity short* (the shop has 5, the cart says 7): the rest comes from a shop **within 1 km of the chosen shop**,
+  which hands it to the chosen shop: always combined.
+- *Whole item missing*: the customer chooses **combined** (the nearby shop hands it over, one delivery) or
+  **separate** (another shop within 2 km of the customer delivers it itself, a second order).
+- At most 2 other shops in the whole plan (those handing items over and those delivering separately together). The
+  shop covering the most of what is missing is chosen first (then the nearest), each item at that shop's lowest price,
+  and no shop's stock is promised twice. `nearby-items` shows the lowest price near the shop, so a quote can be a little
+  higher when another shop covers more. What nobody can give is listed in `unavailable` (its `line` is the cart
+  position from 0, as in error fields). ₹10 is charged once per checkout, on its first order (it comes back when every
+  order of the checkout is cancelled). No minimum order, no delivery fee.
+
+**Order states.** Order: `WAITING_PAYMENT → PLACED → ACCEPTED → PACKED → OUT_FOR_DELIVERY → DELIVERED`, or `CANCELLED`.
+Each shop's share is a **part**: `OWN` (delivers) or `SUPPLIER` (hands its items to the delivering shop):
+`WAITING → ACCEPTED → PACKED | HANDED`, or `REJECTED`, `TIMED_OUT`, `CANCELLED`. Stock goes down when a part is
+accepted (`ORDER` move) and comes back for items marked missing or a cancelled part (`ORDER_BACK`). A supplier never
+sees the customer.
+
+| Who | Rule |
+| --- | --- |
+| Shop | 3 minutes to accept (owner or helper); not accepted → the part times out (`accept` answers 409 `TOO_LATE` until the job runs, `WRONG_STATUS` after). The delivering shop's part rejected or timed out cancels the whole order; a supplier's only its items. An order left with nothing to deliver is cancelled, the ₹10 refunded |
+| Shop | A shop that stopped taking orders (switched off, licence expired, approval removed) between the checkout and the payment gets no order: its part is dropped and refunded, the whole order when it was to deliver it |
+| Shop | The delivering shop sees the customer (name, phone, address, location) only once it accepted; after delivery the name and address only. Shops of one order see each other's phone while it is open, and the customer the shop's |
+| Shop | A supplier hands over only once the delivering shop accepted (409 `NOT_ACCEPTED_YET`). An accepted order the shop can't finish (customer unreachable, wrong address, accepted by mistake) is cancelled by it with a reason, refunded in full, every shop's stock back (handed items are collected from it); a supplier can drop its part before handing over |
+| Shop | Items marked missing while packing are refunded; all missing cancels the order (₹10 refunded too) |
+| Shop | Out for delivery only once every supplier has handed over (409 `WAITING_FOR_SHOP`) |
+| Shop | Delivered with the customer's 4-digit code: every 5th wrong code locks it for 15 minutes, the 15th for a day (429 `CODE_LOCKED`) |
+| Customer | Pays within 30 minutes (the checkout expires 5 minutes later, so a payment made at the last moment still counts; one after that is refunded in full). Razorpay orders capture on their own. A second payment of the same checkout (paid again from another app) is refunded in full, once |
+| Customer | An account can't be deleted while a shop has accepted one of its orders (409 `KIRANA_ORDER_OPEN`); orders not accepted yet are cancelled and refunded with it |
+| Customer | Cancels until the shop accepts (409 `CANT_CANCEL` after); rates 1–5 stars within 7 days of delivery |
+| Money | Refunds only before the delivery code is given. Each refund is one Razorpay refund with our id in its notes. A run claims each refund first (two backends never send one together); once asked, a refund is never PENDING again: a lost answer is looked up by our id before asking again, and a failed lookup waits for the next try. Razorpay refusing it makes it FAILED at once (on the admin website) |
+| Money | A payout's status only moves forward: SENDING and SENT may become anything, PROCESSED only REVERSED; FAILED and REVERSED stay (a late or out-of-order answer never undoes them) |
+| Money | Each shop earns its own items on delivery, due 2 working days later; one payout per shop and run, our id as RazorpayX's idempotency key. Without RazorpayX keys, earnings stay "due" |
+
+| Call | What it does |
+| --- | --- |
+| `GET /kirana/online` · `PUT /kirana/online/taking-orders` · `PUT /kirana/online/fssai` | The shop's readiness, FSSAI status, rating, money due and recent payouts (amounts for the owner). Switch `{on}` (owner; 409 `NOT_READY` with `details.missing`). Licence `{number, fileId}` (owner; 400 naming `number` or `fileId`) |
+| `GET /kirana/catalogue/barcode/{code}` | A scan's catalogue details to prefill a new product (404 `CATALOGUE_NOT_FOUND`) |
+| `GET /kirana/nearby?lat=&lng=&cursor=` | Shops taking orders within 2 km, nearest first, 50 a page |
+| `GET /kirana/shops/{id}/products?q=&cursor=` · `GET /kirana/shops/{id}/nearby-items?q=&cursor=` | The shop's products (in stock or not); items shops within 1 km of it have and it doesn't, at the lowest price. 409 `SHOP_NOT_TAKING_ORDERS` |
+| `POST /kirana/quote` | `{shopId, latitude, longitude, lines: [{productId \| catalogueItemId, quantity}]}` → `{combined, separate, choose, unavailable, separateUnavailable}` (`combined` null when nothing can be given). 409 `TOO_FAR`, `PRODUCT_GONE`, `SHOP_NOT_TAKING_ORDERS` |
+| `POST /kirana/checkouts` | `{clientRef, shopId, latitude, longitude, addressLine, lines, plan: COMBINED\|SEPARATE, method: UPI\|PAY_LATER, expectedTotalPaise}` → `{checkoutId, status, razorpayOrderId, keyId, amountPaise, orders}`. The same `clientRef` → the same checkout. 409 `PRICE_CHANGED` / `NOTHING_AVAILABLE` with `details.quote`; 503 `PAYMENTS_OFF` (keys not set) or `PAYMENTS_UNAVAILABLE` (Razorpay didn't answer: sending it again asks again) |
+| `GET /kirana/checkouts/{id}` · `POST /kirana/checkouts/{id}/paid` | The checkout with its orders (item counts) and every refund (also a late or second payment's); Razorpay checkout's answer `{razorpayOrderId, razorpayPaymentId, razorpaySignature}` (400 `BAD_SIGNATURE`) |
+| `GET /kirana/orders?cursor=` · `GET /kirana/orders/{id}` | The customer's orders; one order with its lines (`fromNearbyShop`, `missing`), refunds, the delivery `otp` (until delivered), `acceptBy` while waiting for the shop, the shop's phone while open, `canCancel`, `canRate`, its rating and comment |
+| `POST /kirana/orders/{id}/cancel` · `POST /kirana/orders/{id}/rating` | `{reason?}`; `{stars, comment?}` (409 `CANT_CANCEL`, `CANT_RATE`, `ALREADY_RATED`) |
+| `GET /kirana/shop-orders?open=&cursor=` · `GET /kirana/shop-orders/{partId}` | The shop's parts, newest first: `open=true` what it still has to do, `open=false` what is done. Items, `secondsLeft` to accept, the customer (delivering shop, once accepted), what other shops send it and their phones, or for a supplier the shop to hand over to and its phone |
+| `POST /kirana/shop-orders/{partId}/accept \| reject \| missing \| packed \| handed \| out \| deliver \| cancel` | The steps above. `reject {reason}`; `missing {lineNos}` (a supplier left with nothing ends its part); `deliver {otp}` (400 `WRONG_CODE` with `details.triesLeft`); `cancel {reason}`. 409 `TOO_LATE`, `NOT_ACCEPTED_YET`, `WAITING_FOR_SHOP`, `WRONG_STATUS` |
+| `POST /payments/razorpay/webhook` | The same URL as subscriptions: `payment.authorized` (captured), `payment.captured` / `order.paid` (marks the checkout paid), `refund.processed` / `refund.failed`; each event once (`X-Razorpay-Event-Id`) |
+| `POST /payments/razorpayx/webhook` | RazorpayX's own URL and secret: `payout.processed`, `payout.failed`, `payout.reversed` (the owner is told when one fails) |
+| `GET /admin/kirana/catalogue?q=&cursor=` · `PATCH /admin/kirana/catalogue/{id}` | Super admins: the catalogue with its barcodes; corrections `{version, name?, brand?, size?, mrpPaise?, category?}` (409 `CATALOGUE_CHANGED`) |
+| `GET /admin/kirana/fssai?status=` · `POST /admin/kirana/shops/{id}/fssai` | Super admins: certificates waiting for a person (`CHECKING`, default) or refused (`REJECTED`), with the number and file; a decision `{verified, reason?, validUntil}` (`validUntil` needed to verify, 400 naming it), the owner told |
+| `GET /admin/kirana/orders/open` · `POST /admin/kirana/orders/{id}/cancel` | The team: paid orders still open 2 hours after they were placed, with the shop's phone; super admins cancel one no one can finish `{reason}` (refunded in full; 409 `WRONG_STATUS`) |
+| `GET /admin/kirana/upi-checks` · `POST /admin/kirana/shops/{id}/upi-check` | The team: shops whose UPI ID changed after approval; checked (404 `NOTHING_TO_CHECK`) |
+| `GET /admin/kirana/refunds/failed` · `GET /admin/kirana/payouts?status=` · `POST /admin/kirana/payouts/{id}/retry` | Super admins: refunds Razorpay refused; payouts by status; a failed or reversed payout sent again |
+
+**Many at once.** A checkout is unique per customer and `clientRef`, so eight taps make one. Razorpay and RazorpayX
+are always called outside database transactions; a checkout, its orders and parts are locked in that order
+(checkout → orders by number → parts → products by id), so the shop accepting, the timeout job and the customer
+cancelling never cross. Jobs (timeouts every 15 s, expiry every minute, refunds every 30 s, payouts every 10 minutes,
+the FSSAI check every minute) each run on one replica at a time (`job_leases`) and take their rows with
+`FOR UPDATE SKIP LOCKED` (refunds are claimed one by one, so a run outlasting its lease never sends one twice). The
+shop's order screens read `(shop_id, board, updated_at DESC, id DESC)` (`board` is OPEN or DONE, kept with the part and
+its order); the timeout job reads a partial index on `accept_by` of waiting parts; the payout run reads earnings by
+payout and skips shops that can't be paid (so they never hold other shops' places); shops near a customer come from
+the PostGIS `location` index.
+Lists are pages read in one query for the page (lines, shops and people fetched in batches).
+
+**Configuration:** `RAZORPAY_*` as for subscriptions (the same webhook URL; add the `payment.*`, `order.paid` and
+`refund.*` events); `RAZORPAYX_KEY_ID`, `RAZORPAYX_KEY_SECRET`, `RAZORPAYX_ACCOUNT_NUMBER`,
+`RAZORPAYX_WEBHOOK_SECRET` (webhook URL `https://<backend>/api/v1/payments/razorpayx/webhook`, the `payout.*`
+events); `KIRANA_AI_KEY` (defaults to `ANTHROPIC_API_KEY`), `KIRANA_AI_MODEL`, `KIRANA_AI_CALLS_PER_DAY` (500).
+
+**Deploying V68–V69:** new tables, a new nullable column on `kirana_products` and `kirana_stock_moves`, the stock
+move reasons widened and `created_by` made optional for order moves; keys and checks on the existing tables are added
+`NOT VALID` and checked by V69 without blocking writes; V70 builds the stock moves' order index `CONCURRENTLY`
+(counter bills go on meanwhile). Safe while the old version runs.
 
 ## Run it on your laptop
 

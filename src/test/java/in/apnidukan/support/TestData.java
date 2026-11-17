@@ -24,8 +24,11 @@ public final class TestData {
         jdbc.update("DELETE FROM licence_ai_spend");
         jdbc.update("UPDATE licence_ai_alert SET problem = NULL, problem_since = NULL, emailed_at = NULL, announced = false, owed_problem = NULL, owed_since = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
-        for (String table : new String[] {"kirana_khata_entries", "kirana_stock_moves", "kirana_bill_return_lines",
-                "kirana_bill_returns", "kirana_bill_changes", "kirana_bill_lines", "kirana_bills", "kirana_barcodes", "kirana_khata_customers", "kirana_products", "kirana_settings", "salon_subscriptions", "razorpay_events", "razorpay_cancellations", "subscription_enforcement", "ticket_emails", "ticket_events", "ticket_messages", "tickets", "salon_ratings", "salon_rating_totals", "visit_follow_ups",
+        for (String table : new String[] {"kirana_khata_entries", "kirana_stock_moves", "kirana_razorpay_events", "kirana_payout_accounts",
+                "kirana_earnings", "kirana_payouts", "kirana_refunds", "kirana_order_lines", "kirana_order_parts",
+                "kirana_orders", "kirana_checkouts", "kirana_ai_calls", "kirana_online", "kirana_catalogue_barcodes",
+                "kirana_bill_return_lines",
+                "kirana_bill_returns", "kirana_bill_changes", "kirana_bill_lines", "kirana_bills", "kirana_barcodes", "kirana_khata_customers", "kirana_products", "kirana_catalogue_items", "kirana_settings", "salon_subscriptions", "razorpay_events", "razorpay_cancellations", "subscription_enforcement", "ticket_emails", "ticket_events", "ticket_messages", "tickets", "salon_ratings", "salon_rating_totals", "visit_follow_ups",
                 "salon_customer_prefs", "customer_places", "salon_offer_mutes", "salon_hours_aud", "salon_hours", "salon_closed_days", "earlier_slot_alerts", "shop_assignments", "admin_pincodes", "video_uploads", "shop_invites", "salon_closings", "salon_message_purges", "shop_handovers", "job_leases", "account_wipes", "file_deletions", "shop_events", "admin_events", "test_emails", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
                 "salon_offer_services", "salon_offers",
                 "appointments", "walk_in_access", "salon_pauses", "notification_jobs", "push_subscriptions",

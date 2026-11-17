@@ -63,9 +63,11 @@ public final class KiranaResponses {
 
     /**
      * A change to a product's stock.
-     * @param reason SALE, VOID (a cancelled sale), RETURN (items brought back), RESTOCK, DAMAGED or COUNT
+     * @param reason SALE, VOID (a cancelled sale), RETURN (items brought back), RESTOCK, DAMAGED, COUNT, ORDER (an
+     *               online order accepted) or ORDER_BACK (its items given back: missing, or the order cancelled)
      * @param billNo the bill's number for SALE, VOID and RETURN, else null
-     * @param byName who made it; null if their account is gone
+     * @param byName who made it; null if their account is gone, or for an online order's change made by no one at
+     *               the shop (a part timed out, the customer cancelled)
      */
     public record MoveView(BigDecimal change, BigDecimal stockAfter, String reason, UUID billId, Long billNo,
                            String note, String byName, Instant at) {
