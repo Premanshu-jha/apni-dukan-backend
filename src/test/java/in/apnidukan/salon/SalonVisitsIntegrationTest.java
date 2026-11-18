@@ -315,10 +315,14 @@ class SalonVisitsIntegrationTest {
         UUID kirana = UUID.randomUUID();
         TestData.shop(jdbc, kirana, kiranaOwner);
         UUID kiranaDoc = file(kirana, kiranaOwner, "REG_DOC", "application/pdf");
-        Reply notSalon = put("/shops/me/registration-document", Map.of("version", version(kirana), "type",
-                "TRADE_LICENCE",
+        // A kirana adds its own (a trade licence, or a Shops and Establishments certificate), never a Udyam one
+        Reply kiranaLicence = put("/shops/me/registration-document", Map.of("version", version(kirana), "type",
+                "TRADE_LICENCE", "fileId", kiranaDoc.toString()), kiranaOwner);
+        assertThat(kiranaLicence.status()).as(kiranaLicence.text()).isEqualTo(200);
+        assertThat(field(kiranaLicence.body(), "licenceCheck")).isEqualTo("PENDING");
+        Reply udyam = put("/shops/me/registration-document", Map.of("version", version(kirana), "type", "UDYAM",
                 "fileId", kiranaDoc.toString()), kiranaOwner);
-        assertThat(field(notSalon.body(), "code")).isEqualTo("NOT_A_SALON");
+        assertThat(udyam.status()).isEqualTo(400);
     }
 
     @Test

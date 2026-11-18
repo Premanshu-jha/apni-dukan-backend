@@ -412,7 +412,7 @@ class ShopIntegrationTest {
     }
 
     @Test
-    void aSalonBecomingAKiranaLosesItsVideoAndTradeLicence() {
+    void theVideoAndATradeLicenceStayAndAreCheckedAgainWhileAShopsAndEstablishmentsCertificateLeavesASalon() {
         Map<?, ?> session = signIn(OWNER_PHONE);
         String access = (String) session.get("accessToken");
         UUID owner = UUID.fromString((String) ((Map<?, ?>) session.get("user")).get("id"));
@@ -422,20 +422,98 @@ class ShopIntegrationTest {
         UUID video = file(shopId, owner, "SHOP_VIDEO", "video/mp4");
         UUID licence = file(shopId, owner, "REG_DOC", "image/jpeg");
         jdbc.update("UPDATE shops SET shop_video_file_id = ?, registration_doc_type = 'TRADE_LICENCE', "
-                + "registration_doc_file_id = ?, licence_check_status = 'PENDING', licence_check_due_at = now() "
-                + "WHERE id = ?", video, licence, shopId);
+                + "registration_doc_file_id = ?, licence_check_status = 'FAILED', licence_check_reason = "
+                + "'NOT_A_SALON_TRADE' WHERE id = ?", video, licence, shopId);
 
+        // A kirana now: the video stays, and the trade licence is checked again for a kirana's trade
         Reply r = put("/shops/me/type", Map.of("version", 0, "type", "KIRANA"), access);
         assertThat(r.status()).as(r.body().toString()).isEqualTo(200);
-        assertThat(r.body().get("shopVideoFileId")).isNull();
-        assertThat(r.body().get("registrationDocFileId")).isNull();
-        assertThat(r.body().get("licenceCheck")).isNull();
-        Map<String, Object> row = jdbc.queryForMap("SELECT licence_check_status, licence_check_due_at FROM shops");
-        assertThat(row.get("licence_check_status")).as("the licence check ends").isNull();
-        assertThat(row.get("licence_check_due_at")).isNull();
-        // Both uploads are released (nothing points at them; a kirana has no screen to delete them from)
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id IN (?, ?)", Long.class, video, licence))
-                .isZero();
+        assertThat(r.body().get("shopVideoFileId")).isEqualTo(video.toString());
+        assertThat(r.body().get("registrationDocFileId")).isEqualTo(licence.toString());
+        assertThat(r.body().get("licenceCheck")).isEqualTo("PENDING");
+        assertThat(r.body().get("licenceCheckReason")).isNull();
+        assertThat(jdbc.queryForObject("SELECT licence_check_due_at IS NOT NULL FROM shops", Boolean.class)).isTrue();
+
+        // A kirana's Shops and Establishments certificate, then back to a salon: it goes (a salon's can't be one)
+        UUID certificate = file(shopId, owner, "REG_DOC", "image/jpeg");
+        Reply se = put("/shops/me/registration-document", Map.of("version", 1, "type", "SHOPS_ESTABLISHMENT",
+                "fileId", certificate.toString()), access);
+        assertThat(se.status()).as(se.body().toString()).isEqualTo(200);
+        Reply back = put("/shops/me/type", Map.of("version", 2, "type", "SALON"), access);
+        assertThat(back.status()).as(back.body().toString()).isEqualTo(200);
+        assertThat(back.body().get("registrationDocFileId")).isNull();
+        assertThat(back.body().get("licenceCheck")).isNull();
+        assertThat(back.body().get("shopVideoFileId")).isEqualTo(video.toString());
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?", Long.class, certificate)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?", Long.class, video)).isOne();
+    }
+
+    @Test
+    void oneUploadUsedAsBothTheCertificateAndTheFssaiLicenceIsKeptWhileEitherStillPointsAtIt() {
+        Map<?, ?> session = signIn(OWNER_PHONE);
+        String access = (String) session.get("accessToken");
+        UUID owner = UUID.fromString((String) ((Map<?, ?>) session.get("user")).get("id"));
+        Map<String, Object> kirana = validShop();
+        kirana.put("type", "KIRANA");
+        UUID shopId = UUID.fromString((String) post("/shops", kirana, access).body().get("id"));
+        // One PDF holding both papers (the same bytes share one file)
+        UUID both = file(shopId, owner, "REG_DOC", "application/pdf");
+        assertThat(put("/shops/me/registration-document", Map.of("version", 0, "type", "SHOPS_ESTABLISHMENT",
+                "fileId", both.toString()), access).status()).isEqualTo(200);
+        Reply fssai = put("/kirana/online/fssai", Map.of("number", "10012345678901", "fileId", both.toString()),
+                access);
+        assertThat(fssai.status()).as(fssai.body().toString()).isEqualTo(200);
+
+        // A salon now: the certificate comes off the shop, but the FSSAI licence still points at the file
+        Reply salon = put("/shops/me/type", Map.of("version", 1, "type", "SALON"), access);
+        assertThat(salon.status()).as(salon.body().toString()).isEqualTo(200);
+        assertThat(salon.body().get("registrationDocFileId")).isNull();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?", Long.class, both)).isOne();
+
+        // And the other way: back to a kirana with it as the trade licence, then a new FSSAI certificate
+        assertThat(put("/shops/me/type", Map.of("version", 2, "type", "KIRANA"), access).status()).isEqualTo(200);
+        assertThat(put("/shops/me/registration-document", Map.of("version", 3, "type", "TRADE_LICENCE",
+                "fileId", both.toString()), access).status()).isEqualTo(200);
+        UUID fresh = file(shopId, owner, "REG_DOC", "image/jpeg");
+        Reply replaced = put("/kirana/online/fssai", Map.of("number", "10012345678902", "fileId", fresh.toString()),
+                access);
+        assertThat(replaced.status()).as(replaced.body().toString()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?", Long.class, both)).isOne();
+        assertThat(jdbc.queryForObject("SELECT registration_doc_file_id FROM shops WHERE id = ?", UUID.class, shopId))
+                .isEqualTo(both);
+    }
+
+    @Test
+    void aKiranaThatAlreadyWorksAtItsCounterStaysAKirana() {
+        Map<?, ?> session = signIn(OWNER_PHONE);
+        String access = (String) session.get("accessToken");
+        Map<String, Object> kirana = validShop();
+        kirana.put("type", "KIRANA");
+        UUID shopId = UUID.fromString((String) post("/shops", kirana, access).body().get("id"));
+
+        // A helper invited, not yet accepted: the same
+        Reply invited = post("/shops/me/helpers", Map.of("phone", "9848099999"), access);
+        assertThat(invited.status()).as(invited.body().toString()).isEqualTo(202);
+        Reply withInvite = put("/shops/me/type", Map.of("version", 0, "type", "SALON"), access);
+        assertThat(withInvite.body().get("code")).isEqualTo("HAS_COUNTER_DATA");
+        jdbc.update("DELETE FROM shop_invites WHERE shop_id = ?", shopId);
+
+        // A helper with his own sign-in: a salon would hide him
+        Map<?, ?> helper = signIn(HELPER_PHONE);
+        UUID helperId = UUID.fromString((String) ((Map<?, ?>) helper.get("user")).get("id"));
+        TestData.member(jdbc, shopId, helperId, "HELPER");
+        Reply withHelper = put("/shops/me/type", Map.of("version", 0, "type", "SALON"), access);
+        assertThat(withHelper.status()).isEqualTo(409);
+        assertThat(withHelper.body().get("code")).isEqualTo("HAS_COUNTER_DATA");
+        jdbc.update("DELETE FROM shop_members WHERE user_id = ?", helperId);
+
+        // A product in its list (it billed while waiting for the visit, then was sent back)
+        Reply product = post("/kirana/products", Map.of("name", "Tata Salt 1 kg", "unit", "PIECE", "pricePaise", 2800),
+                access);
+        assertThat(product.status()).as(product.body().toString()).isEqualTo(201);
+        Reply withProduct = put("/shops/me/type", Map.of("version", 0, "type", "SALON"), access);
+        assertThat(withProduct.body().get("code")).isEqualTo("HAS_COUNTER_DATA");
+        assertThat(jdbc.queryForObject("SELECT type FROM shops WHERE id = ?", String.class, shopId)).isEqualTo("KIRANA");
     }
 
     @Test
