@@ -311,4 +311,72 @@ public final class StockResponses {
     public record ScanStatsView(LocalDate day, long shops, long scans, long unknown, double unknownRate, long sure,
                                 long picked, long created) {
     }
+
+    // ---------- product setup ----------
+
+    /** A product of the shop, by id and name (to open it). */
+    public record ProductRef(UUID id, String name) {
+    }
+
+    /**
+     * A page of the shop's list, as the setup shows it.
+     * @param fileId       its photo (or file)
+     * @param status       READING, READ or FAILED (take it again: {@code failure} says why)
+     * @param linesLeftOut products on the page past the 150 one read keeps: photograph them again
+     * @param linesToCheck its lines still to add or skip; linesAdded, linesSkipped: done
+     */
+    public record SetupPageView(UUID readId, int pageNo, UUID fileId, String status, String failure,
+                                int linesLeftOut, long linesToCheck, long linesAdded, long linesSkipped,
+                                Instant sentAt) {
+    }
+
+    /**
+     * Where the shop's product setup stands (after Submit: its field visit is booked once it is finished).
+     * @param readyAt        when the owner said all products are added; null until then
+     * @param products       the shop's active products
+     * @param uncounted      of them, never counted (added without a count): each needs a count before finishing
+     * @param uncountedProducts up to 20 of them, by name
+     * @param linesToCheck   lines of the list's pages still to add or skip
+     * @param pagesReading   list pages still being read; pagesFailed: couldn't be read (take them again, or delete)
+     * @param pagesLeft      list pages that can still be kept
+     * @param pages          the list's pages kept, in the order sent
+     * @param canFinish      every condition for "I've added all my products" holds
+     * @param youCanFinish   canFinish, and the caller is the owner (only the owner says it); a helper sees false
+     */
+    public record SetupView(Instant readyAt, long products, long uncounted, List<ProductRef> uncountedProducts,
+                            long linesToCheck, long linesAdded, long linesSkipped, long pagesReading, long pagesFailed,
+                            int pagesLeft, List<SetupPageView> pages, boolean canFinish, boolean youCanFinish) {
+
+        public SetupView {
+            uncountedProducts = List.copyOf(uncountedProducts);
+            pages = List.copyOf(pages);
+        }
+    }
+
+    /**
+     * A line of the shop's list, as read.
+     * @param pageNo      its page's place among the pages kept (1 = first sent)
+     * @param quantity    what the list says (a hint: counted again when added); null if not written
+     * @param status      NEW (to check), ADDED, SKIPPED
+     * @param productId   ADDED: the product it became or was counted on
+     * @param counted     ADDED: what the shop counted
+     * @param suggestions NEW: the shop's products or catalogue items it may be, best first
+     * @param sure        the first suggestion is a clear match
+     */
+    public record ListLineView(UUID id, UUID readId, Integer pageNo, int lineNo, String wording, String brand,
+                               String name, String size, boolean byWeight, Long mrpPaise, BigDecimal quantity,
+                               String status, UUID productId, BigDecimal counted, List<SuggestionView> suggestions,
+                               boolean sure) {
+
+        public ListLineView {
+            suggestions = List.copyOf(suggestions);
+        }
+    }
+
+    public record ListLinePage(List<ListLineView> items, String next) {
+
+        public ListLinePage {
+            items = List.copyOf(items);
+        }
+    }
 }

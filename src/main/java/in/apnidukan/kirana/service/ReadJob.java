@@ -53,13 +53,15 @@ public class ReadJob {
     private final ScanService scans;
     private final ScanStore scanStore;
     private final BillFiles billFiles;
+    private final ProductSetupService setup;
     private final JobLeases leases;
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final int callsPerDay;
 
     public ReadJob(ReadStore reads, OnlineStore online, KiranaDocumentAi ai, FileRefs files, PurchaseService purchases,
-                   ScanService scans, ScanStore scanStore, BillFiles billFiles, JobLeases leases,
+                   ScanService scans, ScanStore scanStore, BillFiles billFiles, ProductSetupService setup,
+                   JobLeases leases,
                    TransactionTemplate transactions, Clock clock,
                    @Value("${app.kirana.ai-calls-per-day:500}") int callsPerDay) {
         this.reads = reads;
@@ -70,6 +72,7 @@ public class ReadJob {
         this.scans = scans;
         this.scanStore = scanStore;
         this.billFiles = billFiles;
+        this.setup = setup;
         this.leases = leases;
         this.transactions = transactions;
         this.clock = clock;
@@ -136,7 +139,9 @@ public class ReadJob {
             // Spreadsheets, documents, e-invoices and PDFs with text are read in code first: no AI, or only text
             BillFiles.Prepared ready = billFiles.prepare(r.kind(), pages);
             if (ready.problem() != null) {
-                fail(r, ready.problem(), now);
+                // The same file checks for a page of the shop's list: told in its words
+                fail(r, "STOCK_LIST".equals(r.kind()) ? ready.problem().replace("This bill", "This list")
+                        .replace("the bill", "your list") : ready.problem(), now);
                 return;
             }
             if (ready.facts() != null) {
@@ -157,7 +162,10 @@ public class ReadJob {
             transactions.executeWithoutResult(s -> reads.defer(r.id(), tomorrow, now));
             return;
         }
-        Boolean allowed = transactions.execute(s -> reads.takeShopCall(r.shopId(), today, SHOP_CALLS_PER_DAY));
+        // A list page has its own allowances (ProductSetupService.MAX_LIST_PAGES kept, LIST_PAGES_PER_DAY sent, both
+        // counted when sent, thrown-away pages too for the day): setting up a shop's products may take many pages
+        Boolean allowed = "STOCK_LIST".equals(r.kind()) ? Boolean.TRUE
+                : transactions.execute(s -> reads.takeShopCall(r.shopId(), today, SHOP_CALLS_PER_DAY));
         if (!Boolean.TRUE.equals(allowed)) {
             // The shop's 30 for today are used: read tomorrow morning (the shop sees "waiting")
             transactions.executeWithoutResult(s -> reads.defer(r.id(), tomorrow, now));
@@ -177,6 +185,21 @@ public class ReadJob {
                     transactions.executeWithoutResult(s -> {
                         if (reads.read(r.id(), JSON.writeValueAsString(facts), now)) {
                             purchases.fromRead(r, facts, now);
+                        }
+                    });
+                }
+                case "STOCK_LIST" -> {
+                    KiranaDocumentAi.StockListFacts facts = ai.readStockList(pages.get(0));
+                    if (!facts.readable() || !facts.list() || facts.lines().isEmpty()) {
+                        fail(r, facts.readable() && !facts.list()
+                                ? "This doesn't look like a list of products. Take a photo of one page of your list."
+                                : "We couldn't read the products on this page. Take a clear, straight photo of the "
+                                + "whole page in good light.", now);
+                        return;
+                    }
+                    transactions.executeWithoutResult(s -> {
+                        if (reads.read(r.id(), JSON.writeValueAsString(facts), now)) {
+                            setup.fromRead(r, facts, now);
                         }
                     });
                 }

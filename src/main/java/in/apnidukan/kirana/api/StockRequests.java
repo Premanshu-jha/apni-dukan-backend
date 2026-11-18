@@ -22,13 +22,16 @@ public final class StockRequests {
     private StockRequests() {
     }
 
-    /** What a photo is: a distributor's bill, the shop's own paper bill, or a pack's label. */
-    public enum ReadKind { PURCHASE, PAPER_BILL }
+    /**
+     * What a photo is: PURCHASE a distributor's bill (1 to 3 pages); PAPER_BILL a counter bill written on paper;
+     * STOCK_LIST one page of the shop's own list of products (a register, a notebook, a price list).
+     */
+    public enum ReadKind { PURCHASE, PAPER_BILL, STOCK_LIST }
 
     /**
      * A photo to read. Upload the files first (POST /files?purpose=BILL), then send their ids.
      * @param clientRef made by the app once per photo: sending it again returns the first upload
-     * @param fileIds   1 to 3 pages, in order
+     * @param fileIds   1 to 3 pages, in order (one for STOCK_LIST)
      */
     public record NewRead(@NotNull UUID clientRef,
                           @NotNull(message = "Choose what the photo is") ReadKind kind,
@@ -199,5 +202,29 @@ public final class StockRequests {
 
     /** The team's decision: which item the barcode is. */
     public record ReviewDecision(@NotNull(message = "Choose an item") UUID itemId) {
+    }
+
+    // ---------- product setup ----------
+
+    /** What to do with a line of the shop's list: add it (with its count), skip it, or bring a skipped one back. */
+    public enum LineAction { ADD, SKIP, UNDO }
+
+    /**
+     * The shop's decision on a line of its list.
+     * @param productId ADD: it is this product the shop already has (its stock becomes the count)
+     * @param itemId    ADD: a new product from this shared catalogue item (name, unit and MRP as its own unless sent)
+     * @param name      ADD: a new product's name (the line's, as corrected)
+     * @param unit      ADD: a new product's unit, PIECE or KG
+     * @param pricePaise ADD: a new product's selling price per piece (or kg)
+     * @param quantity  ADD: how many (or how much) is on the shelf, counted now (0 or more)
+     * @param addToCount ADD onto a product another line of the list was already added to (409 ALREADY_COUNTED until
+     *                   said): true adds this count to it (the same product kept in two places), false replaces it
+     */
+    public record LineDecision(@NotNull(message = "Choose what to do") LineAction action, UUID productId, UUID itemId,
+                               @Size(min = 2, max = 100, message = "Use 2 to 100 letters") String name, Unit unit,
+                               @Min(value = 1, message = "The price must be more than ₹0")
+                               @Max(value = 10_000_000, message = "The price can be at most ₹1,00,000")
+                               Long pricePaise,
+                               BigDecimal quantity, Boolean addToCount) {
     }
 }

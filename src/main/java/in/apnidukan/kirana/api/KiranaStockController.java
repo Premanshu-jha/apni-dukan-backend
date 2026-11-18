@@ -5,6 +5,7 @@ import in.apnidukan.kirana.api.KiranaResponses.BillResult;
 import in.apnidukan.kirana.api.StockRequests.AddPurchase;
 import in.apnidukan.kirana.api.StockRequests.ConfirmPaper;
 import in.apnidukan.kirana.api.StockRequests.LabelPhoto;
+import in.apnidukan.kirana.api.StockRequests.LineDecision;
 import in.apnidukan.kirana.api.StockRequests.CorrectLine;
 import in.apnidukan.kirana.api.StockRequests.LineChange;
 import in.apnidukan.kirana.api.StockRequests.LinesChange;
@@ -16,16 +17,20 @@ import in.apnidukan.kirana.api.StockRequests.ReadKind;
 import in.apnidukan.kirana.api.StockRequests.ScanBatch;
 import in.apnidukan.kirana.api.StockResponses.CounterSuggestions;
 import in.apnidukan.kirana.api.StockResponses.LinkResult;
+import in.apnidukan.kirana.api.StockResponses.ListLinePage;
+import in.apnidukan.kirana.api.StockResponses.ListLineView;
 import in.apnidukan.kirana.api.StockResponses.PaperDraft;
 import in.apnidukan.kirana.api.StockResponses.PurchasePage;
 import in.apnidukan.kirana.api.StockResponses.PurchaseView;
 import in.apnidukan.kirana.api.StockResponses.ReadPage;
 import in.apnidukan.kirana.api.StockResponses.ReadView;
 import in.apnidukan.kirana.api.StockResponses.ScanBatchResult;
+import in.apnidukan.kirana.api.StockResponses.SetupView;
 import in.apnidukan.kirana.api.StockResponses.UnknownPage;
 import in.apnidukan.kirana.api.StockResponses.UnknownView;
 import in.apnidukan.kirana.service.PaperBillService;
 import in.apnidukan.kirana.service.PhotoReads;
+import in.apnidukan.kirana.service.ProductSetupService;
 import in.apnidukan.kirana.service.PurchaseService;
 import in.apnidukan.kirana.service.ScanService;
 import in.apnidukan.kirana.service.SuggestionService;
@@ -58,11 +63,13 @@ public class KiranaStockController {
     private final ScanService scans;
     private final PaperBillService paperBills;
     private final SuggestionService suggestions;
+    private final ProductSetupService setup;
     private final CurrentUserProvider currentUser;
 
     public KiranaStockController(PhotoReads photoReads, PurchaseService purchases, ScanService scans,
                                  PaperBillService paperBills, SuggestionService suggestions,
-                                 CurrentUserProvider currentUser) {
+                                 ProductSetupService setup, CurrentUserProvider currentUser) {
+        this.setup = setup;
         this.photoReads = photoReads;
         this.purchases = purchases;
         this.scans = scans;
@@ -95,6 +102,33 @@ public class KiranaStockController {
     @PostMapping("/reads/{id}/discard")
     public ReadView discardRead(@PathVariable UUID id) {
         return photoReads.discard(me(), id);
+    }
+
+    // ---------- product setup (after Submit; the field visit is booked when it is finished) ----------
+
+    /** Where the shop's product setup stands. */
+    @GetMapping("/setup")
+    public SetupView setup() {
+        return setup.get(me());
+    }
+
+    /** Lines of the shop's list: to check (status NEW), SKIPPED or ADDED, 20 at a time. */
+    @GetMapping("/setup/lines")
+    public ListLinePage setupLines(@RequestParam(required = false) String status,
+                                   @RequestParam(required = false) String cursor) {
+        return setup.lines(me(), status, cursor);
+    }
+
+    /** Adds a line as a product with its count, skips it, or brings a skipped one back. */
+    @PostMapping("/setup/lines/{id}")
+    public ListLineView decideLine(@PathVariable UUID id, @Valid @RequestBody LineDecision body) {
+        return setup.decide(me(), id, body);
+    }
+
+    /** "I've added all my products" (owner): books the field visit. */
+    @PostMapping("/setup/finish")
+    public SetupView finishSetup() {
+        return setup.finish(me());
     }
 
     // ---------- distributors' bills ----------
