@@ -67,6 +67,8 @@ public class CheckoutService {
     private static final TextField COMMENT = new TextField("comment", 2, 300);
     static final Duration PAY_WITHIN = Duration.ofMinutes(30);
     static final Duration RATE_WITHIN = Duration.ofDays(7);
+    /** Address corrections per order (each one tells the shop). */
+    static final int ADDRESS_CHANGES = 3;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final OrderStore orders;
@@ -365,6 +367,39 @@ public class CheckoutService {
         return view(orders.order(orderId).orElseThrow());
     }
 
+    /**
+     * The customer corrects the address text (flat, tower, landmark) until the order goes out, at most 3 times; the
+     * pin stays, so the shop is still within 2 km. The delivering shop is told once it accepted. 409 CANT_CHANGE_ADDRESS
+     * once it is out, delivered or cancelled, or after 3 corrections.
+     */
+    @Transactional
+    public OrderView changeAddress(UUID userId, UUID orderId, String addressLine) {
+        Order peek = orders.order(orderId).filter(x -> x.customerId().equals(userId)
+                && !"WAITING_PAYMENT".equals(x.status())).orElseThrow(() -> ApiException.notFound("Order"));
+        String address = TextCleaner.clean(ADDRESS, addressLine);
+        if (orders.lockCheckout(peek.checkoutId()).isEmpty()) {   // the checkout's lock first, as every order step
+            throw ApiException.notFound("Order");
+        }
+        Order o = orders.lockOrder(orderId).orElseThrow();
+        if (!List.of("PLACED", "ACCEPTED", "PACKED").contains(o.status())) {
+            throw new ApiException(HttpStatus.CONFLICT, "CANT_CHANGE_ADDRESS", "DELIVERED".equals(o.status())
+                    || "CANCELLED".equals(o.status()) ? "This order is closed." : "Your order is on its way: call the "
+                    + "shop to tell it the right address.");
+        }
+        if (!address.equals(o.addressLine())) {
+            if (!orders.setAddress(o.id(), address, ADDRESS_CHANGES)) {
+                throw new ApiException(HttpStatus.CONFLICT, "CANT_CHANGE_ADDRESS", "You've changed the address "
+                        + ADDRESS_CHANGES + " times already: call the shop to tell it the right one.");
+            }
+            // Told only to a shop that accepted it (before that it doesn't see the customer's address at all)
+            orders.partsOf(o.id()).stream().filter(p -> "OWN".equals(p.role())
+                    && ("ACCEPTED".equals(p.status()) || "PACKED".equals(p.status()))).findFirst().ifPresent(p ->
+                    flow.tellShop(p.shopId(), "KIRANA_ORDER_CHANGED", p.id(), KiranaChecks.now(clock),
+                            "Order #" + o.orderNo() + ": new address", address, "/kirana/shop-orders/" + p.id()));
+        }
+        return view(orders.order(orderId).orElseThrow());
+    }
+
     /** Rates a delivered order (1–5), once, within 7 days. 409 CANT_RATE / ALREADY_RATED. */
     @Transactional
     public OrderView rate(UUID userId, UUID orderId, Rate in) {
@@ -410,7 +445,9 @@ public class CheckoutService {
                 refunds, waiting ? own.acceptBy() : null, o.placedAt(), o.acceptedAt(), o.packedAt(), o.outAt(),
                 o.deliveredAt(), o.cancelledAt(), o.cancelReason(), waiting,
                 "DELIVERED".equals(o.status()) && o.rating() == null
-                        && !o.deliveredAt().plus(RATE_WITHIN).isBefore(now), o.rating(), o.ratingComment());
+                        && !o.deliveredAt().plus(RATE_WITHIN).isBefore(now), o.rating(), o.ratingComment(),
+                List.of("PLACED", "ACCEPTED", "PACKED").contains(o.status())
+                        && orders.addressChanges(o.id()) < ADDRESS_CHANGES);
     }
 
     private static RefundView refundView(MoneyStore.Refund r) {

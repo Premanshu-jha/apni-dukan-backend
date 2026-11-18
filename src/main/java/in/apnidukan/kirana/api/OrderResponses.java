@@ -45,9 +45,11 @@ public final class OrderResponses {
      * @param status     NONE, CHECKING (being read), VERIFIED or REJECTED (reason says why, in the owner's words)
      * @param validUntil the last day it is valid
      * @param fileId     the certificate uploaded (GET /files/{id}/link shows it; sent again with a corrected number)
+     * @param currentValidUntil while a renewed certificate is checked (or was refused): the last day of the licence
+     *                   verified before, which keeps the shop taking orders until then; null otherwise
      */
     public record FssaiView(String number, UUID fileId, String status, String reason, LocalDate validUntil,
-                            Instant checkedAt) {
+                            LocalDate currentValidUntil, Instant checkedAt) {
     }
 
     /**
@@ -64,6 +66,23 @@ public final class OrderResponses {
         public OnlineView {
             missing = List.copyOf(missing);
             payouts = List.copyOf(payouts);
+        }
+    }
+
+    /**
+     * What one delivered order earned the shop.
+     * @param dueOn        when it is paid out (2 working days after delivery)
+     * @param payoutStatus null until paid out; then SENDING, SENT, PROCESSED, FAILED or REVERSED (with the UPI ID it
+     *                     went to, and why it failed)
+     */
+    public record EarningView(long orderNo, long amountPaise, Instant deliveredAt, LocalDate dueOn, UUID payoutId,
+                              String payoutStatus, String payoutUpiId, String payoutFailure) {
+    }
+
+    public record EarningPage(List<EarningView> items, String next) {
+
+        public EarningPage {
+            items = List.copyOf(items);
         }
     }
 
@@ -201,13 +220,14 @@ public final class OrderResponses {
      * @param canRate   delivered, not rated yet, within 7 days
      * @param shopPhone to call the shop about the order (while it is open)
      * @param acceptBy  while the shop hasn't accepted: by when it must
+     * @param canChangeAddress not sent out yet and fewer than 3 corrections made
      */
     public record OrderView(UUID id, long orderNo, UUID checkoutId, String status, UUID shopId, String shopName,
                             String shopPhone, String addressLine, String otp, List<ItemLine> lines, long itemsPaise,
                             long platformPaise, long totalPaise, List<RefundView> refunds, Instant acceptBy,
                             Instant placedAt, Instant acceptedAt, Instant packedAt, Instant outAt,
                             Instant deliveredAt, Instant cancelledAt, String cancelReason, boolean canCancel,
-                            boolean canRate, Integer rating, String ratingComment) {
+                            boolean canRate, Integer rating, String ratingComment, boolean canChangeAddress) {
 
         public OrderView {
             lines = List.copyOf(lines);
@@ -263,9 +283,12 @@ public final class OrderResponses {
     public record UpiRecheckView(UUID shopId, String shopName, String upiId, Instant changedAt) {
     }
 
-    /** A shop's FSSAI certificate waiting for a person (the AI couldn't decide), or refused. */
+    /**
+     * A shop's FSSAI certificate waiting for a person (the AI couldn't decide), or refused.
+     * @param keptUntil during a renewal: the day the shop's earlier licence (and its orders) ends; null once past
+     */
     public record FssaiCheckView(UUID shopId, String shopName, String number, UUID fileId, String status,
-                                 String reason, int tries, Instant checkedAt) {
+                                 String reason, int tries, Instant checkedAt, LocalDate keptUntil) {
     }
 
     /** A paid order still open long after it was placed (a shop didn't finish it): the team calls, or cancels it. */

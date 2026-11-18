@@ -660,6 +660,111 @@ class KiranaOrdersIntegrationTest {
     }
 
     @Test
+    void aRenewedLicenceBeingCheckedOrRefusedKeepsTheShopOpenUntilTheEarlierOneEnds() {
+        Shops s = network();
+        String me = token(CUSTOMER);
+        String keptUntil = LocalDate.now().plusDays(365).toString();
+        Reply renewed = put("/kirana/online/fssai", Map.of("number", "13624013000111", "fileId", file(s.a)), s.aOwner);
+        assertThat(renewed.status()).as(renewed.body().toString()).isEqualTo(200);
+        Map<?, ?> fssai = (Map<?, ?>) renewed.body().get("fssai");
+        assertThat(fssai.get("status")).isEqualTo("CHECKING");
+        assertThat(fssai.get("currentValidUntil")).isEqualTo(keptUntil);
+        assertThat(objects(renewed.body().get("missing"))).isEmpty();
+        assertThat(pluck(get("/kirana/nearby?lat=" + ME_LAT + "&lng=" + LNG, me).body().get("items"), "name"))
+                .contains("Sharma General Store");
+
+        String admin = superAdmin();
+        assertThat(pluck(get("/admin/kirana/fssai?status=CHECKING", admin).list(), "keptUntil")).isEmpty();   // AI's
+        post("/admin/kirana/shops/" + s.a + "/fssai", Map.of("verified", false, "reason", "Blurred"), admin);
+        Map<?, ?> refused = get("/kirana/online", s.aOwner).body();
+        assertThat(objects(refused.get("missing"))).isEmpty();   // the earlier one holds
+        fssai = (Map<?, ?>) refused.get("fssai");
+        assertThat(fssai.get("status")).isEqualTo("REJECTED");
+        assertThat(fssai.get("currentValidUntil")).isEqualTo(keptUntil);
+        assertThat((String) fssai.get("reason")).startsWith("Blurred").contains("keeps your shop open until");
+        assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE type = 'KIRANA_FSSAI' "
+                + "ORDER BY created_at DESC LIMIT 1", String.class)).contains("keeps your shop open until");
+        assertThat(pluck(get("/admin/kirana/fssai?status=REJECTED", admin).list(), "keptUntil"))
+                .containsExactly(keptUntil);
+
+        jdbc.update("UPDATE kirana_online SET fssai_kept_until = current_date - 1 WHERE shop_id = ?", s.a);
+        assertThat(objects(get("/kirana/online", s.aOwner).body().get("missing"))).containsExactly("FSSAI");
+        assertThat(pluck(get("/kirana/nearby?lat=" + ME_LAT + "&lng=" + LNG, me).body().get("items"), "name"))
+                .doesNotContain("Sharma General Store");
+
+        post("/admin/kirana/shops/" + s.a + "/fssai", Map.of("verified", true,
+                "validUntil", LocalDate.now().plusYears(5).toString()), admin);
+        assertThat(jdbc.queryForList("SELECT fssai_kept_file_id FROM kirana_online WHERE shop_id = ? "
+                + "AND fssai_kept_until IS NULL", UUID.class, s.a)).containsExactly((UUID) null);
+        assertThat(objects(get("/kirana/online", s.aOwner).body().get("missing"))).isEmpty();
+    }
+
+    @Test
+    void anotherLicenceNumberOrTheTeamEndingTheEarlierOneStopsOrders() {
+        Shops s = network();
+        // Another licence (not a renewal of this one): nothing kept, orders wait for it
+        put("/kirana/online/fssai", Map.of("number", "13624013000222", "fileId", file(s.a)), s.aOwner);
+        assertThat(objects(get("/kirana/online", s.aOwner).body().get("missing"))).containsExactly("FSSAI");
+
+        put("/kirana/online/fssai", Map.of("number", "13624013000111", "fileId", file(s.b)), s.bOwner);
+        assertThat(objects(get("/kirana/online", s.bOwner).body().get("missing"))).isEmpty();
+        String admin = superAdmin();
+        post("/admin/kirana/shops/" + s.b + "/fssai", Map.of("verified", false, "reason", "Licence cancelled",
+                "endCurrent", true), admin);
+        assertThat(objects(get("/kirana/online", s.bOwner).body().get("missing"))).containsExactly("FSSAI");
+    }
+
+    @Test
+    void theCustomerCorrectsTheAddressUntilTheOrderGoesOutAndTheOwnerSeesWhatEachOrderEarned() {
+        Shops s = network();
+        String me = token(CUSTOMER);
+        String orderId = orderOf(payFor(me, place(s.a, List.of(line(s.aMilk, "2")), "COMBINED", 6400)));
+        String part = partOf(orderId, s.a);
+        String changes = "SELECT count(*) FROM notification_jobs WHERE type = 'KIRANA_ORDER_CHANGED'";
+        // Before the shop accepts: changed, the shop not told (it doesn't see the customer's address yet)
+        Reply early = patch("/kirana/orders/" + orderId + "/address", Map.of("addressLine", "Tower B, Flat 1205"), me);
+        assertThat(early.body().get("canChangeAddress")).isEqualTo(true);
+        assertThat(jdbc.queryForObject(changes, Integer.class)).isZero();
+        post("/kirana/shop-orders/" + part + "/accept", Map.of(), s.aOwner);
+        Reply changed = patch("/kirana/orders/" + orderId + "/address", Map.of("addressLine", "Tower C, Flat 804"), me);
+        assertThat(changed.status()).as(changed.body().toString()).isEqualTo(200);
+        assertThat(changed.body().get("addressLine")).isEqualTo("Tower C, Flat 804");
+        assertThat(jdbc.queryForObject(changes, Integer.class)).isPositive();
+        assertThat(((Map<?, ?>) get("/kirana/shop-orders/" + part, s.aOwner).body().get("customer")).get("addressLine"))
+                .isEqualTo("Tower C, Flat 804");
+        int told = jdbc.queryForObject(changes, Integer.class);
+        patch("/kirana/orders/" + orderId + "/address", Map.of("addressLine", "Tower C, Flat 804"), me);   // the same
+        assertThat(jdbc.queryForObject(changes, Integer.class)).isEqualTo(told);
+        assertThat(patch("/kirana/orders/" + orderId + "/address", Map.of("addressLine", "x"), me).status())
+                .isEqualTo(400);
+        assertThat(patch("/kirana/orders/" + orderId + "/address", Map.of("addressLine", "Tower D"), token(B_OWNER))
+                .status()).isEqualTo(404);
+        Reply third = patch("/kirana/orders/" + orderId + "/address", Map.of("addressLine", "Tower C, Flat 805"), me);
+        assertThat(third.body().get("canChangeAddress")).isEqualTo(false);
+        assertThat(patch("/kirana/orders/" + orderId + "/address", Map.of("addressLine", "Tower E"), me).body()
+                .get("code")).isEqualTo("CANT_CHANGE_ADDRESS");
+        post("/kirana/shop-orders/" + part + "/packed", Map.of(), s.aOwner);
+        post("/kirana/shop-orders/" + part + "/out", Map.of(), s.aOwner);
+        assertThat(patch("/kirana/orders/" + orderId + "/address", Map.of("addressLine", "Tower D"), me).body()
+                .get("code")).isEqualTo("CANT_CHANGE_ADDRESS");
+
+        String code = (String) get("/kirana/orders/" + orderId, me).body().get("otp");
+        post("/kirana/shop-orders/" + part + "/deliver", Map.of("otp", code), s.aOwner);
+        Map<?, ?> earned = get("/kirana/online/earnings", s.aOwner).body();
+        assertThat(pluck(earned.get("items"), "amountPaise")).containsExactly(5400);
+        Map<?, ?> row = (Map<?, ?>) ((List<?>) earned.get("items")).get(0);
+        assertThat(row.get("payoutStatus")).isNull();
+        assertThat(row.get("dueOn")).isNotNull();
+        jdbc.update("UPDATE kirana_earnings SET due_on = current_date");
+        jobs.payouts();
+        row = (Map<?, ?>) ((List<?>) get("/kirana/online/earnings", s.aOwner).body().get("items")).get(0);
+        assertThat(row.get("payoutStatus")).isEqualTo("SENT");
+        assertThat(row.get("payoutUpiId")).isEqualTo("teststore@okhdfcbank");
+        String helper = helperOf(s.aOwner, A_HELPER);
+        assertThat(get("/kirana/online/earnings", helper).body().get("code")).isEqualTo("OWNER_ONLY");
+    }
+
+    @Test
     void manyTapsAtOnceMakeOneCheckoutAndAcceptAPartOnce() throws Exception {
         Shops s = network();
         String me = token(CUSTOMER);

@@ -942,7 +942,13 @@ certificate (a file uploaded as `REG_DOC`); within a minute the AI reads it (`Fs
 `KIRANA_AI_CALLS_PER_DAY` calls a day, 5 tries) and verifies it when it is an FSSAI certificate, its number is the
 one typed, it hasn't expired, and the business or operator name shares a word with the shop's or the owner's name
 (the usual shop words like "General", "Stores" don't count); otherwise it is refused with the reason in plain words.
-A licence is only verified with its last day (read by the AI, or typed by the super admin), and stops orders the day
+**A renewal never takes the shop offline** (V71): when the owner uploads a renewed certificate of the same licence
+(the same number) while the verified one is still valid, the earlier licence's last day and certificate are kept
+(`fssai.currentValidUntil`; the reason and the refusal notice say so) and the shop takes orders until then, whether the
+new one is being checked or refused; once the new one is verified it replaces it. A different number keeps nothing. A
+super admin refusing with `endCurrent: true` (the licence was cancelled, or isn't genuine) ends the earlier one too.
+**A hand-over forgets the licence** the old owner added (it was issued to him as the food business operator): orders
+stop until the new owner adds his own. A licence is only verified with its last day (read by the AI, or typed by the super admin), and stops orders the day
 after it. When the AI can't decide (5 tries without an answer) the owner is told "our team will check it" and it waits
 on the admin website (`GET /admin/kirana/fssai`); an owner sending the same certificate again after a refusal asks for
 a person's look the same way. A corrected number is read afresh, and a read already under way for the old number is
@@ -986,6 +992,7 @@ sees the customer.
 | Customer | Pays within 30 minutes (the checkout expires 5 minutes later, so a payment made at the last moment still counts; one after that is refunded in full). Razorpay orders capture on their own. A second payment of the same checkout (paid again from another app) is refunded in full, once |
 | Customer | An account can't be deleted while a shop has accepted one of its orders (409 `KIRANA_ORDER_OPEN`); orders not accepted yet are cancelled and refunded with it |
 | Customer | Cancels until the shop accepts (409 `CANT_CANCEL` after); rates 1–5 stars within 7 days of delivery |
+| Customer | Corrects the address text (flat, tower, landmark) until the order goes out, at most 3 times (`canChangeAddress`); the pin stays, so the shop is still within 2 km; the shop is told once it accepted (409 `CANT_CHANGE_ADDRESS` once it is out or after 3: call the shop) |
 | Money | Refunds only before the delivery code is given. Each refund is one Razorpay refund with our id in its notes. A run claims each refund first (two backends never send one together); once asked, a refund is never PENDING again: a lost answer is looked up by our id before asking again, and a failed lookup waits for the next try. Razorpay refusing it makes it FAILED at once (on the admin website) |
 | Money | A payout's status only moves forward: SENDING and SENT may become anything, PROCESSED only REVERSED; FAILED and REVERSED stay (a late or out-of-order answer never undoes them) |
 | Money | Each shop earns its own items on delivery, due 2 working days later; one payout per shop and run, our id as RazorpayX's idempotency key. Without RazorpayX keys, earnings stay "due" |
@@ -993,6 +1000,7 @@ sees the customer.
 | Call | What it does |
 | --- | --- |
 | `GET /kirana/online` · `PUT /kirana/online/taking-orders` · `PUT /kirana/online/fssai` | The shop's readiness, FSSAI status, rating, money due and recent payouts (amounts for the owner). Switch `{on}` (owner; 409 `NOT_READY` with `details.missing`). Licence `{number, fileId}` (owner; 400 naming `number` or `fileId`) |
+| `GET /kirana/online/earnings?cursor=` | The owner (403 `OWNER_ONLY` for helpers): one row per delivered order (the shop's part of it), newest first, 50 a page: order number, amount, delivered, due on, and the payout it went in with its status, UPI ID and why it failed |
 | `GET /kirana/catalogue/barcode/{code}` | A scan's catalogue details to prefill a new product (404 `CATALOGUE_NOT_FOUND`) |
 | `GET /kirana/nearby?lat=&lng=&cursor=` | Shops taking orders within 2 km, nearest first, 50 a page |
 | `GET /kirana/shops/{id}/products?q=&cursor=` · `GET /kirana/shops/{id}/nearby-items?q=&cursor=` | The shop's products (in stock or not); items shops within 1 km of it have and it doesn't, at the lowest price. 409 `SHOP_NOT_TAKING_ORDERS` |
@@ -1000,13 +1008,14 @@ sees the customer.
 | `POST /kirana/checkouts` | `{clientRef, shopId, latitude, longitude, addressLine, lines, plan: COMBINED\|SEPARATE, method: UPI\|PAY_LATER, expectedTotalPaise}` → `{checkoutId, status, razorpayOrderId, keyId, amountPaise, orders}`. The same `clientRef` → the same checkout. 409 `PRICE_CHANGED` / `NOTHING_AVAILABLE` with `details.quote`; 503 `PAYMENTS_OFF` (keys not set) or `PAYMENTS_UNAVAILABLE` (Razorpay didn't answer: sending it again asks again) |
 | `GET /kirana/checkouts/{id}` · `POST /kirana/checkouts/{id}/paid` | The checkout with its orders (item counts) and every refund (also a late or second payment's); Razorpay checkout's answer `{razorpayOrderId, razorpayPaymentId, razorpaySignature}` (400 `BAD_SIGNATURE`) |
 | `GET /kirana/orders?cursor=` · `GET /kirana/orders/{id}` | The customer's orders; one order with its lines (`fromNearbyShop`, `missing`), refunds, the delivery `otp` (until delivered), `acceptBy` while waiting for the shop, the shop's phone while open, `canCancel`, `canRate`, its rating and comment |
+| `PATCH /kirana/orders/{id}/address` | `{addressLine}` (3–200 letters) → the order |
 | `POST /kirana/orders/{id}/cancel` · `POST /kirana/orders/{id}/rating` | `{reason?}`; `{stars, comment?}` (409 `CANT_CANCEL`, `CANT_RATE`, `ALREADY_RATED`) |
 | `GET /kirana/shop-orders?open=&cursor=` · `GET /kirana/shop-orders/{partId}` | The shop's parts, newest first: `open=true` what it still has to do, `open=false` what is done. Items, `secondsLeft` to accept, the customer (delivering shop, once accepted), what other shops send it and their phones, or for a supplier the shop to hand over to and its phone |
 | `POST /kirana/shop-orders/{partId}/accept \| reject \| missing \| packed \| handed \| out \| deliver \| cancel` | The steps above. `reject {reason}`; `missing {lineNos}` (a supplier left with nothing ends its part); `deliver {otp}` (400 `WRONG_CODE` with `details.triesLeft`); `cancel {reason}`. 409 `TOO_LATE`, `NOT_ACCEPTED_YET`, `WAITING_FOR_SHOP`, `WRONG_STATUS` |
 | `POST /payments/razorpay/webhook` | The same URL as subscriptions: `payment.authorized` (captured), `payment.captured` / `order.paid` (marks the checkout paid), `refund.processed` / `refund.failed`; each event once (`X-Razorpay-Event-Id`) |
 | `POST /payments/razorpayx/webhook` | RazorpayX's own URL and secret: `payout.processed`, `payout.failed`, `payout.reversed` (the owner is told when one fails) |
 | `GET /admin/kirana/catalogue?q=&cursor=` · `PATCH /admin/kirana/catalogue/{id}` | Super admins: the catalogue with its barcodes; corrections `{version, name?, brand?, size?, mrpPaise?, category?}` (409 `CATALOGUE_CHANGED`) |
-| `GET /admin/kirana/fssai?status=` · `POST /admin/kirana/shops/{id}/fssai` | Super admins: certificates waiting for a person (`CHECKING`, default) or refused (`REJECTED`), with the number and file; a decision `{verified, reason?, validUntil}` (`validUntil` needed to verify, 400 naming it), the owner told |
+| `GET /admin/kirana/fssai?status=` · `POST /admin/kirana/shops/{id}/fssai` | Super admins: certificates waiting for a person (`CHECKING`, default) or refused (`REJECTED`), with the number and file; a decision `{verified, reason?, validUntil, endCurrent?}` (`validUntil` needed to verify, 400 naming it; `endCurrent` ends a licence kept during a renewal), the owner told; refused renewals show `keptUntil` |
 | `GET /admin/kirana/orders/open` · `POST /admin/kirana/orders/{id}/cancel` | The team: paid orders still open 2 hours after they were placed, with the shop's phone; super admins cancel one no one can finish `{reason}` (refunded in full; 409 `WRONG_STATUS`) |
 | `GET /admin/kirana/upi-checks` · `POST /admin/kirana/shops/{id}/upi-check` | The team: shops whose UPI ID changed after approval; checked (404 `NOTHING_TO_CHECK`) |
 | `GET /admin/kirana/refunds/failed` · `GET /admin/kirana/payouts?status=` · `POST /admin/kirana/payouts/{id}/retry` | Super admins: refunds Razorpay refused; payouts by status; a failed or reversed payout sent again |
@@ -1030,7 +1039,7 @@ events); `KIRANA_AI_KEY` (defaults to `ANTHROPIC_API_KEY`), `KIRANA_AI_MODEL`, `
 
 **Deploying V68–V69:** new tables, a new nullable column on `kirana_products` and `kirana_stock_moves`, the stock
 move reasons widened and `created_by` made optional for order moves; keys and checks on the existing tables are added
-`NOT VALID` and checked by V69 without blocking writes; V70 builds the stock moves' order index `CONCURRENTLY`
+`NOT VALID` and checked by V69 without blocking writes; V71 adds a nullable column (no rewrite); V70 builds the stock moves' order index `CONCURRENTLY`
 (counter bills go on meanwhile). Safe while the old version runs.
 
 ## Run it on your laptop

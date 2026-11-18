@@ -4,6 +4,7 @@ import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.kirana.api.OrderRequests.Fssai;
 import in.apnidukan.kirana.api.OrderRequests.TakingOrders;
 import in.apnidukan.kirana.api.OrderResponses.CatalogueView;
+import in.apnidukan.kirana.api.OrderResponses.EarningPage;
 import in.apnidukan.kirana.api.OrderResponses.OnlineView;
 import in.apnidukan.kirana.service.CatalogueService;
 import in.apnidukan.kirana.service.OnlineService;
@@ -13,6 +14,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
@@ -40,6 +42,12 @@ public class KiranaOnlineController {
     @GetMapping("/online")
     public OnlineView get() {
         return online.get(me());
+    }
+
+    /** The owner: what each delivered order earned and when it is (or was) paid out, newest first, 50 a page. */
+    @GetMapping("/online/earnings")
+    public EarningPage earnings(@RequestParam(required = false) String cursor) {
+        return online.earnings(me(), cursor);
     }
 
     /** The owner's switch. 409 NOT_READY naming what is missing. */

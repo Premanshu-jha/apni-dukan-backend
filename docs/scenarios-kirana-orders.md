@@ -24,6 +24,9 @@ Tests: `KOT` = `KiranaOrdersIntegrationTest`, `FCT` = `FssaiCheckJobTest`, `KIT`
 | 1.11a | Owner sends the same certificate again after a refusal | CHECKING for a person (the AI would say the same) | "Our team is checking it" | — | OK-untested |
 | 1.12 | Super admin decides by hand | 200 `VERIFIED` with valid-until (400 naming `validUntil` without it), or REJECTED with a reason; owner told; others 403 | Admin website | KOT aShopTakesOrdersOnlyOnce… (verify) | OK-tested (reject OK-untested) |
 | 1.13 | Licence expires while orders are on | `missing` shows FSSAI again; the shop drops out of `nearby` (same READY rule) | Banner "Your FSSAI licence expired" | same (`missing`) | OK-tested |
+| 1.13a | Owner uploads the renewed licence (the same number) while the old one is valid; the new one is being checked or refused | The shop keeps taking orders until the old one's last day (`fssai.currentValidUntil`; the reason and the refusal notice say so; the old certificate stays on record); then FSSAI is missing; verified: replaces it | "Your current licence keeps your shop open until …" | KOT aRenewedLicence… | OK-tested |
+| 1.13b | Owner uploads a different licence number, or the team refuses with `endCurrent` (cancelled, not genuine) | Nothing kept: orders stop until it is verified | "Your FSSAI licence is being checked" | KOT anotherLicenceNumberOr… | OK-tested |
+| 1.13c | The shop is handed over | The licence the old owner added is forgotten (his, as the food business operator), the switch off; the new owner adds his own | FSSAI step shown again | — | OK-untested |
 | 1.14 | Owner uploads a new certificate, or corrects the number on the same one, while it is being read | The read's result is kept only for the same file and number; the new one is read | — | (OnlineStore.fssaiResult guard) | OK-untested |
 
 ## 2. The shared catalogue
@@ -110,6 +113,7 @@ Tests: `KOT` = `KiranaOrdersIntegrationTest`, `FCT` = `FssaiCheckJobTest`, `KIT`
 | 7.3 | Someone else's order | 404 | — | same | OK-tested |
 | 7.6 | Customer deletes their account | 409 `KIRANA_ORDER_OPEN` while a shop has accepted an order; orders not accepted yet are cancelled and refunded with it | "Delete it once your order is delivered" | — | OK-untested |
 | 7.4 | Rate 1–5 within 7 days | 200; twice 409 `ALREADY_RATED`; after 7 days `CANT_RATE` | Stars on the delivered order | KOT aCombinedOrder… | OK-tested |
+| 7.4a | Customer typed the wrong flat number | `PATCH /orders/{id}/address` until the order goes out, at most 3 times (`canChangeAddress`); the shop told only once it accepted (the same text again tells no one); 409 `CANT_CHANGE_ADDRESS` after; another's order 404 | "Change address" on the order | KOT theCustomerCorrectsTheAddress… | OK-tested |
 | 7.5 | Refund status | Each refund PENDING / PROCESSED / FAILED on the order | "₹37 refunded" | KOT aPartNotAccepted… | OK-tested |
 
 ## 8. Refunds and payouts
@@ -120,6 +124,7 @@ Tests: `KOT` = `KiranaOrdersIntegrationTest`, `FCT` = `FssaiCheckJobTest`, `KIT`
 | 8.2 | Refund call timed out, or its lookup failed | Stays SENDING; the next run looks it up by our id before asking again (never PENDING again); each refund claimed by one run at a time | — | — | OK-untested |
 | 8.3 | Razorpay refuses a refund | FAILED at once; listed for super admins | Admin website "Failed refunds" | — | OK-untested |
 | 8.4 | Earnings due 2 working days after delivery | One payout per shop to its UPI ID, our id as RazorpayX idempotency key | "Paid ₹135 to sharma@ybl" | KOT aCombinedOrder… | OK-tested |
+| 8.4a | Owner checks what each order earned and when it is paid | `GET /online/earnings`: one row per delivered order (the shop's part of it): order, amount, delivered, due on, the payout with its status, UPI ID and why it failed; 50 a page; helpers 403 | Earnings list | KOT theCustomerCorrectsTheAddress… (paging OK-untested) | OK-tested |
 | 8.5 | Payout job runs again | Nothing sent twice | — | same | OK-tested |
 | 8.6 | RazorpayX webhook: processed, failed, repeated, unsigned, out of order | `result` UPDATED (payout PROCESSED / FAILED, owner told once) / DUPLICATE / 403 `BAD_SIGNATURE`; a final status is never undone | — | KOT aCombinedOrder…, aPayoutThatFailed… | OK-tested |
 | 8.7 | Failed payout | Not resent to the same UPI ID by itself; owner asked to check his UPI ID | Notice with the amount and UPI ID | KOT aPayoutThatFailed… | OK-tested |
@@ -142,4 +147,4 @@ Tests: `KOT` = `KiranaOrdersIntegrationTest`, `FCT` = `FssaiCheckJobTest`, `KIT`
 | 9.9 | The certificate the owner sent couldn't be seen or sent again with a corrected number | `fssai.fileId` | Fixed |
 | 9.10 | FSSAI waiting for the AI for ever with no word | Owner told, the team's list | Fixed |
 | 9.11 | Confirmation screen showed "0 items" | Item counts in the checkout's orders | Fixed |
-| 9.12 | Wrong address after paying can't be changed; renewing a licence takes the shop offline until it is read; no per-order earnings list | Later round (needs a decision) | Open |
+| 9.12 | Wrong address after paying couldn't be changed; renewing a licence took the shop offline until it was read; no per-order earnings list | Address change until it goes out; the earlier licence kept during a renewal; the earnings list | Fixed |
