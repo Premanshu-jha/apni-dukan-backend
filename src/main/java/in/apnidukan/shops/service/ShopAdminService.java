@@ -212,8 +212,10 @@ public class ShopAdminService {
         AddressRequestView addressRequest = addressRequests.pending(shopId).map(AddressRequestService::view)
                 .orElse(null);
         AdminShopDetail.Kirana kirana = shop.getType() == ShopType.KIRANA
-                ? kiranas.upiId(shopId).map(u -> new AdminShopDetail.Kirana(u.upiId(), u.updatedAt()))
-                        .orElse(new AdminShopDetail.Kirana(null, null))
+                ? kiranas.upiId(shopId)
+                        .map(u -> new AdminShopDetail.Kirana(u.upiId(), u.updatedAt(), kiranas.sellsFood(shopId),
+                                kiranas.fssai(shopId)))
+                        .orElse(new AdminShopDetail.Kirana(null, null, kiranas.sellsFood(shopId), kiranas.fssai(shopId)))
                 : null;
         return new AdminShopDetail(views(List.of(shop)).get(0), salon, kirana, changes, moved, oldOwnerPhoto,
                 oldShopPhoto,

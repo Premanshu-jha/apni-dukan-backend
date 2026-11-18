@@ -204,7 +204,7 @@ public class ShopService implements ShopMemberships {
         requireUnlocked(shop, userId);
         shop.apply(updated, now());
         // The trade licence was checked against the old name, owner or address: checked again against the new ones
-        boolean recheckLicence = salon && !sameLicenceFacts(old, updated) && shop.restartLicenceCheck(now());
+        boolean recheckLicence = !sameLicenceFacts(old, updated) && shop.restartLicenceCheck(now());
         // The field team checked the old papers: a live shop waits for them to check the new ones (a shop not live yet
         // is checked at its visit anyway)
         boolean waitsNow = !sameRegistrations(old, updated) && recheck(shop, userId);
@@ -265,7 +265,7 @@ public class ShopService implements ShopMemberships {
     }
 
     /**
-     * Sets the salon video (a salon's owner only; 409 NOT_A_SALON for a kirana): a SHOP_VIDEO file of this shop (POST
+     * Sets the shop's video (the owner, a salon's or a kirana's): a SHOP_VIDEO file of this shop (POST
      * /files/video-uploads/{id}/complete); otherwise 400 naming fileId. Like a new photo, a new video on an approved
      * shop puts it in the field team's re-check (it stays live). In the same transaction the new video is kept (off
      * the deletion queue) and the one it replaces goes (its row now, its bytes queued for deletion due now); a refused
@@ -274,9 +274,6 @@ public class ShopService implements ShopMemberships {
     @Transactional
     public ShopResponse setVideo(UUID userId, ShopRequests.SetVideo in) {
         Shop shop = ownedShop(userId, in.version());
-        if (shop.getType() != ShopType.SALON) {
-            throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The salon video is only for salons.");
-        }
         UUID video = files.find(in.fileId())
                 .filter(x -> shop.getId().equals(x.shopId()) && "SHOP_VIDEO".equals(x.purpose()) && x.isVideo())
                 .map(FileRef::id)
@@ -298,28 +295,29 @@ public class ShopService implements ShopMemberships {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                         Map.of("fileId", "may have just been deleted; upload it again"));
             }
-            if (old != null) {
-                files.release(old);   // the shop no longer points at it (saved above), so its row can go
+            if (old != null && !kiranas.usesFile(old)) {
+                // The shop no longer points at it (saved above), so its row can go, unless the kirana's FSSAI
+                // certificate is the same upload (the same bytes share one file)
+                files.release(old);
             }
         }
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
 
     /**
-     * Sets a salon's trade licence (owner only; 409 NOT_A_SALON for a kirana): type TRADE_LICENCE (any other: 400
-     * naming type) and a REG_DOC file of this shop (a photo or a PDF); otherwise 400 naming fileId. The salon stays as
-     * it is (an approved one stays live): the licence is optional. The new one waits for the automatic check
+     * Sets the shop's document (owner only): a salon's TRADE_LICENCE, or a kirana's TRADE_LICENCE or
+     * SHOPS_ESTABLISHMENT (any other: 400 naming type), and a REG_DOC file of this shop (a photo or a PDF); otherwise
+     * 400 naming fileId. The shop stays as it is (an approved one stays live): the document is optional. The new one waits for the automatic check
      * (LicenceCheckJob); customers see "Licensed" once it passed. The document it replaces stays as an upload the
      * owner can delete.
      */
     @Transactional
     public ShopResponse setRegistrationDoc(UUID userId, ShopRequests.SetRegistrationDoc in) {
         Shop shop = ownedShop(userId, in.version());
-        if (shop.getType() != ShopType.SALON) {
-            throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The registration document is only for salons.");
-        }
-        if (in.type() != RegistrationDocType.TRADE_LICENCE) {
-            throw invalid("type", "must be TRADE_LICENCE: only a municipal trade licence counts");
+        if (in.type() == null || !shop.checkable(in.type())) {
+            throw invalid("type", shop.getType() == ShopType.KIRANA
+                    ? "must be TRADE_LICENCE or SHOPS_ESTABLISHMENT"
+                    : "must be TRADE_LICENCE: only a municipal trade licence counts");
         }
         UUID doc = files.find(in.fileId())
                 .filter(x -> shop.getId().equals(x.shopId()) && "REG_DOC".equals(x.purpose()))
@@ -359,9 +357,6 @@ public class ShopService implements ShopMemberships {
     @Transactional
     public ShopResponse removeRegistrationDoc(UUID userId, long version) {
         Shop shop = ownedShop(userId, version);
-        if (shop.getType() != ShopType.SALON) {
-            throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The registration document is only for salons.");
-        }
         if (shop.getRegistrationDocFileId() != null) {
             requireUnlocked(shop, userId);
             shop.setRegistrationDoc(null, null, now());
@@ -372,14 +367,14 @@ public class ShopService implements ShopMemberships {
 
     /**
      * The owner picked the wrong kind at registration (owner only): a draft never approved changes kirana ↔ salon, any
-     * time before Submit for visit (also after the field team sent it back, as it is still being signed up). Becoming
-     * a kirana takes off the salon video and the trade licence (its check ends); both uploads are released, as a
-     * kirana has no screen for them. A kirana's GSTIN stays stored (a salon never shows or uses one) for if it changes
-     * back. The same type again: the shop as it is. 409 WRONG_STATUS once submitted or ever approved; 409 HAS_BARBERS
-     * for a salon whose barbers have their own sign-in or are invited (a kirana has no barbers: they are taken out
-     * first); 429 TOO_MANY_REQUESTS past {@value #TYPE_CHANGES_PER_DAY} changes a day. Locked like every owner change
-     * (the shop's row first, then its members, as accepting or sending an invitation does), so an invitation accepted
-     * or sent at this moment is seen.
+     * time before Submit for visit (also after the field team sent it back, as it is still being signed up). The
+     * photos and video stay. The document stays and is checked again for the new kind; a Shops and
+     * Establishments certificate (a kirana's only) is released when it becomes a salon. A kirana's GSTIN stays stored
+     * (a salon never shows or uses one) for if it changes back. The same type again: the shop as it is. 409
+     * WRONG_STATUS once submitted or ever approved; 409 HAS_BARBERS for a salon whose barbers have their own sign-in or
+     * are invited (a kirana has no barbers: they are taken out first); 429 TOO_MANY_REQUESTS past
+     * {@value #TYPE_CHANGES_PER_DAY} changes a day. Locked like every owner change (the shop's row first, then its
+     * members, as accepting or sending an invitation does), so an invitation accepted or sent at this moment is seen.
      */
     @Transactional
     public ShopResponse changeType(UUID userId, ShopRequests.ChangeType in) {
@@ -401,22 +396,33 @@ public class ShopService implements ShopMemberships {
                                 + " to a kirana.");
             }
         }
+        if (in.type() == ShopType.SALON) {
+            // A kirana sent back after its visit may have billed meanwhile (its counter works from Submit): a salon
+            // would hide its bills, products, khata book and helpers, so it stays a kirana
+            members.lockMembers(shop.getId());
+            boolean helpers = members.findByShopIdOrderByCreatedAtAscIdAsc(shop.getId()).stream()
+                    .anyMatch(m -> m.getRole() == ShopRole.HELPER);
+            if (helpers || invites.helperWaiting(shop.getId()) || kiranas.hasCounterData(shop.getId())) {
+                throw new ApiException(HttpStatus.CONFLICT, "HAS_COUNTER_DATA",
+                        "Your shop already has bills, products, khata customers or helpers (or a helper invited), so it "
+                                + "stays a kirana. If it really is a salon, write to support.");
+            }
+        }
         requireTypeChangesLeft(shop.getId());
         ShopType from = shop.getType();
-        UUID oldLicence = shop.getRegistrationDocFileId();
-        UUID oldVideo = shop.changeType(in.type(), now());
+        Shop.Dropped dropped = shop.changeType(in.type(), now());
         saveShop(shop);
+        if (shop.getLicenceCheckStatus() == LicenceCheckStatus.PENDING) {
+            startCheck(shop.getId());   // the document kept is checked again for the new kind (a paid read: counted)
+        }
         dashboardCounts.clearAfterCommit();   // the admin dashboard counts each kind's groups apart
         // On the field team's timeline: a registration sent back and changed to the other kind is seen at its next visit
         review.addEvent(shop.getId(), now(), userId, false, ShopEventType.NOTE, null,
                 "Owner changed it from " + kind(from) + " to " + kind(in.type()) + " while registering", List.of());
-        // The shop no longer points at them (saved above), so their rows can go. A kirana has no screen for the trade
-        // licence, so its upload (the owner's name and address) is never left behind where he can't delete it
-        if (oldVideo != null) {
-            files.release(oldVideo);
-        }
-        if (in.type() == ShopType.KIRANA && oldLicence != null) {
-            files.release(oldLicence);
+        // The shop no longer points at it (saved above), so its row can go: the new kind has no screen for it, and a
+        // certificate carries the owner's name and address
+        if (dropped.document() != null && !kiranas.usesFile(dropped.document())) {
+            files.release(dropped.document());   // kept when it is also the FSSAI certificate (one upload of both)
         }
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
@@ -443,19 +449,26 @@ public class ShopService implements ShopMemberships {
                 missing.put("shopPhotoFileId", "add a photo of the shop");
             }
             boolean salon = shop.getType() == ShopType.SALON;
-            if (salon && shop.getShopVideoFileId() == null) {
-                missing.put("shopVideoFileId", "add a short video of the salon");
+            if (shop.getShopVideoFileId() == null) {
+                missing.put("shopVideoFileId", salon ? "add a short video of the salon" : "add a short video of the shop");
             }
             throw new ApiException(HttpStatus.CONFLICT, "PHOTOS_REQUIRED", salon
                     ? "Add the owner's photo, a photo of the shop and a short video of the salon first."
-                    : "Add the owner's photo and a photo of the shop first.", missing);
+                    : "Add the owner's photo, a photo of the shop and a short video of the shop first.", missing);
         }
         if (shop.getType() == ShopType.SALON) {
             requireSalonSetUp(shop);
-        } else if (!kiranas.hasUpiId(shop.getId())) {
-            // The walk-in QR shows it, and Clozest's payouts will go to it: the field team checks it at the visit
-            throw new ApiException(HttpStatus.CONFLICT, "REGISTRATION_INCOMPLETE", "Add the shop's UPI ID first.",
-                    Map.of("upiId", "add the shop's UPI ID"));
+        } else {
+            // Its UPI ID (the walk-in QR, later Clozest's payouts), whether it sells food, and if it does its FSSAI
+            // licence (one still being checked will do: the field team sees how it went at the visit)
+            Map<String, String> gaps = kiranas.registrationGaps(shop.getId());
+            if (!gaps.isEmpty()) {
+                throw new ApiException(HttpStatus.CONFLICT, "REGISTRATION_INCOMPLETE", gaps.containsKey("upiId")
+                        ? "Add the shop's UPI ID first." : gaps.containsKey("sellsFood")
+                        ? "Say whether the shop sells any food items first."
+                        : "Fix the shop's FSSAI licence first: " + gaps.get("fssai") + ".",
+                        new java.util.LinkedHashMap<String, Object>(gaps));
+            }
         }
         shop.submitForVisit(now());
         saveShop(shop);

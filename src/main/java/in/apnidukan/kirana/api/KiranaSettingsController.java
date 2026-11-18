@@ -38,6 +38,12 @@ public class KiranaSettingsController {
         return settings.setUpiId(me(), body.upiId());
     }
 
+    /** Whether the shop sells any food, packed or loose (owner only): Yes needs the FSSAI licence before Submit. */
+    @PutMapping("/sells-food")
+    public Settings setSellsFood(@Valid @RequestBody KiranaRequests.SellsFood body) {
+        return settings.setSellsFood(me(), body.sellsFood());
+    }
+
     private UUID me() {
         return currentUser.get().userId();
     }

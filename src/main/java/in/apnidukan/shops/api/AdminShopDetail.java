@@ -41,8 +41,12 @@ public record AdminShopDetail(AdminShopResponse shop, Salon salon, Kirana kirana
      * A kirana's counter details the field team checks at the visit (null for a salon).
      * @param upiId          the shop's UPI ID (its walk-in QR, later Clozest's payouts); null until set
      * @param upiUpdatedAt   when it was last set (a change after approval shows up here)
+     * @param sellsFood      whether it sells any food (Yes: its FSSAI licence was needed); null until answered
+     * @param fssai          its FSSAI licence as checked so far (status NONE when not added): Submit takes one still
+     *                       being checked, so the field team sees here how it went (number, refusal reason, last day)
      */
-    public record Kirana(String upiId, Instant upiUpdatedAt) {
+    public record Kirana(String upiId, Instant upiUpdatedAt, Boolean sellsFood,
+                         in.apnidukan.common.context.KiranaFacts.Fssai fssai) {
     }
 
     /** The next timeline page's query values: afterAt and afterSeq, exactly as given. */

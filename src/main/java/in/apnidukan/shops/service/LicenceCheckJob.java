@@ -63,6 +63,8 @@ public class LicenceCheckJob {
     static final String FAILED_TYPE = "SHOP_LICENCE_FAILED";
     static final String URL = "/setup/document";
     static final String DRAFT_URL = "/register/photos";
+    static final String KIRANA_URL = "/kirana/licences";
+    static final String KIRANA_DRAFT_URL = "/register/licences";
     static final java.time.format.DateTimeFormatter DAY =
             java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH);
     private static final JsonMapper JSON = JsonMapper.builder().build();
@@ -161,7 +163,8 @@ public class LicenceCheckJob {
         }
         LocalDate today = LocalDate.now(clock.withZone(INDIA));
         LicenceRules.Outcome outcome = LicenceRules.decide(read, new LicenceRules.Salon(check.name(),
-                check.ownerName(), check.addressLine(), check.area(), check.city(), check.pincode()), today);
+                check.ownerName(), check.addressLine(), check.area(), check.city(), check.pincode()), check.kirana(),
+                check.shopsEstablishment(), today);
         String extract = JSON.writeValueAsString(read);
         if (!outcome.passed()) {
             fail(check, outcome.reason(), extract);
@@ -176,12 +179,16 @@ public class LicenceCheckJob {
                 if (!store.pass(check, outcome.licenceNumber(), outcome.validUntil(), extract, now)) {
                     return false;   // replaced, removed or its details changed meanwhile: its own check decides
                 }
+                String until = outcome.validUntil() == null ? "no end date" : "valid until " + day(outcome.validUntil());
                 review.addEvent(check.shopId(), now, null, true, ShopEventType.NOTE, null,
-                        "Trade licence checked automatically: " + outcome.licenceNumber() + ", valid until "
-                                + day(outcome.validUntil()), List.of());
-                tell(check.shopId(), PASSED_TYPE, "Trade licence checked",
-                        "Customers now see \"Licensed\" on your salon, until " + day(outcome.validUntil()) + ".",
-                        url(check.draft()), now);
+                        document(check) + " checked automatically: " + outcome.licenceNumber() + ", " + until,
+                        List.of());
+                // A kirana's badge comes with the customer app's kirana pages: it is promised, not claimed shown
+                String shown = check.kirana() ? "Customers will see \"Licensed\" on your shop when they can find it in Clozest"
+                        : "Customers now see \"Licensed\" on your salon";
+                tell(check.shopId(), PASSED_TYPE, document(check) + " checked",
+                        shown + (outcome.validUntil() == null ? "." : ", until " + day(outcome.validUntil()) + "."),
+                        url(check), now);
                 return true;
             });
             if (Boolean.TRUE.equals(wrote)) {
@@ -216,9 +223,10 @@ public class LicenceCheckJob {
             }
             Instant now = now();
             review.addEvent(check.shopId(), now, null, true, ShopEventType.NOTE, null,
-                    "Trade licence not accepted automatically: " + describe(reason), List.of());
-            tell(check.shopId(), FAILED_TYPE, "Trade licence not accepted",
-                    explain(reason) + " Open Trade licence to see what to do.", url(check.draft()), now);
+                    document(check) + " not accepted automatically: " + describe(reason, check.kirana()), List.of());
+            tell(check.shopId(), FAILED_TYPE, document(check) + " not accepted",
+                    explain(reason, check.kirana()) + " Open " + (check.kirana() ? "Licences" : "Trade licence") + " to see what to do.",
+                    url(check), now);
             return true;
         });
         if (Boolean.TRUE.equals(wrote)) {
@@ -237,12 +245,37 @@ public class LicenceCheckJob {
         return draft ? DRAFT_URL : URL;
     }
 
+    /** The owner's page about the document: a salon's (above), or a kirana's Licences, at registration or in More. */
+    static String url(boolean draft, boolean kirana) {
+        if (!kirana) {
+            return url(draft);
+        }
+        return draft ? KIRANA_DRAFT_URL : KIRANA_URL;
+    }
+
+    private static String url(LicenceCheckStore.Due check) {
+        return url(check.draft(), check.kirana());
+    }
+
+    /** "Trade licence", or "Shops and Establishments certificate" for a kirana's. */
+    private static String document(LicenceCheckStore.Due check) {
+        return check.shopsEstablishment() ? "Shops and Establishments certificate" : "Trade licence";
+    }
+
     /** "31 Mar 2027". */
     static String day(LocalDate date) {
         return date.format(DAY);
     }
 
-    /** What the owner is told, in a sentence (the partner app's licenceReasonText says the same, with more). */
+    /** What the owner is told, in a sentence, in a kirana's or a salon's words. */
+    static String explain(LicenceCheckReason reason, boolean kirana) {
+        String text = explain(reason);
+        return kirana ? text.replace("your salon's", "your shop's").replace("another salon", "another shop")
+                .replace("not a salon", "not a grocery or general store")
+                .replace("the whole licence", "the whole certificate") : text;
+    }
+
+    /** What a salon's owner is told (the partner app's licenceReasonText says the same, with more). */
     static String explain(LicenceCheckReason reason) {
         return switch (reason) {
             case UNREADABLE -> "We couldn't read it: take a clear, well-lit photo of the whole licence.";
@@ -256,10 +289,19 @@ public class LicenceCheckJob {
             case ADDRESS_MISMATCH -> "The address on it doesn't match your salon's address.";
             case DUPLICATE -> "This licence is already used by another salon. If it is yours, write to support.";
             case NOT_READ -> "We couldn't read it: try a clearer photo, or the PDF.";
+            case NOT_A_SHOP_TRADE -> "It is for another kind of business, not a grocery or general store.";
+            case NOT_SHOPS_ESTABLISHMENT -> "It isn't a Shops and Establishments certificate.";
         };
     }
 
-    /** The reason in words, for the field team's timeline. */
+    /** The reason in words, for the field team's timeline, naming a kirana as a shop. */
+    static String describe(LicenceCheckReason reason, boolean kirana) {
+        String text = describe(reason);
+        return kirana ? text.replace("the salon's", "the shop's").replace("the salon", "the shop")
+                .replace("another salon", "another shop") : text;
+    }
+
+    /** The reason in words for a salon's timeline. */
     static String describe(LicenceCheckReason reason) {
         return switch (reason) {
             case UNREADABLE -> "too blurred or cut off to read";
@@ -273,6 +315,8 @@ public class LicenceCheckJob {
             case ADDRESS_MISMATCH -> "the address doesn't match the salon's";
             case DUPLICATE -> "another salon already has this licence";
             case NOT_READ -> "no usable answer from the AI";
+            case NOT_A_SHOP_TRADE -> "for another trade, not a grocery or general store";
+            case NOT_SHOPS_ESTABLISHMENT -> "not a Shops and Establishments certificate";
         };
     }
 

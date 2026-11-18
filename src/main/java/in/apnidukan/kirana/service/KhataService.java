@@ -358,7 +358,7 @@ public class KhataService {
 
     private static KhataEntryView view(Entry e, Map<UUID, String> names) {
         return new KhataEntryView(e.id(), e.kind(), e.amountPaise(), e.balanceAfter(), e.billId(), e.billNo(),
-                e.method(), e.note(), e.reversesId(), e.reversed(), names.get(e.by()), e.at());
+                e.method(), e.note(), e.reversesId(), e.reversed(), names.get(e.by()), e.at(), e.by());
     }
 
     /** Rupees as people in India write them: 2,000 · 1,00,000 · 175.50. */

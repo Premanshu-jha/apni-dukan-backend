@@ -45,7 +45,39 @@ public class KiranaSettingsService {
     public Settings get(UUID userId) {
         Caller c = access.caller(userId);
         KiranaSettingsStore.Settings s = settings.find(c.shopId());
-        return new Settings(shopName(c.shopId()), s.upiId(), s.upiUpdatedAt());
+        return new Settings(shopName(c.shopId()), s.upiId(), s.upiUpdatedAt(), s.sellsFood());
+    }
+
+    /**
+     * Whether the shop sells any food, packed or loose (owner only: 403 OWNER_ONLY): asked at registration. Yes needs
+     * the FSSAI licence before Submit for visit. Once the shop is verified, a change needs the edit code like every
+     * checked detail (403 EDIT_LOCKED); the same answer again changes nothing. After Submit (waiting for the visit,
+     * or live), Yes needs an FSSAI licence that counts first (being checked, or verified and not expired): 409
+     * FSSAI_REQUIRED, so the rule checked at Submit can't be skipped by answering No and changing it afterwards. The
+     * shop's row is held (FOR SHARE) meanwhile, so a Submit at the same moment comes before or after, never between.
+     */
+    @Transactional
+    public Settings setSellsFood(UUID userId, boolean sellsFood) {
+        Caller c = access.owner(userId);
+        String status = shops.findForBooking(c.shopId()).map(ShopDirectory.ShopCard::status).orElse("DRAFT");
+        KiranaSettingsStore.Settings s = settings.find(c.shopId());
+        if (!Boolean.valueOf(sellsFood).equals(s.sellsFood())) {
+            if (shops.needsEditCode(c.shopId()) && editUnlocks.unlockedUntil(userId).isEmpty()) {
+                throw new ApiException(HttpStatus.FORBIDDEN, "EDIT_LOCKED",
+                        "Your shop is verified: confirm it's you with the code we send to your phone first.");
+            }
+            if (sellsFood && !"DRAFT".equals(status)) {
+                String gap = KiranaSettingsStore.fssaiGap(settings.fssai(c.shopId()),
+                        KiranaChecks.today(clock.instant()));
+                if (gap != null) {
+                    throw new ApiException(HttpStatus.CONFLICT, "FSSAI_REQUIRED", "A shop selling food needs its "
+                            + "FSSAI licence: add it in Licences first, then change this (" + gap + ").");
+                }
+            }
+            settings.setSellsFood(c.shopId(), sellsFood);
+            s = new KiranaSettingsStore.Settings(s.upiId(), s.upiUpdatedAt(), sellsFood);
+        }
+        return new Settings(shopName(c.shopId()), s.upiId(), s.upiUpdatedAt(), s.sellsFood());
     }
 
     /**
@@ -76,9 +108,9 @@ public class KiranaSettingsService {
                 // first one a new owner sets after a hand-over: the money still owed may be the old owner's)
                 online.markUpiRecheck(c.shopId(), now);
             }
-            s = new KiranaSettingsStore.Settings(upi, now);
+            s = new KiranaSettingsStore.Settings(upi, now, s.sellsFood());
         }
-        return new Settings(shopName(c.shopId()), s.upiId(), s.upiUpdatedAt());
+        return new Settings(shopName(c.shopId()), s.upiId(), s.upiUpdatedAt(), s.sellsFood());
     }
 
     private String shopName(UUID shopId) {

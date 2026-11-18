@@ -203,6 +203,12 @@ public class ShopInvitesService {
         return invites.waitingFor(owner(ownerId).getShopId(), now()).stream().map(ShopInvitesService::view).toList();
     }
 
+    /** Whether a helper invitation is still waiting: a kirana with one stays a kirana (ShopService.changeType). */
+    @Transactional(readOnly = true)
+    public boolean helperWaiting(UUID shopId) {
+        return invites.helperWaiting(shopId, now());
+    }
+
     /** Barber profile → the phone invited to sign in as him, for the salon's barber list (waiting ones only). */
     @Transactional(readOnly = true)
     public Map<UUID, String> waitingBarbers(UUID shopId) {

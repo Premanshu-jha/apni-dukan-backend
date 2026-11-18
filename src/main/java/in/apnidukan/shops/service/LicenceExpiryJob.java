@@ -83,16 +83,21 @@ public class LicenceExpiryJob {
                         return false;   // another server, or the licence changed meanwhile
                     }
                     String day = LicenceCheckJob.day(e.validUntil());
+                    boolean se = "SHOPS_ESTABLISHMENT".equals(e.document());
+                    String paper = se ? "Shops and Establishments certificate" : "trade licence";
+                    String title = se ? "Shops and Establishments certificate" : "Trade licence";
+                    // A kirana's badge comes with the customer app's kirana pages: not claimed as shown yet
+                    String badge = e.kirana() ? "the \"Licensed\" badge your shop gets" : "\"Licensed\" on your salon";
                     for (UUID owner : store.owners(e.shopId())) {
                         notifications.queue(expired
-                                ? new Notice(owner, EXPIRED_TYPE, null, now, "Trade licence expired",
-                                        "Your trade licence expired on " + day + ": customers no longer see "
-                                                + "\"Licensed\". Upload the renewed licence to show it again.",
-                                        LicenceCheckJob.url(e.draft()), Map.of())
-                                : new Notice(owner, EXPIRING_TYPE, null, now, "Trade licence ends soon",
-                                        "Your trade licence is valid until " + day + ". Upload the renewed licence "
-                                                + "before then to keep \"Licensed\" on your salon.",
-                                        LicenceCheckJob.url(e.draft()), Map.of()));
+                                ? new Notice(owner, EXPIRED_TYPE, null, now, title + " expired",
+                                        "Your " + paper + " expired on " + day + ", so " + badge + " is off. Upload "
+                                                + "the renewed one to get it back.",
+                                        LicenceCheckJob.url(e.draft(), e.kirana()), Map.of())
+                                : new Notice(owner, EXPIRING_TYPE, null, now, title + " ends soon",
+                                        "Your " + paper + " is valid until " + day + ". Upload the renewed one before "
+                                                + "then to keep " + badge + ".",
+                                        LicenceCheckJob.url(e.draft(), e.kirana()), Map.of()));
                     }
                     return true;
                 });
