@@ -18,6 +18,7 @@ import in.apnidukan.kirana.api.StockRequests.ScanBatch;
 import in.apnidukan.kirana.api.StockResponses.CounterSuggestions;
 import in.apnidukan.kirana.api.StockResponses.LinkResult;
 import in.apnidukan.kirana.api.StockResponses.ListLinePage;
+import in.apnidukan.kirana.api.StockResponses.PhotoNeededPage;
 import in.apnidukan.kirana.api.StockResponses.ListLineView;
 import in.apnidukan.kirana.api.StockResponses.PaperDraft;
 import in.apnidukan.kirana.api.StockResponses.PurchasePage;
@@ -110,6 +111,12 @@ public class KiranaStockController {
     @GetMapping("/setup")
     public SetupView setup() {
         return setup.get(me());
+    }
+
+    /** The shop's products still needing a picture, 20 at a time, each with what its photo must show. */
+    @GetMapping("/setup/photos")
+    public PhotoNeededPage setupPhotos(@RequestParam(required = false) String cursor) {
+        return setup.photos(me(), cursor);
     }
 
     /** Lines of the shop's list: to check (status NEW), SKIPPED or ADDED, 20 at a time. */

@@ -381,6 +381,9 @@ public class ShopAdminService {
         // A salon's first approval: its free trial starts (later ones keep the trial it had)
         java.util.Optional<java.time.Instant> trialEnds = subscriptions.startTrial(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.APPROVED, null, note, List.of());
+        if (shop.getType() == in.apnidukan.shops.domain.ShopType.KIRANA) {
+            kiranas.shareCheckedPhotos(shopId);   // its photos checked while registering may now be shared
+        }
         // After approving: no longer waiting, so a new pincode doesn't send it to another agent's visit list
         addressRequests.pending(shopId).ifPresent(r -> applyAddressRequest(adminId, shop, r));
         dashboardCounts.clearAfterCommit();

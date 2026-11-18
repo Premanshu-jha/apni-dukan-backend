@@ -49,4 +49,11 @@ public interface KiranaFacts {
      * can't become a salon, whose screens would hide all of that.
      */
     boolean hasCounterData(UUID shopId);
+
+    /**
+     * The kirana was just approved: its photos checked while it registered, of packs matching their shared catalogue
+     * items, become those items' pictures where they have none (a shop still registering keeps its photos to itself).
+     * The caller holds a transaction.
+     */
+    void shareCheckedPhotos(UUID shopId);
 }

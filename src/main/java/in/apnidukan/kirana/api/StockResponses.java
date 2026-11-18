@@ -340,12 +340,21 @@ public final class StockResponses {
      * @param pagesReading   list pages still being read; pagesFailed: couldn't be read (take them again, or delete)
      * @param pagesLeft      list pages that can still be kept
      * @param pages          the list's pages kept, in the order sent
+     * @param photosMissing  products with no picture (no checked photo of the shop's, none in the shared catalogue): each
+     *                       needs a photo before finishing; of them photosChecking have one being checked,
+     *                       photosRefused one to retake (GET /setup/photos lists them)
+     * @param photosLeftToday photos the shop can still send to be checked today (300 a day)
+     * @param nextStep       what the home screen offers next: LIST (pages reading, lines to check, a page to retake),
+     *                       COUNT, PHOTOS (to take or retake), WAIT (photos being checked), FINISH, DONE; ADD when
+     *                       there are no products yet
      * @param canFinish      every condition for "I've added all my products" holds
      * @param youCanFinish   canFinish, and the caller is the owner (only the owner says it); a helper sees false
      */
     public record SetupView(Instant readyAt, long products, long uncounted, List<ProductRef> uncountedProducts,
                             long linesToCheck, long linesAdded, long linesSkipped, long pagesReading, long pagesFailed,
-                            int pagesLeft, List<SetupPageView> pages, boolean canFinish, boolean youCanFinish) {
+                            int pagesLeft, List<SetupPageView> pages, long photosMissing, long photosChecking,
+                            long photosRefused, int photosLeftToday, String nextStep, boolean canFinish,
+                            boolean youCanFinish) {
 
         public SetupView {
             uncountedProducts = List.copyOf(uncountedProducts);
@@ -370,6 +379,27 @@ public final class StockResponses {
 
         public ListLineView {
             suggestions = List.copyOf(suggestions);
+        }
+    }
+
+    /**
+     * A product still needing a picture, with what the camera screen tells the shopkeeper.
+     * @param loose      sold by the kg: a photo of the goods in their sack or bin (no label)
+     * @param sizeToShow the size the photo must show ("250 ml"), from the product's name; null when it has none
+     * @param photoCheck CHECKING, REFUSED or NEED_SIZE (a photo of the side with the size: sent alone, the front
+     *                   waiting is kept); null: no photo sent yet
+     * @param code       why it was refused, as a code to word in the shop's language (PhotoRules); reason: in English;
+     *                   seen: what the photo showed (another product, another size)
+     * @param newPhotoUrl the photo being checked or refused
+     */
+    public record PhotoNeededView(UUID productId, String name, boolean loose, String sizeToShow, String photoCheck,
+                                  String code, String reason, String seen, String newPhotoUrl) {
+    }
+
+    public record PhotoNeededPage(List<PhotoNeededView> items, String next) {
+
+        public PhotoNeededPage {
+            items = List.copyOf(items);
         }
     }
 

@@ -19,6 +19,12 @@ public interface ShopDirectory {
      */
     boolean needsEditCode(UUID shopId);
 
+    /**
+     * Whether the shop is approved right now (live, not suspended, sent back or closed), its row held in shared mode to
+     * the end of the transaction: an approval being saved is waited for. The caller holds a transaction.
+     */
+    boolean approvedNow(UUID shopId);
+
     /** find() for many shops in one query, by id (unknown ids are left out). */
     java.util.Map<UUID, ShopCard> findAll(java.util.Collection<UUID> shopIds);
 

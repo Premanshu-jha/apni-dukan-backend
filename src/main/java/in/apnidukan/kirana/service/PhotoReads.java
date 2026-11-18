@@ -79,7 +79,8 @@ public class PhotoReads {
             return earlier.get();
         }
         String purpose = "LABEL".equals(kind) ? "PRODUCT_PHOTO" : "BILL";
-        int max = "LABEL".equals(kind) || "STOCK_LIST".equals(kind) ? 1 : MAX_PAGES;
+        // A product's photo may come with a second one, of the side where its size is printed
+        int max = "LABEL".equals(kind) ? (productId != null ? 2 : 1) : "STOCK_LIST".equals(kind) ? 1 : MAX_PAGES;
         List<UUID> ids = fileIds == null ? List.of() : fileIds.stream().distinct().toList();
         if (ids.isEmpty() || ids.size() > max) {
             throw invalid("fileIds", max == 1 ? "Send one photo" : "Send 1 to " + max + " pages");
@@ -146,6 +147,21 @@ public class PhotoReads {
         }
         Read last = page.isEmpty() ? null : page.get(page.size() - 1);
         return new ReadPage(out, more ? Cursors.encode(last.createdAt().toString(), last.id().toString()) : null);
+    }
+
+    /** The shop's read sent with this clientRef, if any (a retry). */
+    Optional<Read> earlier(UUID shopId, UUID clientRef) {
+        return clientRef == null ? Optional.empty() : reads.byClientRef(shopId, clientRef);
+    }
+
+    /** Holds the shop's photo checks to the end of the transaction (ProductService.setPhoto counts under it). */
+    void lockPhotoChecks(UUID shopId) {
+        reads.lockPhotoChecks(shopId);
+    }
+
+    /** Products' photos the shop sent to be checked since then. */
+    int photoChecksSince(UUID shopId, Instant since) {
+        return reads.photoChecksSince(shopId, since);
     }
 
     /** Throws an upload away (one still being read, read, or failed). 409 READ_USED once used. */

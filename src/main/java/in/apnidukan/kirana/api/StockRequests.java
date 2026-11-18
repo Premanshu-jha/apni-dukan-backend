@@ -167,8 +167,14 @@ public final class StockRequests {
                             @NotNull(message = "Enter how many") BigDecimal quantity) {
     }
 
-    /** The product's photo (uploaded first: POST /files?purpose=PRODUCT_PHOTO); null fileId removes the shop's own. */
-    public record ProductPhoto(@NotNull UUID clientRef, UUID fileId) {
+    /**
+     * The product's photo (uploaded first: POST /files?purpose=PRODUCT_PHOTO), checked by AI before it shows; null
+     * fileId removes the shop's own.
+     * @param sizeFileId a second photo, of the side where the size is printed (asked for when the front doesn't show it)
+     * @param dropFileId with fileId null: the photo being let go of (its newPhotoUrl's, or the shop's own), so a late
+     *                   retry doesn't drop a photo sent since
+     */
+    public record ProductPhoto(@NotNull UUID clientRef, UUID fileId, UUID sizeFileId, UUID dropFileId) {
     }
 
     /** The owner's cost price (what is paid per piece or kg); null clears it. */

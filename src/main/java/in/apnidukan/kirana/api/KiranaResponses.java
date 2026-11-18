@@ -32,11 +32,16 @@ public final class KiranaResponses {
      * @param photoUrl    a link that opens it for at least 15 minutes (a shared photo is another shop's file)
      * @param counted     its stock was counted by hand (added with a count, or Count) and still holds: only counted
      *                    products are offered online ("Count it to sell online" otherwise)
+     * @param photoCheck  a new photo of the shop's: CHECKING (the old picture shows meanwhile), REFUSED or NEED_SIZE
+     *                    (retake: {@code photoCheckReason} says why in English, {@code photoCheckCode} as a code to word
+     *                    in the shop's language, {@code photoCheckSeen} what the photo showed); null when none waits
+     * @param newPhotoUrl a link to that new photo (to show which one is being checked or was refused)
      */
     public record ProductView(UUID id, String name, List<BarcodeView> barcodes, Unit unit, long pricePaise,
                               BigDecimal stock, BigDecimal lowStockAt, boolean runningOut, boolean active,
                               long version, Instant updatedAt, Long costPaise, UUID photoFileId, String photoUrl,
-                              boolean counted) {
+                              boolean counted, String photoCheck, String photoCheckCode, String photoCheckReason,
+                              String photoCheckSeen, String newPhotoUrl) {
 
         public ProductView {
             barcodes = List.copyOf(barcodes);
@@ -45,14 +50,25 @@ public final class KiranaResponses {
         public static ProductView of(Product p, List<Barcode> barcodes) {
             return new ProductView(p.id(), p.name(), barcodes.stream().map(BarcodeView::of).toList(), p.unit(),
                     p.pricePaise(), Quantities.json(p.stock()), Quantities.json(p.lowStockAt()), p.runningOut(),
-                    p.active(), p.version(), p.updatedAt(), null, null, null, p.countedAt() != null);
+                    p.active(), p.version(), p.updatedAt(), null, null, null, p.countedAt() != null, null, null, null,
+                    null, null);
         }
 
-        /** With the cost price (shown to the owner only: null for a helper) and the photo and its link. */
-        public ProductView with(Long cost, UUID photo, String photoLink) {
+        /**
+         * With the cost price (shown to the owner only: null for a helper), the photo and its link, and how a new
+         * photo's check stands.
+         */
+        public ProductView with(Long cost, UUID photo, String photoLink, PhotoCheck check) {
             return new ProductView(id, name, barcodes, unit, pricePaise, stock, lowStockAt, runningOut, active, version,
-                    updatedAt, cost, photo, photoLink, counted);
+                    updatedAt, cost, photo, photoLink, counted, check.status(), check.code(), check.reason(),
+                    check.seen(), check.newPhotoUrl());
         }
+    }
+
+    /** How a product's new photo's check stands (all null when none waits). */
+    public record PhotoCheck(String status, String code, String reason, String seen, String newPhotoUrl) {
+
+        public static final PhotoCheck NONE = new PhotoCheck(null, null, null, null, null);
     }
 
     /** @param pack how many pieces (or kg) one scan of it means (12 for a carton of 12) */

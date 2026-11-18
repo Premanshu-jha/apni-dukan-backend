@@ -180,6 +180,19 @@ public class ReadStore {
         return n == null ? 0 : n;
     }
 
+    /** Holds the shop's photo checks until the transaction ends (counted under it: TOO_MANY_PHOTOS_TODAY). */
+    public void lockPhotoChecks(UUID shopId) {
+        jdbc.queryForList("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", Object.class,
+                "kirana-photo-checks:" + shopId);
+    }
+
+    /** Products' photos the shop sent to be checked since then (ix_kirana_reads_shop). */
+    public int photoChecksSince(UUID shopId, Instant since) {
+        Integer n = jdbc.queryForObject("SELECT count(*) FROM kirana_reads WHERE shop_id = ? AND kind = 'LABEL' "
+                + "AND product_id IS NOT NULL AND created_at >= ?", Integer.class, shopId, at(since));
+        return n == null ? 0 : n;
+    }
+
     /** List pages the shop sent since then, thrown away or failed too (each was an AI read; ix_kirana_reads_shop). */
     public int listPagesSince(UUID shopId, Instant since) {
         Integer n = jdbc.queryForObject("SELECT count(*) FROM kirana_reads WHERE shop_id = ? AND kind = 'STOCK_LIST' "

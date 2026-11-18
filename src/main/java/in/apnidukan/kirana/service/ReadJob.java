@@ -2,6 +2,7 @@ package in.apnidukan.kirana.service;
 
 import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.jobs.JobLeases;
+import in.apnidukan.kirana.domain.PhotoRules;
 import in.apnidukan.kirana.repo.OnlineStore;
 import in.apnidukan.kirana.repo.ReadStore;
 import in.apnidukan.kirana.repo.ReadStore.Read;
@@ -54,16 +55,19 @@ public class ReadJob {
     private final ScanStore scanStore;
     private final BillFiles billFiles;
     private final ProductSetupService setup;
+    private final PhotoChecks photoChecks;
     private final JobLeases leases;
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final int callsPerDay;
+    private final int photoCallsPerDay;
 
     public ReadJob(ReadStore reads, OnlineStore online, KiranaDocumentAi ai, FileRefs files, PurchaseService purchases,
                    ScanService scans, ScanStore scanStore, BillFiles billFiles, ProductSetupService setup,
-                   JobLeases leases,
+                   PhotoChecks photoChecks, JobLeases leases,
                    TransactionTemplate transactions, Clock clock,
-                   @Value("${app.kirana.ai-calls-per-day:500}") int callsPerDay) {
+                   @Value("${app.kirana.ai-calls-per-day:500}") int callsPerDay,
+                   @Value("${app.kirana.photo-checks-per-day:3000}") int photoCallsPerDay) {
         this.reads = reads;
         this.online = online;
         this.ai = ai;
@@ -73,10 +77,12 @@ public class ReadJob {
         this.scanStore = scanStore;
         this.billFiles = billFiles;
         this.setup = setup;
+        this.photoChecks = photoChecks;
         this.leases = leases;
         this.transactions = transactions;
         this.clock = clock;
         this.callsPerDay = callsPerDay;
+        this.photoCallsPerDay = photoCallsPerDay;
     }
 
     @Scheduled(fixedDelayString = "${app.kirana.read-ms:15000}",
@@ -106,7 +112,22 @@ public class ReadJob {
         if (r == null) {
             return;
         }
+        boolean productPhoto = "LABEL".equals(r.kind()) && r.productId() != null;
+        Optional<PhotoChecks.Expected> expected = Optional.empty();
+        if (productPhoto) {
+            // Still waiting for this photo? (Replaced or removed meanwhile: no AI call is spent on it)
+            expected = photoChecks.expected(r);
+            if (expected.isEmpty()) {
+                fail(r, "This photo is no longer waiting for its product.", now);
+                return;
+            }
+        }
         if (!ai.configured()) {
+            if (productPhoto) {
+                // A product's photo isn't refused for our setup: it waits (the shop sees "checking")
+                transactions.executeWithoutResult(s -> reads.retry(r.id(), now.plus(Duration.ofHours(1)), now));
+                return;
+            }
             fail(r, "Reading photos isn't switched on yet. Enter it by hand.", now);
             return;
         }
@@ -157,6 +178,22 @@ public class ReadJob {
         }
         LocalDate today = KiranaChecks.today(now);
         Instant tomorrow = today.plusDays(1).atTime(0, 5).atZone(KiranaChecks.ZONE).toInstant();
+        if (productPhoto) {
+            // Photo checks have the platform's own daily allowance, so they never hold up anyone's bills
+            if (!online.takePhotoAiCall(today, photoCallsPerDay)) {
+                log.warn("The daily photo checks cap ({}) is reached: they wait for tomorrow", photoCallsPerDay);
+                transactions.executeWithoutResult(s -> reads.defer(r.id(), tomorrow, now));
+                return;
+            }
+            try {
+                checkPhoto(r, pages, expected.get(), now);
+            } catch (KiranaDocumentAi.Unreadable e) {
+                fail(r, PhotoChecks.UNREADABLE, now);
+            } catch (KiranaDocumentAi.Unavailable e) {
+                retryOrFail(r, now);
+            }
+            return;
+        }
         if (!online.takeAiCall(today, callsPerDay)) {
             log.warn("The kirana AI's daily cap ({}) is reached: photo reads wait for tomorrow", callsPerDay);
             transactions.executeWithoutResult(s -> reads.defer(r.id(), tomorrow, now));
@@ -211,17 +248,14 @@ public class ReadJob {
                     }
                     transactions.executeWithoutResult(s -> reads.read(r.id(), JSON.writeValueAsString(facts), now));
                 }
-                default -> {
+                default -> {   // LABEL: an unknown pack's label (a product's photo is checked above)
                     KiranaDocumentAi.LabelFacts facts = ai.readLabel(pages.get(0));
                     if (!facts.readable() || !facts.product()) {
                         fail(r, "We couldn't read the pack's label. Take a photo of the front of the pack.", now);
                         return;
                     }
-                    transactions.executeWithoutResult(s -> {
-                        if (reads.read(r.id(), JSON.writeValueAsString(facts), now)) {
-                            scans.labelRead(r, facts, now);
-                        }
-                    });
+                    // An unknown pack's label: its suggestions are worked out from it when shown
+                    transactions.executeWithoutResult(s -> reads.read(r.id(), JSON.writeValueAsString(facts), now));
                 }
             }
         } catch (KiranaDocumentAi.Unreadable e) {
@@ -234,6 +268,11 @@ public class ReadJob {
 
     /** Tried again after 1, 2, 4, 8, 16 minutes; after {@link #MAX_TRIES} tries, given up with a reason. */
     private void retryOrFail(Read r, Instant now) {
+        if ("LABEL".equals(r.kind()) && r.productId() != null && r.tries() + 1 >= MAX_TRIES) {
+            // A product's photo isn't refused for our trouble: it is checked when the AI is back (every 30 minutes)
+            transactions.executeWithoutResult(s -> reads.retry(r.id(), now.plus(Duration.ofMinutes(30)), now));
+            return;
+        }
         if (r.tries() + 1 >= MAX_TRIES) {
             fail(r, "We couldn't read it just now. Send it again a little later, or enter it by hand.", now);
             return;
@@ -246,6 +285,17 @@ public class ReadJob {
         transactions.executeWithoutResult(s -> {
             if (reads.failed(r.id(), why, now)) {
                 scans.labelFailed(r, now);
+                photoChecks.failed(r, why);
+            }
+        });
+    }
+
+    /** A shop's photo of its product, checked against it as it was named when the check started. */
+    private void checkPhoto(Read r, List<KiranaDocumentAi.Page> pages, PhotoChecks.Expected expected, Instant now) {
+        PhotoRules.Seen seen = ai.checkProductPhoto(pages, expected.name(), expected.loose());
+        transactions.executeWithoutResult(s -> {
+            if (reads.read(r.id(), JSON.writeValueAsString(seen), now)) {
+                photoChecks.checked(r, seen, expected);
             }
         });
     }

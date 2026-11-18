@@ -1,15 +1,19 @@
 package in.apnidukan.kirana.service;
 
 import in.apnidukan.common.context.ProductReadiness;
+import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.kirana.api.StockRequests.LineDecision;
 import in.apnidukan.kirana.api.StockResponses.ListLinePage;
 import in.apnidukan.kirana.api.StockResponses.ListLineView;
+import in.apnidukan.kirana.api.StockResponses.PhotoNeededPage;
+import in.apnidukan.kirana.api.StockResponses.PhotoNeededView;
 import in.apnidukan.kirana.api.StockResponses.ProductRef;
 import in.apnidukan.kirana.api.StockResponses.SetupPageView;
 import in.apnidukan.kirana.api.StockResponses.SetupView;
 import in.apnidukan.kirana.api.StockResponses.SuggestionView;
 import in.apnidukan.kirana.domain.Cursors;
+import in.apnidukan.kirana.domain.PhotoRules;
 import in.apnidukan.kirana.domain.Product;
 import in.apnidukan.kirana.domain.Quantities;
 import in.apnidukan.kirana.domain.Unit;
@@ -63,11 +67,12 @@ public class ProductSetupService {
     private final ProductService productService;
     private final MatchService matcher;
     private final ProductReadiness readiness;
+    private final FileRefs files;
     private final Clock clock;
 
     public ProductSetupService(KiranaAccess access, SetupStore setup, ReadStore reads, ProductStore products,
                                ProductService productService, MatchService matcher, ProductReadiness readiness,
-                               Clock clock) {
+                               FileRefs files, Clock clock) {
         this.access = access;
         this.setup = setup;
         this.reads = reads;
@@ -75,6 +80,7 @@ public class ProductSetupService {
         this.productService = productService;
         this.matcher = matcher;
         this.readiness = readiness;
+        this.files = files;
         this.clock = clock;
     }
 
@@ -213,9 +219,46 @@ public class ProductSetupService {
     }
 
     /**
+     * The shop's products still needing a picture (owner or helper), by name, 20 at a time, each with what its photo
+     * must show (for the camera screen's guidance) and how its photo's check stands. {@code cursor}: from the last
+     * answer's {@code next}.
+     */
+    @Transactional(readOnly = true)
+    public PhotoNeededPage photos(UUID userId, String cursor) {
+        Caller c = access.caller(userId);
+        // The cursor: "<rank>|<name>" and the id
+        Optional<String[]> after = Cursors.decode(cursor);
+        UUID afterId = after.map(a -> ProductService.uuid(a[1])).orElse(null);
+        Integer afterRank = null;
+        String afterName = null;
+        if (afterId != null && after.get()[0].contains("|")) {
+            afterRank = lineNo(after.get()[0].substring(0, after.get()[0].indexOf('|')));
+            afterName = after.get()[0].substring(after.get()[0].indexOf('|') + 1);
+        }
+        if (afterRank == null) {
+            afterName = null;   // no cursor, or one that doesn't parse: from the start
+        }
+        List<ProductStore.NeedsPhoto> rows = products.needingPhotos(c.shopId(), afterRank, afterName,
+                afterName == null ? null : afterId, PAGE);
+        boolean more = rows.size() > PAGE;
+        List<ProductStore.NeedsPhoto> page = more ? rows.subList(0, PAGE) : rows;
+        Map<UUID, String> links = files.links(page.stream().map(ProductStore.NeedsPhoto::newFileId)
+                .filter(java.util.Objects::nonNull).toList());
+        List<PhotoNeededView> out = page.stream().map(n -> {
+            boolean loose = Unit.KG.name().equals(n.unit());
+            return new PhotoNeededView(n.id(), n.name(), loose, loose ? null : PhotoRules.sizeToShow(n.name()),
+                    n.check(), n.code(), n.reason(), n.seen(), n.newFileId() == null ? null : links.get(n.newFileId()));
+        }).toList();
+        ProductStore.NeedsPhoto last = page.isEmpty() ? null : page.get(page.size() - 1);
+        return new PhotoNeededPage(out, more ? Cursors.encode(last.rank() + "|" + last.sortKey(),
+                last.id().toString()) : null);
+    }
+
+    /**
      * "I've added all my products" (owner only: 403 OWNER_ONLY). Needs at least one product (409 NO_PRODUCTS), no list
      * page still being read and no line left to check (409 LINES_TO_CHECK), no page that couldn't be read (409
-     * PAGES_FAILED: take it again or delete it), and every product counted (409 PRODUCTS_NOT_COUNTED naming up to 20).
+     * PAGES_FAILED: take it again or delete it), every product counted (409 PRODUCTS_NOT_COUNTED naming up to 20) and
+     * every product with a picture (409 PHOTOS_NEEDED: missing, checking, refused).
      * Then the field visit is booked if the shop was submitted. Said again: as it is. Checked under the shop's setup
      * lock, so a line or page can't change meanwhile.
      */
@@ -244,6 +287,18 @@ public class ProductSetupService {
                     + "are added." : t.failed() + " pages of your list couldn't be read. Take their photos again, or "
                     + "delete them if their products are added.", Map.of("pages", t.failed()));
         }
+        ProductStore.PhotoTotals photos = products.photoTotals(c.shopId());
+        if (counts[1] == 0 && photos.missing() > 0) {
+            long toTake = photos.missing() - photos.checking();
+            String take = toTake == 0 ? "" : (toTake == 1 ? "One product needs" : toTake + " products need")
+                    + " a photo";
+            String wait = photos.checking() == 0 ? "" : (photos.checking() == 1 ? "one photo is" : photos.checking()
+                    + " photos are") + " still being checked";
+            String message = toTake == 0 ? Character.toUpperCase(wait.charAt(0)) + wait.substring(1)
+                    + ". Come back a little later." : take + (wait.isEmpty() ? "" : ", and " + wait) + ".";
+            throw new ApiException(HttpStatus.CONFLICT, "PHOTOS_NEEDED", message, Map.of("missing", photos.missing(),
+                    "checking", photos.checking(), "refused", photos.refused()));
+        }
         if (counts[1] > 0) {
             throw new ApiException(HttpStatus.CONFLICT, "PRODUCTS_NOT_COUNTED", counts[1] == 1
                     ? "One product has no count yet: count it first."
@@ -267,10 +322,15 @@ public class ProductSetupService {
             pages.add(new SetupPageView(p.readId(), ++n, p.fileId(), p.status(), p.failure(), p.linesLeftOut(),
                     p.toCheck(), p.added(), p.skipped(), p.sentAt()));
         }
+        ProductStore.PhotoTotals photos = products.photoTotals(shopId);
         boolean canFinish = ready == null && counts[0] > 0 && counts[1] == 0 && t.toCheck() == 0 && t.reading() == 0
-                && t.failed() == 0;
+                && t.failed() == 0 && photos.missing() == 0;
+        String next = ready != null ? "DONE" : counts[0] == 0 && t.toCheck() == 0 && t.reading() == 0 ? "ADD"
+                : t.toCheck() > 0 || t.reading() > 0 || t.failed() > 0 ? "LIST" : counts[1] > 0 ? "COUNT"
+                : photos.missing() > photos.checking() ? "PHOTOS" : photos.checking() > 0 ? "WAIT" : "FINISH";
         return new SetupView(ready, counts[0], counts[1], uncounted, t.toCheck(), t.added(), t.skipped(), t.reading(),
-                t.failed(), left, pages, canFinish, canFinish && c.isOwner());
+                t.failed(), left, pages, photos.missing(), photos.checking(), photos.refused(),
+                productService.photosLeftToday(shopId), next, canFinish, canFinish && c.isOwner());
     }
 
     /** Each kept page's place, 1 = first sent. */
