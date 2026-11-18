@@ -1367,7 +1367,10 @@ class AdminIntegrationTest {
         assertThat(fssai.get("reason")).isEqualTo("A GST certificate");
     }
 
-    /** A shop with an owner, in a status, set straight in the database (its history starts with the next change). */
+    /**
+     * A shop with an owner, in a status, set straight in the database (its history starts with the next change). A
+     * kirana has its products set up (its visit can be booked); KiranaStockIntegrationTest covers one still setting up.
+     */
     private UUID shop(String type, String status, String name, String ownerPhone) {
         UUID owner = person(ownerPhone);
         UUID id = UUID.randomUUID();
@@ -1375,6 +1378,7 @@ class AdminIntegrationTest {
             TestData.salon(jdbc, id, owner);
         } else {
             TestData.shop(jdbc, id, owner);
+            jdbc.update("UPDATE shops SET products_ready_at = now() WHERE id = ?", id);
         }
         jdbc.update("UPDATE shops SET status = ?, name = ?, updated_at = ? WHERE id = ?", status, name,
                 Timestamp.from(CLOCK.instant().plusSeconds(jdbc.queryForObject("SELECT count(*) FROM shops",
