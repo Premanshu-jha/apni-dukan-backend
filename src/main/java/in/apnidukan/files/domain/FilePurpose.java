@@ -15,6 +15,10 @@ public enum FilePurpose {
      * photo or a PDF, for the field team only. Only the owner uploads, opens or deletes it.
      */
     REG_DOC("documents"),
+    /**
+     * A kirana's bill photo: a distributor's bill (stock coming in) or a paper bill written while the phone was off; a
+     * photo or a PDF, stored as it came (read by AI).
+     */
     BILL("bills"),
     RECEIPT("receipts"),
     /**
@@ -22,7 +26,12 @@ public enum FilePurpose {
      * an email). It belongs to the person who sent it, not to a shop (its row has no shop); the helpdesk decides who may
      * see it.
      */
-    TICKET_FILE("tickets");
+    TICKET_FILE("tickets"),
+    /**
+     * A kirana product's pack: the label of a barcode no one knows yet (read by AI to suggest the product), or the
+     * product's photo (shared with every shop that has the same barcode). Cleaned like other photos.
+     */
+    PRODUCT_PHOTO("products");
 
     private final String folder;
 

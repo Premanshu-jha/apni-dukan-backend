@@ -28,6 +28,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -40,6 +41,13 @@ public class FileService {
     public static final long MAX_BYTES = 10L * 1024 * 1024;
     /** Uploads one shop may make per day (India day). Bills are a handful a day; this stops a script filling R2. */
     public static final int MAX_UPLOADS_PER_DAY = 100;
+    /**
+     * A kirana's bill and pack photos a day, counted apart from the rest: stocking a new shop (scanning every shelf)
+     * sends many pack labels in one day.
+     */
+    public static final int MAX_STOCK_PHOTOS_PER_DAY = 600;
+    /** A bill sent as a spreadsheet, document or text: read whole in memory, so smaller than photos and PDFs. */
+    static final long MAX_BILL_DOCUMENT_BYTES = 2L * 1024 * 1024;
 
     private static final Logger log = LoggerFactory.getLogger(FileService.class);
 
@@ -98,9 +106,24 @@ public class FileService {
 
         // Pass 1: read the file once to learn its real type and its fingerprint.
         Inspection inspection = inspect(upload);
-        FileType type = FileType.detect(inspection.head(), inspection.headLength())
-                .orElseThrow(() -> ApiException.badRequest("UNSUPPORTED_FILE_TYPE",
-                        "Only JPEG, PNG, WEBP photos and PDF files can be uploaded"));
+        Optional<FileType> detected = FileType.detect(inspection.head(), inspection.headLength());
+        if (detected.isEmpty() && purpose == FilePurpose.BILL) {
+            // A distributor's bill may also come as Excel, Word, CSV, a GST e-invoice (JSON) or text
+            if (FileType.heic(inspection.head(), inspection.headLength())) {
+                throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE",
+                        "This is an iPhone HEIC photo: take it with the app's camera, or share it as JPEG");
+            }
+            detected = FileType.detectBillDocument(inspection.head(), inspection.headLength(),
+                    upload.getOriginalFilename());
+            if (detected.isPresent() && size > MAX_BILL_DOCUMENT_BYTES) {
+                throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "FILE_TOO_LARGE",
+                        "A bill's file can be at most 2 MB (a PDF or a photo up to 10 MB)");
+            }
+        }
+        FileType type = detected.orElseThrow(() -> ApiException.badRequest("UNSUPPORTED_FILE_TYPE",
+                purpose == FilePurpose.BILL ? "A bill can be a photo (JPEG, PNG, WEBP), a PDF, an Excel or Word file, "
+                        + "a CSV, a GST e-invoice (JSON) or text" : "Only JPEG, PNG, WEBP photos and PDF files can be "
+                        + "uploaded"));
 
         // Same shop, same purpose, same bytes: return the earlier upload instead of storing it twice.
         var existing = repository.findByShopIdAndPurposeAndSha256(user.shopId(), purpose, inspection.sha256());
@@ -110,9 +133,15 @@ public class FileService {
 
         java.time.LocalDate today = java.time.LocalDate.now(clock.withZone(java.time.ZoneId.of("Asia/Kolkata")));
         Instant dayStart = today.atStartOfDay(java.time.ZoneId.of("Asia/Kolkata")).toInstant();
-        if (repository.countByShopIdAndCreatedAtGreaterThanEqual(user.shopId(), dayStart) >= MAX_UPLOADS_PER_DAY) {
+        boolean stockPhoto = STOCK_PHOTOS.contains(purpose);
+        long uploadsToday = stockPhoto
+                ? repository.countByShopIdAndPurposeInAndCreatedAtGreaterThanEqual(user.shopId(), STOCK_PHOTOS, dayStart)
+                : repository.countByShopIdAndPurposeNotInAndCreatedAtGreaterThanEqual(user.shopId(), STOCK_PHOTOS,
+                dayStart);
+        int max = stockPhoto ? MAX_STOCK_PHOTOS_PER_DAY : MAX_UPLOADS_PER_DAY;
+        if (uploadsToday >= max) {
             throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_UPLOADS",
-                    "This shop uploaded " + MAX_UPLOADS_PER_DAY + " files today. Try again tomorrow.");
+                    "This shop uploaded " + max + " files today. Try again tomorrow.");
         }
 
         // Photos of people and shops are drawn again as a smaller JPEG without the phone's hidden details (EXIF);
@@ -245,7 +274,7 @@ public class FileService {
     private static Inspection inspect(MultipartFile upload) {
         try (InputStream in = upload.getInputStream()) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] head = new byte[12];
+            byte[] head = new byte[512];
             int headLength = 0;
             byte[] buffer = new byte[8192];
             int read;
@@ -314,8 +343,12 @@ public class FileService {
 
     private static boolean isPhotoPurpose(FilePurpose purpose) {
         return purpose == FilePurpose.SHOP_PHOTO || purpose == FilePurpose.OWNER_PHOTO
-                || purpose == FilePurpose.STAFF_PHOTO;
+                || purpose == FilePurpose.STAFF_PHOTO || purpose == FilePurpose.PRODUCT_PHOTO;
     }
+
+    /** A kirana's bill and pack photos: their own daily limit. */
+    private static final java.util.Set<FilePurpose> STOCK_PHOTOS = java.util.EnumSet.of(FilePurpose.BILL,
+            FilePurpose.PRODUCT_PHOTO);
 
     private record Inspection(byte[] head, int headLength, String sha256) {
     }
