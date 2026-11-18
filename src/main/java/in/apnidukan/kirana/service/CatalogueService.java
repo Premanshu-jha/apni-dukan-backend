@@ -1,6 +1,7 @@
 package in.apnidukan.kirana.service;
 
 import in.apnidukan.common.context.UserDirectory;
+import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.text.TextCleaner;
@@ -46,14 +47,16 @@ public class CatalogueService {
     private final CatalogueStore catalogue;
     private final ProductStore products;
     private final UserDirectory users;
+    private final FileRefs files;
     private final Clock clock;
 
     public CatalogueService(KiranaAccess access, CatalogueStore catalogue, ProductStore products, UserDirectory users,
-                            Clock clock) {
+                            FileRefs files, Clock clock) {
         this.access = access;
         this.catalogue = catalogue;
         this.products = products;
         this.users = users;
+        this.files = files;
         this.clock = clock;
     }
 
@@ -70,8 +73,10 @@ public class CatalogueService {
         } catch (ApiException e) {
             b = null;
         }
-        return Optional.ofNullable(b).flatMap(catalogue::findByCode)
-                .map(m -> view(m.item(), m.pack()))
+        String scanned = b;
+        return Optional.ofNullable(scanned).flatMap(catalogue::findByCode)
+                .map(m -> view(m.item(), m.pack(), catalogue.codes(m.item().id()),
+                        catalogue.link(scanned).map(CatalogueStore.Link::confirmed).orElse(false)))
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "CATALOGUE_NOT_FOUND",
                         "This barcode isn't known yet. Type the product's details."));
     }
@@ -85,27 +90,102 @@ public class CatalogueService {
      */
     void linkBarcode(UUID shopId, Product product, UUID linkedItem, String code, BigDecimal pack, Long mrpPaise,
                      Instant now) {
-        Optional<CatalogueStore.Match> known = catalogue.findByCode(code);
+        Optional<CatalogueStore.Link> known = catalogue.lockLink(code);
         if (known.isPresent()) {
-            if (linkedItem == null) {
-                products.setCatalogueItem(product.id(), known.get().item().id());
+            UUID mine = linkedItem;
+            if (mine == null) {
+                mine = known.get().itemId();
+                products.setCatalogueItem(product.id(), mine);
             }
-            return;   // a barcode another entry has stays with it: the shop's own link is unchanged
+            // a barcode another entry has stays with it: the shop's own link is unchanged; its say is counted
+            vote(shopId, known.get(), mine, now);
+            return;
         }
         if (linkedItem != null) {
-            catalogue.addCode(linkedItem, code, Quantities.stored(pack), now);
+            if (catalogue.addCode(linkedItem, code, Quantities.stored(pack), "SHOP", false, now)) {
+                catalogue.vote(code, shopId, linkedItem, now);
+            }
             return;
         }
         Item item = new Item(UUID.randomUUID(), product.name(), null, null, product.unit(), mrpPaise, null, 0, now);
         catalogue.insertItem(item, shopId, now);
-        if (catalogue.addCode(item.id(), code, Quantities.stored(pack), now)) {
+        if (catalogue.addCode(item.id(), code, Quantities.stored(pack), "SHOP", false, now)) {
             products.setCatalogueItem(product.id(), item.id());
+            catalogue.vote(code, shopId, item.id(), now);
             return;
         }
         // Another shop added this barcode at the same moment: its entry wins, ours goes
         catalogue.deleteItem(item.id());
-        catalogue.findByCode(code).ifPresent(m -> products.setCatalogueItem(product.id(), m.item().id()));
+        catalogue.lockLink(code).ifPresent(l -> {
+            products.setCatalogueItem(product.id(), l.itemId());
+            vote(shopId, l, l.itemId(), now);
+        });
     }
+
+    /**
+     * A shop says the barcode is {@code itemId}: counted; the link becomes trusted once two shops agree; a shop that
+     * disagrees with it opens a review for the team (the shop keeps its own link meanwhile). The caller holds the
+     * link's lock.
+     */
+    private void vote(UUID shopId, CatalogueStore.Link link, UUID itemId, Instant now) {
+        catalogue.vote(link.code(), shopId, itemId, now);
+        if (itemId.equals(link.itemId())) {
+            if (!link.confirmed() && catalogue.votes(link.code(), itemId) >= 2) {
+                catalogue.confirm(link.code());
+            }
+            return;
+        }
+        catalogue.addReview(new CatalogueStore.Review(UUID.randomUUID(), link.code(), "CONFLICT", link.itemId(),
+                itemId, shopId, "A shop linked this barcode to another product", "OPEN", now));
+    }
+
+    /**
+     * A shop moved a barcode to another of its products (its owner corrected a wrong link): the catalogue follows when
+     * the link was only that shop's say (no other shop agreed, not from a product master or the team); else the team
+     * reviews it. The product gets a catalogue entry from its name if it has none. The caller holds both products'
+     * locks.
+     */
+    void correct(UUID shopId, Product to, String code, BigDecimal pack, Instant now) {
+        UUID target = products.catalogueItemOf(to.id());
+        if (target == null) {
+            Item item = new Item(UUID.randomUUID(), to.name(), null, null, to.unit(), null, null, 0, now);
+            catalogue.insertItem(item, shopId, now);
+            products.setCatalogueItem(to.id(), item.id());
+            target = item.id();
+        }
+        Optional<CatalogueStore.Link> link = catalogue.lockLink(code);
+        if (link.isEmpty()) {
+            if (catalogue.addCode(target, code, Quantities.stored(pack), "SHOP", false, now)) {
+                catalogue.vote(code, shopId, target, now);
+            }
+            return;
+        }
+        CatalogueStore.Link l = link.get();
+        catalogue.vote(code, shopId, target, now);
+        if (target.equals(l.itemId())) {
+            if (!l.confirmed() && catalogue.votes(code, target) >= 2) {
+                catalogue.confirm(code);
+            }
+            return;
+        }
+        if ("SHOP".equals(l.source()) && !l.confirmed() && catalogue.votes(code, l.itemId()) == 0) {
+            catalogue.relink(code, target, null, "SHOP", false);   // it was only this shop's say: it follows
+            return;
+        }
+        catalogue.addReview(new CatalogueStore.Review(UUID.randomUUID(), code, "CORRECTION", l.itemId(), target,
+                shopId, "A shop corrected this barcode to another product", "OPEN", now));
+    }
+
+    /** Whether the item has a shared photo. */
+    boolean hasPhoto(UUID itemId) {
+        return catalogue.photos(List.of(itemId)).containsKey(itemId);
+    }
+
+    /** The shared photo for an item, when it has none (a shop's photo whose label matched the item). */
+    boolean sharePhoto(UUID itemId, UUID fileId) {
+        return catalogue.setPhotoIfNone(itemId, fileId);
+    }
+
 
     // ---------- the admin website (super admins) ----------
 
@@ -120,8 +200,12 @@ public class CatalogueService {
         List<CatalogueStore.Row> page = more ? rows.subList(0, PAGE) : rows;
         CatalogueStore.Row last = page.isEmpty() ? null : page.get(page.size() - 1);
         Map<UUID, List<String>> codes = catalogue.codes(page.stream().map(r -> r.item().id()).toList());
-        return new CataloguePage(page.stream().map(r -> view(r.item(), null, codes.getOrDefault(r.item().id(),
-                        List.of()))).toList(),
+        Map<UUID, UUID> photos = catalogue.photos(page.stream().map(r -> r.item().id()).toList());
+        Map<UUID, String> links = files.links(photos.values());
+        return new CataloguePage(page.stream().map(r -> new CatalogueView(r.item().id(), r.item().name(),
+                        r.item().brand(), r.item().size(), r.item().unit(), r.item().mrpPaise(), r.item().category(),
+                        null, codes.getOrDefault(r.item().id(), List.of()), r.item().version(), r.item().updatedAt(),
+                        null, photos.get(r.item().id()), links.get(photos.get(r.item().id())))).toList(),
                 more ? Cursors.encode(last.sortKey(), last.item().id().toString()) : null);
     }
 
@@ -155,12 +239,14 @@ public class CatalogueService {
     }
 
     private CatalogueView view(Item i, BigDecimal pack) {
-        return view(i, pack, catalogue.codes(i.id()));
+        return view(i, pack, catalogue.codes(i.id()), null);
     }
 
-    private static CatalogueView view(Item i, BigDecimal pack, List<String> codes) {
+    private CatalogueView view(Item i, BigDecimal pack, List<String> codes, Boolean trusted) {
+        UUID photo = catalogue.photos(List.of(i.id())).get(i.id());
         return new CatalogueView(i.id(), i.name(), i.brand(), i.size(), i.unit(), i.mrpPaise(), i.category(),
-                pack == null ? null : Quantities.json(pack), codes, i.version(), i.updatedAt());
+                pack == null ? null : Quantities.json(pack), codes, i.version(), i.updatedAt(), trusted, photo,
+                photo == null ? null : files.links(List.of(photo)).get(photo));
     }
 
     void requireSuperAdmin(UUID adminId) {

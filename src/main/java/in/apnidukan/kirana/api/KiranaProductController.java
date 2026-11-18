@@ -9,6 +9,12 @@ import in.apnidukan.kirana.api.KiranaResponses.ProductDetail;
 import in.apnidukan.kirana.api.KiranaResponses.ProductPage;
 import in.apnidukan.kirana.api.KiranaResponses.ProductView;
 import in.apnidukan.kirana.api.KiranaResponses.ScanView;
+import in.apnidukan.kirana.api.StockRequests.MoveBarcode;
+import in.apnidukan.kirana.api.StockRequests.MoveStock;
+import in.apnidukan.kirana.api.StockRequests.ProductCost;
+import in.apnidukan.kirana.api.StockRequests.ProductPhoto;
+import in.apnidukan.kirana.api.StockResponses.BarcodeMoved;
+import in.apnidukan.kirana.api.StockResponses.StockMoved;
 import in.apnidukan.kirana.service.ProductService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -17,6 +23,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -101,6 +108,34 @@ public class KiranaProductController {
     @PostMapping("/{id}/stock")
     public ProductView stock(@PathVariable UUID id, @Valid @RequestBody StockChange body) {
         return products.changeStock(me(), id, body);
+    }
+
+    /**
+     * Moves one of this product's barcodes to the product it really is (owner). Offers the stock scanned in with it
+     * ({@code suggestedQuantity}) for POST /{id}/move-stock. 404 BARCODE_NOT_FOUND; 409 TOO_MANY_BARCODES.
+     */
+    @PostMapping("/{id}/move-barcode")
+    public BarcodeMoved moveBarcode(@PathVariable UUID id, @Valid @RequestBody MoveBarcode body) {
+        return products.moveBarcode(me(), id, body.code(), body.toProductId(),
+                Boolean.TRUE.equals(body.moveStock()));
+    }
+
+    /** Moves stock counted on this product to the right one (owner, same unit: 409 UNITS_DIFFER). */
+    @PostMapping("/{id}/move-stock")
+    public StockMoved moveStock(@PathVariable UUID id, @Valid @RequestBody MoveStock body) {
+        return products.moveStock(me(), id, body.clientRef(), body.toProductId(), body.quantity());
+    }
+
+    /** The product's photo (owner or helper; a PRODUCT_PHOTO uploaded first); fileId null removes the shop's own. */
+    @PutMapping("/{id}/photo")
+    public ProductView photo(@PathVariable UUID id, @Valid @RequestBody ProductPhoto body) {
+        return products.setPhoto(me(), id, body.clientRef(), body.fileId());
+    }
+
+    /** The cost price (owner only; helpers never see it). */
+    @PutMapping("/{id}/cost")
+    public ProductView cost(@PathVariable UUID id, @Valid @RequestBody ProductCost body) {
+        return products.setCost(me(), id, body.costPaise());
     }
 
     private UUID me() {

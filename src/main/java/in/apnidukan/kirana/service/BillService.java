@@ -650,6 +650,7 @@ public class BillService {
     }
 
     private BillView view(Bill b, List<BillStore.Line> lines, List<Return> returns, List<BillStore.Change> changes) {
+        Optional<BillStore.Paper> paper = bills.paper(b.id());
         Map<UUID, String> names = KiranaChecks.names(users, Stream.concat(Stream.of(b.by()),
                 Stream.concat(returns.stream().map(Return::by), changes.stream().map(BillStore.Change::by)))
                 .distinct().toList());
@@ -665,7 +666,13 @@ public class BillService {
                         ch.fromCustomerId() == null ? null : new KhataRef(ch.fromCustomerId(), ch.fromCustomerName()),
                         ch.fromPaidNow(), ch.fromPaidNowBy(), ch.toPayment(),
                         ch.toCustomerId() == null ? null : new KhataRef(ch.toCustomerId(), ch.toCustomerName()),
-                        ch.toPaidNow(), ch.toPaidNowBy(), names.get(ch.by()), ch.at())).toList());
+                        ch.toPaidNow(), ch.toPaidNowBy(), names.get(ch.by()), ch.at())).toList(),
+                paper.map(BillStore.Paper::writtenOn).orElse(null), paper.map(BillStore.Paper::photoFileId).orElse(null));
+    }
+
+    /** A bill as the app shows it (the paper bill flow returns the bill it made). */
+    BillView viewOf(UUID shopId, UUID billId) {
+        return view(bills.find(shopId, billId).orElseThrow());
     }
 
     private static ReturnView returnView(Return r, Map<UUID, String> names) {

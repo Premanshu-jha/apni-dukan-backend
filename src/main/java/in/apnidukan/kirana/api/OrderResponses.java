@@ -23,9 +23,14 @@ public final class OrderResponses {
      * A shared catalogue item.
      * @param pack  for a scan: how many of it the scanned barcode means; else null
      * @param codes its barcodes
+     * @param trusted for a scan: the barcode's link is trusted (a product master, the team, or two shops agree); else
+     *                a suggestion from one shop, to confirm; null when not a scan
+     * @param photoFileId the shared photo, if any
+     * @param photoUrl    a link that opens it for at least 15 minutes (it is another shop's file)
      */
     public record CatalogueView(UUID id, String name, String brand, String size, Unit unit, Long mrpPaise,
-                                String category, BigDecimal pack, List<String> codes, long version, Instant updatedAt) {
+                                String category, BigDecimal pack, List<String> codes, long version, Instant updatedAt,
+                                Boolean trusted, UUID photoFileId, String photoUrl) {
 
         public CatalogueView {
             codes = List.copyOf(codes);

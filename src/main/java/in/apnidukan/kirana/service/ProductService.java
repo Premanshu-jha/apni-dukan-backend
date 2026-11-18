@@ -1,6 +1,7 @@
 package in.apnidukan.kirana.service;
 
 import in.apnidukan.common.context.UserDirectory;
+import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.error.DatabaseErrors;
 import in.apnidukan.common.text.TextCleaner;
@@ -14,11 +15,14 @@ import in.apnidukan.kirana.api.KiranaResponses.ProductDetail;
 import in.apnidukan.kirana.api.KiranaResponses.ProductPage;
 import in.apnidukan.kirana.api.KiranaResponses.ProductView;
 import in.apnidukan.kirana.api.KiranaResponses.ScanView;
+import in.apnidukan.kirana.api.StockResponses.BarcodeMoved;
+import in.apnidukan.kirana.api.StockResponses.StockMoved;
 import in.apnidukan.kirana.domain.Barcode;
 import in.apnidukan.kirana.domain.Cursors;
 import in.apnidukan.kirana.domain.Product;
 import in.apnidukan.kirana.domain.Quantities;
 import in.apnidukan.kirana.domain.Unit;
+import in.apnidukan.kirana.repo.CatalogueStore;
 import in.apnidukan.kirana.repo.ProductStore;
 import in.apnidukan.kirana.repo.ProductStore.Move;
 import in.apnidukan.kirana.repo.ProductStore.MoveRow;
@@ -31,6 +35,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -45,7 +50,9 @@ import static in.apnidukan.kirana.service.KiranaChecks.invalid;
  * The kirana's catalogue and stock: products and their barcodes (several each, a carton's barcode counting its
  * pieces), finding one by a scan at the counter, stock that comes in, damaged pieces, and counts by hand. Every stock
  * change is recorded with why (kirana_stock_moves). The owner and helpers add products and stock and link barcodes;
- * prices, names, unlinking a barcode and removing a product are the owner's.
+ * prices, names, unlinking a barcode and removing a product are the owner's. The owner corrects mix-ups any time: a
+ * barcode moved to the right product (the shared catalogue follows or the team reviews it), stock moved between
+ * products, the cost price; owner or helper set a product's photo.
  */
 @Service
 public class ProductService {
@@ -60,14 +67,23 @@ public class ProductService {
     private final ProductStore products;
     private final CatalogueService catalogue;
     private final UserDirectory users;
+    private final FileRefs files;
+    private final PhotoReads reads;
+    private final CatalogueStore catalogueItems;
+    private final KiranaFiles kiranaFiles;
     private final Clock clock;
 
     public ProductService(KiranaAccess access, ProductStore products, CatalogueService catalogue, UserDirectory users,
-                          Clock clock) {
+                          FileRefs files, PhotoReads reads, CatalogueStore catalogueItems,
+                          KiranaFiles kiranaFiles, Clock clock) {
         this.access = access;
         this.products = products;
         this.catalogue = catalogue;
         this.users = users;
+        this.files = files;
+        this.reads = reads;
+        this.catalogueItems = catalogueItems;
+        this.kiranaFiles = kiranaFiles;
         this.clock = clock;
     }
 
@@ -123,7 +139,7 @@ public class ProductService {
         List<MoveRow> moves = products.moves(p.id(), PAGE);
         Map<UUID, String> names = KiranaChecks.names(users, moves.stream().map(MoveRow::by).filter(Objects::nonNull)
                 .distinct().toList());
-        return new ProductDetail(view(p), moves.stream()
+        return new ProductDetail(view(c, p), moves.stream()
                 .map(m -> new MoveView(Quantities.json(m.change()), Quantities.json(m.stockAfter()),
                         m.reason(), m.billId(), m.billNo(), m.note(), names.get(m.by()), m.at()))
                 .toList());
@@ -341,16 +357,247 @@ public class ProductService {
                 p.lowStockAt(), p.active(), p.version(), now));
     }
 
-    // ---------- helpers ----------
-
-    private ProductView view(Product p) {
-        return ProductView.of(p, products.barcodes(p.id()));
+    /**
+     * A new product (owner or helper) for something read or scanned: from a shared catalogue item ({@code itemId}, its
+     * name, unit and MRP as the price unless given) and/or the name, unit and price sent (400 naming itemId, name, unit
+     * or pricePaise when missing; NAME_TAKEN as when adding). It is linked to the catalogue item. Its id.
+     */
+    UUID newFor(UUID userId, UUID itemId, String name, Unit unit, Long pricePaise) {
+        CatalogueStore.Item item = null;
+        if (itemId != null) {
+            item = catalogueItems.find(itemId).orElseThrow(() -> invalid("itemId",
+                    "This catalogue item doesn't exist any more"));
+        }
+        String n = name != null ? name : item == null ? null : item.name();
+        Unit u = unit != null ? unit : item == null ? null : item.unit();
+        Long price = pricePaise != null ? pricePaise : item == null ? null : item.mrpPaise();
+        if (n == null) {
+            throw invalid("name", "Enter the product's name");
+        }
+        if (u == null) {
+            throw invalid("unit", "Choose piece or kg");
+        }
+        if (price == null) {
+            throw invalid("pricePaise", "Enter the price");
+        }
+        UUID id = create(userId, new NewProduct(n, null, null, null, u, price, null, null)).id();
+        if (item != null) {
+            products.setCatalogueItem(id, item.id());
+        }
+        return id;
     }
 
-    /** Products with their barcodes, read in one query for the lot. */
+    // ---------- the owner's corrections ----------
+
+    /**
+     * One of this product's barcodes belongs to another product (owner: a wrong link made while shelving). The barcode
+     * moves with its pack (it must suit the other product's unit: 400 naming code); the stock already scanned in with
+     * it is offered to move too ({@code suggestedQuantity}), not moved. The shared catalogue follows when the link was
+     * only this shop's say, else the team reviews it. 404 BARCODE_NOT_FOUND when the product doesn't have it; 409
+     * PRODUCT_REMOVED when the other product was removed; 409 TOO_MANY_BARCODES; 400 naming toProductId for the same
+     * product.
+     */
+    @Transactional
+    public BarcodeMoved moveBarcode(UUID userId, UUID productId, String code, UUID toProductId) {
+        return moveBarcode(userId, productId, code, toProductId, false);
+    }
+
+    /**
+     * As {@link #moveBarcode(UUID, UUID, String, UUID)}; with {@code moveStock}, the stock scanned in with it moves too,
+     * in the same go (one MOVE on each; nothing when the units differ).
+     */
+    @Transactional
+    public BarcodeMoved moveBarcode(UUID userId, UUID productId, String code, UUID toProductId, boolean moveStock) {
+        Caller c = access.owner(userId);
+        if (productId.equals(toProductId)) {
+            throw invalid("toProductId", "Choose another product");
+        }
+        Map<UUID, Product> locked = new java.util.HashMap<>();
+        for (Product x : products.lockAll(c.shopId(), List.of(productId, toProductId))) {
+            locked.put(x.id(), x);
+        }
+        Product from = Optional.ofNullable(locked.get(productId)).orElseThrow(ProductService::notFound);
+        Product to = Optional.ofNullable(locked.get(toProductId)).orElseThrow(ProductService::notFound);
+        if (!to.active()) {
+            throw removed();
+        }
+        String b;
+        try {
+            b = KiranaChecks.barcode(code);
+        } catch (ApiException e) {
+            b = null;
+        }
+        String scanned = b;
+        Barcode moving = scanned == null ? null : products.barcodes(from.id()).stream()
+                .filter(x -> x.code().equals(scanned)).findFirst().orElse(null);
+        if (moving == null) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "BARCODE_NOT_FOUND", "This product doesn't have this barcode.");
+        }
+        if (Quantities.problem(moving.pack(), to.unit(), false).isPresent()) {
+            throw invalid("code", "This barcode counts " + Quantities.plain(moving.pack()) + " a scan, which \""
+                    + to.name() + "\" can't have (it is counted in pieces). Remove it and link it again");
+        }
+        if (products.barcodeCount(to.id()) >= MAX_BARCODES) {
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_BARCODES",
+                    "\"" + to.name() + "\" has " + MAX_BARCODES + " barcodes already. Remove an old one first.");
+        }
+        products.moveBarcode(from.id(), to.id(), moving.code());
+        Instant now = KiranaChecks.now(clock);
+        catalogue.correct(c.shopId(), to, moving.code(), moving.pack(), now);
+        BigDecimal in = products.scannedIn(from.id(), moving.code());
+        BigDecimal offer = in.min(from.stock()).max(BigDecimal.ZERO);
+        if (from.unit() != to.unit()) {
+            offer = BigDecimal.ZERO;
+        }
+        if (moveStock && offer.signum() > 0) {
+            BigDecimal fromAfter = Quantities.stored(from.stock().subtract(offer));
+            BigDecimal toAfter = Quantities.stored(to.stock().add(offer));
+            products.setStock(from.id(), fromAfter, now);
+            products.setStock(to.id(), toAfter, now);
+            products.addStockMoves(c.shopId(), List.of(
+                    new ProductStore.StockMove(from.id(), offer.negate(), fromAfter, "MOVE", null, moving.code(),
+                            cut("To " + to.name() + " (barcode moved)"), null),
+                    new ProductStore.StockMove(to.id(), offer, toAfter, "MOVE", null, moving.code(),
+                            cut("From " + from.name() + " (barcode moved)"), null)), userId, now);
+            return new BarcodeMoved(view(c, products.find(c.shopId(), from.id()).orElseThrow()),
+                    view(c, products.find(c.shopId(), to.id()).orElseThrow()), BigDecimal.ZERO);
+        }
+        return new BarcodeMoved(view(c, from), view(c, to), Quantities.json(offer));
+    }
+
+    /**
+     * Moves stock counted on the wrong product to the right one (owner): one MOVE on each, same unit only (409
+     * UNITS_DIFFER). 400 naming quantity (more than 0, as the unit allows); 400 naming toProductId for the same
+     * product; 409 PRODUCT_REMOVED when the other was removed. The same clientRef again moves nothing twice.
+     */
+    @Transactional
+    public StockMoved moveStock(UUID userId, UUID productId, UUID clientRef, UUID toProductId, BigDecimal quantity) {
+        Caller c = access.owner(userId);
+        if (productId.equals(toProductId)) {
+            throw invalid("toProductId", "Choose another product");
+        }
+        Map<UUID, Product> locked = new java.util.HashMap<>();
+        for (Product x : products.lockAll(c.shopId(), List.of(productId, toProductId))) {
+            locked.put(x.id(), x);
+        }
+        Product from = Optional.ofNullable(locked.get(productId)).orElseThrow(ProductService::notFound);
+        Product to = Optional.ofNullable(locked.get(toProductId)).orElseThrow(ProductService::notFound);
+        if (products.moveRecorded(c.shopId(), clientRef)) {
+            return new StockMoved(view(c, from), view(c, to));
+        }
+        if (!to.active()) {
+            throw removed();
+        }
+        if (from.unit() != to.unit()) {
+            throw new ApiException(HttpStatus.CONFLICT, "UNITS_DIFFER", "\"" + from.name() + "\" and \"" + to.name()
+                    + "\" are counted differently (pieces and kg). Set each one's count instead.");
+        }
+        BigDecimal q = quantity("quantity", quantity, from.unit(), false);
+        if (q.compareTo(from.stock().max(BigDecimal.ZERO)) > 0) {
+            throw invalid("quantity", "\"" + from.name() + "\" has only " + Quantities.plain(from.stock().max(
+                    BigDecimal.ZERO)) + ": set its count first if it has more");
+        }
+        Instant now = KiranaChecks.now(clock);
+        BigDecimal fromAfter = Quantities.stored(from.stock().subtract(q));
+        BigDecimal toAfter = Quantities.stored(to.stock().add(q));
+        if (toAfter.abs().compareTo(new BigDecimal("999999999")) > 0) {
+            throw invalid("quantity", "is too large");
+        }
+        products.setStock(from.id(), fromAfter, now);
+        products.setStock(to.id(), toAfter, now);
+        products.addStockMoves(c.shopId(), List.of(
+                new ProductStore.StockMove(from.id(), q.negate(), fromAfter, "MOVE", null, null,
+                        cut("To " + to.name()), clientRef),
+                new ProductStore.StockMove(to.id(), q, toAfter, "MOVE", null, null, cut("From " + from.name()), null)),
+                userId, now);
+        return new StockMoved(view(c, products.find(c.shopId(), from.id()).orElseThrow()),
+                view(c, products.find(c.shopId(), to.id()).orElseThrow()));
+    }
+
+    /**
+     * The product's photo (owner or helper): a PRODUCT_PHOTO this shop uploaded (400 naming fileId otherwise), or
+     * null to remove the shop's own (the catalogue's shared one shows again). When the product's catalogue item has no
+     * shared photo yet, the label is read by AI and the photo shared if it shows that item. The same clientRef again
+     * changes nothing.
+     */
+    @Transactional
+    public ProductView setPhoto(UUID userId, UUID productId, UUID clientRef, UUID fileId) {
+        Caller c = access.caller(userId);
+        Product p = products.lock(c.shopId(), productId).orElseThrow(ProductService::notFound);
+        if (!p.active()) {
+            throw removed();
+        }
+        ProductStore.Extra x = products.extras(List.of(p.id())).get(p.id());
+        UUID own = products.ownPhoto(p.id());
+        if (Objects.equals(own, fileId)) {
+            return view(c, p);
+        }
+        Instant now = KiranaChecks.now(clock);
+        if (fileId != null) {
+            FileRefs.FileRef f = files.find(fileId).orElse(null);
+            if (f == null || !c.shopId().equals(f.shopId()) || !"PRODUCT_PHOTO".equals(f.purpose())) {
+                throw invalid("fileId", "Upload the photo first (as PRODUCT_PHOTO)");
+            }
+            files.keep(fileId);
+        }
+        products.setPhoto(p.id(), fileId);
+        if (own != null) {
+            kiranaFiles.releaseIfUnused(List.of(own), null);
+        }
+        if (fileId != null && x != null && x.catalogueItemId() != null && !catalogue.hasPhoto(x.catalogueItemId())) {
+            reads.queue(c.shopId(), userId, "LABEL", clientRef, List.of(fileId), p.id(), now);
+        }
+        return view(c, p);
+    }
+
+    /** The cost price (owner): what is paid per piece or kg; null clears it. Bills already made don't change. */
+    @Transactional
+    public ProductView setCost(UUID userId, UUID productId, Long costPaise) {
+        Caller c = access.owner(userId);
+        Product p = products.lock(c.shopId(), productId).orElseThrow(ProductService::notFound);
+        products.setCost(p.id(), costPaise);
+        return view(c, p);
+    }
+
+    private static String cut(String note) {
+        return note.length() > 200 ? note.substring(0, 200) : note;
+    }
+
+    // ---------- helpers ----------
+
+    /** A product with its barcodes and photo (no cost: see {@link #view(Caller, Product)}). */
+    private ProductView view(Product p) {
+        ProductStore.Extra x = products.extras(List.of(p.id())).get(p.id());
+        UUID photo = x == null ? null : x.photoFileId();
+        return ProductView.of(p, products.barcodes(p.id())).with(null, photo, link(photo));
+    }
+
+    /** A link to a photo (any shop's: the catalogue shares them), or null. */
+    private String link(UUID photo) {
+        return photo == null ? null : files.links(List.of(photo)).get(photo);
+    }
+
+    /** As {@link #view(Product)}, with the cost price for the owner. */
+    ProductView view(Caller c, Product p) {
+        ProductStore.Extra x = products.extras(List.of(p.id())).get(p.id());
+        UUID photo = x == null ? null : x.photoFileId();
+        return ProductView.of(p, products.barcodes(p.id())).with(x == null || !c.isOwner() ? null : x.costPaise(),
+                photo, link(photo));
+    }
+
+    /** Products with their barcodes and photos, read in two queries for the lot. */
     private List<ProductView> views(List<Product> list) {
-        Map<UUID, List<Barcode>> codes = products.barcodes(list.stream().map(Product::id).toList());
-        return list.stream().map(p -> ProductView.of(p, codes.getOrDefault(p.id(), List.of()))).toList();
+        List<UUID> ids = list.stream().map(Product::id).toList();
+        Map<UUID, List<Barcode>> codes = products.barcodes(ids);
+        Map<UUID, ProductStore.Extra> extras = products.extras(ids);
+        Map<UUID, String> links = files.links(extras.values().stream().map(ProductStore.Extra::photoFileId)
+                .filter(Objects::nonNull).distinct().toList());
+        return list.stream().map(p -> {
+            ProductStore.Extra x = extras.get(p.id());
+            UUID photo = x == null ? null : x.photoFileId();
+            return ProductView.of(p, codes.getOrDefault(p.id(), List.of())).with(null, photo,
+                    photo == null ? null : links.get(photo));
+        }).toList();
     }
 
     /** A barcode's pack: 1 when left out; else as a quantity of the unit (400 naming {@code pack}). */
@@ -386,7 +633,10 @@ public class ProductService {
             }
         }
         if (name != null && products.nameTaken(shopId, name, self)) {
-            throw nameTaken(name);
+            Optional<Product> other = products.findByName(shopId, name).filter(o -> !o.id().equals(self));
+            throw other.isPresent() ? new ApiException(HttpStatus.CONFLICT, "NAME_TAKEN", "You already have a product "
+                    + "called \"" + other.get().name() + "\".", Map.of("productId", other.get().id(), "name",
+                    other.get().name())) : nameTaken(name);
         }
     }
 

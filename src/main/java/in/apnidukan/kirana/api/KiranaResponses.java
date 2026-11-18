@@ -26,10 +26,14 @@ public final class KiranaResponses {
      * A product.
      * @param barcodes   its barcodes in the order linked, each with how many one scan means
      * @param runningOut at or below its alert, or below zero (the count is behind the sales)
+     * @param costPaise  what was paid per piece (or kg) on the last distributor's bill: the owner only (null for a
+     *                   helper, and in lists)
+     * @param photoFileId the shop's own photo, else the shared catalogue's; null: show the category's icon
+     * @param photoUrl    a link that opens it for at least 15 minutes (a shared photo is another shop's file)
      */
     public record ProductView(UUID id, String name, List<BarcodeView> barcodes, Unit unit, long pricePaise,
                               BigDecimal stock, BigDecimal lowStockAt, boolean runningOut, boolean active,
-                              long version, Instant updatedAt) {
+                              long version, Instant updatedAt, Long costPaise, UUID photoFileId, String photoUrl) {
 
         public ProductView {
             barcodes = List.copyOf(barcodes);
@@ -38,7 +42,13 @@ public final class KiranaResponses {
         public static ProductView of(Product p, List<Barcode> barcodes) {
             return new ProductView(p.id(), p.name(), barcodes.stream().map(BarcodeView::of).toList(), p.unit(),
                     p.pricePaise(), Quantities.json(p.stock()), Quantities.json(p.lowStockAt()), p.runningOut(),
-                    p.active(), p.version(), p.updatedAt());
+                    p.active(), p.version(), p.updatedAt(), null, null, null);
+        }
+
+        /** With the cost price (shown to the owner only: null for a helper) and the photo and its link. */
+        public ProductView with(Long cost, UUID photo, String photoLink) {
+            return new ProductView(id, name, barcodes, unit, pricePaise, stock, lowStockAt, runningOut, active, version,
+                    updatedAt, cost, photo, photoLink);
         }
     }
 
@@ -106,12 +116,14 @@ public final class KiranaResponses {
      * @param voidedAt         set when it was cancelled (then voidReason too)
      * @param returns          items brought back, oldest first
      * @param changes          payment changes after saving, oldest first
+     * @param writtenOn        made from a paper bill's photo: the day written on the paper; else null
+     * @param paperPhotoFileId that paper bill's photo (GET /files/{id}/link opens it); else null
      */
     public record BillView(UUID id, long billNo, long subtotalPaise, long discountPaise, long totalPaise,
                            String payment, KhataRef khataCustomer, Long paidNowPaise, String paidNowBy,
                            long onKhataPaise, long refundedPaise, long version, Instant createdAt, String byName,
                            Instant voidedAt, String voidReason, List<BillLineView> lines, List<ReturnView> returns,
-                           List<ChangeView> changes) {
+                           List<ChangeView> changes, java.time.LocalDate writtenOn, UUID paperPhotoFileId) {
 
         public BillView {
             lines = List.copyOf(lines);

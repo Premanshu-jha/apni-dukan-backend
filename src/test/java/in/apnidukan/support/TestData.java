@@ -24,7 +24,9 @@ public final class TestData {
         jdbc.update("DELETE FROM licence_ai_spend");
         jdbc.update("UPDATE licence_ai_alert SET problem = NULL, problem_since = NULL, emailed_at = NULL, announced = false, owed_problem = NULL, owed_since = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
-        for (String table : new String[] {"kirana_khata_entries", "kirana_stock_moves", "kirana_razorpay_events", "kirana_payout_accounts",
+        for (String table : new String[] {"kirana_khata_entries", "kirana_stock_moves", "kirana_unknown_scans", "kirana_purchase_scans", "kirana_purchase_lines",
+                "kirana_wordings", "kirana_purchases", "kirana_reads", "kirana_shop_ai_calls", "kirana_scan_batches",
+                "kirana_scan_stats", "kirana_barcode_votes", "kirana_catalogue_reviews", "kirana_razorpay_events", "kirana_payout_accounts",
                 "kirana_earnings", "kirana_payouts", "kirana_refunds", "kirana_order_lines", "kirana_order_parts",
                 "kirana_orders", "kirana_checkouts", "kirana_ai_calls", "kirana_online", "kirana_catalogue_barcodes",
                 "kirana_bill_return_lines",

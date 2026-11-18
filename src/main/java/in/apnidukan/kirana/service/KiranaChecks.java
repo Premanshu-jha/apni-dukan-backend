@@ -64,6 +64,42 @@ final class KiranaChecks {
         return b;
     }
 
+    /**
+     * Whether a numeric barcode's last digit fits the others (EAN-8, UPC-A, EAN-13, GTIN-14: the standard check digit);
+     * a misread scan usually fails it. Codes of other lengths, or with letters (the shop's own), always pass.
+     */
+    static boolean checkDigitOk(String code) {
+        int n = code.length();
+        if ((n != 8 && n != 12 && n != 13 && n != 14) || !code.chars().allMatch(Character::isDigit)) {
+            return true;
+        }
+        int sum = 0;
+        for (int i = n - 2, w = 3; i >= 0; i--, w = 4 - w) {
+            sum += (code.charAt(i) - '0') * w;
+        }
+        return (10 - sum % 10) % 10 == code.charAt(n - 1) - '0';
+    }
+
+    /**
+     * A label a shop's scale printed for loose goods: an EAN-13 starting 20 to 23. Its first 7 digits name the item
+     * (linked to a product as that barcode); the next 5 are the weight in grams (20, 21) or the price in paise (22, 23).
+     * @param byWeight the value is grams; else paise
+     */
+    record LooseLabel(String itemCode, boolean byWeight, int value) {
+    }
+
+    static java.util.Optional<LooseLabel> looseLabel(String code) {
+        if (code.length() != 13 || !code.chars().allMatch(Character::isDigit) || code.charAt(0) != '2'
+                || code.charAt(1) > '3' || !checkDigitOk(code)) {
+            return java.util.Optional.empty();
+        }
+        int value = Integer.parseInt(code.substring(7, 12));
+        if (value == 0) {
+            return java.util.Optional.empty();
+        }
+        return java.util.Optional.of(new LooseLabel(code.substring(0, 7), code.charAt(1) <= '1', value));
+    }
+
     /** Optional free text: null or blank → null, else cleaned (400 naming the field if not acceptable). */
     static String optional(TextField field, String value) {
         return value == null || value.isBlank() ? null : TextCleaner.clean(field, value);
