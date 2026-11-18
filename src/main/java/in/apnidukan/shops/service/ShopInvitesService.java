@@ -122,6 +122,9 @@ public class ShopInvitesService {
         UUID shopId = owner.getShopId();
         String phone = users.normalizePhone(phoneInput);
         requireInvitesLeft(shopId);   // counted before anything else is checked: a refused try counts too
+        // The shop's row first, shared, as accepting does: a change of the shop's kind (its row FOR UPDATE, then the
+        // members' lock) waits or is waited for here, never in a circle over the invitation's key to the shop
+        shops.findForShare(shopId);
         // Two invitations (or accepts) at the same moment are counted one after the other
         members.lockMembers(shopId);
         Instant now = now();
@@ -166,7 +169,13 @@ public class ShopInvitesService {
     public InviteView inviteBarber(UUID shopId, UUID ownerId, UUID staffId, String phoneInput) {
         String phone = users.normalizePhone(phoneInput);
         requireInvitesLeft(shopId);
+        shops.findForShare(shopId);   // the shop's row first, shared (see inviteHelper)
         members.lockMembers(shopId);
+        // Read again under the members' lock: a change to a kirana (ShopService.changeType, which takes the same lock)
+        // that committed meanwhile is seen, so no barber is ever invited into a kirana
+        if (!"SALON".equals(shops.typeOf(shopId).orElse(null))) {
+            throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "This is only for salons.");
+        }
         Instant now = now();
         invites.expire(shopId, now);
         notOwnNumber(ownerId, phone);

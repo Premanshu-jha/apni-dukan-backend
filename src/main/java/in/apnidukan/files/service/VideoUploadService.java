@@ -156,6 +156,7 @@ public class VideoUploadService {
         if (upload.fileId() != null) {
             return new FileUploadResult(recorded(upload.fileId()), true);
         }
+        requireSalon(owner);   // changed to a kirana since the upload started: nothing to record it for
         if (!clock.instant().isBefore(upload.createdAt().plus(Duration.ofMinutes(COMPLETE_MINUTES)))) {
             throw new ApiException(HttpStatus.CONFLICT, "UPLOAD_EXPIRED",
                     "This upload is too old. Send the video again.");

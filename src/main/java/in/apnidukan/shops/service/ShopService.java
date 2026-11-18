@@ -61,6 +61,9 @@ public class ShopService implements ShopMemberships {
 
     /** 2-digit state code, PAN (5 letters, 4 digits, 1 letter), entity number, 'Z', check character. */
     private static final Pattern GSTIN = Pattern.compile("[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]");
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ShopService.class);
+    private static final String TYPE_CHANGES_KEY = "shop-type-changes:";
+    static final int TYPE_CHANGES_PER_DAY = 10;
     private static final String GSTIN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     /** Unique key that allows one shop per person (named in V3). */
     static final String ONE_SHOP_PER_PERSON = "ux_shop_members_user";
@@ -86,6 +89,7 @@ public class ShopService implements ShopMemberships {
     private final EditUnlocks editUnlocks;
     private final LicenceCheckStore licences;
     private final RateLimiter limits;
+    private final DashboardCounts dashboardCounts;
     /** How many licence checks one salon may start a day (each is a paid AI read). */
     static final int CHECKS_PER_DAY = 10;
     static final String CHECKS_KEY = "licence-checks:";
@@ -94,7 +98,9 @@ public class ShopService implements ShopMemberships {
                        List<ShopChangeListener> listeners, ShopReviewStore review, Clock clock,
                        ShopInvitesService invites,
                        ShopAssignments assignments, SalonFacts salons, KiranaFacts kiranas,
-                       EditUnlocks editUnlocks, LicenceCheckStore licences, RateLimiter limits) {
+                       EditUnlocks editUnlocks, LicenceCheckStore licences, RateLimiter limits,
+                       DashboardCounts dashboardCounts) {
+        this.dashboardCounts = dashboardCounts;
         this.licences = licences;
         this.limits = limits;
         this.salons = salons;
@@ -113,7 +119,7 @@ public class ShopService implements ShopMemberships {
 
     /**
      * Registration step 1: creates the shop as DRAFT with the caller as its OWNER. A kirana unless the app asks for a
-     * salon; the type can't be changed afterwards.
+     * salon; changeable only while registering (changeType).
      * The caller's current access token doesn't carry the shop yet: the app calls POST /auth/refresh next.
      */
     @Transactional
@@ -365,6 +371,57 @@ public class ShopService implements ShopMemberships {
     }
 
     /**
+     * The owner picked the wrong kind at registration (owner only): a draft never approved changes kirana ↔ salon, any
+     * time before Submit for visit (also after the field team sent it back, as it is still being signed up). Becoming
+     * a kirana takes off the salon video and the trade licence (its check ends); both uploads are released, as a
+     * kirana has no screen for them. A kirana's GSTIN stays stored (a salon never shows or uses one) for if it changes
+     * back. The same type again: the shop as it is. 409 WRONG_STATUS once submitted or ever approved; 409 HAS_BARBERS
+     * for a salon whose barbers have their own sign-in or are invited (a kirana has no barbers: they are taken out
+     * first); 429 TOO_MANY_REQUESTS past {@value #TYPE_CHANGES_PER_DAY} changes a day. Locked like every owner change
+     * (the shop's row first, then its members, as accepting or sending an invitation does), so an invitation accepted
+     * or sent at this moment is seen.
+     */
+    @Transactional
+    public ShopResponse changeType(UUID userId, ShopRequests.ChangeType in) {
+        Shop shop = ownedShop(userId, in.version());
+        if (shop.getType() == in.type()) {
+            return ShopResponse.from(shop, ShopRole.OWNER);
+        }
+        if (shop.getStatus() != ShopStatus.DRAFT || shop.isEverApproved()) {
+            throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
+                    "The kind of shop can only be changed while you're registering, before you submit it.");
+        }
+        if (in.type() == ShopType.KIRANA) {
+            members.lockMembers(shop.getId());
+            boolean barbers = members.findByShopIdOrderByCreatedAtAscIdAsc(shop.getId()).stream()
+                    .anyMatch(m -> m.getRole() == ShopRole.BARBER);
+            if (barbers || !invites.waitingBarbers(shop.getId()).isEmpty()) {
+                throw new ApiException(HttpStatus.CONFLICT, "HAS_BARBERS",
+                        "Your barbers have their own sign-in. Remove it, and cancel their invitations, before changing"
+                                + " to a kirana.");
+            }
+        }
+        requireTypeChangesLeft(shop.getId());
+        ShopType from = shop.getType();
+        UUID oldLicence = shop.getRegistrationDocFileId();
+        UUID oldVideo = shop.changeType(in.type(), now());
+        saveShop(shop);
+        dashboardCounts.clearAfterCommit();   // the admin dashboard counts each kind's groups apart
+        // On the field team's timeline: a registration sent back and changed to the other kind is seen at its next visit
+        review.addEvent(shop.getId(), now(), userId, false, ShopEventType.NOTE, null,
+                "Owner changed it from " + kind(from) + " to " + kind(in.type()) + " while registering", List.of());
+        // The shop no longer points at them (saved above), so their rows can go. A kirana has no screen for the trade
+        // licence, so its upload (the owner's name and address) is never left behind where he can't delete it
+        if (oldVideo != null) {
+            files.release(oldVideo);
+        }
+        if (in.type() == ShopType.KIRANA && oldLicence != null) {
+            files.release(oldLicence);
+        }
+        return ShopResponse.from(shop, ShopRole.OWNER);
+    }
+
+    /**
      * Registration step 2: the owner asks for the field team's visit. DRAFT → PENDING_VISIT. Needs the owner's and
      * the shop's photo, and a salon's video (409 PHOTOS_REQUIRED, naming what is missing); then a salon also
      * needs at least one active service and its opening hours, and a kirana its UPI ID (409 REGISTRATION_INCOMPLETE,
@@ -452,6 +509,27 @@ public class ShopService implements ShopMemberships {
         }
         review.addEvent(shop.getId(), now(), ownerId, false, ShopEventType.EDITED, null, null, List.of());
         return true;
+    }
+
+    /**
+     * At most {@value #TYPE_CHANGES_PER_DAY} kind changes a day per shop: each one writes the field team's timeline and
+     * the audit. Redis down: let it through (a change is rare, and the version still orders them).
+     */
+    private void requireTypeChangesLeft(UUID shopId) {
+        String key = TYPE_CHANGES_KEY + shopId;
+        try {
+            if (!limits.tryHit(key, TYPE_CHANGES_PER_DAY, Duration.ofDays(1))) {
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS",
+                        "You've changed the kind of shop many times today. Try again tomorrow, or write to support.")
+                        .retryAfter(limits.secondsLeft(key));
+            }
+        } catch (org.springframework.dao.DataAccessException redisDown) {
+            log.warn("Redis didn't answer the kind-change count ({}); letting it through", redisDown.toString());
+        }
+    }
+
+    private static String kind(ShopType t) {
+        return t == ShopType.SALON ? "salon" : "kirana";
     }
 
     private Shop ownedShop(UUID userId, long version) {
