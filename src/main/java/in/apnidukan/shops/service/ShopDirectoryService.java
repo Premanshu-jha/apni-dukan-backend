@@ -77,6 +77,12 @@ public class ShopDirectoryService implements ShopDirectory {
     }
 
     @Override
+    public boolean usesFile(UUID fileId) {
+        return shops.existsByOwnerPhotoFileIdOrShopPhotoFileIdOrShopVideoFileId(fileId, fileId, fileId)
+                || shops.existsByRegistrationDocFileId(fileId);
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public Map<UUID, ShopCard> findAll(Collection<UUID> shopIds) {
         Map<UUID, ShopCard> out = new HashMap<>();

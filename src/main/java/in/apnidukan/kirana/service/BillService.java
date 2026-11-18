@@ -667,7 +667,8 @@ public class BillService {
                         ch.fromPaidNow(), ch.fromPaidNowBy(), ch.toPayment(),
                         ch.toCustomerId() == null ? null : new KhataRef(ch.toCustomerId(), ch.toCustomerName()),
                         ch.toPaidNow(), ch.toPaidNowBy(), names.get(ch.by()), ch.at())).toList(),
-                paper.map(BillStore.Paper::writtenOn).orElse(null), paper.map(BillStore.Paper::photoFileId).orElse(null));
+                paper.map(BillStore.Paper::writtenOn).orElse(null), paper.map(BillStore.Paper::photoFileId).orElse(null),
+                b.by());
     }
 
     /** A bill as the app shows it (the paper bill flow returns the bill it made). */

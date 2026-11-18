@@ -260,6 +260,15 @@ public class ShopController {
     }
 
     /**
+     * The kind of shop picked by mistake (owner): {"version", "type": "KIRANA"|"SALON"} while registering (a draft
+     * never approved). Becoming a kirana takes off the salon video and trade licence. 409 WRONG_STATUS (submitted or ever approved), HAS_BARBERS, SHOP_CHANGED; 403 OWNER_ONLY.
+     */
+    @PutMapping("/me/type")
+    public ShopResponse changeType(@Valid @RequestBody ShopRequests.ChangeType body) {
+        return shops.changeType(currentUser.get().userId(), body);
+    }
+
+    /**
      * Registration step 2 (owner): ask for the field team's visit. DRAFT → PENDING_VISIT.
      * 409 PHOTOS_REQUIRED until both photos and the salon video are set; then, for a salon, 409
      * REGISTRATION_INCOMPLETE until at least one service and its opening hours are set (the registration document is

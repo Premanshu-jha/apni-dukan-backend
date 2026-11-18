@@ -62,4 +62,10 @@ public interface ShopDirectory {
                     BigDecimal latitude, BigDecimal longitude, String status, String type, UUID shopPhotoFileId,
                     Double distanceKm, Double distanceMetres) {
     }
+
+    /**
+     * Whether a shop still points at this file (a photo, the video, its registration document): the kirana module
+     * then keeps it when its FSSAI certificate lets go of it (uploads of the same bytes share one file).
+     */
+    boolean usesFile(UUID fileId);
 }

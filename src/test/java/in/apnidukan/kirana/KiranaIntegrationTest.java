@@ -128,11 +128,16 @@ class KiranaIntegrationTest {
         UUID shopId = shopId(owner);
         jdbc.update("UPDATE shops SET owner_photo_file_id = ?::uuid, shop_photo_file_id = ?::uuid WHERE id = ?",
                 photo(shopId, "OWNER_PHOTO"), photo(shopId, "SHOP_PHOTO"), shopId);
+        // A kirana records the shop's video too, as a salon does
+        Reply noVideo = post("/shops/me/submit", Map.of("version", version(owner)), owner);
+        assertThat(noVideo.body().get("code")).isEqualTo("PHOTOS_REQUIRED");
+        assertThat(keys(noVideo.body().get("details"))).containsExactly("shopVideoFileId");
+        jdbc.update("UPDATE shops SET shop_video_file_id = ?::uuid WHERE id = ?", video(shopId), shopId);
 
         Reply early = post("/shops/me/submit", Map.of("version", version(owner)), owner);
         assertThat(early.status()).isEqualTo(409);
         assertThat(early.body().get("code")).isEqualTo("REGISTRATION_INCOMPLETE");
-        assertThat(keys(early.body().get("details"))).containsExactly("upiId");
+        assertThat(keys(early.body().get("details"))).containsExactly("upiId", "sellsFood");
 
         assertThat(get("/kirana/settings", owner).body().get("upiId")).isNull();
         Reply helperTries = put("/kirana/settings/upi-id", Map.of("upiId", "helper@ybl"), helper);
@@ -149,9 +154,99 @@ class KiranaIntegrationTest {
         // The helper sees it: he shows the QR at the counter
         assertThat(get("/kirana/settings", helper).body().get("upiId")).isEqualTo("sharmastore@okhdfcbank");
 
+        // Whether it sells food: the owner's answer, needed before Submit
+        Reply asked = post("/shops/me/submit", Map.of("version", version(owner)), owner);
+        assertThat(keys(asked.body().get("details"))).containsExactly("sellsFood");
+        assertThat(put("/kirana/settings/sells-food", Map.of("sellsFood", true), helper).status()).isEqualTo(403);
+        assertThat(put("/kirana/settings/sells-food", Map.of(), owner).status()).isEqualTo(400);
+        Reply food = put("/kirana/settings/sells-food", Map.of("sellsFood", true), owner);
+        assertThat(food.status()).as(food.body().toString()).isEqualTo(200);
+        assertThat(food.body().get("sellsFood")).isEqualTo(true);
+        assertThat(get("/kirana/settings", helper).body().get("sellsFood")).isEqualTo(true);
+
+        // It sells food: its FSSAI licence is needed; one still being checked will do, a refused one won't
+        Reply noFssai = post("/shops/me/submit", Map.of("version", version(owner)), owner);
+        assertThat(noFssai.body().get("code")).isEqualTo("REGISTRATION_INCOMPLETE");
+        assertThat(keys(noFssai.body().get("details"))).containsExactly("fssai");
+        Reply fssai = put("/kirana/online/fssai", Map.of("number", "10012345678901", "fileId", photo(shopId, "REG_DOC")),
+                owner);
+        assertThat(fssai.status()).as(fssai.body().toString()).isEqualTo(200);
+        jdbc.update("UPDATE kirana_online SET fssai_status = 'REJECTED', fssai_reason = 'Not an FSSAI certificate' "
+                + "WHERE shop_id = ?", shopId);
+        Reply refused = post("/shops/me/submit", Map.of("version", version(owner)), owner);
+        assertThat(keys(refused.body().get("details"))).containsExactly("fssai");
+        assertThat(((Map<?, ?>) refused.body().get("details")).get("fssai").toString()).contains("wasn't accepted");
+        jdbc.update("UPDATE kirana_online SET fssai_status = 'CHECKING', fssai_reason = NULL WHERE shop_id = ?",
+                shopId);
+
         Reply submitted = post("/shops/me/submit", Map.of("version", version(owner)), owner);
         assertThat(submitted.status()).as(submitted.body().toString()).isEqualTo(200);
         assertThat(submitted.body().get("status")).isEqualTo("PENDING_VISIT");
+    }
+
+    @Test
+    void aKiranaSellingNoFoodNeedsNoFssaiAndAVerifiedShopChangesTheAnswerOnlyWithTheEditCode() {
+        String owner = kiranaOwner(OWNER_PHONE);
+        UUID shopId = shopId(owner);
+        jdbc.update("UPDATE shops SET owner_photo_file_id = ?::uuid, shop_photo_file_id = ?::uuid, "
+                + "shop_video_file_id = ?::uuid WHERE id = ?", photo(shopId, "OWNER_PHOTO"), photo(shopId, "SHOP_PHOTO"),
+                video(shopId), shopId);
+        TestData.kiranaUpiId(jdbc, shopId);
+        assertThat(put("/kirana/settings/sells-food", Map.of("sellsFood", false), owner).status()).isEqualTo(200);
+        Reply submitted = post("/shops/me/submit", Map.of("version", version(owner)), owner);
+        assertThat(submitted.status()).as(submitted.body().toString()).isEqualTo(200);
+
+        // Waiting for the visit: "No" can't become "Yes" without an FSSAI licence (the rule checked at Submit)
+        Reply skipped = put("/kirana/settings/sells-food", Map.of("sellsFood", true), owner);
+        assertThat(skipped.status()).isEqualTo(409);
+        assertThat(skipped.body().get("code")).isEqualTo("FSSAI_REQUIRED");
+        assertThat(get("/kirana/settings", owner).body().get("sellsFood")).isEqualTo(false);
+
+        // Verified: the answer changes only after the phone code; the same answer again needs none
+        jdbc.update("UPDATE shops SET status = 'APPROVED', ever_approved = true WHERE id = ?", shopId);
+        assertThat(put("/kirana/settings/sells-food", Map.of("sellsFood", false), owner).status()).isEqualTo(200);
+        Reply locked = put("/kirana/settings/sells-food", Map.of("sellsFood", true), owner);
+        assertThat(locked.status()).isEqualTo(403);
+        assertThat(locked.body().get("code")).isEqualTo("EDIT_LOCKED");
+        unlockEditing(owner);
+        assertThat(put("/kirana/settings/sells-food", Map.of("sellsFood", true), owner).body().get("code"))
+                .isEqualTo("FSSAI_REQUIRED");
+        // An expired licence doesn't count either; one being checked does
+        Reply fssai = put("/kirana/online/fssai", Map.of("number", "10012345678901", "fileId", photo(shopId, "REG_DOC")),
+                owner);
+        assertThat(fssai.status()).as(fssai.body().toString()).isEqualTo(200);
+        jdbc.update("UPDATE kirana_online SET fssai_status = 'VERIFIED', fssai_valid_until = DATE '2020-01-01' "
+                + "WHERE shop_id = ?", shopId);
+        assertThat(put("/kirana/settings/sells-food", Map.of("sellsFood", true), owner).body().get("code"))
+                .isEqualTo("FSSAI_REQUIRED");
+        jdbc.update("UPDATE kirana_online SET fssai_status = 'CHECKING', fssai_valid_until = NULL WHERE shop_id = ?",
+                shopId);
+        assertThat(put("/kirana/settings/sells-food", Map.of("sellsFood", true), owner).body().get("sellsFood"))
+                .isEqualTo(true);
+    }
+
+    @Test
+    void anExpiredFssaiLicenceDoesntCountAtSubmit() {
+        String owner = kiranaOwner(OWNER_PHONE);
+        UUID shopId = shopId(owner);
+        jdbc.update("UPDATE shops SET owner_photo_file_id = ?::uuid, shop_photo_file_id = ?::uuid, "
+                + "shop_video_file_id = ?::uuid WHERE id = ?", photo(shopId, "OWNER_PHOTO"), photo(shopId, "SHOP_PHOTO"),
+                video(shopId), shopId);
+        TestData.kiranaUpiId(jdbc, shopId);
+        assertThat(put("/kirana/settings/sells-food", Map.of("sellsFood", true), owner).status()).isEqualTo(200);
+        assertThat(put("/kirana/online/fssai", Map.of("number", "10012345678901", "fileId", photo(shopId, "REG_DOC")),
+                owner).status()).isEqualTo(200);
+        jdbc.update("UPDATE kirana_online SET fssai_status = 'VERIFIED', fssai_valid_until = DATE '2020-01-01' "
+                + "WHERE shop_id = ?", shopId);
+        Reply expired = post("/shops/me/submit", Map.of("version", version(owner)), owner);
+        assertThat(expired.body().get("code")).isEqualTo("REGISTRATION_INCOMPLETE");
+        assertThat(((Map<?, ?>) expired.body().get("details")).get("fssai").toString()).contains("expired");
+        assertThat(expired.body().get("message").toString()).contains("expired");
+
+        // One being checked will do (the field team sees how it went: AdminIntegrationTest)
+        jdbc.update("UPDATE kirana_online SET fssai_status = 'CHECKING', fssai_valid_until = NULL WHERE shop_id = ?",
+                shopId);
+        assertThat(post("/shops/me/submit", Map.of("version", version(owner)), owner).status()).isEqualTo(200);
     }
 
     // ---------- the catalogue ----------
@@ -318,6 +413,9 @@ class KiranaIntegrationTest {
         assertThat(bill.get("totalPaise")).isEqualTo(2 * 2700 + 1200 + 2700);
         assertThat(bill.get("payment")).isEqualTo("UPI");
         assertThat(bill.get("byName")).isEqualTo("Test person");
+        // Who made it, by account (two helpers may share a name): the app shows a helper his own bills by it
+        assertThat(bill.get("byId")).isEqualTo(jdbc.queryForObject("SELECT id FROM users WHERE phone = ?", UUID.class,
+                HELPER_PHONE).toString());
         assertThat(pluck(bill.get("lines"), "amountPaise"))
                 .containsExactly(5400, 1200, 2700);
         assertThat(r.body().get("repeated")).isEqualTo(false);
@@ -1451,6 +1549,17 @@ class KiranaIntegrationTest {
 
     private long version(String token) {
         return ((Number) get("/shops/me", token).body().get("version")).longValue();
+    }
+
+    /** A SHOP_VIDEO file of this shop (recorded as the video upload would). */
+    private String video(UUID shopId) {
+        UUID file = UUID.randomUUID();
+        UUID owner = jdbc.queryForObject("SELECT user_id FROM shop_members WHERE shop_id = ? AND role = 'OWNER'",
+                UUID.class, shopId);
+        jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
+                        + "uploaded_by, created_at) VALUES (?, ?, 'SHOP_VIDEO', ?, 'video/mp4', 10, ?, ?, now())", file,
+                shopId, "test/" + file + ".mp4", file.toString().replace("-", "") + "0".repeat(32), owner);
+        return file.toString();
     }
 
     private String photo(UUID shopId, String purpose) {

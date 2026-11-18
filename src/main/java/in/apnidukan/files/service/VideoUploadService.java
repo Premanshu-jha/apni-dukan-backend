@@ -2,7 +2,6 @@ package in.apnidukan.files.service;
 
 import in.apnidukan.common.context.CurrentUser;
 import in.apnidukan.common.context.CurrentUserProvider;
-import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.files.domain.FilePurpose;
 import in.apnidukan.files.domain.StoredFile;
@@ -31,7 +30,7 @@ import java.util.OptionalLong;
 import java.util.UUID;
 
 /**
- * The salon video (registration): too big for the backend, so the phone sends it straight to R2.
+ * The shop video (registration, a salon's or a kirana's): too big for the backend, so the phone sends it straight to R2.
  * <ol>
  *   <li>{@link #start}: the owner of a salon says the video's size, type and length (length may be unknown); checked
  *       here (15-45 s, up to 100 MB), then a one-time upload link valid {@value #LINK_MINUTES} minutes to a
@@ -84,31 +83,28 @@ public class VideoUploadService {
     private final FileDeletionStore deletions;
     private final FileStorage storage;
     private final CurrentUserProvider currentUser;
-    private final ShopDirectory shops;
     private final TransactionOperations transactions;
     private final Clock clock;
 
     public VideoUploadService(VideoUploadStore uploads, StoredFileRepository files, FileDeletionStore deletions,
-                              FileStorage storage, CurrentUserProvider currentUser, ShopDirectory shops,
+                              FileStorage storage, CurrentUserProvider currentUser,
                               TransactionOperations transactions, Clock clock) {
         this.uploads = uploads;
         this.files = files;
         this.deletions = deletions;
         this.storage = storage;
         this.currentUser = currentUser;
-        this.shops = shops;
         this.transactions = transactions;
         this.clock = clock;
     }
 
     /**
-     * A one-time upload link for the salon video. 400 VALIDATION_FAILED (length or size field), 400
-     * UNSUPPORTED_FILE_TYPE, 413 FILE_TOO_LARGE, 403 OWNER_ONLY, 409 NOT_A_SALON, 429 TOO_MANY_UPLOADS.
+     * A one-time upload link for the shop video. 400 VALIDATION_FAILED (length or size field), 400
+     * UNSUPPORTED_FILE_TYPE, 413 FILE_TOO_LARGE, 403 OWNER_ONLY, 429 TOO_MANY_UPLOADS.
      * @param durationSeconds null when the phone couldn't read the length (then only the size limit applies)
      */
     public UploadLink start(long sizeBytes, String contentType, Integer durationSeconds) {
         CurrentUser owner = owner();
-        requireSalon(owner);
         VideoFormat format = VideoFormat.ofContentType(contentType).orElseThrow(() -> ApiException.badRequest(
                 "UNSUPPORTED_FILE_TYPE", "The video must be MP4, MOV or WebM"));
         if (sizeBytes <= 0) {
@@ -215,17 +211,9 @@ public class VideoUploadService {
     private CurrentUser owner() {
         CurrentUser user = currentUser.requireShop();
         if (!"OWNER".equals(user.role())) {
-            throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can add the salon video.");
+            throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the shop owner can add the shop video.");
         }
         return user;
-    }
-
-    /** 409 NOT_A_SALON for a kirana: only salons send a video. */
-    private void requireSalon(CurrentUser owner) {
-        boolean salon = shops.find(owner.shopId()).map(c -> "SALON".equals(c.type())).orElse(false);
-        if (!salon) {
-            throw new ApiException(HttpStatus.CONFLICT, "NOT_A_SALON", "The salon video is only for salons.");
-        }
     }
 
     /** The file a completed upload recorded; 409 UPLOAD_GONE once it was replaced, or purged unused after a day. */

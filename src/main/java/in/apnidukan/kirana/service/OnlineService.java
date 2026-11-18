@@ -141,11 +141,13 @@ public class OnlineService {
         boolean renewal = number.equals(o.fssaiNumber());
         boolean keepsCurrent = renewal && "VERIFIED".equals(o.fssaiStatus()) && o.fssaiValidUntil() != null
                 && !o.fssaiValidUntil().isBefore(today);
+        // An old certificate that is also the shop's registration document (one upload of both) stays for it
         if (o.fssaiFileId() != null && !o.fssaiFileId().equals(file.id()) && !keepsCurrent
-                && !o.fssaiFileId().equals(o.fssaiKeptFileId())) {
+                && !o.fssaiFileId().equals(o.fssaiKeptFileId()) && !shops.usesFile(o.fssaiFileId())) {
             files.release(o.fssaiFileId());
         }
-        if (!renewal && o.fssaiKeptFileId() != null) {
+        if (!renewal && o.fssaiKeptFileId() != null && !o.fssaiKeptFileId().equals(file.id())
+                && !shops.usesFile(o.fssaiKeptFileId())) {
             files.release(o.fssaiKeptFileId());   // another licence: nothing of the earlier one is kept
         }
         online.setFssai(c.shopId(), number, file.id(), today, userId, now);

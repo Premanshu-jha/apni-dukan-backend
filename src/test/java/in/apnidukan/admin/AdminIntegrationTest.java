@@ -1350,6 +1350,23 @@ class AdminIntegrationTest {
         return id;
     }
 
+    @Test
+    void theFieldTeamSeesAKiranasFoodAnswerAndHowItsFssaiLicenceWent() {
+        UUID kirana = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000031");
+        UUID cert = file(kirana, ownerOf(kirana), "REG_DOC");
+        jdbc.update("INSERT INTO kirana_settings (shop_id, next_bill_no, sells_food) VALUES (?, 1, true)", kirana);
+        jdbc.update("INSERT INTO kirana_online (shop_id, taking_orders, fssai_number, fssai_file_id, fssai_status, "
+                + "fssai_reason, fssai_tries, upi_recheck, rating_sum, rating_count, updated_at) "
+                + "VALUES (?, false, '10012345678901', ?, 'REJECTED', 'A GST certificate', 1, false, 0, 0, now())",
+                kirana, cert);
+        Map<?, ?> k = (Map<?, ?>) field(get("/admin/shops/" + kirana, boss).body(), "kirana");
+        assertThat(k.get("sellsFood")).isEqualTo(true);
+        Map<?, ?> fssai = (Map<?, ?>) k.get("fssai");
+        assertThat(fssai.get("status")).isEqualTo("REJECTED");
+        assertThat(fssai.get("number")).isEqualTo("10012345678901");
+        assertThat(fssai.get("reason")).isEqualTo("A GST certificate");
+    }
+
     /** A shop with an owner, in a status, set straight in the database (its history starts with the next change). */
     private UUID shop(String type, String status, String name, String ownerPhone) {
         UUID owner = person(ownerPhone);

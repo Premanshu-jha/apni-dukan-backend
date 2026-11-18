@@ -192,12 +192,14 @@ public class OnlineStore {
 
     /**
      * Certificates waiting for the AI and tried fewer than {@code maxTries} times (after that a super admin decides),
-     * those never tried first.
+     * those never tried first. Only a kirana's: a shop that became a salon while registering keeps its row (for if it
+     * changes back) but no paid AI read is spent on it meanwhile.
      */
     public List<Checking> checking(int maxTries, int limit) {
-        return jdbc.query("SELECT shop_id, fssai_number, fssai_file_id, fssai_tries FROM kirana_online "
-                        + "WHERE fssai_status = 'CHECKING' AND fssai_tries < ? "
-                        + "ORDER BY fssai_checked_at NULLS FIRST, shop_id LIMIT ?",
+        return jdbc.query("SELECT o.shop_id, o.fssai_number, o.fssai_file_id, o.fssai_tries FROM kirana_online o "
+                        + "JOIN shops s ON s.id = o.shop_id AND s.type = 'KIRANA' "
+                        + "WHERE o.fssai_status = 'CHECKING' AND o.fssai_tries < ? "
+                        + "ORDER BY o.fssai_checked_at NULLS FIRST, o.shop_id LIMIT ?",
                 (rs, i) -> new Checking(rs.getObject(1, UUID.class), rs.getString(2), rs.getObject(3, UUID.class),
                         rs.getInt(4)), maxTries, limit);
     }
