@@ -34,7 +34,7 @@ class ShopRecheckTest {
         assertThat(shop.getStatus()).isEqualTo(ShopStatus.APPROVED);
         assertThat(shop.getRecheckSince()).isEqualTo(T0.plusSeconds(60));
         assertThat(shop.waitingForVisit()).isTrue();
-        assertThat(ReviewGroup.of(shop.getStatus(), shop.getStatusReason(), true, true)).isEqualTo(ReviewGroup.RECHECK);
+        assertThat(ReviewGroup.of(shop.getStatus(), shop.getStatusReason(), true, true, false)).isEqualTo(ReviewGroup.RECHECK);
 
         // A second change while it waits keeps its place in the queue
         assertThat(shop.requestRecheck(T0.plusSeconds(120))).isFalse();
@@ -45,7 +45,7 @@ class ShopRecheckTest {
         assertThat(shop.getStatus()).isEqualTo(ShopStatus.APPROVED);
         assertThat(shop.getRecheckSince()).isNull();
         assertThat(shop.waitingForVisit()).isFalse();
-        assertThat(ReviewGroup.of(shop.getStatus(), null, true, false)).isEqualTo(ReviewGroup.LIVE);
+        assertThat(ReviewGroup.of(shop.getStatus(), null, true, false, false)).isEqualTo(ReviewGroup.LIVE);
         assertThatThrownBy(() -> shop.approve(T0.plusSeconds(240))).isInstanceOf(IllegalStateException.class);
     }
 

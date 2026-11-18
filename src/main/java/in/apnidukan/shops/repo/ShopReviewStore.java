@@ -41,6 +41,7 @@ public class ShopReviewStore {
 
     private static final String GROUP = "CASE "
             + "WHEN " + RECHECK_SQL + " THEN 'RECHECK' "
+            + "WHEN " + ShopAssignmentStore.SET_UP_S + " THEN NULL "
             + "WHEN s.status = 'PENDING_VISIT' THEN 'FIRST_VISIT' "
             + "WHEN s.status = 'DRAFT' AND s.status_reason IS NOT NULL THEN 'SENT_BACK' "
             + "WHEN s.status = 'APPROVED' THEN 'LIVE' "
@@ -105,7 +106,8 @@ public class ShopReviewStore {
         // The group as plain conditions on the shop's columns, so a page is one range of ix_shops_review_list
         StringBuilder sql = new StringBuilder("SELECT s.id FROM shops s WHERE s.type = ? AND ");
         sql.append(switch (group) {
-            case FIRST_VISIT -> "s.status = 'PENDING_VISIT' AND NOT s.ever_approved";
+            case FIRST_VISIT -> "s.status = 'PENDING_VISIT' AND NOT s.ever_approved AND NOT "
+                    + ShopAssignmentStore.SET_UP_S;
             case RECHECK -> RECHECK_SQL;
             case SENT_BACK -> "s.status = 'DRAFT' AND s.status_reason IS NOT NULL";
             case LIVE -> "s.status = 'APPROVED' AND s.recheck_since IS NULL";

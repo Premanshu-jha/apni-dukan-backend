@@ -155,6 +155,15 @@ public class Shop {
     private Instant licenceCheckDueAt;
 
     /**
+     * A kirana: when its owner said all its products are added (V76; null until then, and always for a salon). Its
+     * field visit is booked only then, and it can't be approved before. Written in SQL only (ShopRepository
+     * .markProductsReady), never by saving the entity, so a save can't undo it.
+     */
+    @Column(name = "products_ready_at", insertable = false, updatable = false)
+    @NotAudited
+    private Instant productsReadyAt;
+
+    /**
      * When a live shop started waiting for the field team's re-check (its owner changed what they checked); null when
      * nothing waits. Only ever set while APPROVED: the shop stays live meanwhile (see {@link #requestRecheck}).
      */
@@ -392,6 +401,19 @@ public class Shop {
     /** Waiting for the field team: its first visit, a reinstated shop's visit, or a live shop's re-check. */
     public boolean waitingForVisit() {
         return status == ShopStatus.PENDING_VISIT || recheckSince != null;
+    }
+
+    /** When a kirana's products were set up (null until then; always null for a salon). */
+    public Instant getProductsReadyAt() {
+        return productsReadyAt;
+    }
+
+    /**
+     * Ready for its field visit to be booked: a salon once submitted; a kirana once submitted and its products set up
+     * too (a live shop's re-check never waits for that).
+     */
+    public boolean visitBookable() {
+        return type != ShopType.KIRANA || productsReadyAt != null || everApproved;
     }
 
     /**

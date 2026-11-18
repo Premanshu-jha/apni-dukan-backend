@@ -21,10 +21,19 @@ import java.util.UUID;
 public class ShopAssignmentStore {
 
     /**
+     * A kirana submitted for its first visit while its products aren't set up yet (V76): it waits for no visit until
+     * then, so it is in no agent's list, no count and no group. SET_UP_S: the same for the table aliased "s".
+     */
+    public static final String SET_UP = "(type = 'KIRANA' AND status = 'PENDING_VISIT' AND NOT ever_approved AND "
+            + "products_ready_at IS NULL)";
+    public static final String SET_UP_S = "(s.type = 'KIRANA' AND s.status = 'PENDING_VISIT' AND NOT s.ever_approved "
+            + "AND s.products_ready_at IS NULL)";
+
+    /**
      * Waiting for a visit: its first, a reinstated shop's, or a live shop's re-check (V41). The same words as the
      * predicates of V42's indexes, so those are used.
      */
-    static final String WAITING = "(status = 'PENDING_VISIT' OR recheck_since IS NOT NULL)";
+    static final String WAITING = "((status = 'PENDING_VISIT' OR recheck_since IS NOT NULL) AND NOT " + SET_UP + ")";
 
     private final JdbcTemplate jdbc;
 
@@ -37,8 +46,9 @@ public class ShopAssignmentStore {
      * for each other. Empty if there's no such business.
      */
     public Optional<Locked> lock(UUID shopId) {
-        return jdbc.query("SELECT id, status, recheck_since, pincode, assigned_admin_id, name, area FROM shops "
-                        + "WHERE id = ? FOR UPDATE", (rs, i) -> locked(rs), shopId).stream().findFirst();
+        return jdbc.query("SELECT id, status, recheck_since, pincode, assigned_admin_id, name, area, " + SET_UP
+                        + " AS setting_up FROM shops WHERE id = ? FOR UPDATE", (rs, i) -> locked(rs), shopId).stream()
+                .findFirst();
     }
 
     /** Who it is assigned to (no lock); empty when unassigned or there's no such business. */
@@ -59,7 +69,8 @@ public class ShopAssignmentStore {
                 + "AND u.deleted_at IS NULL AND (?::uuid IS NULL OR p.user_id <> ?::uuid) "
                 + "AND NOT EXISTS (SELECT 1 FROM shop_members m WHERE m.shop_id = ? AND m.user_id = p.user_id) "
                 + "ORDER BY (SELECT count(*) FROM shops s WHERE s.assigned_admin_id = p.user_id "
-                + "AND (s.status = 'PENDING_VISIT' OR s.recheck_since IS NOT NULL) AND s.id <> ?), "
+                + "AND (s.status = 'PENDING_VISIT' OR s.recheck_since IS NOT NULL) AND NOT " + SET_UP_S
+                + " AND s.id <> ?), "
                 + "u.admin_since NULLS FIRST, u.id LIMIT 1",
                 UUID.class, pincode, except, except, shopId, shopId).stream().findFirst();
     }
@@ -103,7 +114,9 @@ public class ShopAssignmentStore {
      * an agent with many is handled in slices of one statement each.
      */
     public List<Locked> lockPendingOf(UUID adminId, UUID afterId, int max) {
-        return jdbc.query("SELECT id, status, recheck_since, pincode, assigned_admin_id, name, area FROM shops "
+        return jdbc.query("SELECT id, status, recheck_since, pincode, assigned_admin_id, name, area, "
+                        + "FALSE AS setting_up "
+                        + "FROM shops "
                         + "WHERE assigned_admin_id = ? AND " + WAITING + " "
                         + "AND (?::uuid IS NULL OR id > ?::uuid) "
                         + "ORDER BY id LIMIT ? FOR UPDATE",
@@ -118,7 +131,9 @@ public class ShopAssignmentStore {
         if (pincodes.isEmpty()) {
             return List.of();
         }
-        return jdbc.query("SELECT id, status, recheck_since, pincode, assigned_admin_id, name, area FROM shops "
+        return jdbc.query("SELECT id, status, recheck_since, pincode, assigned_admin_id, name, area, "
+                        + "FALSE AS setting_up "
+                        + "FROM shops "
                         + "WHERE " + WAITING + " AND assigned_admin_id IS NULL AND pincode = ANY (?) "
                         + "AND (?::uuid IS NULL OR id > ?::uuid) ORDER BY id LIMIT ? FOR UPDATE",
                 ps -> {
@@ -133,7 +148,8 @@ public class ShopAssignmentStore {
     private static Locked locked(java.sql.ResultSet rs) throws java.sql.SQLException {
         return new Locked(rs.getObject("id", UUID.class), rs.getString("status"),
                 rs.getTimestamp("recheck_since") != null, rs.getString("pincode"),
-                rs.getObject("assigned_admin_id", UUID.class), rs.getString("name"), rs.getString("area"));
+                rs.getObject("assigned_admin_id", UUID.class), rs.getString("name"), rs.getString("area"),
+                rs.getBoolean("setting_up"));
     }
 
     /** How many businesses waiting for a visit each admin has (only those with any). */
@@ -171,11 +187,14 @@ public class ShopAssignmentStore {
      * @param assignee   null when unassigned
      */
     public record Locked(UUID shopId, String status, boolean rechecking, String pincode, UUID assignee, String name,
-                         String area) {
+                         String area, boolean settingUp) {
 
-        /** Waiting for a visit (first, reinstated, or a live business's re-check). */
+        /**
+         * Waiting for a visit (first, reinstated, or a live business's re-check); a kirana whose products aren't set
+         * up yet doesn't wait for one.
+         */
         public boolean pending() {
-            return "PENDING_VISIT".equals(status) || rechecking;
+            return ("PENDING_VISIT".equals(status) || rechecking) && !settingUp;
         }
     }
 }
