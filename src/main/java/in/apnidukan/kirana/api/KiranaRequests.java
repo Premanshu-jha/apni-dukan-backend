@@ -253,6 +253,9 @@ public final class KiranaRequests {
     }
 
     /** The shop's UPI ID, e.g. sharmastore@okhdfcbank (spaces removed, stored lower case). Owner only. */
+    public record SellsFood(@NotNull(message = "Say whether you sell any food items") Boolean sellsFood) {
+    }
+
     public record UpiId(@NotBlank(message = "Enter the shop's UPI ID")
                         @Size(max = 120, message = "A UPI ID has at most 120 characters") String upiId) {
     }

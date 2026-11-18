@@ -11,7 +11,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * Decides, in code, whether what the AI read from a trade licence passes for this salon: it looks genuine (a readable
+ * Decides, in code, whether what the AI read from a trade licence (or a kirana's Shops and Establishments certificate)
+ * passes for this shop: it looks genuine (a readable
  * trade licence for a salon, nothing visibly edited, a number, still valid) and it matches the salon (its business or
  * owner name, and its pincode or area). One salon per licence number is checked by the database (DUPLICATE). A
  * provisional licence (issued on payment, before the inspection) passes: it is a licence until its last day.
@@ -35,11 +36,14 @@ public final class LicenceRules {
         }
     }
 
-    /** Words that say "salon" in a name: they don't make two names the same business. */
+    /** Words that say "salon" or "store" in a name: they don't make two names the same business. */
     private static final Set<String> NAME_NOISE = Set.of("salon", "saloon", "salons", "hair", "hairs", "cut", "cuts",
             "style", "styles", "studio", "unisex", "men", "mens", "gents", "ladies", "beauty", "parlour", "parlor",
             "spa", "shop", "the", "and", "new", "family", "care", "point", "zone", "center", "centre", "barber",
-            "barbers", "makeover", "looks", "academy", "sri", "shri", "m/s", "ms");
+            "barbers", "makeover", "looks", "academy", "sri", "shri", "m/s", "ms",
+            "kirana", "general", "store", "stores", "provision", "provisions", "traders", "trading", "mart", "super",
+            "supermarket", "market", "bazaar", "bazar", "enterprises", "enterprise", "agencies", "departmental",
+            "grocery", "groceries", "daily", "needs", "fresh");
 
     /**
      * Names and surnames shared by many unrelated people in Hyderabad: one of them alone doesn't make two names the
@@ -73,11 +77,26 @@ public final class LicenceRules {
     private LicenceRules() {
     }
 
+    /** A salon's trade licence (the rules before kiranas could add a document). */
     public static Outcome decide(LicenceExtract read, Salon salon, LocalDate today) {
+        return decide(read, salon, false, false, today);
+    }
+
+    /**
+     * A shop's document: a salon's trade licence ({@code kirana} false), or a kirana's trade licence or Shops and
+     * Establishments certificate ({@code shopsEstablishment}). A kirana's must be for a grocery, kirana, provisions or
+     * general store; a Shops and Establishments certificate passes with no last day when none is printed (many have
+     * none), and then its last day is null.
+     */
+    public static Outcome decide(LicenceExtract read, Salon salon, boolean kirana, boolean shopsEstablishment,
+                                 LocalDate today) {
         if (!read.readable()) {
             return Outcome.fail(LicenceCheckReason.UNREADABLE);
         }
-        if (!read.tradeLicence()) {
+        if (shopsEstablishment && !read.shopsEstablishment()) {
+            return Outcome.fail(LicenceCheckReason.NOT_SHOPS_ESTABLISHMENT);
+        }
+        if (!shopsEstablishment && !read.tradeLicence()) {
             return Outcome.fail(LicenceCheckReason.NOT_TRADE_LICENCE);
         }
         if (read.looksEdited()) {
@@ -87,25 +106,36 @@ public final class LicenceRules {
         if (number == null) {
             return Outcome.fail(LicenceCheckReason.NO_NUMBER);
         }
-        if (!read.salonTrade()) {
+        if (!kirana && !read.salonTrade()) {
             return Outcome.fail(LicenceCheckReason.NOT_A_SALON_TRADE);
         }
+        // A kirana's: a trade licence names the trade; a certificate that prints no nature of business says nothing
+        if (kirana && !read.retailTrade() && (!shopsEstablishment || read.tradeCategory() != null)) {
+            return Outcome.fail(LicenceCheckReason.NOT_A_SHOP_TRADE);
+        }
         if (read.validUntil() == null) {
-            return Outcome.fail(LicenceCheckReason.NO_VALIDITY);
+            return shopsEstablishment ? sameBusiness(read, salon, number, null)
+                    : Outcome.fail(LicenceCheckReason.NO_VALIDITY);
         }
         if (read.validUntil().isBefore(today)) {
             return Outcome.fail(LicenceCheckReason.EXPIRED);
         }
         if (read.validUntil().isAfter(today.plusYears(MAX_YEARS_VALID))) {
-            return Outcome.fail(LicenceCheckReason.NO_VALIDITY);
+            return shopsEstablishment ? sameBusiness(read, salon, number, null)
+                    : Outcome.fail(LicenceCheckReason.NO_VALIDITY);
         }
+        return sameBusiness(read, salon, number, read.validUntil());
+    }
+
+    /** The last checks, the same for every document: it is this shop's (name, then place). */
+    private static Outcome sameBusiness(LicenceExtract read, Salon salon, String number, LocalDate validUntil) {
         if (!sameName(read.tradeName(), salon.name()) && !sameName(read.ownerName(), salon.ownerName())) {
             return Outcome.fail(LicenceCheckReason.NAME_MISMATCH);
         }
         if (!samePlace(read, salon)) {
             return Outcome.fail(LicenceCheckReason.ADDRESS_MISMATCH);
         }
-        return new Outcome(true, null, number, read.validUntil());
+        return new Outcome(true, null, number, validUntil);
     }
 
     /** Letters and digits only, upper-case; null if fewer than 4 are left. */

@@ -263,37 +263,55 @@ public class Shop {
      * trade licence counted: it stays FAILED NOT_TRADE_LICENCE and is never sent to the AI).
      */
     public boolean restartLicenceCheck(Instant now) {
-        if (registrationDocFileId == null || registrationDocType != RegistrationDocType.TRADE_LICENCE) {
+        if (registrationDocFileId == null || !checkable(registrationDocType)) {
             return false;
         }
         setRegistrationDoc(registrationDocType, registrationDocFileId, now);
         return true;
     }
 
+    /** The file a change of kind left nothing pointing at (for the caller to release); null when none. */
+    public record Dropped(UUID document) {
+    }
+
     /**
-     * The owner picked the wrong kind at registration: a draft never approved changes kirana ↔ salon. What only the
-     * old kind has goes: a salon's video and trade licence (and its check) when it becomes a kirana. A kirana's GSTIN
-     * stays stored when it becomes a salon (a salon never shows or uses one), for if it changes back. The name, owner, address, pin and photos stay. Returns the video it no longer points at
-     * (for the caller to release), or null.
+     * The owner picked the wrong kind at registration: a draft never approved changes kirana ↔ salon. The name, owner,
+     * address, photos and video stay. The document stays when the new kind takes
+     * it, and is checked again for the new kind (a kirana's must be a grocery or general store's); one the new kind
+     * doesn't take (a Shops and Establishments certificate on a salon) goes. A kirana's GSTIN stays stored when it
+     * becomes a salon (a salon never shows or uses one), for if it changes back.
      */
-    public UUID changeType(ShopType to, Instant now) {
+    public Dropped changeType(ShopType to, Instant now) {
         if (status != ShopStatus.DRAFT || everApproved) {
             throw new IllegalStateException("Only a draft never approved changes its type, not " + status);
         }
-        UUID oldVideo = null;
-        if (to == ShopType.KIRANA) {
-            oldVideo = shopVideoFileId;
-            this.shopVideoFileId = null;
-            setRegistrationDoc(null, null, now);
-        }
         this.type = to;
+        UUID oldDocument = null;
+        if (registrationDocFileId != null && registrationDocType != RegistrationDocType.UDYAM) {
+            if (checkable(registrationDocType)) {
+                setRegistrationDoc(registrationDocType, registrationDocFileId, now);   // checked again for this kind
+            } else {
+                oldDocument = registrationDocFileId;
+                setRegistrationDoc(null, null, now);
+            }
+        }
         this.updatedAt = now;
-        return oldVideo;
+        return new Dropped(oldDocument);
     }
 
-    /** What the field team needs before a visit: both photos, and for a salon its video too. */
+    /**
+     * Whether this kind of document is checked for this shop: a salon's trade licence; a kirana's trade licence or Shops
+     * and Establishments certificate. (Udyam and a salon's Shops and Establishments certificate, added before only a
+     * trade licence counted, stay FAILED and are never sent to the AI.)
+     */
+    public boolean checkable(RegistrationDocType doc) {
+        return doc == RegistrationDocType.TRADE_LICENCE
+                || (type == ShopType.KIRANA && doc == RegistrationDocType.SHOPS_ESTABLISHMENT);
+    }
+
+    /** What the field team needs before a visit: both photos and the shop's video (a salon's and a kirana's). */
     public boolean readyForVisit() {
-        return hasBothPhotos() && (type != ShopType.SALON || shopVideoFileId != null);
+        return hasBothPhotos() && shopVideoFileId != null;
     }
 
     /** Registration done: DRAFT → PENDING_VISIT, waiting for the field team. Needs both photos and the video. */

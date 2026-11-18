@@ -118,12 +118,15 @@ public final class KiranaResponses {
      * @param changes          payment changes after saving, oldest first
      * @param writtenOn        made from a paper bill's photo: the day written on the paper; else null
      * @param paperPhotoFileId that paper bill's photo (GET /files/{id}/link opens it); else null
+     * @param byId             who made it (the app tells a helper's own bills by it: he may change them for 10
+     *                         minutes); null for one made by no one at the counter
      */
     public record BillView(UUID id, long billNo, long subtotalPaise, long discountPaise, long totalPaise,
                            String payment, KhataRef khataCustomer, Long paidNowPaise, String paidNowBy,
                            long onKhataPaise, long refundedPaise, long version, Instant createdAt, String byName,
                            Instant voidedAt, String voidReason, List<BillLineView> lines, List<ReturnView> returns,
-                           List<ChangeView> changes, java.time.LocalDate writtenOn, UUID paperPhotoFileId) {
+                           List<ChangeView> changes, java.time.LocalDate writtenOn, UUID paperPhotoFileId,
+                           UUID byId) {
 
         public BillView {
             lines = List.copyOf(lines);
@@ -318,7 +321,7 @@ public final class KiranaResponses {
      */
     public record KhataEntryView(UUID id, String kind, long amountPaise, long balanceAfter, UUID billId, Long billNo,
                                  String method, String note, UUID reversesId, boolean reversed, String byName,
-                                 Instant at) {
+                                 Instant at, UUID byId) {
     }
 
     /** A khata customer with their entries, newest first (50 at a time; nextEntries for older ones). */
@@ -341,6 +344,7 @@ public final class KiranaResponses {
      * @param shopName  what the UPI QR shows as the payee
      * @param upiId     the shop's UPI ID, null until the owner sets it (needed before Submit for visit)
      */
-    public record Settings(String shopName, String upiId, Instant upiUpdatedAt) {
+    /** @param sellsFood whether it sells any food (packed or loose): Yes needs its FSSAI licence; null until answered */
+    public record Settings(String shopName, String upiId, Instant upiUpdatedAt, Boolean sellsFood) {
     }
 }

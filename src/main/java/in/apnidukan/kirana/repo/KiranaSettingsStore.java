@@ -20,22 +20,77 @@ public class KiranaSettingsStore {
     }
 
     /** The shop's UPI ID and when it was last set; both null until the owner sets it. */
-    public record Settings(String upiId, Instant upiUpdatedAt) {
+    /** @param sellsFood whether it sells any food (packed or loose); null until the owner answers */
+    public record Settings(String upiId, Instant upiUpdatedAt, Boolean sellsFood) {
     }
 
     public Settings find(UUID shopId) {
-        List<Settings> rows = jdbc.query("SELECT upi_id, upi_updated_at FROM kirana_settings WHERE shop_id = ?",
+        List<Settings> rows = jdbc.query(
+                "SELECT upi_id, upi_updated_at, sells_food FROM kirana_settings WHERE shop_id = ?",
                 (rs, i) -> {
                     OffsetDateTime at = rs.getObject(2, OffsetDateTime.class);
-                    return new Settings(rs.getString(1), at == null ? null : at.toInstant());
+                    return new Settings(rs.getString(1), at == null ? null : at.toInstant(),
+                            rs.getObject(3, Boolean.class));
                 }, shopId);
-        return rows.isEmpty() ? new Settings(null, null) : rows.get(0);
+        return rows.isEmpty() ? new Settings(null, null, null) : rows.get(0);
     }
 
     public boolean hasUpiId(UUID shopId) {
         return Boolean.TRUE.equals(jdbc.queryForObject(
                 "SELECT EXISTS (SELECT 1 FROM kirana_settings WHERE shop_id = ? AND upi_id IS NOT NULL)",
                 Boolean.class, shopId));
+    }
+
+    /** Whether the shop sells any food (made first if missing). */
+    public void setSellsFood(UUID shopId, boolean sellsFood) {
+        jdbc.update("INSERT INTO kirana_settings (shop_id, next_bill_no, sells_food) VALUES (?, 1, ?) "
+                + "ON CONFLICT (shop_id) DO UPDATE SET sells_food = EXCLUDED.sells_food", shopId, sellsFood);
+    }
+
+    /** The FSSAI licence's state (kirana_online): NONE when never added. */
+    public String fssaiStatus(UUID shopId) {
+        List<String> rows = jdbc.queryForList("SELECT fssai_status FROM kirana_online WHERE shop_id = ?", String.class,
+                shopId);
+        return rows.isEmpty() ? "NONE" : rows.get(0);
+    }
+
+    /** The FSSAI licence as checked so far (NONE when not added), by the primary key. */
+    public in.apnidukan.common.context.KiranaFacts.Fssai fssai(UUID shopId) {
+        List<in.apnidukan.common.context.KiranaFacts.Fssai> rows = jdbc.query("SELECT fssai_status, fssai_number, "
+                        + "fssai_valid_until, fssai_reason FROM kirana_online WHERE shop_id = ?",
+                (rs, i) -> new in.apnidukan.common.context.KiranaFacts.Fssai(rs.getString("fssai_status"),
+                        rs.getString("fssai_number"), rs.getObject("fssai_valid_until", java.time.LocalDate.class),
+                        rs.getString("fssai_reason")), shopId);
+        return rows.isEmpty() ? new in.apnidukan.common.context.KiranaFacts.Fssai("NONE", null, null, null)
+                : rows.get(0);
+    }
+
+    /**
+     * What stops a food-selling kirana's FSSAI licence from counting before the visit, in the owner's words; null
+     * when it counts (being checked, or verified and not expired by {@code today}, India's day).
+     */
+    public static String fssaiGap(in.apnidukan.common.context.KiranaFacts.Fssai f, java.time.LocalDate today) {
+        return switch (f.status()) {
+            case "NONE" -> "add the shop's FSSAI licence: it sells food";
+            case "REJECTED" -> "the FSSAI certificate wasn't accepted: add the right one";
+            case "VERIFIED" -> f.validUntil() != null && f.validUntil().isBefore(today)
+                    ? "the FSSAI licence has expired: add the renewed one" : null;
+            default -> null;
+        };
+    }
+
+    /** Any bill, active product or active khata customer of the shop (each an index lookup: V66). */
+    public boolean hasCounterData(UUID shopId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM kirana_bills WHERE shop_id = ?) "
+                + "OR EXISTS (SELECT 1 FROM kirana_products WHERE shop_id = ? AND active) "
+                + "OR EXISTS (SELECT 1 FROM kirana_khata_customers WHERE shop_id = ? AND active)", Boolean.class,
+                shopId, shopId, shopId));
+    }
+
+    /** Whether a kirana's FSSAI licence (now or kept from before) is this file. */
+    public boolean fssaiUsesFile(UUID fileId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM kirana_online "
+                + "WHERE fssai_file_id = ? OR fssai_kept_file_id = ?)", Boolean.class, fileId, fileId));
     }
 
     public void setUpiId(UUID shopId, String upiId, UUID by, Instant now) {
