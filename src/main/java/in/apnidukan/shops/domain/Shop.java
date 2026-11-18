@@ -73,9 +73,9 @@ public class Shop {
     @Column(nullable = false, length = 20)
     private ShopStatus status;
 
-    /** Kirana or salon; set once at registration. */
+    /** Kirana or salon; chosen at registration, changeable by the owner only while a draft never approved. */
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 10, updatable = false)
+    @Column(nullable = false, length = 10)
     private ShopType type;
 
     /** The owner's photo (an OWNER_PHOTO upload of this shop); required before Submit for visit. */
@@ -268,6 +268,27 @@ public class Shop {
         }
         setRegistrationDoc(registrationDocType, registrationDocFileId, now);
         return true;
+    }
+
+    /**
+     * The owner picked the wrong kind at registration: a draft never approved changes kirana ↔ salon. What only the
+     * old kind has goes: a salon's video and trade licence (and its check) when it becomes a kirana. A kirana's GSTIN
+     * stays stored when it becomes a salon (a salon never shows or uses one), for if it changes back. The name, owner, address, pin and photos stay. Returns the video it no longer points at
+     * (for the caller to release), or null.
+     */
+    public UUID changeType(ShopType to, Instant now) {
+        if (status != ShopStatus.DRAFT || everApproved) {
+            throw new IllegalStateException("Only a draft never approved changes its type, not " + status);
+        }
+        UUID oldVideo = null;
+        if (to == ShopType.KIRANA) {
+            oldVideo = shopVideoFileId;
+            this.shopVideoFileId = null;
+            setRegistrationDoc(null, null, now);
+        }
+        this.type = to;
+        this.updatedAt = now;
+        return oldVideo;
     }
 
     /** What the field team needs before a visit: both photos, and for a salon its video too. */

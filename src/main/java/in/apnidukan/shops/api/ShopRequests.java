@@ -119,6 +119,10 @@ public final class ShopRequests {
     public record Submit(@NotNull Long version) {
     }
 
+    /** The kind of shop, changed during registration (PUT /shops/me/type). */
+    public record ChangeType(@NotNull Long version, @NotNull(message = "Choose kirana or salon") ShopType type) {
+    }
+
     /**
      * Close the shop for good.
      * @param version the version you last read (GET /shops/me)
