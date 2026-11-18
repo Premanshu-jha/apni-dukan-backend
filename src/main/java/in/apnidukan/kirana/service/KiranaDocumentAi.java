@@ -135,6 +135,30 @@ public class KiranaDocumentAi {
                              Long mrpPaise, String category) {
     }
 
+    /**
+     * A page of the shop's own list of products (a stock register, a notebook, a price list) as read.
+     * @param list     it is a list of products (names, with or without quantities and prices), not a bill to a customer
+     * @param leftOut  products past the 150 kept (the shop photographs them again), or 0
+     */
+    public record StockListFacts(boolean readable, boolean list, java.util.List<ListLine> lines, int leftOut) {
+
+        public StockListFacts {
+            lines = java.util.List.copyOf(lines);
+        }
+    }
+
+    /**
+     * One product on the list.
+     * @param byWeight loose goods sold by weight (the quantity is in kg)
+     * @param quantity how many pieces (or kg) the list says the shop has, if written
+     */
+    public record ListLine(String wording, String brand, String name, String size, boolean byWeight, Long mrpPaise,
+                           java.math.BigDecimal quantity) {
+    }
+
+    /** Lines kept from one list page (a register page rarely has more than 60). */
+    static final int LIST_LINES = 150;
+
     private final String apiKey;
     private final String model;
     private final URI endpoint;
@@ -251,6 +275,45 @@ public class KiranaDocumentAi {
         }
         return new PaperFacts(in.path("readable").asBoolean(false), in.path("bill").asBoolean(false),
                 date(textOf(in, "date")), paise(in.path("total")), lines);
+    }
+
+    /** Reads one page of a shop's own list of products (a stock register, a notebook, a price list). */
+    public StockListFacts readStockList(Page page) {
+        ObjectNode schema = object();
+        ObjectNode p = (ObjectNode) schema.get("properties");
+        flag(schema, p, "readable", "The page can be read");
+        flag(schema, p, "list", "It is a shop's list of products (a stock register, a notebook page, a price list), "
+                + "handwritten or printed");
+        ObjectNode line = object();
+        ObjectNode lp = (ObjectNode) line.get("properties");
+        text(line, lp, "wording", "The product as written");
+        text(line, lp, "brand", "The brand if written, spelled correctly, else null");
+        text(line, lp, "name", "The product's name with its variant, spelled out and correctly spelled, without brand "
+                + "and size");
+        text(line, lp, "size", "One pack's size as \"500 g\", \"1 L\", or null for loose goods");
+        flag(line, lp, "byWeight", "Loose goods sold by weight (rice, sugar, dal): the quantity is in kg");
+        number(line, lp, "mrp", "The MRP or price of one piece (or one kg) in rupees, if written");
+        number(line, lp, "quantity", "How many pieces (or kg) the shop has, if written");
+        array(schema, p, "lines", line, "Every product line, in order (not headings or totals)");
+        JsonNode in = read(java.util.List.of(page), schema, "Read this page of a shop's list of products and answer "
+                + "with what is written on it.");
+        java.util.List<ListLine> lines = new java.util.ArrayList<>();
+        int leftOut = 0;
+        for (JsonNode l : in.path("lines")) {
+            if (lines.size() >= LIST_LINES) {
+                leftOut++;
+                continue;
+            }
+            String wording = textOf(l, "wording");
+            if (wording == null) {
+                continue;
+            }
+            lines.add(new ListLine(cut(wording, 150), cut(textOf(l, "brand"), 60), cut(textOf(l, "name"), 100),
+                    cut(textOf(l, "size"), 30), l.path("byWeight").asBoolean(false), paise(l.path("mrp")),
+                    quantity(l.path("quantity"))));
+        }
+        return new StockListFacts(in.path("readable").asBoolean(false), in.path("list").asBoolean(false), lines,
+                leftOut);
     }
 
     /** Reads a product pack's label (a frame of the scan, or a photo of the front). */
