@@ -124,12 +124,41 @@ public class ProductStore {
                 .findFirst();
     }
 
+    /** These products of the shop (active or not) in one query. */
+    public List<Product> findAll(UUID shopId, Collection<UUID> ids) {
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.query(COLUMNS + " WHERE shop_id = ? AND id = ANY (?)", ps -> {
+            ps.setObject(1, shopId);
+            ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids.toArray()));
+        }, ProductStore::product);
+    }
+
     /** The shop's active product with this barcode, and the barcode's pack. */
     public Optional<Scan> findByBarcode(UUID shopId, String barcode) {
         return jdbc.query("SELECT p.id, p.shop_id, p.name, p.unit, p.price_paise, p.stock, p.low_stock_at, p.active, "
                         + "p.version, p.updated_at, b.pack FROM kirana_barcodes b JOIN kirana_products p "
                         + "ON p.id = b.product_id WHERE b.shop_id = ? AND b.code = ? AND b.active",
                 (rs, i) -> new Scan(product(rs, i), rs.getBigDecimal("pack")), shopId, barcode).stream().findFirst();
+    }
+
+    /** {@link #findByBarcode} for many barcodes in one query, by barcode (unknown ones left out). */
+    public java.util.Map<String, Scan> findByBarcodes(UUID shopId, Collection<String> codes) {
+        java.util.Map<String, Scan> out = new java.util.HashMap<>();
+        if (codes.isEmpty()) {
+            return out;
+        }
+        jdbc.query("SELECT p.id, p.shop_id, p.name, p.unit, p.price_paise, p.stock, p.low_stock_at, p.active, "
+                        + "p.version, p.updated_at, b.pack, b.code FROM kirana_barcodes b JOIN kirana_products p "
+                        + "ON p.id = b.product_id WHERE b.shop_id = ? AND b.code = ANY (?) AND b.active",
+                ps -> {
+                    ps.setObject(1, shopId);
+                    ps.setArray(2, ps.getConnection().createArrayOf("varchar", codes.toArray()));
+                },
+                (org.springframework.jdbc.core.RowCallbackHandler) rs -> out.put(rs.getString("code"),
+                        new Scan(product(rs, 0), rs.getBigDecimal("pack"))));
+        return out;
     }
 
     /** How many barcodes the product has (active or not). */
@@ -294,6 +323,106 @@ public class ProductStore {
                     ps.setObject(8, by);
                     ps.setObject(9, at(now));
                 });
+    }
+
+    /**
+     * A stock change from a bill or a scan: as {@link Move}, with the distributor's bill it came on or the barcode
+     * scanned.
+     */
+    public record StockMove(UUID productId, BigDecimal change, BigDecimal stockAfter, String reason, UUID purchaseId,
+                            String barcode, String note, UUID clientRef) {
+    }
+
+    /** Records stock changes from bills and scans in one round trip. */
+    public void addStockMoves(UUID shopId, List<StockMove> moves, UUID by, Instant now) {
+        if (moves.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("INSERT INTO kirana_stock_moves (id, shop_id, product_id, change, stock_after, reason, "
+                        + "purchase_id, barcode, note, client_ref, created_by, created_at) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", moves, moves.size(),
+                (ps, m) -> {
+                    ps.setObject(1, UUID.randomUUID());
+                    ps.setObject(2, shopId);
+                    ps.setObject(3, m.productId());
+                    ps.setBigDecimal(4, m.change());
+                    ps.setBigDecimal(5, m.stockAfter());
+                    ps.setString(6, m.reason());
+                    ps.setObject(7, m.purchaseId());
+                    ps.setString(8, m.barcode());
+                    ps.setString(9, m.note());
+                    ps.setObject(10, m.clientRef());
+                    ps.setObject(11, by);
+                    ps.setObject(12, at(now));
+                });
+    }
+
+    /** Stock that came in by scanning this barcode into this product (what a barcode moved elsewhere brought). */
+    public BigDecimal scannedIn(UUID productId, String code) {
+        BigDecimal n = jdbc.queryForObject("SELECT coalesce(sum(change), 0) FROM kirana_stock_moves "
+                + "WHERE product_id = ? AND barcode = ? AND reason = 'RESTOCK'", BigDecimal.class, productId, code);
+        return n == null ? BigDecimal.ZERO : n;
+    }
+
+    /** Moves one of a product's barcodes to another product (both locked by the caller). */
+    public void moveBarcode(UUID fromProductId, UUID toProductId, String code) {
+        jdbc.update("UPDATE kirana_barcodes SET product_id = ? WHERE product_id = ? AND code = ?", toProductId,
+                fromProductId, code);
+    }
+
+    /** What was paid per piece (or kg) on the last distributor's bill. */
+    public void setCost(UUID productId, Long costPaise) {
+        jdbc.update("UPDATE kirana_products SET cost_paise = ? WHERE id = ?", costPaise, productId);
+    }
+
+    /** The shop's own photo of the product, if it has one. */
+    public UUID ownPhoto(UUID productId) {
+        List<UUID> f = jdbc.queryForList("SELECT photo_file_id FROM kirana_products WHERE id = ? "
+                + "AND photo_file_id IS NOT NULL", UUID.class, productId);
+        return f.isEmpty() ? null : f.get(0);
+    }
+
+    /**
+     * Whether a kirana still points at this file: a product's photo, a catalogue item's shared photo, a paper bill's
+     * photo, an FSSAI certificate, or a read (other than {@code exceptRead}) still being read, read or used. Uploads of
+     * the same bytes share one file, so one product's old photo may be another's.
+     */
+    public boolean fileInUse(UUID fileId, UUID exceptRead) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM kirana_products "
+                + "WHERE photo_file_id = ?) OR EXISTS (SELECT 1 FROM kirana_catalogue_items WHERE photo_file_id = ?) "
+                + "OR EXISTS (SELECT 1 FROM kirana_bills WHERE photo_file_id = ?) "
+                + "OR EXISTS (SELECT 1 FROM kirana_online WHERE fssai_file_id = ? OR fssai_kept_file_id = ?) "
+                + "OR EXISTS (SELECT 1 FROM kirana_reads WHERE file_ids @> ARRAY[?]::uuid[] "
+                + "AND status IN ('READING', 'READ', 'DONE') AND id IS DISTINCT FROM ?)", Boolean.class, fileId,
+                fileId, fileId, fileId, fileId, fileId, exceptRead));
+    }
+
+    /** The shop's own photo of the product (null: none, the catalogue item's shows). */
+    public void setPhoto(UUID productId, UUID fileId) {
+        jdbc.update("UPDATE kirana_products SET photo_file_id = ? WHERE id = ?", fileId, productId);
+    }
+
+    /**
+     * What a product view adds: the cost (owner only), the photo (the shop's own, else the catalogue item's shared
+     * one) and the catalogue item.
+     */
+    public record Extra(Long costPaise, UUID photoFileId, UUID catalogueItemId, String category) {
+    }
+
+    /** The extras of these products in one query. */
+    public java.util.Map<UUID, Extra> extras(Collection<UUID> productIds) {
+        java.util.Map<UUID, Extra> out = new java.util.HashMap<>();
+        if (productIds.isEmpty()) {
+            return out;
+        }
+        jdbc.query("SELECT p.id, p.cost_paise, coalesce(p.photo_file_id, i.photo_file_id), p.catalogue_item_id, "
+                        + "i.category FROM kirana_products p LEFT JOIN kirana_catalogue_items i "
+                        + "ON i.id = p.catalogue_item_id WHERE p.id = ANY (?)",
+                ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", productIds.toArray())),
+                (org.springframework.jdbc.core.RowCallbackHandler) rs -> out.put(rs.getObject(1, UUID.class),
+                        new Extra((Long) rs.getObject(2), rs.getObject(3, UUID.class), rs.getObject(4, UUID.class),
+                                rs.getString(5))));
+        return out;
     }
 
     /** Whether a stock change with this clientRef was already recorded in the shop (a retry). */

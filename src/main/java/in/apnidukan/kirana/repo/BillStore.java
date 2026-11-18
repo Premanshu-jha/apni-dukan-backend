@@ -104,6 +104,71 @@ public class BillStore {
     public record Money(int count, long totalPaise, long cashPaise, long upiPaise, long khataPaise) {
     }
 
+    /** A bill made from a paper bill's photo: the day written on the paper, and the photo. */
+    public record Paper(java.time.LocalDate writtenOn, UUID photoFileId) {
+    }
+
+    public void setPaper(UUID billId, java.time.LocalDate writtenOn, UUID photoFileId) {
+        jdbc.update("UPDATE kirana_bills SET written_on = ?, photo_file_id = ? WHERE id = ?",
+                java.sql.Date.valueOf(writtenOn), photoFileId, billId);
+    }
+
+    public Optional<Paper> paper(UUID billId) {
+        return jdbc.query("SELECT written_on, photo_file_id FROM kirana_bills WHERE id = ? AND written_on IS NOT NULL",
+                (rs, i) -> new Paper(rs.getDate(1).toLocalDate(), rs.getObject(2, UUID.class)), billId).stream()
+                .findFirst();
+    }
+
+    /** One of a shop's products often sold, with how often. */
+    public record Often(UUID productId, long times) {
+    }
+
+    /**
+     * The shop's products sold most since {@code since}, on bills made in this hour of the day (Indian time, ±1 hour, across midnight too),
+     * at most {@code limit}: what to suggest at the counter now.
+     */
+    public List<Often> soldAtThisHour(UUID shopId, Instant since, int hour, int limit) {
+        return jdbc.query("SELECT l.product_id, count(*) AS n FROM kirana_bills b JOIN kirana_bill_lines l "
+                        + "ON l.bill_id = b.id WHERE b.shop_id = ? AND b.created_at >= ? AND b.voided_at IS NULL "
+                        + "AND l.product_id IS NOT NULL AND (extract(hour FROM b.created_at AT TIME ZONE "
+                        + "'Asia/Kolkata')::int - ? + 25) % 24 <= 2 GROUP BY l.product_id ORDER BY n DESC, l.product_id LIMIT ?",
+                (rs, i) -> new Often(rs.getObject(1, UUID.class), rs.getLong(2)), shopId, at(since), hour, limit);
+    }
+
+    /** What this khata customer bought most since {@code since}, at most {@code limit}. */
+    public List<Often> usualFor(UUID shopId, UUID khataCustomerId, Instant since, int limit) {
+        return jdbc.query("SELECT l.product_id, count(*) AS n FROM kirana_bills b JOIN kirana_bill_lines l "
+                        + "ON l.bill_id = b.id WHERE b.khata_customer_id = ? AND b.shop_id = ? AND b.created_at >= ? "
+                        + "AND b.voided_at IS NULL AND l.product_id IS NOT NULL GROUP BY l.product_id "
+                        + "ORDER BY n DESC, l.product_id LIMIT ?",
+                (rs, i) -> new Often(rs.getObject(1, UUID.class), rs.getLong(2)), khataCustomerId, shopId, at(since),
+                limit);
+    }
+
+    /**
+     * Products most often on the same bill as any of {@code with} since {@code since} (not those themselves), at most
+     * {@code limit}: "often bought together".
+     */
+    public List<Often> boughtWith(UUID shopId, java.util.Collection<UUID> with, Instant since, int limit) {
+        if (with.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.query("SELECT o.product_id, count(DISTINCT o.bill_id) AS n FROM kirana_bill_lines w "
+                        + "JOIN kirana_bills b ON b.id = w.bill_id JOIN kirana_bill_lines o ON o.bill_id = w.bill_id "
+                        + "WHERE b.shop_id = ? AND b.created_at >= ? AND b.voided_at IS NULL AND w.product_id = ANY (?) "
+                        + "AND o.product_id IS NOT NULL AND NOT (o.product_id = ANY (?)) "
+                        + "GROUP BY o.product_id ORDER BY n DESC, o.product_id LIMIT ?",
+                ps -> {
+                    java.sql.Array ids = ps.getConnection().createArrayOf("uuid", with.toArray());
+                    ps.setObject(1, shopId);
+                    ps.setObject(2, at(since));
+                    ps.setArray(3, ids);
+                    ps.setArray(4, ids);
+                    ps.setInt(5, limit);
+                },
+                (rs, i) -> new Often(rs.getObject(1, UUID.class), rs.getLong(2)));
+    }
+
     public void insert(Bill b, List<Line> lines) {
         jdbc.update("INSERT INTO kirana_bills (id, shop_id, bill_no, client_ref, subtotal_paise, discount_paise, "
                         + "total_paise, payment, khata_customer_id, paid_now_paise, paid_now_by, refunded_paise, "
