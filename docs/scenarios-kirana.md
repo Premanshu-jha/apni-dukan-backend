@@ -3,7 +3,7 @@
 Everything a kirana owner or helper can run into at the counter, with what the API answers and which test proves it.
 The screens come with the partner app's kirana round; until then "Screen" says what the app must show.
 Verdicts: **OK-tested**, **OK-untested**, **GAP**, **N/A-v1**, **INCONVENIENCE** (works, but annoying; with the fix).
-Tests: `KIT` = `KiranaIntegrationTest`, `KRT` = `KiranaRulesTest`.
+Tests: `KIT` = `KiranaIntegrationTest`, `KRT` = `KiranaRulesTest`, `SIT` = `ShopIntegrationTest`.
 
 ## 1. Who may use it
 
@@ -29,6 +29,18 @@ Tests: `KIT` = `KiranaIntegrationTest`, `KRT` = `KiranaRulesTest`.
 | 2.8 | Verified kirana's phone left signed in; someone changes the UPI ID | 403 `EDIT_LOCKED` without the code; the same ID again needs none | Code screen | KIT aVerifiedKiranasUpiIdChangesOnlyWithTheEditCode | OK-tested |
 | 2.9 | Shop handed over | Old owner's UPI ID forgotten; products, bills, khata stay | New owner asked for his UPI ID | KIT handingTheShopOverForgetsTheOldOwnersUpiId… | OK-tested |
 | 2.6 | Salon submits | Unchanged (services, hours) | Unchanged | Salon*IntegrationTest | OK-tested |
+| 2.10 | Owner registered a salon by mistake (any step before Submit) and switches to kirana | `PUT /shops/me/type` 200; video and trade licence uploads released (check ended), name/address/pin/photos kept; NOTE on the field team's timeline | Every registration step: "Registering a Salon · Change" → "What do you run?" | SIT theOwnerChangesKiranaToSalon…, aSalonBecomingAKiranaLoses… | OK-tested |
+| 2.11 | Kirana → salon (and back) | 200; the GSTIN is kept but never shown for a salon, back for the kirana; salon services/hours already added come back | Salon steps follow | SIT theOwnerChangesKiranaToSalon… | OK-tested |
+| 2.12 | Change after Submit, or on a shop ever approved | 409 `WRONG_STATUS` | No "Change" shown | SIT theTypeIsLocked… | OK-tested |
+| 2.13 | Sent back by the field team (draft, never approved) and switched | 200 (still signing up); the NOTE tells the field team | "Change" shown | same | OK-tested |
+| 2.14 | Salon draft whose barber has his own sign-in (or a waiting barber invitation) → kirana | 409 `HAS_BARBERS` | Says to remove the barber's sign-in first | same | OK-tested |
+| 2.15 | Helper (or a stale version) tries it | 403 `OWNER_ONLY` / 409 `SHOP_CHANGED` | Reloads the shop | same | OK-tested |
+| 2.16 | Licence check finishing while the salon becomes a kirana | The check's write needs the same file id: it changes nothing (the doc is gone) | — | (LicenceCheckStore WHERE registration_doc_file_id) | OK-untested |
+| 2.18 | Salon video upload started, then switched to kirana, then the upload completes | 409 `NOT_A_SALON` (complete checks the type too) | — | — | OK-untested |
+| 2.19 | Admin dashboard counts after a switch of a sent-back draft | Counts cleared after commit (each kind counted apart) | Right group at once | — | OK-untested |
+| 2.20 | Owner toggles the kind again and again (or a script) | 429 `TOO_MANY_REQUESTS` after 10 a day; the same kind again doesn't count | Message: try tomorrow or write to support | SIT theKindChangesAtMostTenTimesADay | OK-tested |
+| 2.21 | A barber (or helper) invited from another phone at the moment the salon becomes a kirana | Invitations take the shop's row shared, then the members' lock, as the change does (row, then members): whichever goes second sees the other: `HAS_BARBERS`, or the invite 409 `NOT_A_SALON`; never a deadlock | — | — | OK-untested |
+| 2.17 | Two phones switch at once | One 200, the other 409 `SHOP_CHANGED` (row locked, versioned) | Reload | (the versioned shop, as twoEditsAtTheSameMoment…) | OK-untested |
 | 2.7 | Older app sends `udyamNumber` | Ignored, stored nothing, no re-check | Field no longer shown | ShopIntegrationTest, AdminIntegrationTest | OK-tested |
 
 ## 3. Catalogue
