@@ -13,7 +13,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, a kirana's GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and trade licence (checked automatically with AI), Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
-| `kirana` | The kirana's own counter (on the `kirana` branch until the kirana flow is finished): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit) |
+| `kirana` | The kirana's own counter (on the `kirana` branch until the kirana flow is finished): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit); stock from photos of distributors' bills and scans, unknown barcodes linked in one tap, counter suggestions and paper bills (round 3) |
 | `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
@@ -1041,6 +1041,148 @@ events); `KIRANA_AI_KEY` (defaults to `ANTHROPIC_API_KEY`), `KIRANA_AI_MODEL`, `
 move reasons widened and `created_by` made optional for order moves; keys and checks on the existing tables are added
 `NOT VALID` and checked by V69 without blocking writes; V71 adds a nullable column (no rewrite); V70 builds the stock moves' order index `CONCURRENTLY`
 (counter bills go on meanwhile). Safe while the old version runs.
+
+## Kirana stock from photos and scans (V72–V73, `kirana` branch)
+
+Round 3: getting stock in without typing. Everything is under `/api/v1/kirana` for the shop's owner and helpers
+(salon people 409 `NOT_A_KIRANA`); the team's parts are under `/api/v1/admin/kirana` (super admins).
+
+```mermaid
+sequenceDiagram
+    participant A as Partner app
+    participant B as Backend
+    participant J as ReadJob (every 15 s)
+    participant AI as Sonnet
+    A->>B: POST /files?purpose=BILL (photo of the distributor's bill)
+    A->>B: POST /kirana/reads {clientRef, kind: PURCHASE, fileIds}
+    J->>B: claim the read (lease), take the shop's and the day's AI call
+    J->>AI: the pages + the answer's JSON shape
+    AI-->>J: distributor, bill no., lines (brand, name, size, quantity, rate, MRP)
+    J->>B: draft: each line matched (remembered wording, else one clear match in code)
+    A->>B: GET /kirana/purchases/{id} → lines to check, with up to 3 likely products
+    A->>B: PATCH …/lines/{n} (pick / quantity / skip) → POST …/add (stock + cost, once)
+    A->>B: POST /kirana/scans {clientRef, purchaseId?, scans[]} (while shelving)
+    B-->>A: ADDED / TICKED / UNKNOWN (+ needsLabel) / REJECTED
+```
+
+**Bills in any format** (`BillFiles`). A distributor's bill may come as a photo (JPEG, PNG, WEBP), a PDF (up to 20
+pages), an Excel file (`.xlsx`, `.xls`), a Word file (`.docx`), a CSV, a GST e-invoice's JSON (signed or not) or plain
+text: whatever reached the owner's phone (WhatsApp, email, the distributor's app), he uploads it in the app (or shares
+it into the app) with purpose `BILL` (spreadsheets, documents and text at most 2 MB; an iPhone HEIC photo: 400 with
+"share it as JPEG"). Before any AI, the reading job reads it in code: an Excel or CSV bill whose columns it finds (item
+/ description / particulars, qty, free, rate, amount, MRP; bill no. and date above them) and an e-invoice's item list
+become the draft **with no AI call at all**; a PDF made by billing software, a Word file or a sheet it can't place goes
+to the AI as **text** (far fewer tokens than pictures); only photos and scanned PDFs go as pictures.
+
+**Photos read by AI** (`kirana_reads`). Upload the file first (`POST /files`, purpose `BILL` for bills, 1–3 files;
+`PRODUCT_PHOTO` for packs), then `POST /reads {clientRef, kind: PURCHASE | PAPER_BILL, fileIds}` (201, `READING`;
+the same `clientRef` again returns the first). `ReadJob` reads 10 at a time under a lease, each claimed for 5 minutes
+(`SKIP LOCKED`), outside any transaction. The photo is downloaded first; then a shop may have 30 reads a day, all
+shops together `app.kirana.ai-calls-per-day` (500): over either, the read waits until 00:05 without losing a try. The
+AI or storage down, or anything unexpected: tried again after 1, 2, 4, 8, 16 minutes, then `FAILED` with "send it
+again later or enter it by hand"; a photo that isn't a bill or can't be read: `FAILED` with why. A thrown-away or
+failed bill photo is deleted unless something else uses it.
+`GET /reads?kind=`, `GET /reads/{id}`, `POST /reads/{id}/discard` (409 `READ_USED` once it became stock or a bill).
+Photos of bills and products have their own 600 uploads a day per shop, apart from the other 100.
+
+**Distributors' bills** (`kirana_purchases`, `kirana_purchase_lines`). Each line's product: this distributor's
+wording matched before (`REMEMBERED`, `kirana_wordings`), else one clear match by name (`SURE`); the rest wait for the
+shop with up to 3 suggestions (its products, then catalogue items it doesn't have). Names are compared in Java
+(`NameMatcher`): flexible about units (500ML, 0.5 L), short forms (TM = toned milk), spellings (Taza/Taaza), word order
+and brand; never a match for another size; a different variant (toned/gold) is never one tap. `PATCH
+/purchases/{id}/lines/{n} {version, productId?, quantity?, skip?}`; `POST /purchases/{id}/add {version, addAgain?}`:
+409 `LINES_TO_CHECK` (naming them), 409 `BILL_ALREADY_ADDED` (the same distributor, number and date added before:
+send `addAgain` for another delivery), 409 `PURCHASE_CHANGED` (stale version), 409 `PURCHASE_DONE`, 409
+`PRODUCT_REMOVED`. Adding takes a lock on the bill's distributor and number (two copies added at the same moment go one
+at a time: the second gets `BILL_ALREADY_ADDED`), locks the products in id order, adds each one's stock in one
+`RESTOCK` move (with the bill), sets each product's cost to the rate paid and remembers the wordings. What was paid
+(`ratePaise`, `amountPaise`, `totalPaise`, `costPaise`) is the owner's only: null for a helper.
+`PATCH /purchases/{id}/lines {version, lines: [...]}` changes many lines at once (accepting suggestions down the bill);
+`newProduct {itemId | name, unit, pricePaise}` instead of `productId` makes and picks a product the shop doesn't have;
+`ratePaise` (owner) corrects a misread rate; `POST /purchases/{id}/lines` adds a line the reading missed; `PATCH
+/purchases/{id} {version, distributor, billNo, billDate}` corrects the bill's top. Once added, `POST
+/purchases/{id}/lines/{n}/correct {productId | newProduct}` (owner) moves a wrongly picked line's stock to the right
+product (one `MOVE` each), sets its cost and remembers the wording for it. `POST /purchases/{id}/discard` throws a
+draft away.
+
+**Scanning while shelving.** The phone reads barcodes (BarcodeDetector, or ZXing compiled to WebAssembly) and sends
+them in batches: `POST /scans {clientRef, purchaseId?, scans: [{code, times}]}` (1–200). Each scan: `ADDED` (its pack
+times `times` into stock, one `RESTOCK` move per product and barcode), `REJECTED` (a wrong EAN-8/12/13/14 check digit,
+or too many at once: scan again) or `UNKNOWN`. With `purchaseId` (a draft) nothing goes into stock by scanning: each
+product's scans are **held with the bill** (`kirana_purchase_scans`): `TICKED` when it is on one of its lines (with
+`scannedTotal` and the line's `lineQuantity`: "12 of 24"), `HELD` otherwise. Adding the bill adds its lines'
+quantities plus what was held of products on none of its lines; throwing the draft away (from the bill or its photo)
+puts everything held into stock, since it is on the shelves. So stock is never counted twice, whichever comes first. Shop-printed loose labels (20–23…) carry the weight in grams or the price; the
+first 7 digits are linked to the kg product like a barcode. The same `clientRef` again counts nothing (`repeated`).
+
+**Unknown barcodes ("Needs a tap").** `GET /scans/unknown` (20 a page) lists each unknown barcode with its scans, what
+the shared catalogue says (`catalogue`, `trusted`), its label as read, the brand other barcodes of the same company
+have, and up to 3 likely products with `sure` for one clear match. When nobody knows the barcode (`needsLabel`), the
+app sends the scan frame: `POST /scans/unknown/{id}/label {clientRef, fileId}`; Sonnet reads it once for the whole
+network (another shop scanning the same pack reuses that read: no photo, no AI call). `POST /scans/unknown/{id}/link
+{productId | itemId/name/unit/pricePaise, pack?, oneTap?}` links the barcode (as `POST /products/{id}/barcodes`) and
+settles every open entry of it (one per bill it was scanned with): held with a bill still a draft; nothing when the
+bill was added with this product on it (the bill brought them); else into stock (`quantity`, `held`, `note` when a
+loose label adds nothing or a pack was rounded). `needsPhoto` asks for a front photo when neither the product nor its
+catalogue item has one. `POST /scans/unknown/{id}/dismiss` (204) puts one away; `GET /scans/unknown?dismissed=true`
+lists them and `POST /scans/unknown/{id}/reopen` brings one back. Another shop's read of a pack is reused, but a shop
+may send its own photo over it (that read may have been of the wrong pack).
+
+**The owner's corrections, any time.** `POST /products/{id}/move-barcode {code, toProductId, moveStock?}` (owner):
+the barcode moves with its pack; with `moveStock` the stock scanned in with it moves in the same go, else
+`suggestedQuantity` (the stock scanned in with it) is offered for `POST /products/{id}/move-stock
+{clientRef, toProductId, quantity}` (owner; one `MOVE` on each; same unit only: 409 `UNITS_DIFFER`; at most the
+first product's stock: 400 naming quantity). Setting the
+count stays `POST /products/{id}/stock` (`COUNT`); names and prices `PATCH /products/{id}` (the unit can't change after
+a sale; bills keep what they were). `PUT /products/{id}/photo {clientRef, fileId}` (owner or helper);
+`PUT /products/{id}/cost {costPaise}` (owner). Products now carry `photoFileId` (the shop's own, else the catalogue's
+shared one), `photoUrl` (a signed link: a shared photo is another shop's file) and `costPaise` (owner only). A file a
+product, the catalogue, a paper bill, an FSSAI certificate or a read still points at can't be deleted (409
+`FILE_IN_USE`), and a photo the kirana stops using is deleted only when nothing else points at it (uploads of the same
+bytes share one file). `NAME_TAKEN` names the product that has the name (`details.productId`).
+
+**The shared catalogue's trust.** A barcode one shop linked is a suggestion until a second shop links it to the same
+item (or it came from a product master or the team): then `trusted`. A shop that links it to another item keeps its
+own link, and the barcode goes to the team's review list (`CONFLICT`); an owner moving a barcode corrects the
+catalogue when the link was only his shop's say, else the team reviews it (`CORRECTION`). A product's photo whose label
+shows its catalogue item becomes that item's shared photo (once). Admin: `GET /admin/kirana/catalogue/reviews`,
+`POST /admin/kirana/catalogue/reviews/{id} {itemId}` (one of the two, or any item when both are wrong; 204; 409
+`REVIEW_DONE`; an item made only for the review that lost goes), `POST /admin/kirana/catalogue/import` (a distributor's
+product master: a CSV file, multipart field `file`, up to 5,000 rows / 2 MB: a header naming at least barcode and name;
+bad rows listed; a row confirms a shop's link only when the names clearly match, else it is reviewed as `IMPORT`), `GET /admin/kirana/scans/stats?days=30` (scans, the unknown-barcode
+rate, one-tap / picked / new links per day).
+
+**Counter suggestions.** `GET /suggestions?khataCustomerId=&with=…`: `now` (sold most around this hour in the last 14
+days), `usual` (the khata customer's), `together` (often on the same bill as the last 5 items on it). Each list is
+counted at most once per 10 minutes per server and kept in Redis for every server (Redis down: counted in the
+database); products removed or out of stock, and those on the bill already, are left out. "This hour" wraps around
+midnight.
+
+**Paper bills.** A backup for when the counter couldn't scan: `POST /reads {kind: PAPER_BILL}`, then `GET
+/paper-bills/{readId}` (the lines matched to products; `readDate` as read and `writtenOn` when usable, else
+`dateProblem`; `failure` when it couldn't be read) and `POST
+/paper-bills/{readId}/confirm {writtenOn, lines, payment, …}`: exactly a new bill (every check of `POST /bills`),
+plus `writtenOn` (the day on the paper, today or up to 7 days back: 400 otherwise) and the photo kept on the bill
+(`paperPhotoFileId`). The bill's `createdAt` is when it was confirmed, so the day's totals count it on that day, like
+any money that moves then. Confirming again returns the same bill (`repeated`), even after midnight; 409 `READ_NOT_READY` while reading.
+
+**Under load.** No AI call or file download ever runs inside a transaction or a lock; reads are claimed with `SKIP
+LOCKED` and leases, so several servers share the queue. Matching reads the shop's products once per request (at most
+8,000) and compares in memory; catalogue candidates come from a trigram index. Locks are always taken in one order:
+bills (by id; a photo's bill before its read), then unknown scans (by barcode, then id), then products by id. Two
+batches opening the same unknown barcode at once end on one entry (unique key); retries are counted once
+(`kirana_scan_batches`, kept a day, derived `clientRef`s). A product master import runs in one transaction (super
+admins only, at most 5,000 rows).
+
+**Deploying V72–V73:** new tables; nullable columns on `kirana_products`, `kirana_stock_moves`, `kirana_bills`,
+`kirana_catalogue_items` and `kirana_catalogue_barcodes` (the barcodes' `source` and `confirmed` have constant
+defaults: no rewrite); keys and checks added `NOT VALID` with `lock_timeout` 3 s, then checked by V73 without blocking
+writes. Every barcode shops linked before starts as a `SHOP` link; each shop's existing link is counted as its say, and those
+two shops already agree on start trusted. Set `ANTHROPIC_API_KEY` (or
+`app.kirana.ai-key`) for the reading; without it reads fail at once with "enter it by hand".
+
+**GS1 later.** Once the company is registered, unknown barcodes are to be looked up in GS1 India's product data before
+the label is read (see the project's future plans): Sonnet then reads only packs GS1 doesn't know.
 
 ## Run it on your laptop
 
