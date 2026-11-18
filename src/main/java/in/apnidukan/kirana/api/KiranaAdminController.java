@@ -12,10 +12,17 @@ import in.apnidukan.kirana.api.OrderResponses.FssaiCheckView;
 import in.apnidukan.kirana.api.OrderResponses.FssaiView;
 import in.apnidukan.kirana.api.OrderResponses.OpenOrderView;
 import in.apnidukan.kirana.api.OrderResponses.UpiRecheckView;
+import in.apnidukan.kirana.api.StockRequests.ReviewDecision;
+import in.apnidukan.kirana.api.StockResponses.ImportResult;
+import in.apnidukan.kirana.api.StockResponses.ReviewView;
+import in.apnidukan.kirana.api.StockResponses.ScanStatsView;
+import in.apnidukan.kirana.service.CatalogueAdminService;
 import in.apnidukan.kirana.service.CatalogueService;
+import in.apnidukan.kirana.service.ScanService;
 import in.apnidukan.kirana.service.OnlineService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -23,8 +30,10 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.UUID;
@@ -39,12 +48,45 @@ public class KiranaAdminController {
 
     private final CatalogueService catalogue;
     private final OnlineService online;
+    private final CatalogueAdminService catalogueAdmin;
+    private final ScanService scans;
     private final CurrentUserProvider currentUser;
 
-    public KiranaAdminController(CatalogueService catalogue, OnlineService online, CurrentUserProvider currentUser) {
+    public KiranaAdminController(CatalogueService catalogue, OnlineService online, CatalogueAdminService catalogueAdmin,
+                                 ScanService scans, CurrentUserProvider currentUser) {
         this.catalogue = catalogue;
         this.online = online;
+        this.catalogueAdmin = catalogueAdmin;
+        this.scans = scans;
         this.currentUser = currentUser;
+    }
+
+    /** Barcodes for the team to decide (shops disagree, a trusted link corrected, an import clash), oldest first. */
+    @GetMapping("/catalogue/reviews")
+    public List<ReviewView> reviews() {
+        return catalogueAdmin.reviews(me());
+    }
+
+    /** Which item the barcode is: trusted for every shop from now on. 409 REVIEW_DONE. */
+    @PostMapping("/catalogue/reviews/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void decideReview(@PathVariable UUID id, @Valid @RequestBody ReviewDecision body) {
+        catalogueAdmin.decide(me(), id, body.itemId());
+    }
+
+    /**
+     * Imports a distributor's product master: a CSV file (multipart field "file", at most 2 MB), a header row naming at
+     * least barcode and name. Bad rows are listed, the rest imported.
+     */
+    @PostMapping(value = "/catalogue/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ImportResult importMaster(@RequestPart("file") MultipartFile file) {
+        return catalogueAdmin.importMaster(me(), file);
+    }
+
+    /** Scanning per day over every shop (unknown-barcode rate, one-tap links), the last {@code days} (1–90). */
+    @GetMapping("/scans/stats")
+    public List<ScanStatsView> scanStats(@RequestParam(defaultValue = "30") int days) {
+        return scans.stats(me(), days);
     }
 
     @GetMapping("/catalogue")
