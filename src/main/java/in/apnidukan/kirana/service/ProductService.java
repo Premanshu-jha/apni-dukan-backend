@@ -166,7 +166,7 @@ public class ProductService {
         BigDecimal low = in.lowStockAt() == null ? null : quantity("lowStockAt", in.lowStockAt(), in.unit(), true);
         Instant now = KiranaChecks.now(clock);
         Product p = new Product(UUID.randomUUID(), c.shopId(), name, in.unit(), in.pricePaise(), stock, low,
-                true, 0, now);
+                true, 0, now, in.stock() != null ? now : null);
         requireFree(c.shopId(), null, name, barcode);
         List<Barcode> barcodes = barcode == null ? List.of() : List.of(new Barcode(barcode, pack));
         try {
@@ -183,6 +183,9 @@ public class ProductService {
         if (stock.signum() != 0) {
             products.addMoves(c.shopId(), List.of(new Move(p.id(), stock, stock, "COUNT", null, "First count", null)),
                     userId, now);
+        }
+        if (in.stock() != null) {
+            products.markCounted(p.id(), now);   // the shelf counted as it was added (0 is a count too)
         }
         return ProductView.of(p, barcodes);
     }
@@ -221,7 +224,7 @@ public class ProductService {
             }
         }
         Product updated = new Product(old.id(), old.shopId(), name, unit, price, old.stock(), low,
-                active, old.version() + 1, KiranaChecks.now(clock));
+                active, old.version() + 1, KiranaChecks.now(clock), old.countedAt());
         if (Objects.equals(name, old.name()) && price == old.pricePaise() && unit == old.unit()
                 && Objects.equals(low, old.lowStockAt()) && active == old.active()) {
             return view(old);
@@ -332,13 +335,19 @@ public class ProductService {
             case COUNT -> q;
         };
         BigDecimal change = after.subtract(p.stock());
+        Instant now = KiranaChecks.now(clock);
+        Instant counted = p.countedAt();
+        if (in.reason() == StockReason.COUNT) {
+            products.markCounted(p.id(), now);   // a count is a count even when it matches the stock
+            counted = now;
+        }
         if (change.signum() == 0) {
-            return view(p);
+            return view(new Product(p.id(), p.shopId(), p.name(), p.unit(), p.pricePaise(), p.stock(),
+                    p.lowStockAt(), p.active(), p.version(), p.updatedAt(), counted));
         }
         if (after.abs().compareTo(new BigDecimal("999999999")) > 0) {
             throw invalid("quantity", "is too large");
         }
-        Instant now = KiranaChecks.now(clock);
         BigDecimal stored = Quantities.stored(after);
         products.setStock(p.id(), stored, now);
         try {
@@ -354,15 +363,21 @@ public class ProductService {
             throw e;
         }
         return view(new Product(p.id(), p.shopId(), p.name(), p.unit(), p.pricePaise(), stored,
-                p.lowStockAt(), p.active(), p.version(), now));
+                p.lowStockAt(), p.active(), p.version(), now, stored.signum() < 0 ? null : counted));
     }
 
     /**
      * A new product (owner or helper) for something read or scanned: from a shared catalogue item ({@code itemId}, its
      * name, unit and MRP as the price unless given) and/or the name, unit and price sent (400 naming itemId, name, unit
-     * or pricePaise when missing; NAME_TAKEN as when adding). It is linked to the catalogue item. Its id.
+     * or pricePaise when missing; NAME_TAKEN as when adding). It is linked to the catalogue item. It starts counted at
+     * 0: what came in (the bill's or the scan's) is added to it, so its stock is known. Its id.
      */
     UUID newFor(UUID userId, UUID itemId, String name, Unit unit, Long pricePaise) {
+        return newFor(userId, itemId, name, unit, pricePaise, BigDecimal.ZERO);
+    }
+
+    /** As {@link #newFor(UUID, UUID, String, Unit, Long)}, with this count (null: not counted). */
+    UUID newFor(UUID userId, UUID itemId, String name, Unit unit, Long pricePaise, BigDecimal counted) {
         CatalogueStore.Item item = null;
         if (itemId != null) {
             item = catalogueItems.find(itemId).orElseThrow(() -> invalid("itemId",
@@ -380,11 +395,37 @@ public class ProductService {
         if (price == null) {
             throw invalid("pricePaise", "Enter the price");
         }
-        UUID id = create(userId, new NewProduct(n, null, null, null, u, price, null, null)).id();
+        UUID id = create(userId, new NewProduct(n, null, null, null, u, price, counted, null)).id();
         if (item != null) {
             products.setCatalogueItem(id, item.id());
         }
         return id;
+    }
+
+    /**
+     * The product's stock counted now (the product setup adding a line of its list for a product the shop already has):
+     * one COUNT move when it changed, and the product counted. {@code addTo}: the count is more of it kept elsewhere,
+     * added to its stock (read under the lock; below zero counts as none). 400 naming quantity; 409 PRODUCT_REMOVED.
+     */
+    void countFor(UUID shopId, UUID userId, UUID productId, BigDecimal quantity, boolean addTo, String note) {
+        Product p = products.lock(shopId, productId).orElseThrow(ProductService::notFound);
+        if (!p.active()) {
+            throw removed();
+        }
+        BigDecimal q = quantity("quantity", quantity, p.unit(), true);
+        if (addTo) {
+            q = p.stock().max(BigDecimal.ZERO).add(q);
+        }
+        Instant now = KiranaChecks.now(clock);
+        products.markCounted(p.id(), now);
+        BigDecimal change = q.subtract(p.stock());
+        if (change.signum() == 0) {
+            return;
+        }
+        BigDecimal stored = Quantities.stored(q);
+        products.setStock(p.id(), stored, now);
+        products.addMoves(shopId, List.of(new Move(p.id(), Quantities.stored(change), stored, "COUNT", null, note,
+                null)), userId, now);
     }
 
     // ---------- the owner's corrections ----------

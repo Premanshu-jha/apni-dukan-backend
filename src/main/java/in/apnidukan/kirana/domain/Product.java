@@ -12,7 +12,8 @@ import java.util.UUID;
  * @param active      false once removed from the catalogue (old bills keep it)
  */
 public record Product(UUID id, UUID shopId, String name, Unit unit, long pricePaise,
-                      BigDecimal stock, BigDecimal lowStockAt, boolean active, long version, Instant updatedAt) {
+                      BigDecimal stock, BigDecimal lowStockAt, boolean active, long version, Instant updatedAt,
+                      Instant countedAt) {
 
     /** At or below its alert (or below zero): shown under "Running out". */
     public boolean runningOut() {

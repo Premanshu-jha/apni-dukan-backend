@@ -30,10 +30,13 @@ public final class KiranaResponses {
      *                   helper, and in lists)
      * @param photoFileId the shop's own photo, else the shared catalogue's; null: show the category's icon
      * @param photoUrl    a link that opens it for at least 15 minutes (a shared photo is another shop's file)
+     * @param counted     its stock was counted by hand (added with a count, or Count) and still holds: only counted
+     *                    products are offered online ("Count it to sell online" otherwise)
      */
     public record ProductView(UUID id, String name, List<BarcodeView> barcodes, Unit unit, long pricePaise,
                               BigDecimal stock, BigDecimal lowStockAt, boolean runningOut, boolean active,
-                              long version, Instant updatedAt, Long costPaise, UUID photoFileId, String photoUrl) {
+                              long version, Instant updatedAt, Long costPaise, UUID photoFileId, String photoUrl,
+                              boolean counted) {
 
         public ProductView {
             barcodes = List.copyOf(barcodes);
@@ -42,13 +45,13 @@ public final class KiranaResponses {
         public static ProductView of(Product p, List<Barcode> barcodes) {
             return new ProductView(p.id(), p.name(), barcodes.stream().map(BarcodeView::of).toList(), p.unit(),
                     p.pricePaise(), Quantities.json(p.stock()), Quantities.json(p.lowStockAt()), p.runningOut(),
-                    p.active(), p.version(), p.updatedAt(), null, null, null);
+                    p.active(), p.version(), p.updatedAt(), null, null, null, p.countedAt() != null);
         }
 
         /** With the cost price (shown to the owner only: null for a helper) and the photo and its link. */
         public ProductView with(Long cost, UUID photo, String photoLink) {
             return new ProductView(id, name, barcodes, unit, pricePaise, stock, lowStockAt, runningOut, active, version,
-                    updatedAt, cost, photo, photoLink);
+                    updatedAt, cost, photo, photoLink, counted);
         }
     }
 

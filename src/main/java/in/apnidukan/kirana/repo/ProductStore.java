@@ -24,7 +24,7 @@ import static in.apnidukan.kirana.repo.KiranaSettingsStore.at;
 public class ProductStore {
 
     private static final String COLUMNS = "SELECT id, shop_id, name, unit, price_paise, stock, low_stock_at, "
-            + "active, version, updated_at FROM kirana_products";
+            + "active, version, updated_at, counted_at FROM kirana_products";
 
     private static final String BILL_MOVES = "SELECT m.product_id, p.name, p.unit, m.change, m.stock_after, "
             + "p.low_stock_at FROM kirana_stock_moves m JOIN kirana_products p ON p.id = m.product_id "
@@ -138,7 +138,7 @@ public class ProductStore {
     /** The shop's active product with this barcode, and the barcode's pack. */
     public Optional<Scan> findByBarcode(UUID shopId, String barcode) {
         return jdbc.query("SELECT p.id, p.shop_id, p.name, p.unit, p.price_paise, p.stock, p.low_stock_at, p.active, "
-                        + "p.version, p.updated_at, b.pack FROM kirana_barcodes b JOIN kirana_products p "
+                        + "p.version, p.updated_at, p.counted_at, b.pack FROM kirana_barcodes b JOIN kirana_products p "
                         + "ON p.id = b.product_id WHERE b.shop_id = ? AND b.code = ? AND b.active",
                 (rs, i) -> new Scan(product(rs, i), rs.getBigDecimal("pack")), shopId, barcode).stream().findFirst();
     }
@@ -150,8 +150,8 @@ public class ProductStore {
             return out;
         }
         jdbc.query("SELECT p.id, p.shop_id, p.name, p.unit, p.price_paise, p.stock, p.low_stock_at, p.active, "
-                        + "p.version, p.updated_at, b.pack, b.code FROM kirana_barcodes b JOIN kirana_products p "
-                        + "ON p.id = b.product_id WHERE b.shop_id = ? AND b.code = ANY (?) AND b.active",
+                        + "p.version, p.updated_at, p.counted_at, b.pack, b.code FROM kirana_barcodes b "
+                        + "JOIN kirana_products p ON p.id = b.product_id WHERE b.shop_id = ? AND b.code = ANY (?) AND b.active",
                 ps -> {
                     ps.setObject(1, shopId);
                     ps.setArray(2, ps.getConnection().createArrayOf("varchar", codes.toArray()));
@@ -279,7 +279,43 @@ public class ProductStore {
 
     /** Sets the stock of a locked product (the caller worked out the new value under the lock). */
     public void setStock(UUID productId, BigDecimal stock, Instant now) {
-        jdbc.update("UPDATE kirana_products SET stock = ?, updated_at = ? WHERE id = ?", stock, at(now), productId);
+        // Below zero: sold more than was counted, so the count no longer holds (it isn't offered online until counted)
+        jdbc.update("UPDATE kirana_products SET stock = ?, updated_at = ?, counted_at = CASE WHEN ? < 0 THEN NULL "
+                + "ELSE counted_at END WHERE id = ?", stock, at(now), stock, productId);
+    }
+
+    /** Its stock was just counted by hand (added with a count, or Count): it may be offered online. */
+    public void markCounted(UUID productId, Instant now) {
+        jdbc.update("UPDATE kirana_products SET counted_at = ? WHERE id = ?", at(now), productId);
+    }
+
+    /** These products were missing for an online order: their count no longer holds until counted again. */
+    public void uncount(UUID shopId, java.util.Collection<UUID> productIds) {
+        if (productIds.isEmpty()) {
+            return;
+        }
+        jdbc.update("UPDATE kirana_products SET counted_at = NULL WHERE shop_id = ? AND id = ANY (?)",
+                ps -> {
+                    ps.setObject(1, shopId);
+                    ps.setArray(2, ps.getConnection().createArrayOf("uuid", productIds.toArray()));
+                });
+    }
+
+    /** The shop's active products, and how many of them were never counted (ix_kirana_products_uncounted). */
+    public long[] countedTotals(UUID shopId) {
+        return jdbc.queryForObject("SELECT count(*), count(*) FILTER (WHERE counted_at IS NULL) FROM kirana_products "
+                + "WHERE shop_id = ? AND active", (rs, i) -> new long[] {rs.getLong(1), rs.getLong(2)}, shopId);
+    }
+
+    /** A product by id and name. */
+    public record Named(UUID id, String name) {
+    }
+
+    /** Up to {@code limit} active products not counted yet, by name (to show what is left). */
+    public List<Named> uncounted(UUID shopId, int limit) {
+        return jdbc.query("SELECT id, name FROM kirana_products WHERE shop_id = ? AND active AND counted_at IS NULL "
+                + "ORDER BY lower(name) LIMIT ?", (rs, i) -> new Named(rs.getObject("id", UUID.class),
+                rs.getString("name")), shopId, limit);
     }
 
     /** Records stock changes in one round trip. */
@@ -461,6 +497,8 @@ public class ProductStore {
         return new Product(rs.getObject("id", UUID.class), rs.getObject("shop_id", UUID.class), rs.getString("name"),
                 Unit.valueOf(rs.getString("unit")), rs.getLong("price_paise"),
                 rs.getBigDecimal("stock"), rs.getBigDecimal("low_stock_at"), rs.getBoolean("active"),
-                rs.getLong("version"), rs.getObject("updated_at", OffsetDateTime.class).toInstant());
+                rs.getLong("version"), rs.getObject("updated_at", OffsetDateTime.class).toInstant(),
+                Optional.ofNullable(rs.getObject("counted_at", OffsetDateTime.class)).map(OffsetDateTime::toInstant)
+                        .orElse(null));
     }
 }

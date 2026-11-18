@@ -29,7 +29,8 @@ public final class KiranaRequests {
      * @param mrpPaise    the MRP printed on the pack (optional): kept in the shared catalogue when this barcode is new
      *                    there, so the next shop's scan fills it in
      * @param pricePaise  per piece, or per kg for KG: ₹0.01 to ₹1,00,000
-     * @param stock       how many (or how much) is in the shop now; 0 if left out
+     * @param stock       how many (or how much) is on the shelf now, counted (0 if left out, and then not counted:
+     *                    it isn't offered online until Count)
      * @param lowStockAt  "running out" at or below this; left out: no alert
      */
     public record NewProduct(@NotBlank(message = "Enter the product's name")

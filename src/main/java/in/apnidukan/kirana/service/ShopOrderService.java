@@ -11,6 +11,7 @@ import in.apnidukan.kirana.api.OrderResponses.ShopPartPage;
 import in.apnidukan.kirana.api.OrderResponses.ShopPartView;
 import in.apnidukan.kirana.domain.Cursors;
 import in.apnidukan.kirana.domain.Quantities;
+import in.apnidukan.kirana.repo.ProductStore;
 import in.apnidukan.kirana.repo.OrderStore;
 import in.apnidukan.kirana.repo.OrderStore.Checkout;
 import in.apnidukan.kirana.repo.OrderStore.Line;
@@ -56,11 +57,14 @@ public class ShopOrderService {
     private final OrderFlow flow;
     private final ShopDirectory shops;
     private final UserDirectory users;
+    private final ProductStore products;
     private final TransactionTemplate transactions;
     private final Clock clock;
 
     public ShopOrderService(KiranaAccess access, OrderStore orders, OrderFlow flow, ShopDirectory shops,
-                            UserDirectory users, TransactionTemplate transactions, Clock clock) {
+                            UserDirectory users, ProductStore products, TransactionTemplate transactions,
+                            Clock clock) {
+        this.products = products;
         this.access = access;
         this.orders = orders;
         this.flow = flow;
@@ -176,6 +180,8 @@ public class ShopOrderService {
         long off = gone.stream().mapToLong(Line::amountPaise).sum();
         orders.markMissing(p.id(), marked);
         flow.moveStock(p, gone, true, now, userId);
+        // The shelf didn't have them though the app said so: not offered online again until counted
+        products.uncount(p.shopId(), gone.stream().map(Line::productId).filter(java.util.Objects::nonNull).toList());
         boolean empty = p.itemsPaise() - off == 0 && "SUPPLIER".equals(p.role());
         // A supplier left with nothing has nothing to hand over: its part ends, so the order can go out without it
         Part less = new Part(p.id(), p.orderId(), p.shopId(), p.role(), empty ? "CANCELLED" : p.status(), p.acceptBy(),
