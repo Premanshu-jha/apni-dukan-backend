@@ -10,6 +10,7 @@ import in.apnidukan.kirana.api.KiranaRequests.NewBarcode;
 import in.apnidukan.kirana.api.KiranaRequests.NewProduct;
 import in.apnidukan.kirana.api.KiranaRequests.StockChange;
 import in.apnidukan.kirana.api.KiranaRequests.StockReason;
+import in.apnidukan.kirana.api.KiranaResponses;
 import in.apnidukan.kirana.api.KiranaResponses.MoveView;
 import in.apnidukan.kirana.api.KiranaResponses.ProductDetail;
 import in.apnidukan.kirana.api.KiranaResponses.ProductPage;
@@ -166,7 +167,7 @@ public class ProductService {
         BigDecimal low = in.lowStockAt() == null ? null : quantity("lowStockAt", in.lowStockAt(), in.unit(), true);
         Instant now = KiranaChecks.now(clock);
         Product p = new Product(UUID.randomUUID(), c.shopId(), name, in.unit(), in.pricePaise(), stock, low,
-                true, 0, now);
+                true, 0, now, in.stock() != null ? now : null);
         requireFree(c.shopId(), null, name, barcode);
         List<Barcode> barcodes = barcode == null ? List.of() : List.of(new Barcode(barcode, pack));
         try {
@@ -183,6 +184,9 @@ public class ProductService {
         if (stock.signum() != 0) {
             products.addMoves(c.shopId(), List.of(new Move(p.id(), stock, stock, "COUNT", null, "First count", null)),
                     userId, now);
+        }
+        if (in.stock() != null) {
+            products.markCounted(p.id(), now);   // the shelf counted as it was added (0 is a count too)
         }
         return ProductView.of(p, barcodes);
     }
@@ -221,7 +225,7 @@ public class ProductService {
             }
         }
         Product updated = new Product(old.id(), old.shopId(), name, unit, price, old.stock(), low,
-                active, old.version() + 1, KiranaChecks.now(clock));
+                active, old.version() + 1, KiranaChecks.now(clock), old.countedAt());
         if (Objects.equals(name, old.name()) && price == old.pricePaise() && unit == old.unit()
                 && Objects.equals(low, old.lowStockAt()) && active == old.active()) {
             return view(old);
@@ -240,7 +244,50 @@ public class ProductService {
                     .forEach(code -> products.lockBarcode(c.shopId(), code));
             products.setBarcodesActive(c.shopId(), old.id(), active);
         }
+        photoAfterChange(c, old, updated);
         return view(updated);
+    }
+
+    /**
+     * A product's picture after the owner changed it: removed, the photo waiting for a check is let go of (nothing is
+     * left checking); renamed or its unit changed (a size, a brand, packed or loose), its own photo is checked again
+     * against what it is now, showing nothing meanwhile.
+     */
+    private void photoAfterChange(Caller c, Product old, Product now) {
+        ProductStore.PhotoState photo = products.photoState(old.id());
+        boolean changed = !now.name().equals(old.name()) || now.unit() != old.unit();
+        if (!now.active()) {
+            if (changed && photo.own() != null) {
+                // Renamed while removed: its photo was of something else; a new one is taken when it is back
+                products.removePhotos(old.id());
+                kiranaFiles.releaseIfUnused(photo.files(), null);
+            } else if (photo.newFile() != null) {
+                products.dropNewPhoto(old.id());
+                kiranaFiles.releaseIfUnused(java.util.stream.Stream.of(photo.newFile(), photo.sizeFile())
+                        .filter(Objects::nonNull).toList(), null);
+            }
+            return;
+        }
+        UUID file = photo.newFile() != null ? photo.newFile() : photo.own();
+        if (!changed || file == null) {
+            return;
+        }
+        UUID size = photo.newFile() != null ? photo.sizeFile() : null;
+        products.recheckPhoto(old.id(), file, size);
+        if (photo.newFile() != null && photo.own() != null) {
+            kiranaFiles.releaseIfUnused(List.of(photo.own()), null);   // the old picture of what it was before
+        }
+        // A check again is an AI read like any photo's: counted in the day's allowance, and past it the shop sends the
+        // photo again tomorrow
+        Instant at = KiranaChecks.now(clock);
+        reads.lockPhotoChecks(c.shopId());
+        if (photosLeftToday(c.shopId()) == 0) {
+            products.photoChecked(old.id(), "REFUSED", "NOT_CHECKED", "The product changed, so its photo needs "
+                    + "checking again. Send it again after midnight.", null);
+            return;
+        }
+        reads.queue(c.shopId(), c.userId(), "LABEL", UUID.randomUUID(), size == null ? List.of(file)
+                : List.of(file, size), old.id(), at);
     }
 
     /**
@@ -332,13 +379,19 @@ public class ProductService {
             case COUNT -> q;
         };
         BigDecimal change = after.subtract(p.stock());
+        Instant now = KiranaChecks.now(clock);
+        Instant counted = p.countedAt();
+        if (in.reason() == StockReason.COUNT) {
+            products.markCounted(p.id(), now);   // a count is a count even when it matches the stock
+            counted = now;
+        }
         if (change.signum() == 0) {
-            return view(p);
+            return view(new Product(p.id(), p.shopId(), p.name(), p.unit(), p.pricePaise(), p.stock(),
+                    p.lowStockAt(), p.active(), p.version(), p.updatedAt(), counted));
         }
         if (after.abs().compareTo(new BigDecimal("999999999")) > 0) {
             throw invalid("quantity", "is too large");
         }
-        Instant now = KiranaChecks.now(clock);
         BigDecimal stored = Quantities.stored(after);
         products.setStock(p.id(), stored, now);
         try {
@@ -354,15 +407,21 @@ public class ProductService {
             throw e;
         }
         return view(new Product(p.id(), p.shopId(), p.name(), p.unit(), p.pricePaise(), stored,
-                p.lowStockAt(), p.active(), p.version(), now));
+                p.lowStockAt(), p.active(), p.version(), now, stored.signum() < 0 ? null : counted));
     }
 
     /**
      * A new product (owner or helper) for something read or scanned: from a shared catalogue item ({@code itemId}, its
      * name, unit and MRP as the price unless given) and/or the name, unit and price sent (400 naming itemId, name, unit
-     * or pricePaise when missing; NAME_TAKEN as when adding). It is linked to the catalogue item. Its id.
+     * or pricePaise when missing; NAME_TAKEN as when adding). It is linked to the catalogue item. It starts counted at
+     * 0: what came in (the bill's or the scan's) is added to it, so its stock is known. Its id.
      */
     UUID newFor(UUID userId, UUID itemId, String name, Unit unit, Long pricePaise) {
+        return newFor(userId, itemId, name, unit, pricePaise, BigDecimal.ZERO);
+    }
+
+    /** As {@link #newFor(UUID, UUID, String, Unit, Long)}, with this count (null: not counted). */
+    UUID newFor(UUID userId, UUID itemId, String name, Unit unit, Long pricePaise, BigDecimal counted) {
         CatalogueStore.Item item = null;
         if (itemId != null) {
             item = catalogueItems.find(itemId).orElseThrow(() -> invalid("itemId",
@@ -380,11 +439,37 @@ public class ProductService {
         if (price == null) {
             throw invalid("pricePaise", "Enter the price");
         }
-        UUID id = create(userId, new NewProduct(n, null, null, null, u, price, null, null)).id();
+        UUID id = create(userId, new NewProduct(n, null, null, null, u, price, counted, null)).id();
         if (item != null) {
             products.setCatalogueItem(id, item.id());
         }
         return id;
+    }
+
+    /**
+     * The product's stock counted now (the product setup adding a line of its list for a product the shop already has):
+     * one COUNT move when it changed, and the product counted. {@code addTo}: the count is more of it kept elsewhere,
+     * added to its stock (read under the lock; below zero counts as none). 400 naming quantity; 409 PRODUCT_REMOVED.
+     */
+    void countFor(UUID shopId, UUID userId, UUID productId, BigDecimal quantity, boolean addTo, String note) {
+        Product p = products.lock(shopId, productId).orElseThrow(ProductService::notFound);
+        if (!p.active()) {
+            throw removed();
+        }
+        BigDecimal q = quantity("quantity", quantity, p.unit(), true);
+        if (addTo) {
+            q = p.stock().max(BigDecimal.ZERO).add(q);
+        }
+        Instant now = KiranaChecks.now(clock);
+        products.markCounted(p.id(), now);
+        BigDecimal change = q.subtract(p.stock());
+        if (change.signum() == 0) {
+            return;
+        }
+        BigDecimal stored = Quantities.stored(q);
+        products.setStock(p.id(), stored, now);
+        products.addMoves(shopId, List.of(new Move(p.id(), Quantities.stored(change), stored, "COUNT", null, note,
+                null)), userId, now);
     }
 
     // ---------- the owner's corrections ----------
@@ -514,40 +599,111 @@ public class ProductService {
                 view(c, products.find(c.shopId(), to.id()).orElseThrow()));
     }
 
+    /** Photos a shop may send to be checked in a day (each is an AI read). */
+    public static final int PHOTO_CHECKS_PER_DAY = 300;
+
     /**
-     * The product's photo (owner or helper): a PRODUCT_PHOTO this shop uploaded (400 naming fileId otherwise), or
-     * null to remove the shop's own (the catalogue's shared one shows again). When the product's catalogue item has no
-     * shared photo yet, the label is read by AI and the photo shared if it shows that item. The same clientRef again
-     * changes nothing.
+     * The product's photo (owner or helper): a PRODUCT_PHOTO this shop uploaded (400 naming fileId, or sizeFileId,
+     * otherwise), with a second one of the side where the size is printed when the check asked for it. It is checked
+     * by AI before it shows (PhotoChecks): the right product and size, the front of the pack, sharp, one product, no
+     * people; the product's picture stays as it was meanwhile, and a refused photo says why. After NEED_SIZE, the size
+     * side alone ({@code sizeFileId}, no fileId) goes with the front still waiting. At most
+     * {@value #PHOTO_CHECKS_PER_DAY} a day a shop (409 TOO_MANY_PHOTOS_TODAY). Null: a photo waiting or refused is let
+     * go of, keeping the accepted picture; with none waiting, the shop's own photo is removed, only when the catalogue
+     * has a picture of it (409 PHOTO_NEEDED: every product needs one); {@code dropFileId}, the photo the shop meant to
+     * let go of, makes a late retry change nothing once another photo waits. The same clientRef again changes
+     * nothing.
      */
     @Transactional
-    public ProductView setPhoto(UUID userId, UUID productId, UUID clientRef, UUID fileId) {
+    public ProductView setPhoto(UUID userId, UUID productId, UUID clientRef, UUID fileId, UUID sizeFileId,
+                                UUID dropFileId) {
         Caller c = access.caller(userId);
         Product p = products.lock(c.shopId(), productId).orElseThrow(ProductService::notFound);
+        if (reads.earlier(c.shopId(), clientRef).isPresent()) {
+            return view(c, p);   // sent again (a retry, even a late one): it was taken then
+        }
         if (!p.active()) {
             throw removed();
         }
-        ProductStore.Extra x = products.extras(List.of(p.id())).get(p.id());
-        UUID own = products.ownPhoto(p.id());
-        if (Objects.equals(own, fileId)) {
+        ProductStore.PhotoState was = products.photoState(p.id());
+        Instant now = KiranaChecks.now(clock);
+        if (fileId == null && sizeFileId != null) {
+            // The side with the size, for the front still waiting (NEED_SIZE): the front need not be sent again
+            if (was.newFile() == null || !"NEED_SIZE".equals(was.check())) {
+                throw invalid("fileId", "Send the photo of the front with it");
+            }
+            fileId = was.newFile();
+        }
+        if (fileId == null) {
+            if (dropFileId != null && !dropFileId.equals(was.newFile()) && !dropFileId.equals(was.own())) {
+                return view(c, p);   // that photo is already gone (a late retry): another may wait now
+            }
+            if (was.newFile() != null && was.own() != null) {
+                // A new photo waiting or refused: let go of, keeping the accepted picture
+                products.dropNewPhoto(p.id());
+                kiranaFiles.releaseIfUnused(java.util.stream.Stream.of(was.newFile(), was.sizeFile())
+                        .filter(Objects::nonNull).toList(), null);
+                return view(c, p);
+            }
+            if (was.own() == null && was.newFile() == null) {
+                return view(c, p);
+            }
+            UUID shared = catalogueItems.photos(java.util.Optional.ofNullable(products.catalogueItemOf(p.id()))
+                    .map(List::of).orElse(List.of())).values().stream().findFirst().orElse(null);
+            if (shared == null) {
+                throw new ApiException(HttpStatus.CONFLICT, "PHOTO_NEEDED", "Every product needs a picture. Take a "
+                        + "new photo instead of removing this one.");
+            }
+            products.removePhotos(p.id());
+            kiranaFiles.releaseIfUnused(was.files(), null);
             return view(c, p);
         }
-        Instant now = KiranaChecks.now(clock);
-        if (fileId != null) {
-            FileRefs.FileRef f = files.find(fileId).orElse(null);
-            if (f == null || !c.shopId().equals(f.shopId()) || !"PRODUCT_PHOTO".equals(f.purpose())) {
-                throw invalid("fileId", "Upload the photo first (as PRODUCT_PHOTO)");
+        if (fileId.equals(sizeFileId)) {
+            throw invalid("sizeFileId", "Take a second photo, of the side where the size is printed");
+        }
+        requirePhoto(c.shopId(), fileId, "fileId");
+        if (sizeFileId != null) {
+            requirePhoto(c.shopId(), sizeFileId, "sizeFileId");
+        }
+        // Counted under the shop's lock, so a burst can't pass the day's allowance
+        reads.lockPhotoChecks(c.shopId());
+        int sent = reads.photoChecksSince(c.shopId(), KiranaChecks.today(now).atStartOfDay(KiranaChecks.ZONE)
+                .toInstant());
+        if (sent >= PHOTO_CHECKS_PER_DAY) {
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_PHOTOS_TODAY", "You've sent "
+                    + PHOTO_CHECKS_PER_DAY + " photos to check today. You can send more after midnight.",
+                    Map.of("max", PHOTO_CHECKS_PER_DAY, "leftToday", 0));
+        }
+        files.keep(fileId);
+        if (sizeFileId != null) {
+            files.keep(sizeFileId);
+        }
+        products.photoToCheck(p.id(), fileId, sizeFileId);
+        List<UUID> pages = sizeFileId == null ? List.of(fileId) : List.of(fileId, sizeFileId);
+        reads.queue(c.shopId(), userId, "LABEL", clientRef, pages, p.id(), now);
+        // The photos waiting before, if replaced (the accepted one stays until the new one passes)
+        List<UUID> before = new java.util.ArrayList<>();
+        for (UUID f : new UUID[] {was.newFile(), was.sizeFile()}) {
+            if (f != null && !pages.contains(f)) {
+                before.add(f);
             }
-            files.keep(fileId);
         }
-        products.setPhoto(p.id(), fileId);
-        if (own != null) {
-            kiranaFiles.releaseIfUnused(List.of(own), null);
-        }
-        if (fileId != null && x != null && x.catalogueItemId() != null && !catalogue.hasPhoto(x.catalogueItemId())) {
-            reads.queue(c.shopId(), userId, "LABEL", clientRef, List.of(fileId), p.id(), now);
-        }
+        kiranaFiles.releaseIfUnused(before, null);
         return view(c, p);
+    }
+
+    /** Photos the shop can still send to be checked today. */
+    int photosLeftToday(UUID shopId) {
+        int sent = reads.photoChecksSince(shopId, KiranaChecks.today(KiranaChecks.now(clock))
+                .atStartOfDay(KiranaChecks.ZONE).toInstant());
+        return Math.max(0, PHOTO_CHECKS_PER_DAY - sent);
+    }
+
+    private void requirePhoto(UUID shopId, UUID fileId, String field) {
+        FileRefs.FileRef f = files.find(fileId).orElse(null);
+        if (f == null || !shopId.equals(f.shopId()) || !"PRODUCT_PHOTO".equals(f.purpose())) {
+            throw invalid(field, "Upload the photo first (as PRODUCT_PHOTO)");
+        }
     }
 
     /** The cost price (owner): what is paid per piece or kg; null clears it. Bills already made don't change. */
@@ -569,7 +725,7 @@ public class ProductService {
     private ProductView view(Product p) {
         ProductStore.Extra x = products.extras(List.of(p.id())).get(p.id());
         UUID photo = x == null ? null : x.photoFileId();
-        return ProductView.of(p, products.barcodes(p.id())).with(null, photo, link(photo));
+        return ProductView.of(p, products.barcodes(p.id())).with(null, photo, link(photo), check(x, null));
     }
 
     /** A link to a photo (any shop's: the catalogue shares them), or null. */
@@ -582,7 +738,18 @@ public class ProductService {
         ProductStore.Extra x = products.extras(List.of(p.id())).get(p.id());
         UUID photo = x == null ? null : x.photoFileId();
         return ProductView.of(p, products.barcodes(p.id())).with(x == null || !c.isOwner() ? null : x.costPaise(),
-                photo, link(photo));
+                photo, link(photo), check(x, null));
+    }
+
+    /** How the product's new photo's check stands; {@code links}: the photos' links when read for many, else null. */
+    private KiranaResponses.PhotoCheck check(ProductStore.Extra x, Map<UUID, String> links) {
+        if (x == null || x.photoCheck() == null) {
+            return KiranaResponses.PhotoCheck.NONE;
+        }
+        String url = x.newPhotoFileId() == null ? null : links != null ? links.get(x.newPhotoFileId())
+                : link(x.newPhotoFileId());
+        return new KiranaResponses.PhotoCheck(x.photoCheck(), x.photoCheckCode(), x.photoCheckReason(),
+                x.photoCheckSeen(), url);
     }
 
     /** Products with their barcodes and photos, read in two queries for the lot. */
@@ -590,13 +757,13 @@ public class ProductService {
         List<UUID> ids = list.stream().map(Product::id).toList();
         Map<UUID, List<Barcode>> codes = products.barcodes(ids);
         Map<UUID, ProductStore.Extra> extras = products.extras(ids);
-        Map<UUID, String> links = files.links(extras.values().stream().map(ProductStore.Extra::photoFileId)
-                .filter(Objects::nonNull).distinct().toList());
+        Map<UUID, String> links = files.links(extras.values().stream().flatMap(x -> java.util.stream.Stream.of(
+                x.photoFileId(), x.newPhotoFileId())).filter(Objects::nonNull).distinct().toList());
         return list.stream().map(p -> {
             ProductStore.Extra x = extras.get(p.id());
             UUID photo = x == null ? null : x.photoFileId();
             return ProductView.of(p, codes.getOrDefault(p.id(), List.of())).with(null, photo,
-                    photo == null ? null : links.get(photo));
+                    photo == null ? null : links.get(photo), check(x, links));
         }).toList();
     }
 

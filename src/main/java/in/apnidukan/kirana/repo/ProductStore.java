@@ -24,7 +24,15 @@ import static in.apnidukan.kirana.repo.KiranaSettingsStore.at;
 public class ProductStore {
 
     private static final String COLUMNS = "SELECT id, shop_id, name, unit, price_paise, stock, low_stock_at, "
-            + "active, version, updated_at FROM kirana_products";
+            + "active, version, updated_at, counted_at FROM kirana_products";
+    /** Retakes first (0: refused, or the size asked for), then those not sent yet (1), then those being checked (2). */
+    private static final String PHOTO_RANK = "(CASE WHEN p.photo_check IN ('REFUSED', 'NEED_SIZE') THEN 0 "
+            + "WHEN p.photo_check IS NULL THEN 1 ELSE 2 END)";
+    private static final String NEEDING_PHOTOS = "SELECT * FROM (SELECT p.id, p.name, p.unit, p.photo_check, "
+            + "p.photo_check_reason, p.photo_check_code, p.photo_check_seen, p.photo_new_file_id, "
+            + "lower(p.name) AS sort_key, " + PHOTO_RANK + " AS rank FROM kirana_products p "
+            + "LEFT JOIN kirana_catalogue_items i ON i.id = p.catalogue_item_id WHERE p.shop_id = ? AND p.active "
+            + "AND p.photo_file_id IS NULL AND i.photo_file_id IS NULL) n ";
 
     private static final String BILL_MOVES = "SELECT m.product_id, p.name, p.unit, m.change, m.stock_after, "
             + "p.low_stock_at FROM kirana_stock_moves m JOIN kirana_products p ON p.id = m.product_id "
@@ -138,7 +146,7 @@ public class ProductStore {
     /** The shop's active product with this barcode, and the barcode's pack. */
     public Optional<Scan> findByBarcode(UUID shopId, String barcode) {
         return jdbc.query("SELECT p.id, p.shop_id, p.name, p.unit, p.price_paise, p.stock, p.low_stock_at, p.active, "
-                        + "p.version, p.updated_at, b.pack FROM kirana_barcodes b JOIN kirana_products p "
+                        + "p.version, p.updated_at, p.counted_at, b.pack FROM kirana_barcodes b JOIN kirana_products p "
                         + "ON p.id = b.product_id WHERE b.shop_id = ? AND b.code = ? AND b.active",
                 (rs, i) -> new Scan(product(rs, i), rs.getBigDecimal("pack")), shopId, barcode).stream().findFirst();
     }
@@ -150,8 +158,8 @@ public class ProductStore {
             return out;
         }
         jdbc.query("SELECT p.id, p.shop_id, p.name, p.unit, p.price_paise, p.stock, p.low_stock_at, p.active, "
-                        + "p.version, p.updated_at, b.pack, b.code FROM kirana_barcodes b JOIN kirana_products p "
-                        + "ON p.id = b.product_id WHERE b.shop_id = ? AND b.code = ANY (?) AND b.active",
+                        + "p.version, p.updated_at, p.counted_at, b.pack, b.code FROM kirana_barcodes b "
+                        + "JOIN kirana_products p ON p.id = b.product_id WHERE b.shop_id = ? AND b.code = ANY (?) AND b.active",
                 ps -> {
                     ps.setObject(1, shopId);
                     ps.setArray(2, ps.getConnection().createArrayOf("varchar", codes.toArray()));
@@ -279,7 +287,43 @@ public class ProductStore {
 
     /** Sets the stock of a locked product (the caller worked out the new value under the lock). */
     public void setStock(UUID productId, BigDecimal stock, Instant now) {
-        jdbc.update("UPDATE kirana_products SET stock = ?, updated_at = ? WHERE id = ?", stock, at(now), productId);
+        // Below zero: sold more than was counted, so the count no longer holds (it isn't offered online until counted)
+        jdbc.update("UPDATE kirana_products SET stock = ?, updated_at = ?, counted_at = CASE WHEN ? < 0 THEN NULL "
+                + "ELSE counted_at END WHERE id = ?", stock, at(now), stock, productId);
+    }
+
+    /** Its stock was just counted by hand (added with a count, or Count): it may be offered online. */
+    public void markCounted(UUID productId, Instant now) {
+        jdbc.update("UPDATE kirana_products SET counted_at = ? WHERE id = ?", at(now), productId);
+    }
+
+    /** These products were missing for an online order: their count no longer holds until counted again. */
+    public void uncount(UUID shopId, java.util.Collection<UUID> productIds) {
+        if (productIds.isEmpty()) {
+            return;
+        }
+        jdbc.update("UPDATE kirana_products SET counted_at = NULL WHERE shop_id = ? AND id = ANY (?)",
+                ps -> {
+                    ps.setObject(1, shopId);
+                    ps.setArray(2, ps.getConnection().createArrayOf("uuid", productIds.toArray()));
+                });
+    }
+
+    /** The shop's active products, and how many of them were never counted (ix_kirana_products_uncounted). */
+    public long[] countedTotals(UUID shopId) {
+        return jdbc.queryForObject("SELECT count(*), count(*) FILTER (WHERE counted_at IS NULL) FROM kirana_products "
+                + "WHERE shop_id = ? AND active", (rs, i) -> new long[] {rs.getLong(1), rs.getLong(2)}, shopId);
+    }
+
+    /** A product by id and name. */
+    public record Named(UUID id, String name) {
+    }
+
+    /** Up to {@code limit} active products not counted yet, by name (to show what is left). */
+    public List<Named> uncounted(UUID shopId, int limit) {
+        return jdbc.query("SELECT id, name FROM kirana_products WHERE shop_id = ? AND active AND counted_at IS NULL "
+                + "ORDER BY lower(name) LIMIT ?", (rs, i) -> new Named(rs.getObject("id", UUID.class),
+                rs.getString("name")), shopId, limit);
     }
 
     /** Records stock changes in one round trip. */
@@ -383,30 +427,160 @@ public class ProductStore {
     }
 
     /**
-     * Whether a kirana still points at this file: a product's photo, a catalogue item's shared photo, a paper bill's
-     * photo, an FSSAI certificate, or a read (other than {@code exceptRead}) still being read, read or used. Uploads of
+     * Whether a kirana still points at this file: a product's photo (or one being checked), a catalogue item's shared
+     * photo, a paper bill's photo, an FSSAI certificate, or a read (other than {@code exceptRead}) still being read,
+     * read or used (a product's photo check, once done, holds nothing: the product says what it kept). Uploads of
      * the same bytes share one file, so one product's old photo may be another's.
      */
     public boolean fileInUse(UUID fileId, UUID exceptRead) {
         return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM kirana_products "
-                + "WHERE photo_file_id = ?) OR EXISTS (SELECT 1 FROM kirana_catalogue_items WHERE photo_file_id = ?) "
+                + "WHERE photo_file_id = ? OR photo_new_file_id = ? OR photo_new_size_file_id = ?) "
+                + "OR EXISTS (SELECT 1 FROM kirana_catalogue_items WHERE photo_file_id = ?) "
                 + "OR EXISTS (SELECT 1 FROM kirana_bills WHERE photo_file_id = ?) "
                 + "OR EXISTS (SELECT 1 FROM kirana_online WHERE fssai_file_id = ? OR fssai_kept_file_id = ?) "
                 + "OR EXISTS (SELECT 1 FROM kirana_reads WHERE file_ids @> ARRAY[?]::uuid[] "
-                + "AND status IN ('READING', 'READ', 'DONE') AND id IS DISTINCT FROM ?)", Boolean.class, fileId,
-                fileId, fileId, fileId, fileId, fileId, exceptRead));
+                + "AND (status = 'READING' OR status IN ('READ', 'DONE') AND NOT (kind = 'LABEL' "
+                + "AND product_id IS NOT NULL)) AND id IS DISTINCT FROM ?)", Boolean.class, fileId,
+                fileId, fileId, fileId, fileId, fileId, fileId, fileId, exceptRead));
     }
 
-    /** The shop's own photo of the product (null: none, the catalogue item's shows). */
-    public void setPhoto(UUID productId, UUID fileId) {
-        jdbc.update("UPDATE kirana_products SET photo_file_id = ? WHERE id = ?", fileId, productId);
+    /**
+     * A product's photos: its own accepted one, and a new one being checked (with its size photo), how that check
+     * stands and why.
+     * @param check CHECKING, REFUSED or NEED_SIZE; null when no new photo waits
+     */
+    public record PhotoState(UUID own, UUID newFile, UUID sizeFile, String check, String reason, boolean shareable) {
+
+        /** The files this state points at (to let go of the ones no longer used). */
+        public List<UUID> files() {
+            List<UUID> out = new ArrayList<>();
+            for (UUID f : new UUID[] {own, newFile, sizeFile}) {
+                if (f != null) {
+                    out.add(f);
+                }
+            }
+            return out;
+        }
+    }
+
+    public PhotoState photoState(UUID productId) {
+        return jdbc.queryForObject("SELECT photo_file_id, photo_new_file_id, photo_new_size_file_id, photo_check, "
+                + "photo_check_reason, photo_shareable FROM kirana_products WHERE id = ?", (rs, i) -> new PhotoState(
+                rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getObject(3, UUID.class),
+                rs.getString(4), rs.getString(5), rs.getBoolean(6)), productId);
+    }
+
+    /** A new photo (and its size photo) to check; the accepted one stays until it passes. */
+    public void photoToCheck(UUID productId, UUID fileId, UUID sizeFileId) {
+        jdbc.update("UPDATE kirana_products SET photo_new_file_id = ?, photo_new_size_file_id = ?, "
+                + "photo_check = 'CHECKING', photo_check_reason = NULL, photo_check_code = NULL, "
+                + "photo_check_seen = NULL WHERE id = ?", fileId, sizeFileId, productId);
+    }
+
+    /**
+     * The product's name or unit changed: its picture is checked again against them (it shows nothing meanwhile, and
+     * isn't shared): the accepted photo (or the one waiting) becomes the one being checked.
+     */
+    public void recheckPhoto(UUID productId, UUID fileId, UUID sizeFileId) {
+        jdbc.update("UPDATE kirana_products SET photo_file_id = NULL, photo_shareable = false, photo_new_file_id = ?, "
+                + "photo_new_size_file_id = ?, photo_check = 'CHECKING', photo_check_reason = NULL, "
+                + "photo_check_code = NULL, photo_check_seen = NULL WHERE id = ?", fileId, sizeFileId, productId);
+    }
+
+    /** The new photo's check: REFUSED or NEED_SIZE, with the reason for the shop, its code and what the photo showed. */
+    public void photoChecked(UUID productId, String check, String code, String reason, String seen) {
+        // Cut to the columns (a long product name in the reason), so a refusal is always saved
+        jdbc.update("UPDATE kirana_products SET photo_check = ?, photo_check_code = ?, photo_check_reason = ?, "
+                + "photo_check_seen = ? WHERE id = ?", check, code, cut(reason, 300), cut(seen, 160), productId);
+    }
+
+    private static String cut(String s, int max) {
+        return s == null || s.length() <= max ? s : s.substring(0, max - 1) + "…";
+    }
+
+    /** The photo waiting (or refused) let go of; the accepted one stays. */
+    public void dropNewPhoto(UUID productId) {
+        jdbc.update("UPDATE kirana_products SET photo_new_file_id = NULL, photo_new_size_file_id = NULL, "
+                + "photo_check = NULL, photo_check_reason = NULL, photo_check_code = NULL, photo_check_seen = NULL "
+                + "WHERE id = ?", productId);
+    }
+
+    /** The new photo passed: it is the product's picture now (shareable: may go to its catalogue item). */
+    public void acceptPhoto(UUID productId, boolean shareable) {
+        jdbc.update("UPDATE kirana_products SET photo_file_id = photo_new_file_id, photo_new_file_id = NULL, "
+                + "photo_new_size_file_id = NULL, photo_check = NULL, photo_check_reason = NULL, "
+                + "photo_check_code = NULL, photo_check_seen = NULL, photo_shareable = ? "
+                + "WHERE id = ? AND photo_new_file_id IS NOT NULL", shareable, productId);
+    }
+
+    /** The shop's own photo taken off, and any new one waiting (the catalogue item's shows). */
+    public void removePhotos(UUID productId) {
+        jdbc.update("UPDATE kirana_products SET photo_file_id = NULL, photo_new_file_id = NULL, "
+                + "photo_new_size_file_id = NULL, photo_check = NULL, photo_check_reason = NULL, "
+                + "photo_check_code = NULL, photo_check_seen = NULL, photo_shareable = false WHERE id = ?", productId);
+    }
+
+    /**
+     * The shop's checked photos that may be shared, given to catalogue items without one (once it is approved). The
+     * items are locked in id order first, so two shops approved at once never wait on each other's items in a circle.
+     */
+    public int shareCheckedPhotos(UUID shopId) {
+        List<UUID> items = jdbc.queryForList("SELECT i.id FROM kirana_catalogue_items i WHERE i.photo_file_id IS NULL "
+                + "AND i.id IN (SELECT p.catalogue_item_id FROM kirana_products p WHERE p.shop_id = ? AND p.active "
+                + "AND p.photo_shareable AND p.photo_file_id IS NOT NULL) ORDER BY i.id FOR UPDATE", UUID.class, shopId);
+        if (items.isEmpty()) {
+            return 0;
+        }
+        return jdbc.update("UPDATE kirana_catalogue_items i SET photo_file_id = p.photo_file_id FROM kirana_products p "
+                + "WHERE p.shop_id = ? AND p.active AND p.photo_shareable AND p.photo_file_id IS NOT NULL "
+                + "AND p.catalogue_item_id = i.id AND i.photo_file_id IS NULL", shopId);
+    }
+
+    /**
+     * The shop's active products with no picture (no photo of its own, none in the catalogue), how many of those have
+     * a photo being checked, and how many a photo refused (to retake).
+     */
+    public record PhotoTotals(long missing, long checking, long refused) {
+    }
+
+    public PhotoTotals photoTotals(UUID shopId) {
+        return jdbc.queryForObject("SELECT count(*), count(*) FILTER (WHERE p.photo_check = 'CHECKING'), "
+                + "count(*) FILTER (WHERE p.photo_check IN ('REFUSED', 'NEED_SIZE')) FROM kirana_products p "
+                + "LEFT JOIN kirana_catalogue_items i ON i.id = p.catalogue_item_id WHERE p.shop_id = ? AND p.active "
+                + "AND p.photo_file_id IS NULL AND i.photo_file_id IS NULL",
+                (rs, i) -> new PhotoTotals(rs.getLong(1), rs.getLong(2), rs.getLong(3)), shopId);
+    }
+
+    /** A product still needing a picture, with its new photo's check. */
+    public record NeedsPhoto(UUID id, String name, String unit, String check, String reason, String code,
+                             String seen, UUID newFileId, String sortKey, int rank) {
+    }
+
+    /**
+     * The shop's active products with no picture, retakes first, then by name, after the cursor (rank, name, id); one
+     * more than limit.
+     */
+    public List<NeedsPhoto> needingPhotos(UUID shopId, Integer afterRank, String afterName, UUID afterId, int limit) {
+        org.springframework.jdbc.core.RowMapper<NeedsPhoto> map = (rs, i) -> new NeedsPhoto(
+                rs.getObject("id", UUID.class), rs.getString("name"), rs.getString("unit"),
+                rs.getString("photo_check"), rs.getString("photo_check_reason"), rs.getString("photo_check_code"),
+                rs.getString("photo_check_seen"), rs.getObject("photo_new_file_id", UUID.class),
+                rs.getString("sort_key"), rs.getInt("rank"));
+        if (afterName == null) {
+            return jdbc.query(NEEDING_PHOTOS + "ORDER BY rank, sort_key COLLATE \"C\", id LIMIT ?", map, shopId,
+                    limit + 1);
+        }
+        return jdbc.query(NEEDING_PHOTOS + "WHERE (rank, sort_key COLLATE \"C\", id) > (?, ?, ?) "
+                + "ORDER BY rank, sort_key COLLATE \"C\", id LIMIT ?", map, shopId, afterRank, afterName, afterId,
+                limit + 1);
     }
 
     /**
      * What a product view adds: the cost (owner only), the photo (the shop's own, else the catalogue item's shared
      * one) and the catalogue item.
      */
-    public record Extra(Long costPaise, UUID photoFileId, UUID catalogueItemId, String category) {
+    public record Extra(Long costPaise, UUID photoFileId, UUID catalogueItemId, String category, String photoCheck,
+                        String photoCheckReason, String photoCheckCode, String photoCheckSeen, UUID newPhotoFileId) {
     }
 
     /** The extras of these products in one query. */
@@ -416,12 +590,15 @@ public class ProductStore {
             return out;
         }
         jdbc.query("SELECT p.id, p.cost_paise, coalesce(p.photo_file_id, i.photo_file_id), p.catalogue_item_id, "
-                        + "i.category FROM kirana_products p LEFT JOIN kirana_catalogue_items i "
+                        + "i.category, p.photo_check, p.photo_check_reason, p.photo_check_code, p.photo_check_seen, "
+                        + "p.photo_new_file_id FROM kirana_products p "
+                        + "LEFT JOIN kirana_catalogue_items i "
                         + "ON i.id = p.catalogue_item_id WHERE p.id = ANY (?)",
                 ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", productIds.toArray())),
                 (org.springframework.jdbc.core.RowCallbackHandler) rs -> out.put(rs.getObject(1, UUID.class),
                         new Extra((Long) rs.getObject(2), rs.getObject(3, UUID.class), rs.getObject(4, UUID.class),
-                                rs.getString(5))));
+                                rs.getString(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9),
+                                rs.getObject(10, UUID.class))));
         return out;
     }
 
@@ -461,6 +638,8 @@ public class ProductStore {
         return new Product(rs.getObject("id", UUID.class), rs.getObject("shop_id", UUID.class), rs.getString("name"),
                 Unit.valueOf(rs.getString("unit")), rs.getLong("price_paise"),
                 rs.getBigDecimal("stock"), rs.getBigDecimal("low_stock_at"), rs.getBoolean("active"),
-                rs.getLong("version"), rs.getObject("updated_at", OffsetDateTime.class).toInstant());
+                rs.getLong("version"), rs.getObject("updated_at", OffsetDateTime.class).toInstant(),
+                Optional.ofNullable(rs.getObject("counted_at", OffsetDateTime.class)).map(OffsetDateTime::toInstant)
+                        .orElse(null));
     }
 }

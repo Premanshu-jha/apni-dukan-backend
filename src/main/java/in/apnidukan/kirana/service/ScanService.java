@@ -17,7 +17,6 @@ import in.apnidukan.kirana.api.StockResponses.UnknownPage;
 import in.apnidukan.kirana.api.StockResponses.UnknownView;
 import in.apnidukan.kirana.domain.Barcode;
 import in.apnidukan.kirana.domain.Cursors;
-import in.apnidukan.kirana.domain.NameMatcher;
 import in.apnidukan.kirana.domain.Product;
 import in.apnidukan.kirana.domain.Quantities;
 import in.apnidukan.kirana.domain.Unit;
@@ -568,31 +567,6 @@ public class ScanService {
     // ---------- the reading job ----------
 
     /**
-     * A pack's label just read. For a product's photo: shared as its catalogue item's photo when the label shows that
-     * item (and the shop still has this photo); unknown barcodes need nothing (their suggestions are worked out when
-     * shown). The caller holds a transaction.
-     */
-    void labelRead(Read r, KiranaDocumentAi.LabelFacts f, Instant now) {
-        if (r.productId() == null || r.fileIds().isEmpty()) {
-            return;
-        }
-        UUID file = r.fileIds().get(0);
-        if (!file.equals(products.ownPhoto(r.productId()))) {
-            return;
-        }
-        UUID itemId = products.catalogueItemOf(r.productId());
-        CatalogueStore.Item item = itemId == null ? null : catalogue.find(itemId).orElse(null);
-        if (item == null) {
-            return;
-        }
-        NameMatcher.Score s = NameMatcher.score(NameMatcher.parse(join(f.brand(), f.name()), f.brand(), f.size()),
-                NameMatcher.parse(item.name(), item.brand(), item.size()));
-        if (!s.never() && s.value() >= NameMatcher.LIKELY && catalogueService.sharePhoto(item.id(), file)) {
-            log.info("Shared a shop's photo as catalogue item {}'s", item.id());
-        }
-    }
-
-    /**
      * A photo that couldn't be read: an unknown pack's photo is let go of (the shop may send another); bills' photos
      * and products' own photos stay.
      */
@@ -680,14 +654,6 @@ public class ScanService {
     private static SuggestionView item(Known k) {
         CatalogueStore.Item i = k.item();
         return new SuggestionView(null, i.id(), i.name(), i.brand(), i.size(), i.mrpPaise(), 1);
-    }
-
-    private static String join(String brand, String name) {
-        if (name == null) {
-            return brand;
-        }
-        return brand == null || name.toLowerCase(java.util.Locale.ROOT).contains(brand.toLowerCase(java.util.Locale.ROOT))
-                ? name : brand + " " + name;
     }
 
     static ApiException unknownNotFound() {

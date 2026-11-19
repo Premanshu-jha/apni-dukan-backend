@@ -126,10 +126,13 @@ public class KiranaProductController {
         return products.moveStock(me(), id, body.clientRef(), body.toProductId(), body.quantity());
     }
 
-    /** The product's photo (owner or helper; a PRODUCT_PHOTO uploaded first); fileId null removes the shop's own. */
+    /**
+     * The product's photo (owner or helper; a PRODUCT_PHOTO uploaded first, with the size side's photo when asked),
+     * checked before it shows; fileId null removes the shop's own.
+     */
     @PutMapping("/{id}/photo")
     public ProductView photo(@PathVariable UUID id, @Valid @RequestBody ProductPhoto body) {
-        return products.setPhoto(me(), id, body.clientRef(), body.fileId());
+        return products.setPhoto(me(), id, body.clientRef(), body.fileId(), body.sizeFileId(), body.dropFileId());
     }
 
     /** The cost price (owner only; helpers never see it). */

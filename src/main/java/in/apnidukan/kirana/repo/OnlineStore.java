@@ -244,6 +244,14 @@ public class OnlineStore {
         return !n.isEmpty() && cap > 0;
     }
 
+    /** As takeAiCall, from photo checks' own daily allowance (they never hold up bills). */
+    public boolean takePhotoAiCall(LocalDate day, int cap) {
+        List<Integer> n = jdbc.queryForList("INSERT INTO kirana_photo_ai_calls (day, calls) VALUES (?, 1) "
+                + "ON CONFLICT (day) DO UPDATE SET calls = kirana_photo_ai_calls.calls + 1 "
+                + "WHERE kirana_photo_ai_calls.calls < ? RETURNING calls", Integer.class, Date.valueOf(day), cap);
+        return !n.isEmpty() && cap > 0;
+    }
+
     static Online online(ResultSet rs, int i) throws SQLException {
         Date valid = rs.getDate("fssai_valid_until");
         OffsetDateTime checked = rs.getObject("fssai_checked_at", OffsetDateTime.class);

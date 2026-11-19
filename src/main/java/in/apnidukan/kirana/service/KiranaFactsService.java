@@ -17,11 +17,20 @@ import java.util.UUID;
 public class KiranaFactsService implements KiranaFacts {
 
     private final KiranaSettingsStore settings;
+    private final in.apnidukan.kirana.repo.ProductStore products;
     private final java.time.Clock clock;
 
-    public KiranaFactsService(KiranaSettingsStore settings, java.time.Clock clock) {
+    public KiranaFactsService(KiranaSettingsStore settings, in.apnidukan.kirana.repo.ProductStore products,
+                              java.time.Clock clock) {
         this.settings = settings;
+        this.products = products;
         this.clock = clock;
+    }
+
+    @Override
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public void shareCheckedPhotos(UUID shopId) {
+        products.shareCheckedPhotos(shopId);
     }
 
     @Override

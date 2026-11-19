@@ -490,7 +490,7 @@ public class OrderStore {
      */
     public List<Listed> listed(UUID shopId, String words, String afterName, UUID afterId, int limit) {
         StringBuilder sql = new StringBuilder("SELECT id, name, unit, price_paise, stock, catalogue_item_id, "
-                + "lower(name) AS sort_key FROM kirana_products WHERE shop_id = ? AND active");
+                + "lower(name) AS sort_key FROM kirana_products WHERE shop_id = ? AND active AND counted_at IS NOT NULL");
         List<Object> args = new ArrayList<>(List.of(shopId));
         if (words != null) {
             sql.append(" AND lower(name) LIKE ? ESCAPE '\\'");
@@ -508,14 +508,14 @@ public class OrderStore {
                 rs.getString(7)), args.toArray());
     }
 
-    /** These active products of the shop (others are left out). */
+    /** These active, counted products of the shop (others are left out: not offered online). */
     public Map<UUID, Listed> products(UUID shopId, Collection<UUID> ids) {
         Map<UUID, Listed> out = new LinkedHashMap<>();
         if (ids.isEmpty()) {
             return out;
         }
         jdbc.query("SELECT id, name, unit, price_paise, stock, catalogue_item_id, lower(name) FROM kirana_products "
-                        + "WHERE shop_id = ? AND active AND id = ANY (?)",
+                        + "WHERE shop_id = ? AND active AND counted_at IS NOT NULL AND id = ANY (?)",
                 ps -> {
                     ps.setObject(1, shopId);
                     ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids.toArray()));
@@ -540,7 +540,8 @@ public class OrderStore {
                         + "ST_Distance(s.location, p.g, false) AS metres FROM kirana_products pr "
                         + "JOIN shops s ON s.id = pr.shop_id JOIN kirana_online o ON o.shop_id = s.id "
                         + "JOIN kirana_settings k ON k.shop_id = s.id, p "
-                        + "WHERE pr.catalogue_item_id = ANY (?) AND pr.active AND pr.stock > 0 AND s.id <> ? AND " + READY
+                        + "WHERE pr.catalogue_item_id = ANY (?) AND pr.active AND pr.stock > 0 "
+                        + "AND pr.counted_at IS NOT NULL AND s.id <> ? AND " + READY
                         + " AND ST_DWithin(s.location, p.g, ?, false) ORDER BY metres, s.id, pr.id",
                 ps -> {
                     ps.setObject(1, lng);
@@ -567,9 +568,10 @@ public class OrderStore {
                 + "FROM kirana_products pr JOIN kirana_catalogue_items c ON c.id = pr.catalogue_item_id "
                 + "JOIN shops s ON s.id = pr.shop_id JOIN kirana_online o ON o.shop_id = s.id "
                 + "JOIN kirana_settings k ON k.shop_id = s.id, p "
-                + "WHERE pr.active AND pr.stock > 0 AND s.id <> ? AND " + READY
+                + "WHERE pr.active AND pr.stock > 0 AND pr.counted_at IS NOT NULL AND s.id <> ? AND " + READY
                 + " AND ST_DWithin(s.location, p.g, ?, false) AND NOT EXISTS (SELECT 1 FROM kirana_products mine "
-                + "WHERE mine.shop_id = ? AND mine.active AND mine.catalogue_item_id = c.id)");
+                + "WHERE mine.shop_id = ? AND mine.active AND mine.counted_at IS NOT NULL "
+                + "AND mine.catalogue_item_id = c.id)");
         List<Object> args = new ArrayList<>(List.of(lng, lat, shopId, java.sql.Date.valueOf(today), metres, shopId));
         if (words != null) {
             sql.append(" AND lower(c.name) LIKE ? ESCAPE '\\'");

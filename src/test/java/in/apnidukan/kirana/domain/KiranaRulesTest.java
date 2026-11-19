@@ -91,6 +91,6 @@ class KiranaRulesTest {
 
     private static Product product(String stock, String low) {
         return new Product(UUID.randomUUID(), UUID.randomUUID(), "Amul Butter 100 g", Unit.PIECE, 5800,
-                new BigDecimal(stock), low == null ? null : new BigDecimal(low), true, 0, Instant.EPOCH);
+                new BigDecimal(stock), low == null ? null : new BigDecimal(low), true, 0, Instant.EPOCH, null);
     }
 }

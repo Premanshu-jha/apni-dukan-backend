@@ -176,15 +176,7 @@ public class CatalogueService {
                 shopId, "A shop corrected this barcode to another product", "OPEN", now));
     }
 
-    /** Whether the item has a shared photo. */
-    boolean hasPhoto(UUID itemId) {
-        return catalogue.photos(List.of(itemId)).containsKey(itemId);
-    }
 
-    /** The shared photo for an item, when it has none (a shop's photo whose label matched the item). */
-    boolean sharePhoto(UUID itemId, UUID fileId) {
-        return catalogue.setPhotoIfNone(itemId, fileId);
-    }
 
 
     // ---------- the admin website (super admins) ----------

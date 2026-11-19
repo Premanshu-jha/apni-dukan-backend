@@ -79,12 +79,16 @@ public class KiranaSettingsStore {
         };
     }
 
-    /** Any bill, active product or active khata customer of the shop (each an index lookup: V66). */
+    /**
+     * Any bill, active product, active khata customer or page of its list of products kept (each an index lookup:
+     * V66, ix_kirana_reads_shop).
+     */
     public boolean hasCounterData(UUID shopId) {
         return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM kirana_bills WHERE shop_id = ?) "
                 + "OR EXISTS (SELECT 1 FROM kirana_products WHERE shop_id = ? AND active) "
-                + "OR EXISTS (SELECT 1 FROM kirana_khata_customers WHERE shop_id = ? AND active)", Boolean.class,
-                shopId, shopId, shopId));
+                + "OR EXISTS (SELECT 1 FROM kirana_khata_customers WHERE shop_id = ? AND active) "
+                + "OR EXISTS (SELECT 1 FROM kirana_reads WHERE shop_id = ? AND kind = 'STOCK_LIST' "
+                + "AND status <> 'DISCARDED')", Boolean.class, shopId, shopId, shopId, shopId));
     }
 
     /** Whether a kirana's FSSAI licence (now or kept from before) is this file. */

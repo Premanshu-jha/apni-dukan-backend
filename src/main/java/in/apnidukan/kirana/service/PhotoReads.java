@@ -56,7 +56,10 @@ public class PhotoReads {
 
     /**
      * Queues a photo to read. {@code fileIds}: uploaded first (POST /files) by this shop, BILL photos or PDFs for a bill
-     * (1 to 3 pages, in order), one PRODUCT_PHOTO for a label. 400 naming fileIds otherwise.
+     * (1 to 3 pages, in order), one PRODUCT_PHOTO for a label, one BILL photo (or file) for a page of the shop's list of
+     * products (STOCK_LIST: one page each, so a bad page is retaken alone; at most
+     * {@value ProductSetupService#MAX_LIST_PAGES} kept a shop, 409 TOO_MANY_PAGES; at most
+     * {@value ProductSetupService#LIST_PAGES_PER_DAY} sent a day, 409 TOO_MANY_PAGES_TODAY). 400 naming fileIds otherwise.
      */
     @Transactional
     public ReadView upload(UUID userId, String kind, UUID clientRef, List<UUID> fileIds) {
@@ -76,7 +79,8 @@ public class PhotoReads {
             return earlier.get();
         }
         String purpose = "LABEL".equals(kind) ? "PRODUCT_PHOTO" : "BILL";
-        int max = "LABEL".equals(kind) ? 1 : MAX_PAGES;
+        // A product's photo may come with a second one, of the side where its size is printed
+        int max = "LABEL".equals(kind) ? (productId != null ? 2 : 1) : "STOCK_LIST".equals(kind) ? 1 : MAX_PAGES;
         List<UUID> ids = fileIds == null ? List.of() : fileIds.stream().distinct().toList();
         if (ids.isEmpty() || ids.size() > max) {
             throw invalid("fileIds", max == 1 ? "Send one photo" : "Send 1 to " + max + " pages");
@@ -85,6 +89,27 @@ public class PhotoReads {
             FileRefs.FileRef f = files.find(id).orElse(null);
             if (f == null || !shopId.equals(f.shopId()) || !purpose.equals(f.purpose())) {
                 throw invalid("fileIds", "Upload the photo first (as " + purpose + ")");
+            }
+        }
+        if ("STOCK_LIST".equals(kind)) {
+            // Counted under a lock held to the end of this transaction: pages sent at the same moment wait their turn
+            reads.lockListPages(shopId);
+            Optional<Read> meanwhile = reads.byClientRef(shopId, clientRef);
+            if (meanwhile.isPresent()) {
+                return meanwhile.get();
+            }
+            if (reads.listPages(shopId) >= ProductSetupService.MAX_LIST_PAGES) {
+                throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_PAGES", "You have "
+                        + ProductSetupService.MAX_LIST_PAGES + " pages of your list already. Add the rest of your "
+                        + "products one by one, or delete a page you don't need.",
+                        Map.of("max", ProductSetupService.MAX_LIST_PAGES));
+            }
+            // Pages deleted or that failed are counted for the day too: each was read by AI
+            Instant dayStart = KiranaChecks.today(now).atStartOfDay(KiranaChecks.ZONE).toInstant();
+            if (reads.listPagesSince(shopId, dayStart) >= ProductSetupService.LIST_PAGES_PER_DAY) {
+                throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_PAGES_TODAY", "You've sent "
+                        + ProductSetupService.LIST_PAGES_PER_DAY + " pages today. Send more tomorrow, or add the "
+                        + "rest of your products one by one.", Map.of("max", ProductSetupService.LIST_PAGES_PER_DAY));
             }
         }
         ids.forEach(files::keep);
@@ -104,7 +129,7 @@ public class PhotoReads {
         return view(reads.find(c.shopId(), readId).orElseThrow(PhotoReads::notFound));
     }
 
-    /** The shop's uploads of one kind (PURCHASE or PAPER_BILL), newest first, 50 a page. */
+    /** The shop's uploads of one kind (PURCHASE, PAPER_BILL or STOCK_LIST), newest first, 50 a page. */
     @Transactional(readOnly = true)
     public ReadPage list(UUID userId, String kind, String cursor) {
         Caller c = access.caller(userId);
@@ -122,6 +147,21 @@ public class PhotoReads {
         }
         Read last = page.isEmpty() ? null : page.get(page.size() - 1);
         return new ReadPage(out, more ? Cursors.encode(last.createdAt().toString(), last.id().toString()) : null);
+    }
+
+    /** The shop's read sent with this clientRef, if any (a retry). */
+    Optional<Read> earlier(UUID shopId, UUID clientRef) {
+        return clientRef == null ? Optional.empty() : reads.byClientRef(shopId, clientRef);
+    }
+
+    /** Holds the shop's photo checks to the end of the transaction (ProductService.setPhoto counts under it). */
+    void lockPhotoChecks(UUID shopId) {
+        reads.lockPhotoChecks(shopId);
+    }
+
+    /** Products' photos the shop sent to be checked since then. */
+    int photoChecksSince(UUID shopId, Instant since) {
+        return reads.photoChecksSince(shopId, since);
     }
 
     /** Throws an upload away (one still being read, read, or failed). 409 READ_USED once used. */

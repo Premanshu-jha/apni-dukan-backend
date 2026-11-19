@@ -256,6 +256,8 @@ class KiranaStockIntegrationTest {
         Map<?, ?> now = (Map<?, ?>) ((List<?>) picked.body().get("lines")).get(0);
         assertThat(now.get("productName")).isEqualTo("Britannia Good Day Cashew 100 g");
         assertThat(now.get("pick")).isEqualTo("PICKED");
+        // A new product starts counted at 0: what the bill brings is added to it, so it can be offered online
+        assertThat(counted((String) now.get("productId"))).isTrue();
     }
 
     @Test
@@ -577,20 +579,243 @@ class KiranaStockIntegrationTest {
         String owner = kirana(OWNER, "Sharma General Store");
         String a = id(post("/kirana/products", product("Rice 1 kg", "PIECE", 6000, "0"), owner));
         String b = id(post("/kirana/products", product("Rice 5 kg", "PIECE", 28000, "0"), owner));
+        ANSWERS.put("rice-bag", seen(true, false, true, true, true, true, null, "Rice", "1 kg"));
         String shared = upload(owner, "PRODUCT_PHOTO", "rice-bag");
-        assertThat(put("/kirana/products/" + a + "/photo", Map.of("clientRef", UUID.randomUUID().toString(),
-                "fileId", shared), owner).status()).isEqualTo(200);
-        Reply onB = put("/kirana/products/" + b + "/photo", Map.of("clientRef", UUID.randomUUID().toString(),
-                "fileId", shared), owner);
-        assertThat(onB.body().get("photoUrl")).as(onB.body().toString()).isNotNull();
-        put("/kirana/products/" + a + "/photo", Map.of("clientRef", UUID.randomUUID().toString(),
-                "fileId", upload(owner, "PRODUCT_PHOTO", "rice-bag-2")), owner);
+        assertThat(put("/kirana/products/" + a + "/photo", photo(shared), owner).status()).isEqualTo(200);
+        Reply onB = put("/kirana/products/" + b + "/photo", photo(shared), owner);
+        assertThat(onB.body().get("photoCheck")).as(onB.body().toString()).isEqualTo("CHECKING");
+        readJob.run();
+        // The same bag: the 1 kg's picture; the 5 kg's is refused, by its size
+        assertThat(product(a, owner).get("photoUrl")).isNotNull();
+        Map<?, ?> fiveKg = product(b, owner);
+        assertThat(fiveKg.get("photoCheck")).isEqualTo("REFUSED");
+        assertThat((String) fiveKg.get("photoCheckReason")).contains("1 kg").contains("Rice 5 kg");
+        ANSWERS.put("rice-bag-2", seen(true, false, true, true, true, true, null, "Rice", "1 kg"));
+        put("/kirana/products/" + a + "/photo", photo(upload(owner, "PRODUCT_PHOTO", "rice-bag-2")), owner);
+        readJob.run();
         assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?::uuid", Integer.class, shared))
-                .isEqualTo(1);
+                .isEqualTo(1);   // the 5 kg's refused photo still points at it
         // ... and can't be deleted from the files screen while used
         String signedIn = token(OWNER);   // a token naming the shop (the first was made before it was registered)
         assertThat(http.delete().uri("/files/" + shared).headers(h -> h.setBearerAuth(signedIn))
                 .exchange((rq, res) -> reply(res)).status()).isEqualTo(409);
+    }
+
+    // ---------- products' photos, checked ----------
+
+    @Test
+    void aProductsPhotoIsCheckedBeforeItShowsAndARefusalSaysWhy() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        String helper = helperOf(owner, HELPER);
+        String milk = id(post("/kirana/products", product("Amul Taaza 250 ml", "PIECE", 1500, "6"), owner));
+        Map<?, ?> needed = (Map<?, ?>) ((List<?>) get("/kirana/setup/photos", helper).body().get("items")).get(0);
+        assertThat(needed.get("sizeToShow")).isEqualTo("250 ml");   // "make sure 250 ml is visible"
+        assertThat(needed.get("loose")).isEqualTo(false);
+        assertThat(needed.get("photoCheck")).isNull();
+
+        // The wrong size: refused, saying what the pack shows
+        ANSWERS.put("milk-500", seen(true, false, true, true, true, true, "Amul", "Taaza Toned Milk", "500 ml"));
+        Reply sent = put("/kirana/products/" + milk + "/photo", photo(upload(helper, "PRODUCT_PHOTO", "milk-500")),
+                helper);
+        assertThat(sent.body().get("photoCheck")).as(sent.body().toString()).isEqualTo("CHECKING");
+        assertThat(sent.body().get("photoUrl")).isNull();   // nothing shows until it passes
+        Map<?, ?> waiting = get("/kirana/setup", owner).body();
+        assertThat(waiting.get("photosMissing")).isEqualTo(1);
+        assertThat(waiting.get("photosChecking")).isEqualTo(1);
+        Reply checking = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(checking.body().get("code")).isEqualTo("PHOTOS_NEEDED");
+        assertThat((String) checking.body().get("message")).contains("being checked");
+        readJob.run();
+        Map<?, ?> refused = product(milk, owner);
+        assertThat(refused.get("photoCheck")).isEqualTo("REFUSED");
+        assertThat(refused.get("photoCheckCode")).isEqualTo("WRONG_SIZE");
+        assertThat(refused.get("photoCheckSeen")).isEqualTo("500 ml");
+        assertThat(refused.get("newPhotoUrl")).isNotNull();   // which photo was refused
+        assertThat((String) refused.get("photoCheckReason")).contains("500 ml").contains("Amul Taaza 250 ml");
+        assertThat(get("/kirana/setup", owner).body().get("photosRefused")).isEqualTo(1);
+
+        // People, two products, blurry, the back, another product: each refused with its own reason
+        Map<String, String> bad = Map.of(
+                "milk-people", seen(true, true, true, true, true, true, "Amul", "Taaza", "250 ml"),
+                "milk-two", seen(true, false, false, true, true, true, "Amul", "Taaza", "250 ml"),
+                "milk-blur", seen(true, false, true, false, true, true, "Amul", "Taaza", "250 ml"),
+                "milk-back", seen(true, false, true, true, false, true, "Amul", "Taaza", "250 ml"),
+                "milk-curd", seen(true, false, true, true, true, false, "Amul", "Masti Dahi", "250 ml"));
+        Map<String, String> why = Map.of("milk-people", "without people", "milk-two", "Only one product",
+                "milk-blur", "blurry", "milk-back", "front of the pack", "milk-curd", "Amul Masti Dahi 250 ml");
+        for (Map.Entry<String, String> e : bad.entrySet()) {
+            ANSWERS.put(e.getKey(), e.getValue());
+            put("/kirana/products/" + milk + "/photo", photo(upload(owner, "PRODUCT_PHOTO", e.getKey())), owner);
+            readJob.run();
+            assertThat((String) product(milk, owner).get("photoCheckReason")).as(e.getKey())
+                    .contains(why.get(e.getKey()));
+        }
+
+        // The size can't be read on the front: asked for the side where it's printed, then accepted with it (the side
+        // alone is sent: the front waiting is kept, even after the app was closed)
+        ANSWERS.put("milk-front", seen(true, false, true, true, true, true, "Amul", "Taaza Toned Milk", null));
+        String front = upload(owner, "PRODUCT_PHOTO", "milk-front");
+        put("/kirana/products/" + milk + "/photo", photo(front), owner);
+        readJob.run();
+        Map<?, ?> needSize = product(milk, owner);
+        assertThat(needSize.get("photoCheck")).isEqualTo("NEED_SIZE");
+        assertThat(needSize.get("photoCheckCode")).isEqualTo("NEED_SIZE");
+        assertThat((String) needSize.get("photoCheckReason")).contains("side where 250 ml is printed");
+        Map<String, Object> sameTwice = new HashMap<>(photo(front));
+        sameTwice.put("sizeFileId", front);
+        assertThat(new ArrayList<Object>(((Map<?, ?>) put("/kirana/products/" + milk + "/photo", sameTwice, owner)
+                .body().get("details")).keySet())).containsExactly("sizeFileId");
+        ANSWERS.put("milk-front", seen(true, false, true, true, true, true, "Amul", "Taaza Toned Milk", "250 ml"));
+        Map<String, Object> side = new HashMap<>();
+        side.put("clientRef", UUID.randomUUID().toString());
+        side.put("sizeFileId", upload(owner, "PRODUCT_PHOTO", "milk-side"));
+        Reply sideSent = put("/kirana/products/" + milk + "/photo", side, owner);
+        assertThat(sideSent.body().get("photoCheck")).as(sideSent.body().toString()).isEqualTo("CHECKING");
+        readJob.run();
+        Map<?, ?> ok = product(milk, owner);
+        assertThat(ok.get("photoCheck")).as(ok.toString()).isNull();
+        assertThat(ok.get("photoUrl")).isNotNull();
+        assertThat(get("/kirana/setup", owner).body().get("photosMissing")).isEqualTo(0);
+        assertThat((List<?>) get("/kirana/setup/photos", owner).body().get("items")).isEmpty();
+
+        // A refused new photo leaves the accepted one showing, and can be let go of keeping it; with no catalogue
+        // picture the accepted one can't just be removed
+        Map<String, Object> late = photo(upload(owner, "PRODUCT_PHOTO", "milk-500"));
+        put("/kirana/products/" + milk + "/photo", late, owner);
+        readJob.run();
+        Map<?, ?> kept = product(milk, owner);
+        assertThat(kept.get("photoUrl")).isNotNull();
+        assertThat(kept.get("photoCheck")).isEqualTo("REFUSED");
+        assertThat(put("/kirana/products/" + milk + "/photo", remove(), owner).body().get("photoCheck")).isNull();
+        assertThat(product(milk, owner).get("photoUrl")).isNotNull();
+        assertThat(put("/kirana/products/" + milk + "/photo", remove(), owner).body().get("code"))
+                .isEqualTo("PHOTO_NEEDED");
+        // A late retry of an old request changes nothing
+        assertThat(put("/kirana/products/" + milk + "/photo", late, owner).body().get("photoCheck")).isNull();
+
+        // Renamed to another size: its picture is checked again against the new name, showing nothing meanwhile
+        long v = ((Number) product(milk, owner).get("version")).longValue();
+        Reply renamed = patch("/kirana/products/" + milk, Map.of("version", v, "name", "Amul Taaza 500 ml"), owner);
+        assertThat(renamed.status()).as(renamed.body().toString()).isEqualTo(200);
+        Map<?, ?> rechecking = product(milk, owner);
+        assertThat(rechecking.get("photoCheck")).isEqualTo("CHECKING");
+        assertThat(rechecking.get("photoUrl")).isNull();
+        readJob.run();
+        assertThat(product(milk, owner).get("photoCheckCode")).isEqualTo("WRONG_SIZE");   // the photo shows 250 ml
+
+        // Removed while a photo is being checked: nothing stays "checking" when it comes back
+        ANSWERS.put("milk-500-new", seen(true, false, true, true, true, true, "Amul", "Taaza", "500 ml"));
+        put("/kirana/products/" + milk + "/photo", photo(upload(owner, "PRODUCT_PHOTO", "milk-500-new")), owner);
+        long v2 = ((Number) product(milk, owner).get("version")).longValue();
+        assertThat(patch("/kirana/products/" + milk, Map.of("version", v2, "active", false), owner).status())
+                .isEqualTo(200);
+        readJob.run();
+        assertThat(patch("/kirana/products/" + milk, Map.of("version", v2 + 1, "active", true), owner).status())
+                .isEqualTo(200);
+        assertThat(product(milk, owner).get("photoCheck")).isNull();
+    }
+
+    private static Map<String, Object> remove() {
+        Map<String, Object> remove = new HashMap<>();
+        remove.put("clientRef", UUID.randomUUID().toString());
+        remove.put("fileId", null);
+        return remove;
+    }
+
+    @Test
+    void looseGoodsNeedNoLabelAndAPhotoIsSharedInTheCatalogueOnlyOnceTheShopIsApproved() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        UUID shop = shopId(owner);
+        // Loose rice: its sack is enough (no front or size to read); never shared, even in the catalogue
+        Map<String, Object> rice = new HashMap<>(Map.of("name", "Sona Masoori Rice", "unit", "KG", "pricePaise", 6000,
+                "stock", 20, "barcode", ean("890100000001")));
+        String looseRice = id(post("/kirana/products", rice, owner));
+        Map<?, ?> riceNeeded = (Map<?, ?>) ((List<?>) get("/kirana/setup/photos", owner).body().get("items")).get(0);
+        assertThat(riceNeeded.get("loose")).isEqualTo(true);
+        ANSWERS.put("sack", seen(true, false, true, true, false, true, null, "Rice", null));
+        put("/kirana/products/" + looseRice + "/photo", photo(upload(owner, "PRODUCT_PHOTO", "sack")), owner);
+
+        // A pack in the shared catalogue: checked and accepted, but not shared while the shop registers
+        String milk = id(post("/kirana/products", coded("Amul Taaza Toned Milk 500 ml", 2900, "5",
+                ean("890126215001")), owner));
+        ANSWERS.put("taaza", seen(true, false, true, true, true, true, "Amul", "Taaza Toned Milk", "500 ml"));
+        String taaza = upload(owner, "PRODUCT_PHOTO", "taaza");
+        put("/kirana/products/" + milk + "/photo", photo(taaza), owner);
+        readJob.run();
+        assertThat(product(looseRice, owner).get("photoUrl")).isNotNull();
+        assertThat(product(milk, owner).get("photoUrl")).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM kirana_catalogue_items WHERE photo_file_id IS NOT NULL",
+                Integer.class)).isZero();
+
+        // Approved by the field team: its checked pack photo becomes the catalogue's picture (not the rice's)
+        jdbc.update("UPDATE shops SET status = 'PENDING_VISIT', products_ready_at = now() WHERE id = ?", shop);
+        long version = jdbc.queryForObject("SELECT version FROM shops WHERE id = ?", Long.class, shop);
+        Reply approved = post("/admin/shops/" + shop + "/approve", Map.of("version", version), superAdmin());
+        assertThat(approved.status()).as(approved.body().toString()).isEqualTo(200);
+        assertThat(jdbc.queryForList("SELECT photo_file_id::text FROM kirana_catalogue_items WHERE photo_file_id IS "
+                + "NOT NULL", String.class)).containsExactly(taaza);
+        // Another shop's same pack now has a picture with no photo of its own: nothing for it to take
+        String other = kirana(OTHER_OWNER, "Gupta Kirana");
+        id(post("/kirana/products", coded("Amul Taaza 500 ml", 2900, "4", ean("890126215001")), other));
+        assertThat(get("/kirana/setup", other).body().get("photosMissing")).isEqualTo(0);
+
+        // Live now: a new pack's checked photo is shared at once
+        String salt = id(post("/kirana/products", coded("Tata Salt 1 kg", 2800, "8", ean("890400440020")), owner));
+        ANSWERS.put("salt", seen(true, false, true, true, true, true, "Tata", "Salt", "1 kg"));
+        String saltPhoto = upload(owner, "PRODUCT_PHOTO", "salt");
+        put("/kirana/products/" + salt + "/photo", photo(saltPhoto), owner);
+        readJob.run();
+        assertThat(jdbc.queryForList("SELECT photo_file_id::text FROM kirana_catalogue_items WHERE photo_file_id IS "
+                + "NOT NULL", String.class)).containsExactlyInAnyOrder(taaza, saltPhoto);
+        // With a catalogue picture, the shop's own photo can be removed: the catalogue's shows
+        assertThat(put("/kirana/products/" + milk + "/photo", remove(), owner).status()).isEqualTo(200);
+        assertThat(product(milk, owner).get("photoFileId")).isEqualTo(taaza);
+    }
+
+    @Test
+    void aRefusalOfAProductWithALongNameIsSavedAndARenameWhileRemovedNeedsANewPhoto() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        String longName = "Haldiram's Aloo Bhujia Namkeen Family Pack Extra Crunchy Special Festive Edition Combo 1 kg";
+        String bhujia = id(post("/kirana/products", product(longName, "PIECE", 25000, "3"), owner));
+        ANSWERS.put("other", seen(true, false, true, true, true, false, "Bikaji", "Bikaneri Bhujia Classic Namkeen "
+                + "Super Saver Family Value Pack With Extra Spice", "1 kg"));
+        put("/kirana/products/" + bhujia + "/photo", photo(upload(owner, "PRODUCT_PHOTO", "other")), owner);
+        readJob.run();
+        Map<?, ?> refused = product(bhujia, owner);
+        assertThat(refused.get("photoCheck")).as(refused.toString()).isEqualTo("REFUSED");
+        assertThat(refused.get("photoCheckCode")).isEqualTo("OTHER_PRODUCT");
+
+        // An accepted photo, then renamed while removed: back, it needs a new photo (it showed something else)
+        ANSWERS.put("good", seen(true, false, true, true, true, true, "Haldiram's", "Aloo Bhujia", "1 kg"));
+        put("/kirana/products/" + bhujia + "/photo", photo(upload(owner, "PRODUCT_PHOTO", "good")), owner);
+        readJob.run();
+        assertThat(product(bhujia, owner).get("photoUrl")).isNotNull();
+        long v = ((Number) product(bhujia, owner).get("version")).longValue();
+        assertThat(patch("/kirana/products/" + bhujia, Map.of("version", v, "active", false, "name",
+                "Haldiram's Navratan 400 g"), owner).status()).isEqualTo(200);
+        assertThat(patch("/kirana/products/" + bhujia, Map.of("version", v + 1, "active", true), owner).status())
+                .isEqualTo(200);
+        assertThat(product(bhujia, owner).get("photoUrl")).isNull();
+        assertThat(product(bhujia, owner).get("photoCheck")).isNull();
+    }
+
+    @Test
+    void aShopSendsAtMost300PhotosToCheckADay() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        UUID shop = shopId(owner);
+        String milk = id(post("/kirana/products", product("Amul Taaza 250 ml", "PIECE", 1500, "6"), owner));
+        String file = upload(owner, "PRODUCT_PHOTO", "any");
+        UUID ownerId = jdbc.queryForObject("SELECT user_id FROM shop_members WHERE shop_id = ? AND role = 'OWNER'",
+                UUID.class, shop);
+        jdbc.update("INSERT INTO kirana_reads (id, shop_id, kind, status, file_ids, client_ref, tries, next_try_at, "
+                + "created_by, created_at, updated_at, product_id) SELECT gen_random_uuid(), ?, 'LABEL', 'READ', "
+                + "ARRAY[?::uuid], gen_random_uuid(), 0, now(), ?, now(), now(), ?::uuid FROM generate_series(1, 300)",
+                shop, file, ownerId, milk);
+        Reply refused = put("/kirana/products/" + milk + "/photo", photo(file), owner);
+        assertThat(refused.status()).isEqualTo(409);
+        assertThat(refused.body().get("code")).isEqualTo("TOO_MANY_PHOTOS_TODAY");
+        assertThat(product(milk, owner).get("photoCheck")).isNull();   // nothing changed
+        assertThat(get("/kirana/setup", owner).body().get("photosLeftToday")).isEqualTo(0);
     }
 
     // ---------- unknown barcodes ----------
@@ -841,6 +1066,357 @@ class KiranaStockIntegrationTest {
         assertThat(get("/kirana/reads/" + id(read), owner).body().get("billId")).isEqualTo(bill.get("id"));
     }
 
+    // ---------- the product setup after Submit ----------
+
+    @Test
+    void aPageOfTheShopsListIsReadIntoLinesAddedWithTheirCountsOrSkippedAndTheSetupFinishes() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        String helper = helperOf(owner, HELPER);
+        Map<String, Object> biscuit = new HashMap<>(Map.of("name", "Parle G Biscuit 70 g", "unit", "PIECE",
+                "pricePaise", 500));   // added earlier without a count
+        String parle = id(post("/kirana/products", biscuit, owner));
+        ANSWERS.put("list-1", stockList("[" + listLine("Tata namak 1kg  12", "Tata", "Salt", "1 kg", false, "28", "12")
+                + "," + listLine("Chini khula 25.5", null, "Sugar", null, true, "44", "25.5") + ","
+                + listLine("Parle-G 40", "Parle", "G Biscuit", "70 g", false, "5", "40") + "]"));
+        Map<?, ?> before = get("/kirana/setup", helper).body();
+        assertThat(before.get("products")).isEqualTo(1);
+        assertThat(before.get("uncounted")).isEqualTo(1);
+        assertThat(pluck(before.get("uncountedProducts"), "id")).containsExactly(parle);
+        assertThat(before.get("pagesLeft")).isEqualTo(60);
+        assertThat(before.get("canFinish")).isEqualTo(false);
+
+        Reply read = post("/kirana/reads", newRead("STOCK_LIST", upload(owner, "BILL", "list-1")), helper);
+        assertThat(read.status()).as(read.body().toString()).isEqualTo(201);
+        assertThat(get("/kirana/setup", owner).body().get("pagesReading")).isEqualTo(1);
+        readJob.run();
+        assertThat(get("/kirana/reads/" + id(read), owner).body().get("status")).isEqualTo("READ");
+        Map<?, ?> setup = get("/kirana/setup", owner).body();
+        assertThat(setup.get("linesToCheck")).isEqualTo(3);
+        assertThat(setup.get("pagesReading")).isEqualTo(0);
+        assertThat(setup.get("pagesLeft")).isEqualTo(59);
+
+        Reply lines = get("/kirana/setup/lines", helper);
+        List<?> items = (List<?>) lines.body().get("items");
+        assertThat(pluck(items, "wording")).containsExactly("Tata namak 1kg  12", "Chini khula 25.5", "Parle-G 40");
+        assertThat(pluck(items, "lineNo")).containsExactly(1, 2, 3);
+        assertThat(lines.body().get("next")).isNull();
+        Map<?, ?> third = (Map<?, ?>) items.get(2);
+        assertThat(pluck(third.get("suggestions"), "productId")).contains(parle);   // the shop's own product
+        String salt = (String) ((Map<?, ?>) items.get(0)).get("id");
+        String sugar = (String) ((Map<?, ?>) items.get(1)).get("id");
+        String biscuitLine = (String) third.get("id");
+
+        // Added as a new product: its name, unit and price from the line; the count is needed
+        Reply noCount = post("/kirana/setup/lines/" + salt, Map.of("action", "ADD"), helper);
+        assertThat(noCount.status()).isEqualTo(400);
+        assertThat(new ArrayList<Object>(((Map<?, ?>) noCount.body().get("details")).keySet()))
+                .containsExactly("quantity");
+        Reply added = post("/kirana/setup/lines/" + salt, Map.of("action", "ADD", "quantity", 12), helper);
+        assertThat(added.status()).as(added.body().toString()).isEqualTo(200);
+        assertThat(added.body().get("status")).isEqualTo("ADDED");
+        String saltId = (String) added.body().get("productId");
+        Map<?, ?> made = (Map<?, ?>) get("/kirana/products/" + saltId, owner).body().get("product");
+        assertThat(made.get("name")).as(made.toString()).isEqualTo("Tata Salt 1 kg");
+        assertThat(made.get("unit")).isEqualTo("PIECE");
+        assertThat(made.get("pricePaise")).isEqualTo(2800);
+        assertThat(made.get("counted")).isEqualTo(true);
+        assertThat(added.body().get("counted")).isEqualTo(12);
+        assertThat(stock(saltId)).isEqualByComparingTo("12");
+        // Sent again (the answer was lost): nothing added twice
+        Reply again = post("/kirana/setup/lines/" + salt, Map.of("action", "ADD", "quantity", 12), owner);
+        assertThat(again.body().get("productId")).isEqualTo(saltId);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM kirana_products WHERE name = 'Tata Salt 1 kg'",
+                Integer.class)).isEqualTo(1);
+        assertThat(stock(saltId)).isEqualByComparingTo("12");
+        // Already added: it can't be skipped (the product itself is changed instead)
+        assertThat(post("/kirana/setup/lines/" + salt, Map.of("action", "SKIP"), owner).body().get("code"))
+                .isEqualTo("LINE_ADDED");
+
+        // Loose sugar: by the kg, the count with its decimals
+        Reply loose = post("/kirana/setup/lines/" + sugar, Map.of("action", "ADD", "quantity", new BigDecimal("25.5")),
+                owner);
+        assertThat(loose.status()).as(loose.body().toString()).isEqualTo(200);
+        String sugarId = (String) loose.body().get("productId");
+        assertThat(jdbc.queryForObject("SELECT unit FROM kirana_products WHERE id = ?::uuid", String.class, sugarId))
+                .isEqualTo("KG");
+        assertThat(stock(sugarId)).isEqualByComparingTo("25.5");
+
+        // Skipped by mistake, put back, then counted against the product the shop already has (not a second one)
+        assertThat(post("/kirana/setup/lines/" + biscuitLine, Map.of("action", "SKIP"), helper).body().get("status"))
+                .isEqualTo("SKIPPED");
+        assertThat(get("/kirana/setup", owner).body().get("linesSkipped")).isEqualTo(1);
+        // After a reload, the skipped lines are listed to bring one back; the added ones with what was counted
+        assertThat(pluck(get("/kirana/setup/lines?status=SKIPPED", helper).body().get("items"), "id"))
+                .containsExactly(biscuitLine);
+        assertThat(pluck(get("/kirana/setup/lines?status=ADDED", helper).body().get("items"), "counted"))
+                .containsExactly(12, 25.5);
+        assertThat(get("/kirana/setup/lines?status=GONE", helper).status()).isEqualTo(400);
+        Reply back = post("/kirana/setup/lines/" + biscuitLine, Map.of("action", "UNDO"), helper);
+        assertThat(back.body().get("status")).isEqualTo("NEW");
+        assertThat(pluck(back.body().get("suggestions"), "productId")).contains(parle);
+        Reply taken = post("/kirana/setup/lines/" + biscuitLine, Map.of("action", "ADD", "name",
+                "Parle G Biscuit 70 g", "quantity", 40), helper);
+        assertThat(taken.body().get("code")).as(taken.body().toString()).isEqualTo("NAME_TAKEN");
+        Reply counted = post("/kirana/setup/lines/" + biscuitLine, Map.of("action", "ADD", "productId", parle,
+                "quantity", 40), helper);
+        assertThat(counted.body().get("productId")).as(counted.body().toString()).isEqualTo(parle);
+        assertThat(stock(parle)).isEqualByComparingTo("40");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM kirana_stock_moves WHERE product_id = ?::uuid AND "
+                + "reason = 'COUNT'", Integer.class, parle)).isEqualTo(1);
+
+        // Another shop can't touch these lines; only the owner says all are added
+        String other = kirana(OTHER_OWNER, "Gupta Kirana");
+        assertThat(post("/kirana/setup/lines/" + salt, Map.of("action", "SKIP"), other).body().get("code"))
+                .isEqualTo("LINE_NOT_FOUND");
+        assertThat(post("/kirana/setup/lines/" + UUID.randomUUID(), Map.of("action", "SKIP"), owner).status())
+                .isEqualTo(404);
+        assertThat(post("/kirana/setup/finish", Map.of(), helper).body().get("code")).isEqualTo("OWNER_ONLY");
+        // Every product needs a picture too (photos: aProductsPhotoIsCheckedBeforeItShows…)
+        Reply noPhotos = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(noPhotos.body().get("code")).as(noPhotos.body().toString()).isEqualTo("PHOTOS_NEEDED");
+        assertThat(((Map<?, ?>) noPhotos.body().get("details")).get("missing")).isEqualTo(3);
+        pictureAll(owner);
+        assertThat(get("/kirana/setup", helper).body().get("canFinish")).isEqualTo(true);
+        assertThat(get("/kirana/setup", helper).body().get("youCanFinish")).isEqualTo(false);   // the owner says it
+
+        Map<?, ?> ready = get("/kirana/setup", owner).body();
+        assertThat(ready.get("youCanFinish")).isEqualTo(true);
+        Map<?, ?> page = (Map<?, ?>) ((List<?>) ready.get("pages")).get(0);
+        assertThat(page.get("pageNo")).isEqualTo(1);
+        assertThat(page.get("readId")).isEqualTo(id(read));
+        assertThat(page.get("linesAdded")).isEqualTo(3);
+        assertThat(ready.get("linesToCheck")).isEqualTo(0);
+        assertThat(ready.get("linesAdded")).isEqualTo(3);
+        assertThat(ready.get("uncounted")).isEqualTo(0);
+        assertThat(ready.get("canFinish")).isEqualTo(true);
+        assertThat(((List<?>) get("/kirana/setup/lines", owner).body().get("items"))).isEmpty();
+        Reply finished = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(finished.status()).as(finished.body().toString()).isEqualTo(200);
+        assertThat(finished.body().get("readyAt")).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT products_ready_at IS NOT NULL FROM shops WHERE id = ?", Boolean.class,
+                shopId(owner))).isTrue();
+    }
+
+    @Test
+    void theSetupFinishesOnlyWithEveryProductCountedAndNoPageOrLineLeftAndLongListsComeInPages() throws Exception {
+        String owner = kirana(OWNER, "Sharma General Store");
+        assertThat(post("/kirana/setup/finish", Map.of(), owner).body().get("code")).isEqualTo("NO_PRODUCTS");
+        String rice = id(post("/kirana/products", product("Sona Masoori Rice", "KG", 6000, "30"), owner));
+        Map<String, Object> uncounted = new HashMap<>(Map.of("name", "Surf Excel 1 kg", "unit", "PIECE",
+                "pricePaise", 14000));
+        String surf = id(post("/kirana/products", uncounted, owner));
+
+        // 25 lines on a page: 20 at a time, in order, the rest after the cursor
+        StringBuilder many = new StringBuilder("[");
+        for (int i = 1; i <= 25; i++) {
+            many.append(i == 1 ? "" : ",").append(listLine("Item " + i, null, "Item " + i, null, false, "10", "1"));
+        }
+        ANSWERS.put("list-long", stockList(many + "]"));
+        ANSWERS.put("not-a-list", "{\"readable\":true,\"list\":false,\"lines\":[]}");
+        post("/kirana/reads", newRead("STOCK_LIST", upload(owner, "BILL", "list-long")), owner);
+        Reply wrong = post("/kirana/reads", newRead("STOCK_LIST", upload(owner, "BILL", "not-a-list")), owner);
+        Reply reading = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(reading.body().get("code")).isEqualTo("LINES_TO_CHECK");
+        assertThat(((Map<?, ?>) reading.body().get("details")).get("pagesReading")).isEqualTo(2);
+        readJob.run();
+        assertThat(get("/kirana/reads/" + id(wrong), owner).body().get("status")).isEqualTo("FAILED");
+        assertThat(get("/kirana/setup", owner).body().get("pagesFailed")).isEqualTo(1);
+
+        Reply first = get("/kirana/setup/lines", owner);
+        assertThat(pluck(first.body().get("items"), "lineNo")).hasSize(20).startsWith(1).endsWith(20);
+        String next = (String) first.body().get("next");
+        assertThat(next).isNotNull();
+        Reply rest = get("/kirana/setup/lines?cursor=" + next, owner);
+        assertThat(pluck(rest.body().get("items"), "lineNo")).containsExactly(21, 22, 23, 24, 25);
+        assertThat(rest.body().get("next")).isNull();
+        // A cursor that doesn't parse starts from the beginning
+        assertThat(pluck(get("/kirana/setup/lines?cursor=nonsense", owner).body().get("items"), "lineNo"))
+                .hasSize(20);
+
+        Reply left = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(left.body().get("code")).isEqualTo("LINES_TO_CHECK");
+        assertThat(((Map<?, ?>) left.body().get("details")).get("lines")).isEqualTo(25);
+        for (Object line : (List<?>) first.body().get("items")) {
+            post("/kirana/setup/lines/" + ((Map<?, ?>) line).get("id"), Map.of("action", "SKIP"), owner);
+        }
+        for (Object line : (List<?>) rest.body().get("items")) {
+            post("/kirana/setup/lines/" + ((Map<?, ?>) line).get("id"), Map.of("action", "SKIP"), owner);
+        }
+        // The page that couldn't be read: taken again or deleted first
+        Reply failed = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(failed.body().get("code")).isEqualTo("PAGES_FAILED");
+        assertThat(((Map<?, ?>) failed.body().get("details")).get("pages")).isEqualTo(1);
+        assertThat(post("/kirana/reads/" + id(wrong) + "/discard", Map.of(), owner).status()).isEqualTo(200);
+        Reply notCounted = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(notCounted.body().get("code")).isEqualTo("PRODUCTS_NOT_COUNTED");
+        assertThat(pluck(((Map<?, ?>) notCounted.body().get("details")).get("products"), "name"))
+                .containsExactly("Surf Excel 1 kg");
+        // Removed, it no longer needs a count
+        Reply removed = patch("/kirana/products/" + surf, Map.of("version", 0, "active", false), owner);
+        assertThat(removed.status()).as(removed.body().toString()).isEqualTo(200);
+        pictureAll(owner);
+        assertThat(post("/kirana/setup/finish", Map.of(), owner).status()).isEqualTo(200);
+        assertThat(stock(rice)).isEqualByComparingTo("30");
+        // Said twice at once: one note on the timeline
+        List<Reply> both = together(2, () -> post("/kirana/setup/finish", Map.of(), owner));
+        assertThat(both).extracting(Reply::status).containsOnly(200);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM shop_events WHERE shop_id = ? AND event = 'NOTE'",
+                Integer.class, shopId(owner))).isEqualTo(1);
+    }
+
+    @Test
+    void aShopSendsAtMost60PagesOfItsListEvenAllAtOnceAndAPageThrownAwayFreesItsPlace() throws Exception {
+        String owner = kirana(OWNER, "Sharma General Store");
+        UUID shop = shopId(owner);
+        String page = upload(owner, "BILL", "page");
+        UUID ownerId = jdbc.queryForObject("SELECT user_id FROM shop_members WHERE shop_id = ? AND role = 'OWNER'",
+                UUID.class, shop);
+        jdbc.update("INSERT INTO kirana_reads (id, shop_id, kind, status, file_ids, client_ref, tries, next_try_at, "
+                + "created_by, created_at, updated_at) SELECT gen_random_uuid(), ?, 'STOCK_LIST', 'READ', "
+                + "ARRAY[?::uuid], gen_random_uuid(), 0, now(), ?, now(), now() FROM generate_series(1, 57)", shop,
+                page, ownerId);
+        // Three more sent at the same moment: 58, 59 and 60 are kept, the next is refused
+        List<Reply> burst = together(4, () -> post("/kirana/reads", newRead("STOCK_LIST", page), owner));
+        assertThat(burst).extracting(Reply::status).containsExactlyInAnyOrder(201, 201, 201, 409);
+        assertThat(burst.stream().filter(r -> r.status() == 409).findFirst().orElseThrow().body().get("code"))
+                .isEqualTo("TOO_MANY_PAGES");
+        assertThat(get("/kirana/setup", owner).body().get("pagesLeft")).isEqualTo(0);
+        // A retry of a kept page (its clientRef) is that page, not refused; a new page is
+        String kept = (String) burst.stream().filter(r -> r.status() == 201).findFirst().orElseThrow().body().get("id");
+        UUID keptRef = jdbc.queryForObject("SELECT client_ref FROM kirana_reads WHERE id = ?::uuid", UUID.class, kept);
+        Reply retried = post("/kirana/reads", Map.of("clientRef", keptRef.toString(), "kind", "STOCK_LIST", "fileIds",
+                List.of(page)), owner);
+        assertThat(retried.body().get("id")).as(retried.body().toString()).isEqualTo(kept);
+        Map<String, Object> next = newRead("STOCK_LIST", page);
+        assertThat(post("/kirana/reads", next, owner).body().get("code")).isEqualTo("TOO_MANY_PAGES");
+        // A page thrown away frees its place
+        assertThat(post("/kirana/reads/" + kept + "/discard", Map.of(), owner).status()).isEqualTo(200);
+        assertThat(get("/kirana/setup", owner).body().get("pagesLeft")).isEqualTo(1);
+        assertThat(post("/kirana/reads", next, owner).status()).isEqualTo(201);
+        // Two pages in one upload are refused: one page each, so a bad page is retaken alone
+        Map<String, Object> two = Map.of("clientRef", UUID.randomUUID().toString(), "kind", "STOCK_LIST",
+                "fileIds", List.of(page, upload(owner, "BILL", "page-2")));
+        assertThat(new ArrayList<Object>(((Map<?, ?>) post("/kirana/reads", two, owner).body().get("details"))
+                .keySet())).containsExactly("fileIds");
+    }
+
+    @Test
+    void theSameProductOnTwoLinesIsAddedToOrReplacedAsTheShopSaysAndABadPriceIsAskedFor() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        ANSWERS.put("list-twice", stockList("[" + listLine("Tata namak (dukaan)", "Tata", "Salt", "1 kg", false, "28",
+                "5") + "," + listLine("Tata namak (godown)", "Tata", "Salt", "1 kg", false, "28", "20") + ","
+                + listLine("Rin bar", "Rin", "Bar", null, false, "0", null) + "]"));
+        post("/kirana/reads", newRead("STOCK_LIST", upload(owner, "BILL", "list-twice")), owner);
+        readJob.run();
+        List<?> items = (List<?>) get("/kirana/setup/lines", owner).body().get("items");
+        String shelf = (String) ((Map<?, ?>) items.get(0)).get("id");
+        String godown = (String) ((Map<?, ?>) items.get(1)).get("id");
+        String rin = (String) ((Map<?, ?>) items.get(2)).get("id");
+
+        String salt = (String) post("/kirana/setup/lines/" + shelf, Map.of("action", "ADD", "quantity", 5), owner)
+                .body().get("productId");
+        // The godown's line onto the same product: asked whether to add or replace
+        Reply asked = post("/kirana/setup/lines/" + godown, Map.of("action", "ADD", "productId", salt, "quantity", 20),
+                owner);
+        assertThat(asked.status()).isEqualTo(409);
+        assertThat(asked.body().get("code")).isEqualTo("ALREADY_COUNTED");
+        assertThat(((Map<?, ?>) asked.body().get("details")).get("productId")).isEqualTo(salt);
+        Reply both = post("/kirana/setup/lines/" + godown, Map.of("action", "ADD", "productId", salt, "quantity", 20,
+                "addToCount", true), owner);
+        assertThat(both.status()).as(both.body().toString()).isEqualTo(200);
+        assertThat(both.body().get("counted")).isEqualTo(20);   // this line's own count, beside the list's
+        assertThat(stock(salt)).isEqualByComparingTo("25");
+
+        assertThat(new ArrayList<Object>(((Map<?, ?>) post("/kirana/setup/lines/" + rin, Map.of("action", "ADD",
+                "quantity", -1), owner).body().get("details")).keySet())).containsExactly("quantity");
+        // An MRP of ₹0 read from the list isn't a price: asked for, not a server error
+        Reply noPrice = post("/kirana/setup/lines/" + rin, Map.of("action", "ADD", "quantity", 3), owner);
+        assertThat(noPrice.status()).as(noPrice.body().toString()).isEqualTo(400);
+        assertThat(new ArrayList<Object>(((Map<?, ?>) noPrice.body().get("details")).keySet()))
+                .containsExactly("pricePaise");
+        assertThat(post("/kirana/setup/lines/" + rin, Map.of("action", "ADD", "quantity", 3, "pricePaise", 1000),
+                owner).status()).isEqualTo(200);
+    }
+
+    @Test
+    void aPageDeletedTakesItsUncheckedLinesAwayKeepsWhatWasAddedAndAPageTooLongSaysHowManyWereLeftOut() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        StringBuilder many = new StringBuilder("[");
+        for (int i = 1; i <= 152; i++) {
+            many.append(i == 1 ? "" : ",").append(listLine("Item " + i, null, "Item " + i, null, false, "10", "1"));
+        }
+        ANSWERS.put("list-dense", stockList(many + "]"));
+        Reply read = post("/kirana/reads", newRead("STOCK_LIST", upload(owner, "BILL", "list-dense")), owner);
+        readJob.run();
+        // A page of its list kept: the shop stays a kirana (a salon would hide it)
+        assertThat(put("/shops/me/type", Map.of("version", jdbc.queryForObject("SELECT version FROM shops WHERE "
+                + "id = ?", Long.class, shopId(owner)), "type", "SALON"), owner).body().get("code"))
+                .isEqualTo("HAS_COUNTER_DATA");
+        Map<?, ?> setup = get("/kirana/setup", owner).body();
+        assertThat(setup.get("linesToCheck")).isEqualTo(150);
+        Map<?, ?> page = (Map<?, ?>) ((List<?>) setup.get("pages")).get(0);
+        assertThat(page.get("linesLeftOut")).isEqualTo(2);   // "photograph the rest again"
+
+        List<?> items = (List<?>) get("/kirana/setup/lines", owner).body().get("items");
+        String first = (String) ((Map<?, ?>) items.get(0)).get("id");
+        String second = (String) ((Map<?, ?>) items.get(1)).get("id");
+        String product = (String) post("/kirana/setup/lines/" + first, Map.of("action", "ADD", "quantity", 4), owner)
+                .body().get("productId");
+        assertThat(post("/kirana/reads/" + id(read) + "/discard", Map.of(), owner).status()).isEqualTo(200);
+        Map<?, ?> after = get("/kirana/setup", owner).body();
+        assertThat(after.get("linesToCheck")).isEqualTo(0);
+        assertThat(after.get("linesAdded")).isEqualTo(0);
+        assertThat((List<?>) after.get("pages")).isEmpty();
+        assertThat(stock(product)).isEqualByComparingTo("4");   // the product stays
+        assertThat(post("/kirana/setup/lines/" + second, Map.of("action", "SKIP"), owner).body().get("code"))
+                .isEqualTo("LINE_NOT_FOUND");
+    }
+
+    @Test
+    void aShopSendsAtMost100ListPagesADayDeletedOnesToo() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        UUID shop = shopId(owner);
+        String page = upload(owner, "BILL", "page");
+        UUID ownerId = jdbc.queryForObject("SELECT user_id FROM shop_members WHERE shop_id = ? AND role = 'OWNER'",
+                UUID.class, shop);
+        String insert = "INSERT INTO kirana_reads (id, shop_id, kind, status, file_ids, client_ref, tries, "
+                + "next_try_at, created_by, created_at, updated_at) SELECT gen_random_uuid(), ?, 'STOCK_LIST', "
+                + "'DISCARDED', ARRAY[?::uuid], gen_random_uuid(), 0, now(), ?, %s, now() FROM generate_series(1, %d)";
+        jdbc.update(insert.formatted("now() - interval '2 days'", 50), shop, page, ownerId);   // other days: free
+        jdbc.update(insert.formatted("now()", 99), shop, page, ownerId);
+        assertThat(post("/kirana/reads", newRead("STOCK_LIST", page), owner).status()).isEqualTo(201);
+        Reply refused = post("/kirana/reads", newRead("STOCK_LIST", page), owner);
+        assertThat(refused.status()).isEqualTo(409);
+        assertThat(refused.body().get("code")).isEqualTo("TOO_MANY_PAGES_TODAY");
+        assertThat(((Map<?, ?>) refused.body().get("details")).get("max")).isEqualTo(100);
+    }
+
+    // ---------- what is offered online is what was counted ----------
+
+    @Test
+    void aProductIsCountedWhenAddedWithItsStockOrCountedAndNotAnyMoreOnceSoldBelowZero() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        String milk = id(post("/kirana/products", product("Amul Taaza Toned Milk 500 ml", "PIECE", 2900, "2"), owner));
+        Map<String, Object> bare = new HashMap<>(Map.of("name", "Harvest Gold 400 g", "unit", "PIECE",
+                "pricePaise", 4500));
+        String bread = id(post("/kirana/products", bare, owner));
+        assertThat(counted(milk)).isTrue();
+        assertThat(counted(bread)).isFalse();
+        // A count of what is there: counted, even when it was right already
+        assertThat(post("/kirana/products/" + bread + "/stock", Map.of("clientRef", UUID.randomUUID().toString(),
+                "reason", "COUNT", "quantity", 0), owner).status()).isEqualTo(200);
+        assertThat(counted(bread)).isTrue();
+
+        // Sold one more than counted: the count no longer holds
+        bill(owner, List.of(line(milk, "3")), "CASH", null);
+        assertThat(stock(milk)).isEqualByComparingTo("-1");
+        assertThat(counted(milk)).isFalse();
+        assertThat(pluck(get("/kirana/setup", owner).body().get("uncountedProducts"), "name"))
+                .containsExactly("Amul Taaza Toned Milk 500 ml");
+        assertThat(((Map<?, ?>) get("/kirana/products/" + milk, owner).body().get("product")).get("counted"))
+                .isEqualTo(false);
+    }
+
     // ---------- helpers ----------
 
     /** Editing unlocked for this sign-in, as if its owner had entered the code (EditUnlockStore: user and session). */
@@ -876,6 +1452,49 @@ class KiranaStockIntegrationTest {
         return "{\"wording\":\"" + wording + "\",\"brand\":" + (brand == null ? "null" : "\"" + brand + "\"")
                 + ",\"name\":\"" + name + "\",\"size\":\"" + size + "\",\"quantity\":" + qty + ",\"rate\":" + rate
                 + ",\"mrp\":" + mrp + ",\"amount\":100}";
+    }
+
+    private static String stockList(String lines) {
+        return "{\"readable\":true,\"list\":true,\"lines\":" + lines + "}";
+    }
+
+    private static String listLine(String wording, String brand, String name, String size, boolean byWeight,
+                                   String mrp, String quantity) {
+        return "{\"wording\":\"" + wording + "\",\"brand\":" + (brand == null ? "null" : "\"" + brand + "\"")
+                + ",\"name\":\"" + name + "\",\"size\":" + (size == null ? "null" : "\"" + size + "\"")
+                + ",\"byWeight\":" + byWeight + ",\"mrp\":" + mrp + ",\"quantity\":" + quantity + "}";
+    }
+
+    /** What the fake AI says it saw in a product's photo. */
+    private static String seen(boolean goods, boolean people, boolean oneKind, boolean sharp, boolean front,
+                               boolean matches, String brand, String name, String size) {
+        return "{\"goods\":" + goods + ",\"people\":" + people + ",\"oneKind\":" + oneKind + ",\"sharp\":" + sharp
+                + ",\"front\":" + front + ",\"matches\":" + matches + ",\"brand\":" + quoted(brand) + ",\"name\":"
+                + quoted(name) + ",\"size\":" + quoted(size) + "}";
+    }
+
+    private static String quoted(String s) {
+        return s == null ? "null" : "\"" + s + "\"";
+    }
+
+    private static Map<String, Object> photo(String fileId) {
+        return Map.of("clientRef", UUID.randomUUID().toString(), "fileId", fileId);
+    }
+
+    /** The product as its page shows it. */
+    private Map<?, ?> product(String productId, String token) {
+        return (Map<?, ?>) get("/kirana/products/" + productId, token).body().get("product");
+    }
+
+    /** Every product of the shop given a checked photo of its own (as if each had passed its check). */
+    private void pictureAll(String owner) {
+        String photo = upload(owner, "PRODUCT_PHOTO", "photo-" + UUID.randomUUID());
+        jdbc.update("UPDATE kirana_products SET photo_file_id = ?::uuid WHERE shop_id = ?", photo, shopId(owner));
+    }
+
+    private boolean counted(String productId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT counted_at IS NOT NULL FROM kirana_products "
+                + "WHERE id = ?::uuid", Boolean.class, productId));
     }
 
     private static Map<String, Object> newRead(String kind, String fileId) {

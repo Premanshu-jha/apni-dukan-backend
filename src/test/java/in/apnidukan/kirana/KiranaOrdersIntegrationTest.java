@@ -261,6 +261,10 @@ class KiranaOrdersIntegrationTest {
         assertThat(pluck(get("/kirana/nearby?lat=" + ME_LAT + "&lng=" + LNG, me).body().get("items"), "name"))
                 .containsExactly("Sharma General Store", "Gupta Kirana");
 
+        // A product never counted isn't offered (the shop doesn't know it has it)
+        Map<String, Object> uncounted = new HashMap<>(Map.of("name", "Good Day 100 g", "unit", "PIECE", "pricePaise",
+                3000));
+        assertThat(post("/kirana/products", uncounted, s.aOwner).status()).isEqualTo(201);
         Reply products = get("/kirana/shops/" + s.a + "/products", me);
         assertThat(pluck(products.body().get("items"), "name")).containsExactly("Amul Taaza 500 ml", "Harvest Gold 400 g");
         // Curd isn't at A; B (555 m from A) has it, C (1.33 km) is too far to hand it over
@@ -439,6 +443,13 @@ class KiranaOrdersIntegrationTest {
         assertThat(missing.status()).as(missing.body().toString()).isEqualTo(200);
         assertThat(missing.body().get("itemsPaise")).isEqualTo(3 * 2700);
         assertThat(stock(s.aBread)).isEqualByComparingTo("2");
+        // Its count didn't hold: not offered online until the shop counts it again
+        assertThat(pluck(get("/kirana/shops/" + s.a + "/products", me).body().get("items"), "name"))
+                .containsExactly("Amul Taaza 500 ml");
+        assertThat(post("/kirana/products/" + s.aBread + "/stock", Map.of("clientRef", UUID.randomUUID().toString(),
+                "reason", "COUNT", "quantity", 2), s.aOwner).status()).isEqualTo(200);
+        assertThat(pluck(get("/kirana/shops/" + s.a + "/products", me).body().get("items"), "name"))
+                .containsExactly("Amul Taaza 500 ml", "Harvest Gold 400 g");
         Map<?, ?> order = get("/kirana/orders/" + orderId, me).body();
         assertThat(pluck(order.get("refunds"), "amountPaise")).containsExactly(3000, 4500);
         assertThat(order.get("totalPaise")).isEqualTo(3 * 2700 + 1000);

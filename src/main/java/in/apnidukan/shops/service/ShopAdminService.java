@@ -362,12 +362,18 @@ public class ShopAdminService {
      * pin are the shop's from now on (as changeAddress; the owner is told).
      * Decline the request first (declineAddressRequest) to approve the rest without it. {@code version} is the one shown in the list the field team checked: if the owner
      * changed anything since (photos, address), 409 SHOP_CHANGED, so nothing unchecked is approved. 409 WRONG_STATUS
-     * from any other status (a live shop with nothing to re-check too); 404 if there's no such shop.
+     * from any other status (a live shop with nothing to re-check too); 409 PRODUCTS_NOT_READY for a kirana whose
+     * owner hasn't finished adding its products; 404 if there's no such shop.
      */
     @Transactional
     public AdminShopResponse approve(UUID adminId, UUID shopId, long version, String noteInput) {
         assignments.lockForAssignment();   // first: an approved new address may change the pincode
         Shop shop = checkedWaiting(adminId, shopId, version, "approved");
+        if (!shop.visitBookable()) {
+            // A kirana's products are checked at the visit: none set up yet, nothing to check
+            throw new ApiException(HttpStatus.CONFLICT, "PRODUCTS_NOT_READY", "The owner hasn't finished adding the "
+                    + "shop's products yet. The visit is booked when they have.");
+        }
         boolean wasLive = shop.getStatus() == ShopStatus.APPROVED;
         String note = optionalNote(noteInput);
         shop.approve(now());
@@ -375,6 +381,9 @@ public class ShopAdminService {
         // A salon's first approval: its free trial starts (later ones keep the trial it had)
         java.util.Optional<java.time.Instant> trialEnds = subscriptions.startTrial(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.APPROVED, null, note, List.of());
+        if (shop.getType() == in.apnidukan.shops.domain.ShopType.KIRANA) {
+            kiranas.shareCheckedPhotos(shopId);   // its photos checked while registering may now be shared
+        }
         // After approving: no longer waiting, so a new pincode doesn't send it to another agent's visit list
         addressRequests.pending(shopId).ifPresent(r -> applyAddressRequest(adminId, shop, r));
         dashboardCounts.clearAfterCommit();
@@ -577,8 +586,10 @@ public class ShopAdminService {
         review.addEvent(shopId, now(), adminId, true, ShopEventType.REINSTATED, null, note, List.of());
         assignments.startedWaiting(shopId, "REINSTATED");
         dashboardCounts.clearAfterCommit();
-        tellOwner(shop, "SHOP_REINSTATED", "Your shop will be checked again",
-                shop.details().name() + " is no longer suspended. Our team will visit; it goes live once approved.");
+        tellOwner(shop, "SHOP_REINSTATED", "Your shop will be checked again", shop.details().name()
+                + (shop.visitBookable() ? " is no longer suspended. Our team will visit; it goes live once approved."
+                : " is no longer suspended. Finish adding your products in the app: then our team will visit, and "
+                + "it goes live once approved."));
         return view(shop);
     }
 

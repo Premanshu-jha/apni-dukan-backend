@@ -79,7 +79,14 @@ public class ShopAssignments implements FieldAssignments {
     public void startedWaiting(UUID shopId, String reason) {
         // Always assigned and told, even back to the same agent (a business sent back and submitted again is news to
         // whoever visits it)
-        store.lock(shopId).filter(Locked::pending).ifPresent(shop -> assignByRule(shop, null, reason, null, true));
+        store.lock(shopId).ifPresent(shop -> {
+            if (shop.pending()) {
+                assignByRule(shop, null, reason, null, true);
+            } else if (shop.settingUp() && shop.assignee() != null) {
+                // A kirana setting up its products waits for no visit yet: nobody holds it (booked when it finishes)
+                move(shop, null, reason, null, false);
+            }
+        });
     }
 
     /**

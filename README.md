@@ -1218,6 +1218,82 @@ Safe while the old version runs: it never writes `sells_food`, and its PASSED ro
 **GS1 later.** Once the company is registered, unknown barcodes are to be looked up in GS1 India's product data before
 the label is read (see the project's future plans): Sonnet then reads only packs GS1 doesn't know.
 
+## Kirana product setup after Submit (V76–V78, `kirana` branch)
+
+A kirana is approved only once the field agent has seen that its products are in the app. So after Submit the owner
+(and helpers) set up **every product the shop sells, each with a count** of what is on the shelf. Signup itself is
+unchanged; the counter works from Submit, so a sale after a product is counted takes it off the stock.
+
+```mermaid
+sequenceDiagram
+    participant A as Partner app
+    participant B as Backend
+    participant J as ReadJob
+    A->>B: POST /files?purpose=BILL (one page of the shop's list)
+    A->>B: POST /kirana/reads {clientRef, kind: STOCK_LIST, fileIds: [page]}
+    J->>B: the page read by AI into lines (wording, brand, name, size, by weight, MRP, quantity)
+    A->>B: GET /kirana/setup/lines → 20 lines, each with likely products
+    A->>B: POST /kirana/setup/lines/{id} {action: ADD, productId? | name/unit/price?, quantity} / SKIP / UNDO
+    A->>B: GET /kirana/setup → progress, canFinish
+    A->>B: POST /kirana/setup/finish (owner) → the field visit booked
+```
+
+- **`GET /kirana/setup`** (owner or helper): `products`, `uncounted` and up to 20 `uncountedProducts` (`{id, name}`),
+  `linesToCheck`, `linesAdded`, `linesSkipped`, `pagesReading`, `pagesFailed`, `pagesLeft` (of 60), `pages` (each kept
+  page: `pageNo`, `fileId`, `status`, `failure`, `linesLeftOut` past the 150 one read keeps, its lines' counts),
+  `canFinish`, `youCanFinish` (the owner only), `readyAt`.
+- **Pages of the list** (`kind: STOCK_LIST`): one BILL photo or file each, at most 60 kept a shop (409
+  `TOO_MANY_PAGES`, counted under a per-shop lock; a page deleted or that failed frees its place) and 100 sent a day,
+  deleted and failed ones too (409 `TOO_MANY_PAGES_TODAY`: each was an AI read). They don't use the shop's 30 daily AI
+  reads for bills. A page that isn't a list, or can't be read, fails with the reason, to retake. Deleting a page takes
+  its unchecked lines away (deciding one: 404); products added from it stay.
+- **`GET /kirana/setup/lines?status=&cursor=`**: lines to check (`NEW`, the default, with suggestions), `SKIPPED` (to
+  bring one back) or `ADDED` (with what was `counted`), 20 a page, in the order the pages were sent, each with `pageNo`.
+- **`POST /kirana/setup/lines/{id}`**: `ADD` with `quantity` (400 naming it if missing) either onto a product the shop
+  has (`productId`: its stock becomes the count; when another line was already added onto it, 409 `ALREADY_COUNTED`
+  with its stock until `addToCount` true adds or false replaces) or as a new one (`itemId` from the catalogue and/or
+  `name`, `unit`, `pricePaise`; left out: brand + name + size as read, kg for loose goods else piece, the MRP read if
+  a product may have it, else 400 naming `pricePaise`; 409 `NAME_TAKEN`). Sent again: the line as it is. `SKIP` /
+  `UNDO` (409 `LINE_ADDED` once added: the product is changed instead). 404 `LINE_NOT_FOUND`.
+- **`POST /kirana/setup/finish`** (owner; 403 `OWNER_ONLY`): 409 `NO_PRODUCTS`, `LINES_TO_CHECK` (also while a page
+  is reading), `PAGES_FAILED` (retake or delete), `PRODUCTS_NOT_COUNTED` (with `{id, name}`s). Checked under the
+  shop's setup lock (lines and pages wait). Then `shops.products_ready_at` is set, a note goes on the shop's timeline
+  and, if it was submitted and never approved, the visit is booked with the agent covering its pincode. Again: as it
+  is.
+- **A picture for every product** before finishing (409 `PHOTOS_NEEDED`: `missing`, `checking`, `refused`): its
+  shared catalogue item's, or the shop's own photo once checked. `GET /kirana/setup/photos?cursor=` lists the products
+  without one, 20 a page, each with `sizeToShow` and `loose` (for the camera screen's guidance) and its photo's check.
+  `PUT /kirana/products/{id}/photo {clientRef, fileId, sizeFileId?}`: the photo is checked by AI before it shows
+  (`photoCheck` CHECKING; the old picture stays meanwhile) against the product (`PhotoRules`): the right product and
+  variant, the right size (code compares it with the name's), the front of the pack, sharp, one product, no people;
+  loose goods only need to be those goods. Refused (`REFUSED` / `NEED_SIZE`: a photo of the side with the size, sent with
+  the front's) with `photoCheckReason` in the shop's words. 300 checks a day a shop (409 `TOO_MANY_PHOTOS_TODAY`); they
+  don't use the 30 daily reads for bills. Removing the shop's own photo needs a catalogue picture (409 `PHOTO_NEEDED`).
+  A checked photo of a pack matching its catalogue item becomes the item's picture where it has none, only while the
+  shop is approved (`KiranaFacts.shareCheckedPhotos` at approval, then at each check). Each refusal has a `code`
+  (WRONG_SIZE, OTHER_PRODUCT, NEED_SIZE, BLURRY …) and what the photo showed (`seen`) for the app to word in Hindi or
+  Telugu. After NEED_SIZE the side alone is sent; `fileId` null lets go of a waiting or refused photo, keeping the
+  accepted one. A product renamed or its unit changed has its photo checked again. **AI cost:** each photo check is one
+  AI call, from the platform's own daily allowance for photos (`app.kirana.photo-checks-per-day`, 3,000), so bills
+  (`app.kirana.ai-calls-per-day`, 500) are never held up; set both to what the budget allows.
+- **The field team:** a submitted kirana still setting up is in no review group, not on the dashboard and not assigned
+  (nor counted in an agent's load; one held from before is let go when it is submitted); its page shows
+  `waitingForVisit` false and `productsReadyAt`; approving it is refused with 409 `PRODUCTS_NOT_READY`. A kirana ever
+  approved is never held back. (`ShopAssignmentStore.setUp`, `Shop.visitBookable`.)
+- **Counted products** (`kirana_products.counted_at`): set when a product is added with a stock or counted (Count, a
+  setup line, or created from a distributor's bill or a scan: it starts at 0 and what came in is added); cleared when a
+  sale takes it below zero or it is missing while packing an online order. **Only counted products are offered
+  online** (the shop's list and nearby shops' items); each product says `counted`.
+
+**Deploying V76–V78:** V76 adds nullable `shops.products_ready_at`, `kirana_products.counted_at`, the photo-check
+columns of `kirana_products` (`photo_shareable` NOT NULL DEFAULT false: no rewrite; its keys and rule `NOT VALID`) and
+`kirana_reads.lines_left_out` (no default: no rewrite), marks products with stock above 0 as counted and lets go of
+the agent holding a kirana waiting for its first visit (kiranas aren't live yet: few rows; they are booked again when
+they finish their setup), widens the read kinds (`NOT VALID`) and creates the empty `kirana_list_lines`; V77
+validates; V78 builds the uncounted-products index `CONCURRENTLY`. Safe while the old version runs: it never reads the
+new columns. **Deploy with the partner app's setup screens** (its next PR): without them a new kirana can't finish its
+setup, so its visit is never booked.
+
 ## Run it on your laptop
 
 1. **Install:** JDK 21 (IntelliJ can download it). IntelliJ's bundled Maven is enough.
@@ -2655,7 +2731,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V76__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V79__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).

@@ -404,7 +404,8 @@ public class ShopService implements ShopMemberships {
                     .anyMatch(m -> m.getRole() == ShopRole.HELPER);
             if (helpers || invites.helperWaiting(shop.getId()) || kiranas.hasCounterData(shop.getId())) {
                 throw new ApiException(HttpStatus.CONFLICT, "HAS_COUNTER_DATA",
-                        "Your shop already has bills, products, khata customers or helpers (or a helper invited), so it "
+                        "Your shop already has bills, products, its list of products, khata customers or helpers (or a "
+                                + "helper invited), so it "
                                 + "stays a kirana. If it really is a salon, write to support.");
             }
         }
