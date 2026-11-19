@@ -45,6 +45,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -211,12 +212,15 @@ public class ShopAdminService {
         String video = shop.getShopVideoFileId() == null ? null : existingLink(shop.getShopVideoFileId());
         AddressRequestView addressRequest = addressRequests.pending(shopId).map(AddressRequestService::view)
                 .orElse(null);
-        AdminShopDetail.Kirana kirana = shop.getType() == ShopType.KIRANA
-                ? kiranas.upiId(shopId)
-                        .map(u -> new AdminShopDetail.Kirana(u.upiId(), u.updatedAt(), kiranas.sellsFood(shopId),
-                                kiranas.fssai(shopId)))
-                        .orElse(new AdminShopDetail.Kirana(null, null, kiranas.sellsFood(shopId), kiranas.fssai(shopId)))
-                : null;
+        AdminShopDetail.Kirana kirana = null;
+        if (shop.getType() == ShopType.KIRANA) {
+            in.apnidukan.common.context.KiranaFacts.ProductGaps gaps = shop.isEverApproved() ? null
+                    : kiranas.productGaps(shopId);
+            Optional<in.apnidukan.common.context.KiranaFacts.UpiId> upi = kiranas.upiId(shopId);
+            kirana = new AdminShopDetail.Kirana(upi.map(in.apnidukan.common.context.KiranaFacts.UpiId::upiId)
+                    .orElse(null), upi.map(in.apnidukan.common.context.KiranaFacts.UpiId::updatedAt).orElse(null),
+                    kiranas.sellsFood(shopId), kiranas.fssai(shopId), gaps);
+        }
         return new AdminShopDetail(views(List.of(shop)).get(0), salon, kirana, changes, moved, oldOwnerPhoto,
                 oldShopPhoto,
                 video, doc, addressRequest, timeline.items(), timeline.next());
@@ -373,6 +377,27 @@ public class ShopAdminService {
             // A kirana's products are checked at the visit: none set up yet, nothing to check
             throw new ApiException(HttpStatus.CONFLICT, "PRODUCTS_NOT_READY", "The owner hasn't finished adding the "
                     + "shop's products yet. The visit is booked when they have.");
+        }
+        if (shop.getType() == ShopType.KIRANA && !shop.isEverApproved()) {
+            // Products added after the owner finished need their count and picture too, before the first approval
+            in.apnidukan.common.context.KiranaFacts.ProductGaps gaps = kiranas.productGaps(shopId);
+            if (!gaps.none()) {
+                long toDo = gaps.noPicture() - gaps.checking();
+                String what = gaps.active() == 0 ? "The shop has no products in the app"
+                        : String.join(", ", java.util.stream.Stream.of(
+                                gaps.uncounted() == 0 ? null : gaps.uncounted() == 1 ? "1 product has no count"
+                                        : gaps.uncounted() + " products have no count",
+                                toDo <= 0 ? null : toDo == 1 ? "1 product has no photo"
+                                        : toDo + " products have no photo",
+                                gaps.checking() == 0 ? null : gaps.checking() == 1
+                                        ? "1 photo is still being checked (try again in a few minutes)"
+                                        : gaps.checking() + " photos are still being checked (try again in a few "
+                                        + "minutes)").filter(Objects::nonNull).toList());
+                throw new ApiException(HttpStatus.CONFLICT, "PRODUCTS_INCOMPLETE", what + (gaps.active() == 0
+                        || gaps.uncounted() + toDo > 0 ? ". Ask the owner to finish in the app first." : "."),
+                        Map.of("uncounted", gaps.uncounted(), "noPicture", gaps.noPicture(), "checking",
+                                gaps.checking(), "products", gaps.products()));
+            }
         }
         boolean wasLive = shop.getStatus() == ShopStatus.APPROVED;
         String note = optionalNote(noteInput);

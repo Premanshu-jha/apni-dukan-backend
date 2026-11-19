@@ -18,10 +18,12 @@ public class KiranaFactsService implements KiranaFacts {
 
     private final KiranaSettingsStore settings;
     private final in.apnidukan.kirana.repo.ProductStore products;
+    private final DataKart gs1;
     private final java.time.Clock clock;
 
     public KiranaFactsService(KiranaSettingsStore settings, in.apnidukan.kirana.repo.ProductStore products,
-                              java.time.Clock clock) {
+                              DataKart gs1, java.time.Clock clock) {
+        this.gs1 = gs1;
         this.settings = settings;
         this.products = products;
         this.clock = clock;
@@ -62,6 +64,16 @@ public class KiranaFactsService implements KiranaFacts {
     @Transactional(readOnly = true)
     public Fssai fssai(UUID shopId) {
         return settings.fssai(shopId);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public ProductGaps productGaps(UUID shopId) {
+        long[] counts = products.countedTotals(shopId);
+        in.apnidukan.kirana.repo.ProductStore.PhotoTotals photos = products.photoTotals(shopId, gs1.configured());
+        // A photo being checked, or a picture GS1 is still looking for: nothing for the owner to do yet
+        return new ProductGaps(counts[0], counts[1], photos.missing(), photos.checking() + photos.finding(),
+                counts[1] + photos.missing() == 0 ? java.util.List.of() : products.notReady(shopId, 10));
     }
 
     @Override

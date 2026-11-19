@@ -46,6 +46,13 @@ public class ShopProductReadiness implements ProductReadiness {
     }
 
     @Override
+    @Transactional(readOnly = true)
+    public boolean everApproved(UUID shopId) {
+        return Boolean.TRUE.equals(jdbc.query("SELECT ever_approved FROM shops WHERE id = ?",
+                (rs, i) -> rs.getBoolean(1), shopId).stream().findFirst().orElse(false));
+    }
+
+    @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public Instant markProductsReady(UUID shopId, UUID by, long products) {
         assignments.lockForAssignment();

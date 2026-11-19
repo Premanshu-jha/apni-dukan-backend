@@ -85,7 +85,8 @@ public class KiranaStockController {
     @PostMapping("/reads")
     @ResponseStatus(HttpStatus.CREATED)
     public ReadView upload(@Valid @RequestBody NewRead body) {
-        return photoReads.upload(me(), body.kind().name(), body.clientRef(), body.fileIds());
+        return photoReads.upload(me(), body.kind().name(), body.clientRef(), body.fileIds(),
+                Boolean.TRUE.equals(body.recount()));
     }
 
     /** The shop's photos of one kind, newest first, 50 at a time. */
@@ -102,7 +103,7 @@ public class KiranaStockController {
     /** Throws a photo away. 409 READ_USED once it became a bill or was added to stock. */
     @PostMapping("/reads/{id}/discard")
     public ReadView discardRead(@PathVariable UUID id) {
-        return photoReads.discard(me(), id);
+        return setup.discardRead(me(), id);
     }
 
     // ---------- product setup (after Submit; the field visit is booked when it is finished) ----------
@@ -122,8 +123,9 @@ public class KiranaStockController {
     /** Lines of the shop's list: to check (status NEW), SKIPPED or ADDED, 20 at a time. */
     @GetMapping("/setup/lines")
     public ListLinePage setupLines(@RequestParam(required = false) String status,
+                                   @RequestParam(required = false) UUID readId,
                                    @RequestParam(required = false) String cursor) {
-        return setup.lines(me(), status, cursor);
+        return setup.lines(me(), status, readId, cursor);
     }
 
     /** Adds a line as a product with its count, skips it, or brings a skipped one back. */

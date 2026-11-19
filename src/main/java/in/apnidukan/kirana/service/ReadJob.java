@@ -2,6 +2,7 @@ package in.apnidukan.kirana.service;
 
 import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.jobs.JobLeases;
+import in.apnidukan.kirana.domain.ReadFailure;
 import in.apnidukan.kirana.domain.PhotoRules;
 import in.apnidukan.kirana.repo.OnlineStore;
 import in.apnidukan.kirana.repo.ReadStore;
@@ -20,6 +21,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -118,7 +120,7 @@ public class ReadJob {
             // Still waiting for this photo? (Replaced or removed meanwhile: no AI call is spent on it)
             expected = photoChecks.expected(r);
             if (expected.isEmpty()) {
-                fail(r, "This photo is no longer waiting for its product.", now);
+                fail(r, ReadFailure.PHOTO_NOT_WAITING.text(), now);
                 return;
             }
         }
@@ -128,7 +130,7 @@ public class ReadJob {
                 transactions.executeWithoutResult(s -> reads.retry(r.id(), now.plus(Duration.ofHours(1)), now));
                 return;
             }
-            fail(r, "Reading photos isn't switched on yet. Enter it by hand.", now);
+            fail(r, ReadFailure.READING_OFF.text(), now);
             return;
         }
         // The photo first (storage trouble isn't a read: no AI call is used up), then the day's calls
@@ -136,14 +138,14 @@ public class ReadJob {
         for (UUID fileId : r.fileIds()) {
             Optional<FileRefs.FileRef> f = files.find(fileId);
             if (f.isEmpty()) {
-                fail(r, "We couldn't open the photo. Take it again.", now);
+                fail(r, ReadFailure.CANT_OPEN.text(), now);
                 return;
             }
             Optional<byte[]> bytes;
             try {
                 bytes = files.read(f.get().id(), MAX_BYTES);
             } catch (IllegalStateException e) {
-                fail(r, "This photo is too large. Take it again.", now);
+                fail(r, ReadFailure.TOO_LARGE.text(), now);
                 return;
             } catch (RuntimeException storageDown) {
                 log.warn("Kirana photo {} couldn't be downloaded: {}", r.id(), storageDown.getClass().getSimpleName());
@@ -151,7 +153,7 @@ public class ReadJob {
                 return;
             }
             if (bytes.isEmpty()) {
-                fail(r, "We couldn't open the photo. Take it again.", now);
+                fail(r, ReadFailure.CANT_OPEN.text(), now);
                 return;
             }
             pages.add(new KiranaDocumentAi.Page(bytes.get(), f.get().contentType()));
@@ -161,8 +163,7 @@ public class ReadJob {
             BillFiles.Prepared ready = billFiles.prepare(r.kind(), pages);
             if (ready.problem() != null) {
                 // The same file checks for a page of the shop's list: told in its words
-                fail(r, "STOCK_LIST".equals(r.kind()) ? ready.problem().replace("This bill", "This list")
-                        .replace("the bill", "your list") : ready.problem(), now);
+                fail(r, "STOCK_LIST".equals(r.kind()) ? ReadFailure.forList(ready.problem()) : ready.problem(), now);
                 return;
             }
             if (ready.facts() != null) {
@@ -188,7 +189,7 @@ public class ReadJob {
             try {
                 checkPhoto(r, pages, expected.get(), now);
             } catch (KiranaDocumentAi.Unreadable e) {
-                fail(r, PhotoChecks.UNREADABLE, now);
+                fail(r, ReadFailure.PRODUCT_UNCLEAR.text(), now);
             } catch (KiranaDocumentAi.Unavailable e) {
                 retryOrFail(r, now);
             }
@@ -214,9 +215,8 @@ public class ReadJob {
                     KiranaDocumentAi.PurchaseFacts facts = ai.readPurchase(pages);
                     if (!facts.readable() || !facts.bill() || facts.lines().isEmpty()) {
                         fail(r, facts.readable() && !facts.bill()
-                                ? "This doesn't look like a distributor's bill. Take a photo of the bill."
-                                : "We couldn't read the bill's items. Take a clear, straight photo of each page in good "
-                                + "light.", now);
+                                ? ReadFailure.NOT_A_BILL.text()
+                                : ReadFailure.BILL_UNREADABLE.text(), now);
                         return;
                     }
                     transactions.executeWithoutResult(s -> {
@@ -229,21 +229,22 @@ public class ReadJob {
                     KiranaDocumentAi.StockListFacts facts = ai.readStockList(pages.get(0));
                     if (!facts.readable() || !facts.list() || facts.lines().isEmpty()) {
                         fail(r, facts.readable() && !facts.list()
-                                ? "This doesn't look like a list of products. Take a photo of one page of your list."
-                                : "We couldn't read the products on this page. Take a clear, straight photo of the "
-                                + "whole page in good light.", now);
+                                ? ReadFailure.NOT_A_LIST.text()
+                                : ReadFailure.LIST_UNREADABLE.text(), now);
                         return;
                     }
+                    // A recount's matching first, outside the transaction (no lock is held while it works)
+                    Map<Integer, UUID> clear = setup.clearCounts(r, facts);
                     transactions.executeWithoutResult(s -> {
                         if (reads.read(r.id(), JSON.writeValueAsString(facts), now)) {
-                            setup.fromRead(r, facts, now);
+                            setup.fromRead(r, facts, clear, now);
                         }
                     });
                 }
                 case "PAPER_BILL" -> {
                     KiranaDocumentAi.PaperFacts facts = ai.readPaperBill(pages);
                     if (!facts.readable() || !facts.bill() || facts.lines().isEmpty()) {
-                        fail(r, "We couldn't read the bill. Take a clear photo of the whole paper in good light.", now);
+                        fail(r, ReadFailure.PAPER_BILL_UNREADABLE.text(), now);
                         return;
                     }
                     transactions.executeWithoutResult(s -> reads.read(r.id(), JSON.writeValueAsString(facts), now));
@@ -251,7 +252,7 @@ public class ReadJob {
                 default -> {   // LABEL: an unknown pack's label (a product's photo is checked above)
                     KiranaDocumentAi.LabelFacts facts = ai.readLabel(pages.get(0));
                     if (!facts.readable() || !facts.product()) {
-                        fail(r, "We couldn't read the pack's label. Take a photo of the front of the pack.", now);
+                        fail(r, ReadFailure.LABEL_UNREADABLE.text(), now);
                         return;
                     }
                     // An unknown pack's label: its suggestions are worked out from it when shown
@@ -259,8 +260,8 @@ public class ReadJob {
                 }
             }
         } catch (KiranaDocumentAi.Unreadable e) {
-            fail(r, "LABEL".equals(r.kind()) ? "We couldn't read the pack's label. Take a photo of the front of the "
-                    + "pack." : "We couldn't read this photo. Take a clear, straight photo in good light.", now);
+            fail(r, "LABEL".equals(r.kind()) ? ReadFailure.LABEL_UNREADABLE.text()
+                    : ReadFailure.PHOTO_UNREADABLE.text(), now);
         } catch (KiranaDocumentAi.Unavailable e) {
             retryOrFail(r, now);
         }
@@ -274,7 +275,7 @@ public class ReadJob {
             return;
         }
         if (r.tries() + 1 >= MAX_TRIES) {
-            fail(r, "We couldn't read it just now. Send it again a little later, or enter it by hand.", now);
+            fail(r, ReadFailure.TRY_LATER.text(), now);
             return;
         }
         long minutes = Math.min(30, 1L << r.tries());

@@ -30,8 +30,7 @@ import java.util.UUID;
 public class PhotoChecks {
 
     /** Why a photo couldn't be checked: the AI couldn't make it out. */
-    static final String UNREADABLE = "We couldn't see the product clearly in this photo. Take it again in good light, "
-            + "holding the phone steady.";
+    static final String UNREADABLE = in.apnidukan.kirana.domain.ReadFailure.PRODUCT_UNCLEAR.text();
 
     private static final Logger log = LoggerFactory.getLogger(PhotoChecks.class);
 

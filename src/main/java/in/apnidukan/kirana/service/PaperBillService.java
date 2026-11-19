@@ -74,7 +74,7 @@ public class PaperBillService {
         KiranaDocumentAi.PaperFacts f = facts(r);
         if (f == null) {
             return new PaperDraft(r.id(), r.status(), r.failure(), null, null, null, null, List.of(), r.fileIds(),
-                    r.billId());
+                    r.billId(), in.apnidukan.kirana.domain.ReadFailure.code(r.failure()));
         }
         MatchService.Shop shop = matcher.shop(c.shopId());
         List<MatchService.Result> matches = new ArrayList<>();
@@ -111,7 +111,7 @@ public class PaperBillService {
         }
         LocalDate written = dateProblem == null ? f.date() : null;
         return new PaperDraft(r.id(), r.status(), null, f.date(), written, dateProblem, f.totalPaise(), lines,
-                r.fileIds(), r.billId());
+                r.fileIds(), r.billId(), null);
     }
 
     /**
