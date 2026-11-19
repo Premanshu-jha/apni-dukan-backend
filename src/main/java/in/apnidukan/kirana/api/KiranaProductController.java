@@ -135,6 +135,12 @@ public class KiranaProductController {
         return products.setPhoto(me(), id, body.clientRef(), body.fileId(), body.sizeFileId(), body.dropFileId());
     }
 
+    /** "Not this product" (owner): the picture and barcode GS1 found by its name are wrong; they are let go of. */
+    @PostMapping("/{id}/not-this-product")
+    public ProductView notThisProduct(@PathVariable UUID id) {
+        return products.notThisProduct(me(), id);
+    }
+
     /** The cost price (owner only; helpers never see it). */
     @PutMapping("/{id}/cost")
     public ProductView cost(@PathVariable UUID id, @Valid @RequestBody ProductCost body) {

@@ -1294,6 +1294,43 @@ validates; V78 builds the uncounted-products index `CONCURRENTLY`. Safe while th
 new columns. **Deploy with the partner app's setup screens** (its next PR): without them a new kirana can't finish its
 setup, so its visit is never booked.
 
+## GS1 DataKart: official pictures and barcodes (V79–V80, `kirana` branch)
+
+**Off until both `GS1_DATAKART_URL` and `GS1_DATAKART_KEY` are set** (Railway variables; `GS1_IMAGE_HOSTS` optionally
+lists other hosts DataKart's pictures may come from). Railway can't keep a variable without a value, so `NULL`, `NONE`
+or `OFF` (any case) count as not set: GS1 stays off with those. Then `Gs1Job` runs every minute on one server:
+
+- **By barcode (CODE):** every barcode new to the shared catalogue whose item has no picture is queued. GS1's product
+  must be ours (brand, name and size agree) and its picture must pass the AI photo check; it becomes the item's
+  picture for every shop selling it (stored as the platform's own file, `CATALOGUE_PHOTO`, no shop's), and the item's
+  missing brand and size are filled in.
+- **By name (NAME):** a packed product added without a barcode, with its size in its name ("Tata Salt 1 kg"), is
+  queued; loose goods and names without a size aren't (they can't be matched clearly). On one clear match (a sure
+  score, clearly ahead of any other likely product) its barcode joins the catalogue (source `GS1`, trusted) and the
+  product is linked to that item, so its picture follows; the product's own barcode is still set only by the shop: the
+  product shows `suggestedBarcode` ("Is this its barcode? Tap to add").
+- **The shop's view:** a product shows `pictureFrom` (SHOP, CATALOGUE or null) and `findingPicture` while GS1 may still
+  bring a picture. Setup counts those as `photosFinding` (listed last in the photos to take, `findingPicture: true`):
+  with only those left, `nextStep` is WAIT, but the shop may photograph them anyway.
+- **"Not this product"** (`POST /kirana/products/{id}/not-this-product`, owner): GS1's match by name was wrong; the
+  link, picture and suggestion go and it isn't looked for again under that name (409 HAS_BARCODE: matched by its
+  barcode; 409 NOT_MATCHED). Renaming a product without a barcode drops what was found and looks again under the new
+  name.
+- **Admin:** `GET /admin/kirana/gs1?status=REFUSED|NOT_FOUND|WAITING|FOUND&cursor=` (super admins): lookups newest change
+  first with their note, shop and product, the counts at each status, and whether GS1 is switched on.
+- Not found: looked up again a month later. GS1 or the AI unreachable or busy: 30 minutes later, for a day, then a
+  month later; the shop is never kept waiting on it (after 3 failures or a day it's a photo to take). A wrong key
+  (401/403) or URL stops the run and gives the lookups back untouched (logged), so fixing the variable is enough. A picture the AI can't make out is skipped. GS1's picture
+  checks have their own daily allowance, `GS1_CHECKS_PER_DAY` (1000), apart from shops' photos
+  (`KIRANA_PHOTO_CHECKS_PER_DAY`).
+- GTIN-14s with leading zeros are read as the EAN-13 (or EAN-8) a pack prints.
+- `DataKart` was written before access to DataKart's API documentation (it calls `GET <url>/products/<gtin>` and
+  `GET <url>/products?q=<name>` with the key as a bearer token, and reads GS1's core attribute names); when access
+  comes, only that class is adjusted to the real API.
+
+**Deploying V79–V80:** V79 widens two `files` rules and the catalogue barcodes' sources (`NOT VALID`) and creates the
+empty `kirana_gs1_lookups` and `kirana_gs1_ai_calls`; V80 validates. Safe while the old version runs.
+
 ## Run it on your laptop
 
 1. **Install:** JDK 21 (IntelliJ can download it). IntelliJ's bundled Maven is enough.
@@ -2731,7 +2768,7 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V79__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V81__...`). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).

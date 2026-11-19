@@ -31,7 +31,12 @@ public enum FilePurpose {
      * A kirana product's pack: the label of a barcode no one knows yet (read by AI to suggest the product), or the
      * product's photo (shared with every shop that has the same barcode). Cleaned like other photos.
      */
-    PRODUCT_PHOTO("products");
+    PRODUCT_PHOTO("products"),
+    /**
+     * A product's official picture the platform fetched for the shared catalogue (GS1 DataKart): no shop's and no
+     * one's (its row has neither), never uploaded through the API (PlatformFiles).
+     */
+    CATALOGUE_PHOTO("catalogue");
 
     private final String folder;
 

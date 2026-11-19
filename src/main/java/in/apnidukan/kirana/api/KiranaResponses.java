@@ -36,12 +36,18 @@ public final class KiranaResponses {
      *                    (retake: {@code photoCheckReason} says why in English, {@code photoCheckCode} as a code to word
      *                    in the shop's language, {@code photoCheckSeen} what the photo showed); null when none waits
      * @param newPhotoUrl a link to that new photo (to show which one is being checked or was refused)
+     * @param pictureFrom SHOP (the shop's own photo), CATALOGUE (the shared catalogue's: another shop's checked photo
+     *                    or the company's official picture from GS1), or null (none: show the category's icon)
+     * @param suggestedBarcode a barcode GS1 found for the product's name, offered when the product has none: "Is this
+     *                    its barcode? Tap to add" (the shop adds it with the usual add-barcode call); null otherwise
+     * @param findingPicture no picture yet, and GS1 is still looking for the company's own ("Finding its picture…")
      */
     public record ProductView(UUID id, String name, List<BarcodeView> barcodes, Unit unit, long pricePaise,
                               BigDecimal stock, BigDecimal lowStockAt, boolean runningOut, boolean active,
                               long version, Instant updatedAt, Long costPaise, UUID photoFileId, String photoUrl,
                               boolean counted, String photoCheck, String photoCheckCode, String photoCheckReason,
-                              String photoCheckSeen, String newPhotoUrl) {
+                              String photoCheckSeen, String newPhotoUrl, String pictureFrom,
+                              String suggestedBarcode, boolean findingPicture) {
 
         public ProductView {
             barcodes = List.copyOf(barcodes);
@@ -51,18 +57,25 @@ public final class KiranaResponses {
             return new ProductView(p.id(), p.name(), barcodes.stream().map(BarcodeView::of).toList(), p.unit(),
                     p.pricePaise(), Quantities.json(p.stock()), Quantities.json(p.lowStockAt()), p.runningOut(),
                     p.active(), p.version(), p.updatedAt(), null, null, null, p.countedAt() != null, null, null, null,
-                    null, null);
+                    null, null, null, null, false);
         }
 
         /**
          * With the cost price (shown to the owner only: null for a helper), the photo and its link, and how a new
          * photo's check stands.
          */
-        public ProductView with(Long cost, UUID photo, String photoLink, PhotoCheck check) {
+        public ProductView with(Long cost, UUID photo, String photoLink, PhotoCheck check, Picture picture) {
             return new ProductView(id, name, barcodes, unit, pricePaise, stock, lowStockAt, runningOut, active, version,
                     updatedAt, cost, photo, photoLink, counted, check.status(), check.code(), check.reason(),
-                    check.seen(), check.newPhotoUrl());
+                    check.seen(), check.newPhotoUrl(), picture.from(), barcodes.isEmpty() ? picture.suggestedBarcode()
+                    : null, photo == null && picture.finding());
         }
+    }
+
+    /** Where the product's picture comes from, and what GS1 found or is still looking for. */
+    public record Picture(String from, String suggestedBarcode, boolean finding) {
+
+        public static final Picture NONE = new Picture(null, null, false);
     }
 
     /** How a product's new photo's check stands (all null when none waits). */
