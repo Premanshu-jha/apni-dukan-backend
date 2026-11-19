@@ -2,15 +2,18 @@ package in.apnidukan.kirana.service;
 
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.error.ApiException;
+import in.apnidukan.kirana.api.StockResponses;
 import in.apnidukan.kirana.api.StockResponses.ImportProblem;
 import in.apnidukan.kirana.api.StockResponses.ImportResult;
 import in.apnidukan.kirana.api.StockResponses.ReviewItem;
 import in.apnidukan.kirana.api.StockResponses.ReviewView;
+import in.apnidukan.kirana.domain.Cursors;
 import in.apnidukan.kirana.domain.NameMatcher;
 import in.apnidukan.kirana.domain.Unit;
 import in.apnidukan.kirana.repo.CatalogueStore;
 import in.apnidukan.kirana.repo.CatalogueStore.Item;
 import in.apnidukan.kirana.repo.CatalogueStore.Review;
+import in.apnidukan.kirana.repo.Gs1Store;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,17 +49,56 @@ public class CatalogueAdminService {
     private final CatalogueService catalogueService;
     private final CatalogueStore catalogue;
     private final ShopDirectory shops;
+    private final Gs1Store gs1Lookups;
+    private final DataKart dataKart;
     private final TransactionTemplate transactions;
     private final Clock clock;
 
     public CatalogueAdminService(CatalogueService catalogueService, CatalogueStore catalogue, ShopDirectory shops,
-                                 TransactionTemplate transactions, Clock clock) {
+                                 Gs1Store gs1Lookups, DataKart dataKart, TransactionTemplate transactions,
+                                 Clock clock) {
         this.catalogueService = catalogueService;
+        this.gs1Lookups = gs1Lookups;
+        this.dataKart = dataKart;
         this.catalogue = catalogue;
         this.shops = shops;
         this.transactions = transactions;
         this.clock = clock;
     }
+
+    /**
+     * GS1 lookups at one status (WAITING, FOUND, NOT_FOUND or REFUSED; 400 for another), newest change first, 50 a
+     * page, with how many stand at each status: what GS1 couldn't find or the team should look at.
+     */
+    @Transactional(readOnly = true)
+    public StockResponses.Gs1Page gs1(UUID adminId, String status, String cursor) {
+        catalogueService.requireSuperAdmin(adminId);
+        if (!List.of("WAITING", "FOUND", "NOT_FOUND", "REFUSED").contains(status)) {
+            throw KiranaChecks.invalid("status", "WAITING, FOUND, NOT_FOUND or REFUSED");
+        }
+        Optional<String[]> after = Cursors.decode(cursor);
+        Instant afterAt = null;
+        UUID afterId = null;
+        if (after.isPresent()) {
+            try {
+                afterAt = Instant.parse(after.get()[0]);
+                afterId = UUID.fromString(after.get()[1]);
+            } catch (RuntimeException e) {
+                afterAt = null;   // a broken token: the first page
+                afterId = null;
+            }
+        }
+        List<Gs1Store.AdminRow> rows = gs1Lookups.byStatus(status, afterAt, afterId, GS1_PAGE + 1);
+        boolean more = rows.size() > GS1_PAGE;
+        List<Gs1Store.AdminRow> page = more ? rows.subList(0, GS1_PAGE) : rows;
+        Gs1Store.AdminRow last = page.isEmpty() ? null : page.get(page.size() - 1);
+        return new StockResponses.Gs1Page(gs1Lookups.counts(), dataKart.configured(), page.stream()
+                .map(r -> new StockResponses.Gs1LookupView(r.id(), r.kind(), r.code(), r.status(), r.note(), r.tries(),
+                        r.shopId(), r.shopName(), r.productId(), r.productName(), r.itemName(), r.updatedAt()))
+                .toList(), more ? Cursors.encode(last.updatedAt().toString(), last.id().toString()) : null);
+    }
+
+    private static final int GS1_PAGE = 50;
 
     /** Open reviews, oldest first, with both items and how many shops say each. */
     @Transactional(readOnly = true)

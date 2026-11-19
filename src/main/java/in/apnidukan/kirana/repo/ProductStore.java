@@ -25,8 +25,25 @@ public class ProductStore {
 
     private static final String COLUMNS = "SELECT id, shop_id, name, unit, price_paise, stock, low_stock_at, "
             + "active, version, updated_at, counted_at FROM kirana_products";
+    /**
+     * A GS1 lookup that may still bring the product's picture is waiting: one by name for it, or one by barcode for
+     * its catalogue item (p: the product's alias). Only meaningful while GS1 is switched on.
+     */
+    /**
+     * GS1 may still bring the product's picture: its lookup waits, has failed fewer than 3 times in a row and was queued
+     * less than a day ago. GS1 down, or its key wrong, never keeps a shop waiting longer than that: it photographs them.
+     */
+    private static final String WAITING_FOR_GS1 = "EXISTS (SELECT 1 FROM kirana_gs1_lookups l WHERE l.status = 'WAITING' "
+            + "AND l.tries < 3 AND l.created_at > now() - interval '1 day' "
+            + "AND (l.kind = 'NAME' AND l.product_id = p.id OR l.kind = 'CODE' AND l.item_id = p.catalogue_item_id))";
+
     /** Retakes first (0: refused, or the size asked for), then those not sent yet (1), then those being checked (2). */
+    /**
+     * Retakes first (0: refused, or the size asked for), then those not sent yet (1), then those being checked (2),
+     * then those whose picture GS1 may still bring (3; the first ? says whether GS1 is on).
+     */
     private static final String PHOTO_RANK = "(CASE WHEN p.photo_check IN ('REFUSED', 'NEED_SIZE') THEN 0 "
+            + "WHEN p.photo_check IS NULL AND ? AND " + WAITING_FOR_GS1 + " THEN 3 "
             + "WHEN p.photo_check IS NULL THEN 1 ELSE 2 END)";
     private static final String NEEDING_PHOTOS = "SELECT * FROM (SELECT p.id, p.name, p.unit, p.photo_check, "
             + "p.photo_check_reason, p.photo_check_code, p.photo_check_seen, p.photo_new_file_id, "
@@ -193,6 +210,19 @@ public class ProductStore {
     }
 
     /** Links the product to a shared catalogue entry (the same item in every shop). */
+    /** Links the product to a catalogue item if it has none yet (a link found for it never replaces the shop's). */
+    public boolean linkCatalogueIfNone(UUID productId, UUID itemId) {
+        return jdbc.update("UPDATE kirana_products SET catalogue_item_id = ? WHERE id = ? AND catalogue_item_id IS NULL",
+                itemId, productId) > 0;
+    }
+
+    /** The product's catalogue item let go of, only while it has no barcode (a link by barcode stays). */
+    public boolean unlinkCatalogueIfNoBarcode(UUID productId) {
+        return jdbc.update("UPDATE kirana_products p SET catalogue_item_id = NULL WHERE p.id = ? AND "
+                + "p.catalogue_item_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM kirana_barcodes b "
+                + "WHERE b.product_id = p.id)", productId) > 0;
+    }
+
     public void setCatalogueItem(UUID productId, UUID itemId) {
         jdbc.update("UPDATE kirana_products SET catalogue_item_id = ? WHERE id = ?", itemId, productId);
     }
@@ -540,15 +570,18 @@ public class ProductStore {
      * The shop's active products with no picture (no photo of its own, none in the catalogue), how many of those have
      * a photo being checked, and how many a photo refused (to retake).
      */
-    public record PhotoTotals(long missing, long checking, long refused) {
+    public record PhotoTotals(long missing, long checking, long refused, long finding) {
     }
 
-    public PhotoTotals photoTotals(UUID shopId) {
+    public PhotoTotals photoTotals(UUID shopId, boolean gs1On) {
         return jdbc.queryForObject("SELECT count(*), count(*) FILTER (WHERE p.photo_check = 'CHECKING'), "
-                + "count(*) FILTER (WHERE p.photo_check IN ('REFUSED', 'NEED_SIZE')) FROM kirana_products p "
+                + "count(*) FILTER (WHERE p.photo_check IN ('REFUSED', 'NEED_SIZE')), "
+                + "count(*) FILTER (WHERE p.photo_check IS NULL AND ? AND " + WAITING_FOR_GS1 + ") "
+                + "FROM kirana_products p "
                 + "LEFT JOIN kirana_catalogue_items i ON i.id = p.catalogue_item_id WHERE p.shop_id = ? AND p.active "
                 + "AND p.photo_file_id IS NULL AND i.photo_file_id IS NULL",
-                (rs, i) -> new PhotoTotals(rs.getLong(1), rs.getLong(2), rs.getLong(3)), shopId);
+                (rs, i) -> new PhotoTotals(rs.getLong(1), rs.getLong(2), rs.getLong(3), rs.getLong(4)), gs1On,
+                shopId);
     }
 
     /** A product still needing a picture, with its new photo's check. */
@@ -560,27 +593,34 @@ public class ProductStore {
      * The shop's active products with no picture, retakes first, then by name, after the cursor (rank, name, id); one
      * more than limit.
      */
-    public List<NeedsPhoto> needingPhotos(UUID shopId, Integer afterRank, String afterName, UUID afterId, int limit) {
+    public List<NeedsPhoto> needingPhotos(UUID shopId, boolean gs1On, Integer afterRank, String afterName, UUID afterId,
+                                          int limit) {
         org.springframework.jdbc.core.RowMapper<NeedsPhoto> map = (rs, i) -> new NeedsPhoto(
                 rs.getObject("id", UUID.class), rs.getString("name"), rs.getString("unit"),
                 rs.getString("photo_check"), rs.getString("photo_check_reason"), rs.getString("photo_check_code"),
                 rs.getString("photo_check_seen"), rs.getObject("photo_new_file_id", UUID.class),
                 rs.getString("sort_key"), rs.getInt("rank"));
         if (afterName == null) {
-            return jdbc.query(NEEDING_PHOTOS + "ORDER BY rank, sort_key COLLATE \"C\", id LIMIT ?", map, shopId,
+            return jdbc.query(NEEDING_PHOTOS + "ORDER BY rank, sort_key COLLATE \"C\", id LIMIT ?", map, gs1On, shopId,
                     limit + 1);
         }
         return jdbc.query(NEEDING_PHOTOS + "WHERE (rank, sort_key COLLATE \"C\", id) > (?, ?, ?) "
-                + "ORDER BY rank, sort_key COLLATE \"C\", id LIMIT ?", map, shopId, afterRank, afterName, afterId,
-                limit + 1);
+                + "ORDER BY rank, sort_key COLLATE \"C\", id LIMIT ?", map, gs1On, shopId, afterRank, afterName,
+                afterId, limit + 1);
     }
 
     /**
      * What a product view adds: the cost (owner only), the photo (the shop's own, else the catalogue item's shared
      * one) and the catalogue item.
      */
+    /**
+     * @param ownPhoto        the picture is the shop's own photo (else the catalogue's, if any)
+     * @param suggestedBarcode a barcode GS1 found for it by name (its first scan offers it in one tap)
+     * @param waitingForGs1   a GS1 lookup that may bring its picture is waiting
+     */
     public record Extra(Long costPaise, UUID photoFileId, UUID catalogueItemId, String category, String photoCheck,
-                        String photoCheckReason, String photoCheckCode, String photoCheckSeen, UUID newPhotoFileId) {
+                        String photoCheckReason, String photoCheckCode, String photoCheckSeen, UUID newPhotoFileId,
+                        boolean ownPhoto, String suggestedBarcode, boolean waitingForGs1) {
     }
 
     /** The extras of these products in one query. */
@@ -591,14 +631,17 @@ public class ProductStore {
         }
         jdbc.query("SELECT p.id, p.cost_paise, coalesce(p.photo_file_id, i.photo_file_id), p.catalogue_item_id, "
                         + "i.category, p.photo_check, p.photo_check_reason, p.photo_check_code, p.photo_check_seen, "
-                        + "p.photo_new_file_id FROM kirana_products p "
+                        + "p.photo_new_file_id, p.photo_file_id IS NOT NULL, "
+                        + "(SELECT l.code FROM kirana_gs1_lookups l WHERE l.kind = 'NAME' AND l.product_id = p.id "
+                        + "AND l.status = 'FOUND'), " + WAITING_FOR_GS1 + " FROM kirana_products p "
                         + "LEFT JOIN kirana_catalogue_items i "
                         + "ON i.id = p.catalogue_item_id WHERE p.id = ANY (?)",
                 ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", productIds.toArray())),
                 (org.springframework.jdbc.core.RowCallbackHandler) rs -> out.put(rs.getObject(1, UUID.class),
                         new Extra((Long) rs.getObject(2), rs.getObject(3, UUID.class), rs.getObject(4, UUID.class),
                                 rs.getString(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9),
-                                rs.getObject(10, UUID.class))));
+                                rs.getObject(10, UUID.class), rs.getBoolean(11), rs.getString(12),
+                                rs.getBoolean(13))));
         return out;
     }
 

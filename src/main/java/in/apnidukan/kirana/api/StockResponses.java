@@ -343,9 +343,11 @@ public final class StockResponses {
      * @param photosMissing  products with no picture (no checked photo of the shop's, none in the shared catalogue): each
      *                       needs a photo before finishing; of them photosChecking have one being checked,
      *                       photosRefused one to retake (GET /setup/photos lists them)
+     * @param photosFinding  of photosMissing, those whose picture GS1 may still bring (nothing for the shop to do yet)
      * @param photosLeftToday photos the shop can still send to be checked today (300 a day)
      * @param nextStep       what the home screen offers next: LIST (pages reading, lines to check, a page to retake),
-     *                       COUNT, PHOTOS (to take or retake), WAIT (photos being checked), FINISH, DONE; ADD when
+     *                       COUNT, PHOTOS (to take or retake), WAIT (photos being checked, or pictures GS1 is
+     *                       looking for), FINISH, DONE; ADD when
      *                       there are no products yet
      * @param canFinish      every condition for "I've added all my products" holds
      * @param youCanFinish   canFinish, and the caller is the owner (only the owner says it); a helper sees false
@@ -353,7 +355,8 @@ public final class StockResponses {
     public record SetupView(Instant readyAt, long products, long uncounted, List<ProductRef> uncountedProducts,
                             long linesToCheck, long linesAdded, long linesSkipped, long pagesReading, long pagesFailed,
                             int pagesLeft, List<SetupPageView> pages, long photosMissing, long photosChecking,
-                            long photosRefused, int photosLeftToday, String nextStep, boolean canFinish,
+                            long photosRefused, long photosFinding, int photosLeftToday, String nextStep,
+                            boolean canFinish,
                             boolean youCanFinish) {
 
         public SetupView {
@@ -391,9 +394,12 @@ public final class StockResponses {
      * @param code       why it was refused, as a code to word in the shop's language (PhotoRules); reason: in English;
      *                   seen: what the photo showed (another product, another size)
      * @param newPhotoUrl the photo being checked or refused
+     * @param findingPicture GS1 may still bring its official picture (listed last): "Finding the company's picture…
+     *                   you can photograph it anyway"
      */
     public record PhotoNeededView(UUID productId, String name, boolean loose, String sizeToShow, String photoCheck,
-                                  String code, String reason, String seen, String newPhotoUrl) {
+                                  String code, String reason, String seen, String newPhotoUrl,
+                                  boolean findingPicture) {
     }
 
     public record PhotoNeededPage(List<PhotoNeededView> items, String next) {
@@ -406,6 +412,33 @@ public final class StockResponses {
     public record ListLinePage(List<ListLineView> items, String next) {
 
         public ListLinePage {
+            items = List.copyOf(items);
+        }
+    }
+
+    /**
+     * A GS1 lookup for the admin website.
+     * @param kind   CODE (a catalogue barcode's picture) or NAME (a product added without a barcode)
+     * @param code   the barcode looked up (CODE) or found (NAME)
+     * @param status WAITING, FOUND, NOT_FOUND (tried again weekly) or REFUSED (GS1 disagreed with the catalogue, the
+     *               picture was refused, or the shop said "Not this product")
+     * @param note   why, in English
+     */
+    public record Gs1LookupView(UUID id, String kind, String code, String status, String note, int tries, UUID shopId,
+                                String shopName, UUID productId, String productName, String itemName,
+                                Instant updatedAt) {
+    }
+
+    /**
+     * A page of GS1 lookups at one status, newest change first.
+     * @param counts       how many lookups stand at each status (all of them, not just this page)
+     * @param switchedOn   GS1 DataKart's settings are filled in (else lookups only wait)
+     */
+    public record Gs1Page(java.util.Map<String, Long> counts, boolean switchedOn, List<Gs1LookupView> items,
+                          String next) {
+
+        public Gs1Page {
+            counts = java.util.Map.copyOf(counts);
             items = List.copyOf(items);
         }
     }

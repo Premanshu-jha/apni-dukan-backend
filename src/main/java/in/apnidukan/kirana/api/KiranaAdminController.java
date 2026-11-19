@@ -13,6 +13,7 @@ import in.apnidukan.kirana.api.OrderResponses.FssaiView;
 import in.apnidukan.kirana.api.OrderResponses.OpenOrderView;
 import in.apnidukan.kirana.api.OrderResponses.UpiRecheckView;
 import in.apnidukan.kirana.api.StockRequests.ReviewDecision;
+import in.apnidukan.kirana.api.StockResponses.Gs1Page;
 import in.apnidukan.kirana.api.StockResponses.ImportResult;
 import in.apnidukan.kirana.api.StockResponses.ReviewView;
 import in.apnidukan.kirana.api.StockResponses.ScanStatsView;
@@ -81,6 +82,16 @@ public class KiranaAdminController {
     @PostMapping(value = "/catalogue/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ImportResult importMaster(@RequestPart("file") MultipartFile file) {
         return catalogueAdmin.importMaster(me(), file);
+    }
+
+    /**
+     * GS1 DataKart lookups at one status (WAITING, FOUND, NOT_FOUND, REFUSED), newest change first, with counts by
+     * status: barcodes GS1 doesn't know, pictures refused, matches a shop said were wrong.
+     */
+    @GetMapping("/gs1")
+    public Gs1Page gs1(@RequestParam(defaultValue = "REFUSED") String status,
+                                      @RequestParam(required = false) String cursor) {
+        return catalogueAdmin.gs1(me(), status, cursor);
     }
 
     /** Scanning per day over every shop (unknown-barcode rate, one-tap links), the last {@code days} (1–90). */

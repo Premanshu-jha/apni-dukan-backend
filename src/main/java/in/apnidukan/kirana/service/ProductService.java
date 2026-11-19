@@ -20,10 +20,12 @@ import in.apnidukan.kirana.api.StockResponses.BarcodeMoved;
 import in.apnidukan.kirana.api.StockResponses.StockMoved;
 import in.apnidukan.kirana.domain.Barcode;
 import in.apnidukan.kirana.domain.Cursors;
+import in.apnidukan.kirana.domain.NameMatcher;
 import in.apnidukan.kirana.domain.Product;
 import in.apnidukan.kirana.domain.Quantities;
 import in.apnidukan.kirana.domain.Unit;
 import in.apnidukan.kirana.repo.CatalogueStore;
+import in.apnidukan.kirana.repo.Gs1Store;
 import in.apnidukan.kirana.repo.ProductStore;
 import in.apnidukan.kirana.repo.ProductStore.Move;
 import in.apnidukan.kirana.repo.ProductStore.MoveRow;
@@ -72,11 +74,13 @@ public class ProductService {
     private final PhotoReads reads;
     private final CatalogueStore catalogueItems;
     private final KiranaFiles kiranaFiles;
+    private final Gs1Store gs1;
+    private final DataKart dataKart;
     private final Clock clock;
 
     public ProductService(KiranaAccess access, ProductStore products, CatalogueService catalogue, UserDirectory users,
                           FileRefs files, PhotoReads reads, CatalogueStore catalogueItems,
-                          KiranaFiles kiranaFiles, Clock clock) {
+                          KiranaFiles kiranaFiles, Gs1Store gs1, DataKart dataKart, Clock clock) {
         this.access = access;
         this.products = products;
         this.catalogue = catalogue;
@@ -85,6 +89,8 @@ public class ProductService {
         this.reads = reads;
         this.catalogueItems = catalogueItems;
         this.kiranaFiles = kiranaFiles;
+        this.gs1 = gs1;
+        this.dataKart = dataKart;
         this.clock = clock;
     }
 
@@ -181,6 +187,9 @@ public class ProductService {
         for (Barcode b : barcodes) {
             catalogue.linkBarcode(c.shopId(), p, null, b.code(), b.pack(), in.mrpPaise(), now);
         }
+        if (barcodes.isEmpty() && findable(name, p.unit())) {
+            gs1.queueName(c.shopId(), p.id(), now);
+        }
         if (stock.signum() != 0) {
             products.addMoves(c.shopId(), List.of(new Move(p.id(), stock, stock, "COUNT", null, "First count", null)),
                     userId, now);
@@ -245,7 +254,58 @@ public class ProductService {
             products.setBarcodesActive(c.shopId(), old.id(), active);
         }
         photoAfterChange(c, old, updated);
+        if (!name.equals(old.name()) || unit != old.unit()) {
+            gs1AfterRename(c.shopId(), updated);
+        }
         return view(updated);
+    }
+
+    /**
+     * A pack with its size in its name: its barcode and picture are looked for on GS1 (when it is on). Loose goods and
+     * names without a size can't be matched clearly, so aren't looked for.
+     */
+    private static boolean findable(String name, Unit unit) {
+        return unit == Unit.PIECE && NameMatcher.parse(name, null, null).size() != null;
+    }
+
+    /**
+     * Renamed (or its unit changed) without a barcode: what GS1 found under the old name no longer holds, so its match
+     * is let go of and it is looked for afresh under the new name (if findable). A product with a barcode is matched
+     * by it, not by name.
+     */
+    private void gs1AfterRename(UUID shopId, Product p) {
+        if (!products.barcodes(p.id()).isEmpty()) {
+            return;
+        }
+        if (gs1.matchedByName(p.id())) {
+            products.unlinkCatalogueIfNoBarcode(p.id());
+        }
+        gs1.dropName(p.id());
+        if (findable(p.name(), p.unit())) {
+            gs1.queueName(shopId, p.id(), KiranaChecks.now(clock));
+        }
+    }
+
+    /**
+     * "Not this product" (owner): the shared catalogue's match GS1 found by name is wrong. Its picture and suggested
+     * barcode go, and it isn't looked for again under this name (a rename looks again). 409 HAS_BARCODE when the
+     * product has a barcode (it is matched by that: remove the barcode instead); 409 NOT_MATCHED when nothing was
+     * matched by name.
+     */
+    @Transactional
+    public ProductView notThisProduct(UUID userId, UUID productId) {
+        Caller c = access.owner(userId);
+        Product p = products.lock(c.shopId(), productId).orElseThrow(ProductService::notFound);
+        if (!products.barcodes(p.id()).isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT, "HAS_BARCODE", "This product is matched by its barcode. "
+                    + "Remove the barcode if it's wrong.");
+        }
+        if (!gs1.matchedByName(p.id())) {
+            throw new ApiException(HttpStatus.CONFLICT, "NOT_MATCHED", "Nothing was matched to this product by name.");
+        }
+        products.unlinkCatalogueIfNoBarcode(p.id());
+        gs1.refuseName(p.id(), "The shop said this isn't its product", KiranaChecks.now(clock));
+        return view(c, p);
     }
 
     /**
@@ -725,7 +785,8 @@ public class ProductService {
     private ProductView view(Product p) {
         ProductStore.Extra x = products.extras(List.of(p.id())).get(p.id());
         UUID photo = x == null ? null : x.photoFileId();
-        return ProductView.of(p, products.barcodes(p.id())).with(null, photo, link(photo), check(x, null));
+        return ProductView.of(p, products.barcodes(p.id())).with(null, photo, link(photo), check(x, null),
+                picture(x));
     }
 
     /** A link to a photo (any shop's: the catalogue shares them), or null. */
@@ -738,7 +799,16 @@ public class ProductService {
         ProductStore.Extra x = products.extras(List.of(p.id())).get(p.id());
         UUID photo = x == null ? null : x.photoFileId();
         return ProductView.of(p, products.barcodes(p.id())).with(x == null || !c.isOwner() ? null : x.costPaise(),
-                photo, link(photo), check(x, null));
+                photo, link(photo), check(x, null), picture(x));
+    }
+
+    /** Where its picture comes from; GS1's suggested barcode and search only while GS1 is switched on. */
+    private KiranaResponses.Picture picture(ProductStore.Extra x) {
+        if (x == null) {
+            return KiranaResponses.Picture.NONE;
+        }
+        String from = x.photoFileId() == null ? null : x.ownPhoto() ? "SHOP" : "CATALOGUE";
+        return new KiranaResponses.Picture(from, x.suggestedBarcode(), dataKart.configured() && x.waitingForGs1());
     }
 
     /** How the product's new photo's check stands; {@code links}: the photos' links when read for many, else null. */
@@ -763,7 +833,7 @@ public class ProductService {
             ProductStore.Extra x = extras.get(p.id());
             UUID photo = x == null ? null : x.photoFileId();
             return ProductView.of(p, codes.getOrDefault(p.id(), List.of())).with(null, photo,
-                    photo == null ? null : links.get(photo), check(x, links));
+                    photo == null ? null : links.get(photo), check(x, links), picture(x));
         }).toList();
     }
 

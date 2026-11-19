@@ -100,8 +100,20 @@ public class CatalogueStore {
 
     /** Adds a barcode to an entry; false (nothing changed) when the barcode belongs to an entry already. */
     public boolean addCode(UUID itemId, String code, BigDecimal pack, Instant now) {
-        return jdbc.update("INSERT INTO kirana_catalogue_barcodes (code, item_id, pack, created_at) VALUES (?, ?, ?, ?) "
-                + "ON CONFLICT (code) DO NOTHING", code, itemId, pack, at(now)) > 0;
+        boolean added = jdbc.update("INSERT INTO kirana_catalogue_barcodes (code, item_id, pack, created_at) "
+                + "VALUES (?, ?, ?, ?) ON CONFLICT (code) DO NOTHING", code, itemId, pack, at(now)) > 0;
+        if (added) {
+            queuePicture(code, itemId, now);
+        }
+        return added;
+    }
+
+    /** A barcode new to the catalogue: its item's official picture looked up on GS1, if it has none (Gs1Store). */
+    private void queuePicture(String code, UUID itemId, Instant now) {
+        jdbc.update("INSERT INTO kirana_gs1_lookups (id, kind, code, item_id, status, next_try_at, created_at, "
+                + "updated_at) SELECT ?, 'CODE', ?, i.id, 'WAITING', ?, ?, ? FROM kirana_catalogue_items i "
+                + "WHERE i.id = ? AND i.photo_file_id IS NULL ON CONFLICT (code) WHERE kind = 'CODE' DO NOTHING",
+                UUID.randomUUID(), code, at(now), at(now), at(now), itemId);
     }
 
     /**
@@ -128,15 +140,21 @@ public class CatalogueStore {
 
     /** Adds a barcode with where it came from; false when another entry has it already. */
     public boolean addCode(UUID itemId, String code, BigDecimal pack, String source, boolean confirmed, Instant now) {
-        return jdbc.update("INSERT INTO kirana_catalogue_barcodes (code, item_id, pack, source, confirmed, created_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (code) DO NOTHING", code, itemId, pack, source, confirmed,
-                at(now)) > 0;
+        boolean added = jdbc.update("INSERT INTO kirana_catalogue_barcodes (code, item_id, pack, source, confirmed, "
+                + "created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (code) DO NOTHING", code, itemId, pack, source,
+                confirmed, at(now)) > 0;
+        if (added) {
+            queuePicture(code, itemId, now);
+        }
+        return added;
     }
 
     /** Points a barcode at another entry (a correction or the team's decision). */
     public void relink(String code, UUID itemId, BigDecimal pack, String source, boolean confirmed) {
         jdbc.update("UPDATE kirana_catalogue_barcodes SET item_id = ?, pack = coalesce(?, pack), source = ?, "
                 + "confirmed = ? WHERE code = ?", itemId, pack, source, confirmed, code);
+        // Its GS1 lookup follows it (a picture found is checked against the item it belongs to now)
+        jdbc.update("UPDATE kirana_gs1_lookups SET item_id = ? WHERE kind = 'CODE' AND code = ?", itemId, code);
     }
 
     public void confirm(String code) {
