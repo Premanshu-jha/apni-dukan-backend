@@ -1331,6 +1331,33 @@ or `OFF` (any case) count as not set: GS1 stays off with those. Then `Gs1Job` ru
 **Deploying V79–V80:** V79 widens two `files` rules and the catalogue barcodes' sources (`NOT VALID`) and creates the
 empty `kirana_gs1_lookups` and `kirana_gs1_ai_calls`; V80 validates. Safe while the old version runs.
 
+## Recount pages, products added after finishing, failure codes (V81–V82, `kirana` branch)
+
+- **Recount** (`POST /kirana/reads {kind: STOCK_LIST, recount: true}`): a page of the list sent again to update counts.
+  A line clearly naming one of the shop's products, with a count written, takes that count without asking (as the
+  shop's Count would); the line is ADDED with `autoCounted`, `countBefore`, `productName` and `stockNow`, the page says
+  `linesAutoCounted`; `GET /kirana/setup/lines?status=ADDED&readId=` lists what one page changed. Never guessed, so
+  asked as usual: a product named twice on the page, kg against pieces, a product the shop never counted itself, one
+  that changed after the photo was sent, one counted from a list in the last 12 hours, a count it can't have.
+  `UNDO` on such a line puts the count back as it was, keeping sales since (a newer count stands), and brings the
+  line back to check; its answer says `countPutBack` (true, or false when the count was left as it is). `ADD` or
+  `SKIP` on it is 409 `AUTO_COUNTED`. A page's `pageNo` is its place among all pages kept (a recount page no longer shown
+  included), so it only changes when an earlier page is thrown away; a
+  recount page is shown in setup for a week (and however old while read, failed, or with lines to check). Lines'
+  `countBefore`, `productName` and `stockNow` are null until the line is added. Throwing the page away puts its counts back first. Recount
+  pages aren't among the 60 kept pages (the 100 a day still count them). 400 naming `recount` for another kind.
+- **Before the first approval** every product needs its count and picture, those added after
+  `POST /kirana/setup/finish` too: setup says `beforeApproval` (`nextStep` COUNT, PHOTOS or WAIT; the visit stays
+  booked), the field team's shop page lists them (`kirana.productGaps`, with how many photos are still `checking`)
+  and approving answers 409 `PRODUCTS_INCOMPLETE` until none is left (also for a shop with no products at all). A shop ever approved is never held back.
+- **`failureCode`** beside every `failure` of a read (reads, list pages, paper bills, scanned labels), from
+  `ReadFailure`, for the app to word in the shop's language; `OTHER` for a reason kept from an older version.
+- Scenarios: `docs/scenarios-kirana-recount.md`.
+
+**Deploying V81–V82:** V81 adds `kirana_reads.recount` (NOT NULL DEFAULT false: no rewrite) and V82 the nullable
+`kirana_list_lines.auto_before`, each under a 3 s lock timeout and in its own migration (one table locked at a time).
+Safe while the old version runs. Next migration: V83.
+
 ## Run it on your laptop
 
 1. **Install:** JDK 21 (IntelliJ can download it). IntelliJ's bundled Maven is enough.

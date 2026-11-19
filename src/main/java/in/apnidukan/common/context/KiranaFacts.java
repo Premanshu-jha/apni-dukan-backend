@@ -56,4 +56,27 @@ public interface KiranaFacts {
      * The caller holds a transaction.
      */
     void shareCheckedPhotos(UUID shopId);
+
+    /**
+     * The kirana's products still missing a count or a picture (each needs both before its first approval: those
+     * added after the owner finished too).
+     * @param active    its products (none at all: nothing for the visit to check)
+     * @param uncounted products never counted, or whose count no longer holds (sold below zero)
+     * @param noPicture products with no picture (no checked photo of the shop's, none in the shared catalogue)
+     * @param checking  of noPicture, those whose photo is being checked right now, or whose picture GS1 is still
+     *                  looking for (nothing for the owner to do: approving works a little later)
+     * @param products  up to 10 of them, by name: what the field agent asks the owner to finish
+     */
+    ProductGaps productGaps(UUID shopId);
+
+    record ProductGaps(long active, long uncounted, long noPicture, long checking, java.util.List<String> products) {
+
+        public ProductGaps {
+            products = java.util.List.copyOf(products);
+        }
+
+        public boolean none() {
+            return active > 0 && uncounted == 0 && noPicture == 0;
+        }
+    }
 }

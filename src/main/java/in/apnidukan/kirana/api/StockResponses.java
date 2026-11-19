@@ -30,7 +30,7 @@ public final class StockResponses {
      * @param billId     for PAPER_BILL once confirmed: the bill it became
      */
     public record ReadView(UUID id, String kind, String status, List<UUID> fileIds, String failure, UUID purchaseId,
-                           UUID billId, Instant createdAt, Instant updatedAt) {
+                           UUID billId, Instant createdAt, Instant updatedAt, boolean recount, String failureCode) {
 
         public ReadView {
             fileIds = List.copyOf(fileIds);
@@ -149,7 +149,7 @@ public final class StockResponses {
      * @param status READING, READ or FAILED (failure says why)
      */
     public record LabelView(String status, String name, String brand, String size, Long mrpPaise, String category,
-                            String failure) {
+                            String failure, String failureCode) {
     }
 
     /**
@@ -258,7 +258,7 @@ public final class StockResponses {
      */
     public record PaperDraft(UUID readId, String status, String failure, LocalDate readDate, LocalDate writtenOn,
                              String dateProblem, Long totalPaise, List<PaperLineView> lines, List<UUID> photoFileIds,
-                             UUID billId) {
+                             UUID billId, String failureCode) {
 
         public PaperDraft {
             lines = List.copyOf(lines);
@@ -324,10 +324,12 @@ public final class StockResponses {
      * @param status       READING, READ or FAILED (take it again: {@code failure} says why)
      * @param linesLeftOut products on the page past the 150 one read keeps: photograph them again
      * @param linesToCheck its lines still to add or skip; linesAdded, linesSkipped: done
+     * @param recount      sent as a recount: the counts it clearly gave were taken without asking
+     * @param linesAutoCounted of linesAdded, those counted automatically (each can be undone)
      */
     public record SetupPageView(UUID readId, int pageNo, UUID fileId, String status, String failure,
                                 int linesLeftOut, long linesToCheck, long linesAdded, long linesSkipped,
-                                Instant sentAt) {
+                                Instant sentAt, boolean recount, long linesAutoCounted, String failureCode) {
     }
 
     /**
@@ -351,13 +353,15 @@ public final class StockResponses {
      *                       there are no products yet
      * @param canFinish      every condition for "I've added all my products" holds
      * @param youCanFinish   canFinish, and the caller is the owner (only the owner says it); a helper sees false
+     * @param beforeApproval finished, but products added since (or not counted) still need a count or a picture: the
+     *                       field agent can't approve the shop until they have (nextStep COUNT, PHOTOS or WAIT)
      */
     public record SetupView(Instant readyAt, long products, long uncounted, List<ProductRef> uncountedProducts,
                             long linesToCheck, long linesAdded, long linesSkipped, long pagesReading, long pagesFailed,
                             int pagesLeft, List<SetupPageView> pages, long photosMissing, long photosChecking,
                             long photosRefused, long photosFinding, int photosLeftToday, String nextStep,
                             boolean canFinish,
-                            boolean youCanFinish) {
+                            boolean youCanFinish, boolean beforeApproval) {
 
         public SetupView {
             uncountedProducts = List.copyOf(uncountedProducts);
@@ -374,14 +378,30 @@ public final class StockResponses {
      * @param counted     ADDED: what the shop counted
      * @param suggestions NEW: the shop's products or catalogue items it may be, best first
      * @param sure        the first suggestion is a clear match
+     * @param autoCounted ADDED by a recount without asking: the product's count became the list's ("Undo" puts the
+     *                    count back as it was, sales since kept, and the line comes back to check)
+     * @param countBefore autoCounted: the product's count just before
+     * @param productName ADDED: the product's name now (to show "Tata Salt 1 kg: 10 → 15")
+     * @param stockNow    ADDED: the product's stock now
+     * @param countPutBack only in the answer to UNDO on an auto-counted line: true when the product's count was put
+     *                    back, false when it was left as it is (counted again since, its count withdrawn, removed, or
+     *                    sold another way now); null otherwise
      */
     public record ListLineView(UUID id, UUID readId, Integer pageNo, int lineNo, String wording, String brand,
                                String name, String size, boolean byWeight, Long mrpPaise, BigDecimal quantity,
                                String status, UUID productId, BigDecimal counted, List<SuggestionView> suggestions,
-                               boolean sure) {
+                               boolean sure, boolean autoCounted, BigDecimal countBefore, String productName,
+                               BigDecimal stockNow, Boolean countPutBack) {
 
         public ListLineView {
             suggestions = List.copyOf(suggestions);
+        }
+
+        /** As this, saying whether UNDO put the count back. */
+        public ListLineView withCountPutBack(boolean putBack) {
+            return new ListLineView(id, readId, pageNo, lineNo, wording, brand, name, size, byWeight, mrpPaise,
+                    quantity, status, productId, counted, suggestions, sure, autoCounted, countBefore, productName,
+                    stockNow, putBack);
         }
     }
 

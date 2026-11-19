@@ -69,11 +69,12 @@ public class ProductSetupService {
     private final ProductReadiness readiness;
     private final FileRefs files;
     private final DataKart gs1;
+    private final PhotoReads photoReads;
     private final Clock clock;
 
     public ProductSetupService(KiranaAccess access, SetupStore setup, ReadStore reads, ProductStore products,
                                ProductService productService, MatchService matcher, ProductReadiness readiness,
-                               FileRefs files, DataKart gs1, Clock clock) {
+                               FileRefs files, DataKart gs1, PhotoReads photoReads, Clock clock) {
         this.access = access;
         this.setup = setup;
         this.reads = reads;
@@ -83,25 +84,143 @@ public class ProductSetupService {
         this.readiness = readiness;
         this.files = files;
         this.gs1 = gs1;
+        this.photoReads = photoReads;
         this.clock = clock;
     }
 
     // ---------- the reading job ----------
 
-    /** A list page just read: its lines, to be checked (the caller holds a transaction; a page is read once). */
-    void fromRead(Read r, KiranaDocumentAi.StockListFacts f, Instant now) {
+    /** A product counted from a list in the last hours isn't counted again without asking (shelf, then godown). */
+    private static final java.time.Duration RECENT_COUNT = java.time.Duration.ofHours(12);
+
+    /**
+     * Before the job's transaction (nothing locked, so a long page holds nobody up): for a recount page, the lines
+     * (by number) naming one of the shop's products clearly: a sure match of the shop's own product, not another as
+     * likely, sold the way the line says (by weight or by piece), with a count written, and named by no other line of
+     * the page (which count would be right?). Empty for an ordinary page.
+     */
+    Map<Integer, UUID> clearCounts(Read r, KiranaDocumentAi.StockListFacts f) {
+        if (!r.recount()) {
+            return Map.of();
+        }
+        MatchService.Shop shop = matcher.shop(r.shopId());
+        Map<UUID, Integer> named = new java.util.HashMap<>();
+        Map<Integer, UUID> sure = new java.util.HashMap<>();
+        int lineNo = 0;
+        for (KiranaDocumentAi.ListLine l : f.lines()) {
+            lineNo++;
+            if (l.quantity() == null || l.quantity().signum() < 0) {
+                continue;
+            }
+            MatchService.Result m = matcher.match(shop, new MatchService.Want(l.wording(), l.brand(), l.name(),
+                    l.size()), Set.of(), false);
+            MatchService.Suggestion best = m.best();
+            if (m.sure() && best != null && best.productId() != null) {
+                sure.put(lineNo, best.productId());
+                named.merge(best.productId(), 1, Integer::sum);
+            }
+        }
+        sure.values().removeIf(id -> named.get(id) > 1);
+        return sure;
+    }
+
+    /**
+     * A list page just read: its lines, to be checked (the caller holds a transaction; a page is read once).
+     * {@code clear}: from {@link #clearCounts}; those lines take their count at once.
+     */
+    void fromRead(Read r, KiranaDocumentAi.StockListFacts f, Map<Integer, UUID> clear, Instant now) {
+        if (!clear.isEmpty()) {
+            reads.lockListPages(r.shopId());   // as a decision on a line takes it: no line changes under us
+        }
         List<Line> lines = new ArrayList<>();
         for (KiranaDocumentAi.ListLine l : f.lines()) {
             lines.add(new Line(null, r.shopId(), r.id(), 0, l.wording(), l.brand(), l.name(), l.size(), l.byWeight(),
-                    l.mrpPaise(), l.quantity(), "NEW", null, null, now));
+                    l.mrpPaise(), l.quantity(), "NEW", null, null, now, null, null));
         }
-        setup.insertLines(SetupStore.numbered(r.shopId(), r.id(), lines));
+        List<Line> numbered = SetupStore.numbered(r.shopId(), r.id(), lines);
+        setup.insertLines(numbered);
         if (f.leftOut() > 0) {
             setup.setLeftOut(r.id(), f.leftOut());
+        }
+        if (!clear.isEmpty()) {
+            autoCount(r, numbered, clear);
+        }
+    }
+
+    /**
+     * A recount's clear lines take their count, as the shop's Count would. Not taken (the line is checked as usual)
+     * when the product:
+     * <ul>
+     * <li>was removed, or is sold another way than the line says (kg against pieces);</li>
+     * <li>was never counted by the shop (its first count is the shop's own: the list's number is only a hint);</li>
+     * <li>changed since the page was sent (a sale, a delivery, a count: the page's number is older than the shelf);</li>
+     * <li>was counted from a list in the last 12 hours (the shelf's page, then the godown's: add or replace?);</li>
+     * <li>can't have that count (a part of a piece).</li>
+     * </ul>
+     * Products are locked in id order, as bills lock them.
+     */
+    private void autoCount(Read r, List<Line> lines, Map<Integer, UUID> clear) {
+        Set<UUID> ids = new java.util.HashSet<>(clear.values());
+        Map<UUID, Product> locked = new java.util.HashMap<>();
+        for (Product p : products.lockAll(r.shopId(), ids)) {
+            locked.put(p.id(), p);
+        }
+        Set<UUID> recent = setup.countedSince(r.shopId(), ids, KiranaChecks.now(clock).minus(RECENT_COUNT));
+        for (Line l : lines) {
+            Product p = locked.get(clear.get(l.lineNo()));
+            if (p == null || !p.active() || p.countedAt() == null || l.byWeight() != (p.unit() == Unit.KG)
+                    || moved(p, r.createdAt()) || recent.contains(p.id())) {
+                continue;
+            }
+            try {
+                productService.countFor(r.shopId(), r.createdBy(), p.id(), l.quantity(), false,
+                        "Product setup: recount from your list");
+            } catch (ApiException e) {
+                continue;   // not a count this product can have (half a piece): the shop checks the line
+            }
+            setup.autoCounted(l.id(), p.id(), l.quantity(), p.stock(), p.countedAt(), KiranaChecks.now(clock));
+        }
+    }
+
+    /** Its stock changed (a sale, a delivery) or it was counted (even to the same number) after this moment. */
+    private boolean moved(Product p, Instant since) {
+        return p.updatedAt().isAfter(since) || p.countedAt() != null && p.countedAt().isAfter(since);
+    }
+
+    /**
+     * A recount page thrown away: the counts it took without asking are put back (as "Undo" on each), since its lines
+     * go with it. The caller holds a transaction and the shop's setup lock.
+     */
+    void undoPage(UUID shopId, UUID userId, UUID readId) {
+        List<Line> auto = setup.autoCountedOf(shopId, readId);
+        products.lockAll(shopId, auto.stream().map(Line::productId).toList());
+        for (Line l : auto) {
+            undoAutoCount(shopId, userId, l);
+            setup.setStatus(l.id(), "NEW", null, null, KiranaChecks.now(clock));
         }
     }
 
     // ---------- the shop ----------
+
+    /**
+     * Throws an upload away (as {@link PhotoReads#discard}). A recount page's counts taken without asking are put back
+     * first, as Undo on each line would (a count made since stands): its lines go with the page, so they couldn't be
+     * undone afterwards.
+     */
+    @Transactional
+    public in.apnidukan.kirana.api.StockResponses.ReadView discardRead(UUID userId, UUID readId) {
+        Caller c = access.caller(userId);
+        // A recount page: its row first, then the setup lock (the order the reading job takes them). Bills keep their
+        // own order (the bill, then its read) in PhotoReads.discard
+        Optional<Read> seen = reads.find(c.shopId(), readId);
+        Optional<Read> r = seen.isPresent() && "STOCK_LIST".equals(seen.get().kind()) && seen.get().recount()
+                ? reads.lock(c.shopId(), readId) : Optional.empty();
+        if (r.isPresent() && !"DISCARDED".equals(r.get().status())) {
+            reads.lockListPages(c.shopId());
+            undoPage(c.shopId(), userId, readId);
+        }
+        return photoReads.discard(userId, readId);
+    }
 
     /** Where the setup stands (owner or helper). */
     @Transactional(readOnly = true)
@@ -117,7 +236,7 @@ public class ProductSetupService {
      * naming status otherwise.
      */
     @Transactional(readOnly = true)
-    public ListLinePage lines(UUID userId, String status, String cursor) {
+    public ListLinePage lines(UUID userId, String status, UUID readId, String cursor) {
         Caller c = access.caller(userId);
         String want = status == null || status.isBlank() ? "NEW" : status.strip().toUpperCase(java.util.Locale.ROOT);
         if (!Set.of("NEW", "SKIPPED", "ADDED").contains(want)) {
@@ -132,14 +251,18 @@ public class ProductSetupService {
         if (afterRead == null || afterLine == null) {
             afterAt = null;   // no cursor, or one that doesn't parse: from the start
         }
-        List<Line> rows = setup.lines(c.shopId(), want, afterAt, afterRead, afterLine, PAGE);
+        List<Line> rows = setup.lines(c.shopId(), want, readId, afterAt, afterRead, afterLine, PAGE);
         boolean more = rows.size() > PAGE;
         List<Line> page = more ? rows.subList(0, PAGE) : rows;
         Map<UUID, Integer> pageNos = pageNos(c.shopId());
         MatchService.Shop shop = "NEW".equals(want) && !page.isEmpty() ? matcher.shop(c.shopId()) : null;
+        // Added lines with their product as it is now, read once for the page
+        Map<UUID, Product> on = products.byIds(c.shopId(), page.stream().map(Line::productId)
+                .filter(java.util.Objects::nonNull).distinct().toList());
         List<ListLineView> out = new ArrayList<>();
         for (Line l : page) {
-            out.add(view(l, pageNos, shop == null ? MatchService.Result.NONE : suggestions(shop, l)));
+            out.add(view(l, pageNos, shop == null ? MatchService.Result.NONE : suggestions(shop, l),
+                    on.get(l.productId())));
         }
         String next = null;
         if (more) {
@@ -161,7 +284,8 @@ public class ProductSetupService {
      * <li>SKIP: not a product to add (a heading, something not sold any more). UNDO: a skipped line back to check.</li>
      * </ul>
      * 404 LINE_NOT_FOUND (also on a page deleted); 409 LINE_ADDED for SKIP or UNDO on a line already added (the
-     * product itself is changed instead).
+     * product itself is changed instead); 409 AUTO_COUNTED for ADD or SKIP on a line a recount counted (UNDO it
+     * first: the answer says whether the count was put back, {@code countPutBack}).
      */
     @Transactional
     public ListLineView decide(UUID userId, UUID lineId, LineDecision in) {
@@ -170,8 +294,10 @@ public class ProductSetupService {
         reads.lockListPages(c.shopId());
         Line line = setup.lock(c.shopId(), lineId).orElseThrow(ProductSetupService::notFound);
         Instant now = KiranaChecks.now(clock);
+        Boolean putBack = null;
         switch (in.action()) {
             case ADD -> {
+                requireNotAutoCounted(line);   // counted by the recount: a different answer isn't taken silently
                 if ("ADDED".equals(line.status())) {
                     return view(line, pageNos(c.shopId()), MatchService.Result.NONE);
                 }
@@ -207,17 +333,46 @@ public class ProductSetupService {
                 setup.setStatus(line.id(), "ADDED", productId, counted, now);
             }
             case SKIP -> {
+                requireNotAutoCounted(line);
                 requireNotAdded(line);
                 setup.setStatus(line.id(), "SKIPPED", null, null, now);
             }
             case UNDO -> {
-                requireNotAdded(line);
+                if ("ADDED".equals(line.status()) && line.autoBefore() != null) {
+                    putBack = undoAutoCount(c.shopId(), userId, line);
+                } else {
+                    requireNotAdded(line);
+                }
                 setup.setStatus(line.id(), "NEW", null, null, now);
             }
         }
         Line after = setup.lock(c.shopId(), lineId).orElseThrow();
-        return view(after, pageNos(c.shopId()), "NEW".equals(after.status())
+        ListLineView v = view(after, pageNos(c.shopId()), "NEW".equals(after.status())
                 ? suggestions(matcher.shop(c.shopId()), after) : MatchService.Result.NONE);
+        return putBack == null ? v : v.withCountPutBack(putBack);
+    }
+
+    /**
+     * "Undo" on a line a recount counted without asking: the product's count goes back to what it was, keeping what
+     * was sold or delivered since (before + (now − what the line set), never below 0). When the product was counted
+     * again since (by hand, even to the same number, or by a later page not undone), or its count was withdrawn (missing
+     * for an online order), that stands and only the line comes back to check; so too when the product was removed or
+     * its unit changed. Undone, the product's last count is the one it had before (newest page first, then the older).
+     */
+    private boolean undoAutoCount(UUID shopId, UUID userId, Line line) {
+        Optional<Product> p = products.lock(shopId, line.productId());
+        if (p.isEmpty() || !p.get().active() || p.get().countedAt() == null
+                || p.get().countedAt().isAfter(line.updatedAt()) || line.byWeight() != (p.get().unit() == Unit.KG)) {
+            return false;
+        }
+        BigDecimal back = line.autoBefore().add(p.get().stock().subtract(line.counted())).max(BigDecimal.ZERO);
+        try {
+            productService.countFor(shopId, userId, p.get().id(), back, false, "Product setup: recount undone");
+        } catch (ApiException e) {
+            return false;   // not a count it can have: the count it has now stands
+        }
+        products.setCountedAt(p.get().id(), line.autoCountedBefore());
+        return true;
     }
 
     /**
@@ -321,28 +476,41 @@ public class ProductSetupService {
         List<ProductRef> uncounted = counts[1] == 0 ? List.of() : refs(products.uncounted(shopId, UNCOUNTED_SHOWN));
         int left = Math.max(0, MAX_LIST_PAGES - reads.listPages(shopId));
         List<SetupPageView> pages = new ArrayList<>();
-        int n = 0;
-        for (SetupStore.Page p : setup.pages(shopId)) {
-            pages.add(new SetupPageView(p.readId(), ++n, p.fileId(), p.status(), p.failure(), p.linesLeftOut(),
-                    p.toCheck(), p.added(), p.skipped(), p.sentAt()));
+        List<SetupStore.Page> kept = setup.pages(shopId);
+        Map<UUID, Integer> numbers = pageNos(shopId);   // after the pages: a page sent meanwhile is numbered too
+        for (SetupStore.Page p : kept) {
+            pages.add(new SetupPageView(p.readId(), numbers.getOrDefault(p.readId(), 0), p.fileId(), p.status(),
+                    p.failure(), p.linesLeftOut(),
+                    p.toCheck(), p.added(), p.skipped(), p.sentAt(), p.recount(), p.autoCounted(),
+                    in.apnidukan.kirana.domain.ReadFailure.code(p.failure())));
         }
         ProductStore.PhotoTotals photos = products.photoTotals(shopId, gs1.configured());
         boolean canFinish = ready == null && counts[0] > 0 && counts[1] == 0 && t.toCheck() == 0 && t.reading() == 0
                 && t.failed() == 0 && photos.missing() == 0;
-        String next = ready != null ? "DONE" : counts[0] == 0 && t.toCheck() == 0 && t.reading() == 0 ? "ADD"
+        // Finished, not approved yet: products added since (or recounted to nothing) still need their count and
+        // picture before the field agent can approve the shop
+        boolean beforeApproval = ready != null && (counts[0] == 0 || counts[1] > 0 || photos.missing() > 0)
+                && !readiness.everApproved(shopId);
+        String step = counts[0] == 0 && t.toCheck() == 0 && t.reading() == 0 ? "ADD"
                 : t.toCheck() > 0 || t.reading() > 0 || t.failed() > 0 ? "LIST" : counts[1] > 0 ? "COUNT"
                 : photos.missing() > photos.checking() + photos.finding() ? "PHOTOS"
                 : photos.checking() + photos.finding() > 0 ? "WAIT" : "FINISH";
+        // After finishing too, a page sent since (a recount) with lines to check, or to retake, comes first
+        String next = ready == null ? step
+                : t.toCheck() > 0 || t.reading() > 0 || t.failed() > 0 ? "LIST"
+                : beforeApproval ? (counts[0] == 0 ? "ADD" : counts[1] > 0 ? "COUNT"
+                : photos.missing() > photos.checking() + photos.finding()
+                ? "PHOTOS" : "WAIT") : "DONE";
         return new SetupView(ready, counts[0], counts[1], uncounted, t.toCheck(), t.added(), t.skipped(), t.reading(),
                 t.failed(), left, pages, photos.missing(), photos.checking(), photos.refused(), photos.finding(),
-                productService.photosLeftToday(shopId), next, canFinish, canFinish && c.isOwner());
+                productService.photosLeftToday(shopId), next, canFinish, canFinish && c.isOwner(), beforeApproval);
     }
 
     /** Each kept page's place, 1 = first sent. */
     private Map<UUID, Integer> pageNos(UUID shopId) {
         Map<UUID, Integer> out = new java.util.HashMap<>();
-        for (SetupStore.Page p : setup.pages(shopId)) {
-            out.put(p.readId(), out.size() + 1);
+        for (UUID id : setup.pageIds(shopId)) {
+            out.put(id, out.size() + 1);
         }
         return out;
     }
@@ -355,12 +523,19 @@ public class ProductSetupService {
         return named.stream().map(x -> new ProductRef(x.id(), x.name())).toList();
     }
 
-    private static ListLineView view(Line l, Map<UUID, Integer> pageNos, MatchService.Result m) {
+    private ListLineView view(Line l, Map<UUID, Integer> pageNos, MatchService.Result m) {
+        return view(l, pageNos, m, l.productId() == null ? null
+                : products.find(l.shopId(), l.productId()).orElse(null));
+    }
+
+    private static ListLineView view(Line l, Map<UUID, Integer> pageNos, MatchService.Result m, Product on) {
         List<SuggestionView> s = m.suggestions().stream().map(x -> new SuggestionView(x.productId(), x.itemId(),
                 x.name(), x.brand(), x.size(), x.pricePaise(), x.score())).toList();
         return new ListLineView(l.id(), l.readId(), pageNos.get(l.readId()), l.lineNo(), l.wording(), l.brand(),
                 l.name(), l.size(), l.byWeight(), l.mrpPaise(), Quantities.json(l.quantity()), l.status(),
-                l.productId(), Quantities.json(l.counted()), s, m.sure());
+                l.productId(), Quantities.json(l.counted()), s, m.sure(), l.autoBefore() != null,
+                Quantities.json(l.autoBefore()), on == null ? null : on.name(),
+                on == null ? null : Quantities.json(on.stock()), null);
     }
 
     /** An MRP read from the list, if a product may have it as its price (else the shop is asked). */
@@ -383,6 +558,13 @@ public class ProductSetupService {
             n.append(' ').append(l.size());
         }
         return n.length() > 100 ? n.substring(0, 100).strip() : n.toString();
+    }
+
+    private static void requireNotAutoCounted(Line line) {
+        if ("ADDED".equals(line.status()) && line.autoBefore() != null) {
+            throw new ApiException(HttpStatus.CONFLICT, "AUTO_COUNTED", "This line was counted from your recount. "
+                    + "Undo it first to change it.", Map.of("productId", line.productId()));
+        }
     }
 
     private static void requireNotAdded(Line line) {

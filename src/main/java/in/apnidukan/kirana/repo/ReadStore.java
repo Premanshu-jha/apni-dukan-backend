@@ -23,7 +23,7 @@ import java.util.UUID;
 public class ReadStore {
 
     private static final String READ = "SELECT id, shop_id, kind, status, file_ids, client_ref, tries, next_try_at, "
-            + "failure, result::text AS result, bill_id, product_id, created_by, created_at, updated_at "
+            + "failure, result::text AS result, bill_id, product_id, created_by, created_at, updated_at, recount "
             + "FROM kirana_reads";
 
     private final JdbcTemplate jdbc;
@@ -43,7 +43,7 @@ public class ReadStore {
     public record Read(UUID id, UUID shopId, String kind, String status, List<UUID> fileIds, UUID clientRef,
                        int tries, Instant nextTryAt, String failure, String result, UUID billId, UUID productId,
                        UUID createdBy,
-                       Instant createdAt, Instant updatedAt) {
+                       Instant createdAt, Instant updatedAt, boolean recount) {
 
         public Read {
             fileIds = List.copyOf(fileIds);
@@ -53,10 +53,10 @@ public class ReadStore {
     /** A new photo to read, queued now; false (nothing changed) when the app sent this clientRef before. */
     public boolean insert(Read r) {
         return jdbc.update("INSERT INTO kirana_reads (id, shop_id, kind, status, file_ids, client_ref, tries, "
-                        + "next_try_at, created_by, created_at, updated_at, product_id) VALUES (?, ?, ?, 'READING', "
-                        + "?::uuid[], ?, 0, ?, ?, ?, ?, ?) ON CONFLICT (shop_id, client_ref) DO NOTHING",
+                        + "next_try_at, created_by, created_at, updated_at, product_id, recount) VALUES (?, ?, ?, 'READING', "
+                        + "?::uuid[], ?, 0, ?, ?, ?, ?, ?, ?) ON CONFLICT (shop_id, client_ref) DO NOTHING",
                 r.id(), r.shopId(), r.kind(), uuids(r.fileIds()), r.clientRef(), at(r.createdAt()), r.createdBy(),
-                at(r.createdAt()), at(r.createdAt()), r.productId()) > 0;
+                at(r.createdAt()), at(r.createdAt()), r.productId(), r.recount()) > 0;
     }
 
     /** A uuid[] literal ("{a,b}") for these ids. */
@@ -173,10 +173,13 @@ public class ReadStore {
                 "kirana-list-pages:" + shopId);
     }
 
-    /** List pages the shop keeps: sent, not thrown away and not failed (through ix_kirana_reads_shop). */
+    /**
+     * List pages the shop keeps: sent, not thrown away and not failed (through ix_kirana_reads_shop). Recount pages
+     * aren't kept pages: a shop recounts for as long as it runs (the day's limit still counts them).
+     */
     public int listPages(UUID shopId) {
         Integer n = jdbc.queryForObject("SELECT count(*) FROM kirana_reads WHERE shop_id = ? AND kind = 'STOCK_LIST' "
-                + "AND status NOT IN ('DISCARDED', 'FAILED')", Integer.class, shopId);
+                + "AND status NOT IN ('DISCARDED', 'FAILED') AND NOT recount", Integer.class, shopId);
         return n == null ? 0 : n;
     }
 
@@ -221,7 +224,7 @@ public class ReadStore {
                 rs.getString("result"), rs.getObject("bill_id", UUID.class), rs.getObject("product_id", UUID.class),
                 rs.getObject("created_by", UUID.class),
                 rs.getObject("created_at", OffsetDateTime.class).toInstant(),
-                rs.getObject("updated_at", OffsetDateTime.class).toInstant());
+                rs.getObject("updated_at", OffsetDateTime.class).toInstant(), rs.getBoolean("recount"));
     }
 
     private static OffsetDateTime at(Instant i) {

@@ -32,11 +32,14 @@ public final class StockRequests {
      * A photo to read. Upload the files first (POST /files?purpose=BILL), then send their ids.
      * @param clientRef made by the app once per photo: sending it again returns the first upload
      * @param fileIds   1 to 3 pages, in order (one for STOCK_LIST)
+     * @param recount   STOCK_LIST only: a recount of products the shop has. Lines clearly matching one of its products
+     *                  with a count written take that count without asking (each can be undone); the rest are checked
+     *                  as usual. Left out: false
      */
     public record NewRead(@NotNull UUID clientRef,
                           @NotNull(message = "Choose what the photo is") ReadKind kind,
                           @NotNull(message = "Send the photo") @Size(min = 1, max = 3, message = "Send 1 to 3 pages")
-                          List<@NotNull UUID> fileIds) {
+                          List<@NotNull UUID> fileIds, Boolean recount) {
 
         public NewRead {
             fileIds = fileIds == null ? null : List.copyOf(fileIds);

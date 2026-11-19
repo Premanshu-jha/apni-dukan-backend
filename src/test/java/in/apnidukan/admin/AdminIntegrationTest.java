@@ -1379,6 +1379,11 @@ class AdminIntegrationTest {
         } else {
             TestData.shop(jdbc, id, owner);
             jdbc.update("UPDATE shops SET products_ready_at = now() WHERE id = ?", id);
+            // One product, counted and with its picture: what its first approval needs
+            jdbc.update("INSERT INTO kirana_products (id, shop_id, name, unit, price_paise, stock, active, version, "
+                    + "created_by, created_at, updated_at, counted_at, photo_file_id) VALUES (gen_random_uuid(), ?, "
+                    + "'Tata Salt 1 kg', 'PIECE', 2800, 5, true, 0, ?, now(), now(), now(), ?)", id, owner,
+                    file(id, owner, "PRODUCT_PHOTO"));
         }
         jdbc.update("UPDATE shops SET status = ?, name = ?, updated_at = ? WHERE id = ?", status, name,
                 Timestamp.from(CLOCK.instant().plusSeconds(jdbc.queryForObject("SELECT count(*) FROM shops",

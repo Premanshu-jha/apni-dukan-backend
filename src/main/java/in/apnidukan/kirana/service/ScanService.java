@@ -613,7 +613,8 @@ public class ScanService {
             LabelView label = r == null ? null : new LabelView("DONE".equals(r.status()) ? "READ" : r.status(),
                     facts == null ? null : facts.name(), facts == null ? null : facts.brand(),
                     facts == null ? null : facts.size(), facts == null ? null : facts.mrpPaise(),
-                    facts == null ? null : facts.category(), r.failure());
+                    facts == null ? null : facts.category(), r.failure(),
+                    in.apnidukan.kirana.domain.ReadFailure.code(r.failure()));
             String brandGuess = k == null && facts == null ? matcher.brandOfBarcode(u.code()) : null;
             MatchService.Result m = MatchService.Result.NONE;
             if (k != null) {

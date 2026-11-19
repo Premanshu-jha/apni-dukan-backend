@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.kirana.domain.ReadFailure;
 import in.apnidukan.kirana.service.KiranaDocumentAi.BillLine;
 import in.apnidukan.kirana.service.KiranaDocumentAi.Page;
 import in.apnidukan.kirana.service.KiranaDocumentAi.PurchaseFacts;
@@ -121,16 +122,16 @@ class BillFiles {
                     page = textPage(new String(f.bytes(), StandardCharsets.UTF_8));
                 }
             } catch (InvalidPasswordException e) {
-                return Prepared.problem("This PDF has a password. Send it without one, or a photo of the bill.");
+                return Prepared.problem(ReadFailure.FILE_PASSWORD.text());
             } catch (TooLong e) {
                 return Prepared.problem(e.getMessage());
             } catch (IOException | RuntimeException e) {
-                return Prepared.problem("We couldn't open this file. Send the bill as a PDF or a photo.");
+                return Prepared.problem(ReadFailure.FILE_CANT_OPEN.text());
             }
             if (page.contentType().startsWith("text/")) {
                 text += page.bytes().length;
                 if (text > MAX_TEXT * 3) {
-                    return Prepared.problem("This bill is too long to read at once. Send it in parts.");
+                    return Prepared.problem(ReadFailure.TOO_LONG.text());
                 }
             }
             pages.add(page);
@@ -160,7 +161,7 @@ class BillFiles {
             throw new IllegalArgumentException("empty");
         }
         if (t.length() > MAX_TEXT) {
-            throw new TooLong("This bill is too long to read at once. Send it in parts.");
+            throw new TooLong(ReadFailure.TOO_LONG.text());
         }
         return new Page(t.getBytes(StandardCharsets.UTF_8), "text/plain");
     }

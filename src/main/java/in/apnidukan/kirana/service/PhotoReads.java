@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.kirana.domain.ReadFailure;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.kirana.api.StockResponses.ReadPage;
@@ -62,15 +63,23 @@ public class PhotoReads {
      * {@value ProductSetupService#LIST_PAGES_PER_DAY} sent a day, 409 TOO_MANY_PAGES_TODAY). 400 naming fileIds otherwise.
      */
     @Transactional
-    public ReadView upload(UUID userId, String kind, UUID clientRef, List<UUID> fileIds) {
+    public ReadView upload(UUID userId, String kind, UUID clientRef, List<UUID> fileIds, boolean recount) {
         Caller c = access.caller(userId);
-        Read r = queue(c.shopId(), userId, kind, clientRef, fileIds, null, KiranaChecks.now(clock));
+        if (recount && !"STOCK_LIST".equals(kind)) {
+            throw invalid("recount", "Only a page of your list can be a recount");
+        }
+        Read r = queue(c.shopId(), userId, kind, clientRef, fileIds, null, recount, KiranaChecks.now(clock));
         return view(r);
     }
 
     /** As {@link #upload} for the caller's own services (a scan's label, a product's photo); the read. */
     Read queue(UUID shopId, UUID userId, String kind, UUID clientRef, List<UUID> fileIds, UUID productId,
                Instant now) {
+        return queue(shopId, userId, kind, clientRef, fileIds, productId, false, now);
+    }
+
+    private Read queue(UUID shopId, UUID userId, String kind, UUID clientRef, List<UUID> fileIds, UUID productId,
+                       boolean recount, Instant now) {
         if (clientRef == null) {
             throw invalid("clientRef", "is required");
         }
@@ -98,7 +107,7 @@ public class PhotoReads {
             if (meanwhile.isPresent()) {
                 return meanwhile.get();
             }
-            if (reads.listPages(shopId) >= ProductSetupService.MAX_LIST_PAGES) {
+            if (!recount && reads.listPages(shopId) >= ProductSetupService.MAX_LIST_PAGES) {
                 throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_PAGES", "You have "
                         + ProductSetupService.MAX_LIST_PAGES + " pages of your list already. Add the rest of your "
                         + "products one by one, or delete a page you don't need.",
@@ -114,7 +123,7 @@ public class PhotoReads {
         }
         ids.forEach(files::keep);
         Read r = new Read(UUID.randomUUID(), shopId, kind, "READING", ids, clientRef, 0, now, null, null, null,
-                productId, userId, now, now);
+                productId, userId, now, now, recount);
         if (!reads.insert(r)) {
             // The same clientRef at the same moment: the other request's upload
             return reads.byClientRef(shopId, clientRef).orElseThrow();
@@ -201,7 +210,7 @@ public class PhotoReads {
 
     private static ReadView view(Read r, UUID purchaseId) {
         return new ReadView(r.id(), r.kind(), r.status(), r.fileIds(), r.failure(), purchaseId, r.billId(),
-                r.createdAt(), r.updatedAt());
+                r.createdAt(), r.updatedAt(), r.recount(), ReadFailure.code(r.failure()));
     }
 
     static ApiException notFound() {

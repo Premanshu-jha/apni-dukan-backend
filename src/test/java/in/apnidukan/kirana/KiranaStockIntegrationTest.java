@@ -1198,6 +1198,272 @@ class KiranaStockIntegrationTest {
     }
 
     @Test
+    void aRecountPageTakesTheCountsItGivesClearlyAndAsksAboutTheRestWithUndoKeepingSalesSince() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        String salt = id(post("/kirana/products", new HashMap<>(Map.of("name", "Tata Salt 1 kg", "unit", "PIECE",
+                "pricePaise", 2800, "stock", 10)), owner));
+        String biscuit = id(post("/kirana/products", new HashMap<>(Map.of("name", "Parle G Biscuit 70 g", "unit",
+                "PIECE", "pricePaise", 500, "stock", 5)), owner));
+        String milk = id(post("/kirana/products", new HashMap<>(Map.of("name", "Amul Taaza Toned Milk 500 ml", "unit",
+                "PIECE", "pricePaise", 2900, "stock", 3)), owner));
+        ANSWERS.put("recount-1", stockList("[" + listLine("Tata Salt 1kg 15", "Tata", "Salt", "1 kg", false, "28", "15")
+                + "," + listLine("Parle-G 2.5", "Parle", "G Biscuit", "70 g", false, "5", "2.5")
+                + "," + listLine("Amul Taaza 500ml 4", "Amul", "Taaza Toned Milk", "500 ml", false, "29", "4")
+                + "," + listLine("Taaza 500 6", "Amul", "Taaza Toned Milk", "500 ml", false, "29", "6")
+                + "," + listLine("Maggi 70g 9", "Maggi", "Noodles", "70 g", false, "14", "9") + "]"));
+        // Only a page of the list can be a recount
+        Map<String, Object> bill = new HashMap<>(newRead("PURCHASE", upload(owner, "BILL", "recount-bill")));
+        bill.put("recount", true);
+        Reply notList = post("/kirana/reads", bill, owner);
+        assertThat(notList.status()).isEqualTo(400);
+        assertThat(new ArrayList<Object>(((Map<?, ?>) notList.body().get("details")).keySet()))
+                .containsExactly("recount");
+
+        Map<String, Object> page = new HashMap<>(newRead("STOCK_LIST", upload(owner, "BILL", "recount-1")));
+        page.put("recount", true);
+        Reply read = post("/kirana/reads", page, owner);
+        assertThat(read.status()).as(read.body().toString()).isEqualTo(201);
+        assertThat(read.body().get("recount")).isEqualTo(true);
+        readJob.run();
+
+        // The salt was clear: counted without asking, with its count before kept for Undo
+        assertThat(stock(salt)).isEqualByComparingTo("15");
+        Map<?, ?> setup = get("/kirana/setup", owner).body();
+        Map<?, ?> kept = (Map<?, ?>) ((List<?>) setup.get("pages")).get(0);
+        assertThat(kept.get("recount")).isEqualTo(true);
+        assertThat(kept.get("linesAutoCounted")).isEqualTo(1);
+        List<?> added = (List<?>) get("/kirana/setup/lines?status=ADDED", owner).body().get("items");
+        assertThat(added).hasSize(1);
+        Map<?, ?> auto = (Map<?, ?>) added.get(0);
+        assertThat(auto.get("productId")).isEqualTo(salt);
+        assertThat(auto.get("autoCounted")).isEqualTo(true);
+        assertThat(auto.get("countBefore")).isEqualTo(10);
+        assertThat(auto.get("counted")).isEqualTo(15);
+        // Half a biscuit packet, the milk named twice (which count is right?) and a product the shop doesn't have:
+        // asked about as usual, nothing changed
+        assertThat(pluck(get("/kirana/setup/lines", owner).body().get("items"), "wording")).containsExactly(
+                "Parle-G 2.5", "Amul Taaza 500ml 4", "Taaza 500 6", "Maggi 70g 9");
+        assertThat(stock(biscuit)).isEqualByComparingTo("5");
+        assertThat(stock(milk)).isEqualByComparingTo("3");
+
+        // Two sold since; Undo puts the count back as it was, keeping the sale: 10 - 2 = 8. The line comes back
+        jdbc.update("UPDATE kirana_products SET stock = 13 WHERE id = ?::uuid", salt);
+        Reply undone = post("/kirana/setup/lines/" + auto.get("id"), Map.of("action", "UNDO"), owner);
+        assertThat(undone.status()).as(undone.body().toString()).isEqualTo(200);
+        assertThat(undone.body().get("status")).isEqualTo("NEW");
+        assertThat(undone.body().get("autoCounted")).isEqualTo(false);
+        assertThat(stock(salt)).isEqualByComparingTo("8");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM kirana_stock_moves WHERE product_id = ?::uuid AND "
+                + "reason = 'COUNT'", Integer.class, salt)).isEqualTo(3);   // its first count, the recount, the undo
+        // A line the shop added itself isn't undone that way: the product is changed instead
+        Reply manual = post("/kirana/setup/lines/" + undone.body().get("id"), Map.of("action", "ADD", "productId",
+                salt, "quantity", 9), owner);
+        assertThat(manual.body().get("autoCounted")).isEqualTo(false);
+        assertThat(post("/kirana/setup/lines/" + undone.body().get("id"), Map.of("action", "UNDO"), owner).body()
+                .get("code")).isEqualTo("LINE_ADDED");
+        // An ordinary page (not a recount) never counts by itself
+        ANSWERS.put("list-plain", stockList("[" + listLine("Tata Salt 1kg 20", "Tata", "Salt", "1 kg", false, "28",
+                "20") + "]"));
+        post("/kirana/reads", newRead("STOCK_LIST", upload(owner, "BILL", "list-plain")), owner);
+        readJob.run();
+        assertThat(stock(salt)).isEqualByComparingTo("9");
+    }
+
+    @Test
+    void aRecountNeverGuessesAndUndoNeverDestroysANewerCountAndAPageThrownAwayPutsItsCountsBack() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        String salt = id(post("/kirana/products", new HashMap<>(Map.of("name", "Tata Salt 1 kg", "unit", "PIECE",
+                "pricePaise", 2800, "stock", 10)), owner));
+        String sugar = id(post("/kirana/products", new HashMap<>(Map.of("name", "Madhur Sugar 1 kg", "unit", "PIECE",
+                "pricePaise", 5500, "stock", 7)), owner));
+        String maggi = id(post("/kirana/products", new HashMap<>(Map.of("name", "Maggi Noodles 70 g", "unit", "PIECE",
+                "pricePaise", 1400)), owner));   // never counted: its first count is the shop's own
+        String milk = id(post("/kirana/products", new HashMap<>(Map.of("name", "Amul Taaza Toned Milk 500 ml", "unit",
+                "PIECE", "pricePaise", 2900, "stock", 3)), owner));
+        ANSWERS.put("recount-a", stockList("[" + listLine("Tata Salt 1kg 15", "Tata", "Salt", "1 kg", false, "28", "15")
+                + "," + listLine("Madhur Sugar 1kg 25", "Madhur", "Sugar", "1 kg", true, "55", "25")   // read as loose
+                + "," + listLine("Maggi 70g 9", "Maggi", "Noodles", "70 g", false, "14", "9")
+                + "," + listLine("Amul Taaza 500ml 6", "Amul", "Taaza Toned Milk", "500 ml", false, "29", "6") + "]"));
+        Map<String, Object> pageA = new HashMap<>(newRead("STOCK_LIST", upload(owner, "BILL", "recount-a")));
+        pageA.put("recount", true);
+        String readA = id(post("/kirana/reads", pageA, owner));
+        // One milk sold after the photo was taken, before it is read: the page's number is older than the shelf
+        bill(owner, List.of(line(milk, "1")), "CASH", null);
+        readJob.run();
+        assertThat(stock(salt)).isEqualByComparingTo("15");
+        assertThat(stock(sugar)).isEqualByComparingTo("7");    // kg against pieces: asked
+        assertThat(stock(maggi)).isEqualByComparingTo("0");    // never counted: asked
+        assertThat(counted(maggi)).isFalse();
+        assertThat(stock(milk)).isEqualByComparingTo("2");     // sold since the photo: asked
+        // The recount's own lines, each with the product as it is now
+        List<?> added = (List<?>) get("/kirana/setup/lines?status=ADDED&readId=" + readA, owner).body().get("items");
+        assertThat(added).hasSize(1);
+        Map<?, ?> auto = (Map<?, ?>) added.get(0);
+        assertThat(auto.get("productName")).isEqualTo("Tata Salt 1 kg");
+        assertThat(auto.get("stockNow")).isEqualTo(15);
+        assertThat(((List<?>) get("/kirana/setup/lines?readId=" + readA, owner).body().get("items"))).hasSize(3);
+        assertThat(get("/kirana/setup", owner).body().get("pagesLeft")).isEqualTo(60);   // a recount isn't a kept page
+        String filler = upload(owner, "BILL", "filler");
+        jdbc.update("INSERT INTO kirana_reads (id, shop_id, kind, status, file_ids, client_ref, tries, next_try_at, "
+                + "created_by, created_at, updated_at) SELECT gen_random_uuid(), r.shop_id, 'STOCK_LIST', 'READ', "
+                + "ARRAY[?::uuid], gen_random_uuid(), 0, now(), r.created_by, now() - interval '2 days', now() "
+                + "FROM kirana_reads r, generate_series(1, 60) WHERE r.id = ?::uuid", filler, readA);
+        assertThat(post("/kirana/reads", newRead("STOCK_LIST", upload(owner, "BILL", "page-61")), owner).body()
+                .get("code")).isEqualTo("TOO_MANY_PAGES");
+        Reply recountAt60 = post("/kirana/reads", recount(upload(owner, "BILL", "recount-at-60")), owner);
+        assertThat(recountAt60.status()).as(recountAt60.body().toString()).isEqualTo(201);
+        jdbc.update("DELETE FROM kirana_reads WHERE file_ids = ARRAY[?::uuid] OR id = ?::uuid", filler,
+                id(recountAt60));
+        // A different answer on a counted line isn't taken silently
+        assertThat(post("/kirana/setup/lines/" + auto.get("id"), Map.of("action", "ADD", "productId", sugar,
+                "quantity", 4), owner).body().get("code")).isEqualTo("AUTO_COUNTED");
+        assertThat(post("/kirana/setup/lines/" + auto.get("id"), Map.of("action", "SKIP"), owner).body().get("code"))
+                .isEqualTo("AUTO_COUNTED");
+
+        // A second page the same day naming the salt: not replaced without asking (the shelf, then the godown)
+        ANSWERS.put("recount-b", stockList("[" + listLine("Tata Salt 1kg 20", "Tata", "Salt", "1 kg", false, "28",
+                "20") + "]"));
+        Map<String, Object> pageB = new HashMap<>(newRead("STOCK_LIST", upload(owner, "BILL", "recount-b")));
+        pageB.put("recount", true);
+        post("/kirana/reads", pageB, owner);
+        readJob.run();
+        assertThat(stock(salt)).isEqualByComparingTo("15");
+
+        // Counted by hand since: Undo leaves that newer count and only brings the line back
+        post("/kirana/products/" + salt + "/stock", Map.of("clientRef", UUID.randomUUID().toString(), "reason",
+                "COUNT", "quantity", 12), owner);
+        Reply undone = post("/kirana/setup/lines/" + auto.get("id"), Map.of("action", "UNDO"), owner);
+        assertThat(undone.body().get("status")).as(undone.body().toString()).isEqualTo("NEW");
+        assertThat(undone.body().get("countPutBack")).isEqualTo(false);   // the hand count stands
+        assertThat(stock(salt)).isEqualByComparingTo("12");
+
+        // A recount page thrown away puts back the counts it took
+        jdbc.update("UPDATE kirana_list_lines SET updated_at = now() - interval '13 hours'");
+        ANSWERS.put("recount-c", stockList("[" + listLine("Madhur Sugar 1kg 30", "Madhur", "Sugar", "1 kg", false,
+                "55", "30") + "]"));
+        Map<String, Object> pageC = new HashMap<>(newRead("STOCK_LIST", upload(owner, "BILL", "recount-c")));
+        pageC.put("recount", true);
+        String readC = id(post("/kirana/reads", pageC, owner));
+        readJob.run();
+        assertThat(stock(sugar)).isEqualByComparingTo("30");
+        assertThat(post("/kirana/reads/" + readC + "/discard", Map.of(), owner).body().get("status"))
+                .isEqualTo("DISCARDED");
+        assertThat(stock(sugar)).isEqualByComparingTo("7");
+    }
+
+    @Test
+    void twoRecountsUndoneNewestFirstPutBothBackAndACountConfirmedByHandMeanwhileIsKept() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        String salt = id(post("/kirana/products", new HashMap<>(Map.of("name", "Tata Salt 1 kg", "unit", "PIECE",
+                "pricePaise", 2800, "stock", 10)), owner));
+        ANSWERS.put("day-1", stockList("[" + listLine("Tata Salt 1kg 15", "Tata", "Salt", "1 kg", false, "28", "15")
+                + "]"));
+        ANSWERS.put("day-2", stockList("[" + listLine("Tata Salt 1kg 20", "Tata", "Salt", "1 kg", false, "28", "20")
+                + "]"));
+        String a = id(post("/kirana/reads", recount(upload(owner, "BILL", "day-1")), owner));
+        readJob.run();
+        assertThat(stock(salt)).isEqualByComparingTo("15");
+        jdbc.update("UPDATE kirana_list_lines SET updated_at = updated_at - interval '13 hours'");   // a day later
+        jdbc.update("UPDATE kirana_products SET counted_at = counted_at - interval '13 hours', updated_at = "
+                + "updated_at - interval '13 hours'");
+        String b = id(post("/kirana/reads", recount(upload(owner, "BILL", "day-2")), owner));
+        readJob.run();
+        assertThat(stock(salt)).isEqualByComparingTo("20");
+        Object lineA = ((Map<?, ?>) ((List<?>) get("/kirana/setup/lines?status=ADDED&readId=" + a, owner).body()
+                .get("items")).get(0)).get("id");
+        Object lineB = ((Map<?, ?>) ((List<?>) get("/kirana/setup/lines?status=ADDED&readId=" + b, owner).body()
+                .get("items")).get(0)).get("id");
+        assertThat(post("/kirana/setup/lines/" + lineB, Map.of("action", "UNDO"), owner).body().get("countPutBack"))
+                .isEqualTo(true);
+        assertThat(stock(salt)).isEqualByComparingTo("15");
+        post("/kirana/setup/lines/" + lineA, Map.of("action", "UNDO"), owner);
+        assertThat(stock(salt)).isEqualByComparingTo("10");
+        assertThat(counted(salt)).isTrue();
+
+        // The owner confirms the same number by hand while a recount waits to be read: the page is older, so asked
+        ANSWERS.put("day-3", stockList("[" + listLine("Tata Salt 1kg 30", "Tata", "Salt", "1 kg", false, "28", "30")
+                + "]"));
+        jdbc.update("UPDATE kirana_list_lines SET updated_at = updated_at - interval '13 hours'");
+        post("/kirana/reads", recount(upload(owner, "BILL", "day-3")), owner);
+        post("/kirana/products/" + salt + "/stock", Map.of("clientRef", UUID.randomUUID().toString(), "reason",
+                "COUNT", "quantity", 10), owner);
+        readJob.run();
+        assertThat(stock(salt)).isEqualByComparingTo("10");
+        // A failed recount page stays on the setup screen (to retake or delete), however old
+        ANSWERS.put("blurry", "{\"readable\":false,\"list\":false,\"lines\":[]}");
+        String failed = id(post("/kirana/reads", recount(upload(owner, "BILL", "blurry")), owner));
+        readJob.run();
+        jdbc.update("UPDATE kirana_reads SET created_at = created_at - interval '8 days' WHERE id = ?::uuid", failed);
+        Map<?, ?> setup = get("/kirana/setup", owner).body();
+        assertThat(pluck(setup.get("pages"), "readId")).contains(failed);
+        assertThat(pluck(setup.get("pages"), "failureCode")).contains("LIST_UNREADABLE");
+    }
+
+    private static Map<String, Object> recount(String fileId) {
+        Map<String, Object> page = new HashMap<>(newRead("STOCK_LIST", fileId));
+        page.put("recount", true);
+        return page;
+    }
+
+    @Test
+    void productsAddedAfterFinishingNeedTheirCountAndPhotoBeforeTheShopIsApproved() {
+        String owner = kirana(OWNER, "Sharma General Store");
+        UUID shop = shopId(owner);
+        id(post("/kirana/products", new HashMap<>(Map.of("name", "Tata Salt 1 kg", "unit", "PIECE", "pricePaise", 2800,
+                "stock", 10)), owner));
+        pictureAll(owner);
+        assertThat(post("/kirana/setup/finish", Map.of(), owner).status()).isEqualTo(200);
+        assertThat(get("/kirana/setup", owner).body().get("nextStep")).isEqualTo("DONE");
+
+        // A new product after finishing, with no count and no photo
+        String maggi = id(post("/kirana/products", new HashMap<>(Map.of("name", "Maggi Noodles 70 g", "unit", "PIECE",
+                "pricePaise", 1400)), owner));
+        Map<?, ?> setup = get("/kirana/setup", owner).body();
+        assertThat(setup.get("beforeApproval")).isEqualTo(true);
+        assertThat(setup.get("nextStep")).isEqualTo("COUNT");
+        assertThat(setup.get("readyAt")).isNotNull();   // the visit stays booked
+
+        jdbc.update("UPDATE shops SET status = 'PENDING_VISIT' WHERE id = ?", shop);
+        String admin = superAdmin();
+        Map<?, ?> detail = get("/admin/shops/" + shop, admin).body();
+        Map<?, ?> gaps = (Map<?, ?>) ((Map<?, ?>) detail.get("kirana")).get("productGaps");
+        assertThat(gaps.get("uncounted")).as(detail.toString()).isEqualTo(1);
+        assertThat(gaps.get("noPicture")).isEqualTo(1);
+        assertThat(new ArrayList<Object>((List<?>) gaps.get("products")))
+                .containsExactly("Maggi Noodles 70 g: count, photo");
+        long version = jdbc.queryForObject("SELECT version FROM shops WHERE id = ?", Long.class, shop);
+        Reply refused = post("/admin/shops/" + shop + "/approve", Map.of("version", version), admin);
+        assertThat(refused.body().get("code")).as(refused.body().toString()).isEqualTo("PRODUCTS_INCOMPLETE");
+        assertThat(((Map<?, ?>) refused.body().get("details")).get("uncounted")).isEqualTo(1);
+        assertThat(refused.body().get("message")).isEqualTo("1 product has no count, 1 product has no photo. Ask the "
+                + "owner to finish in the app first.");
+        assertThat(gaps.get("checking")).isEqualTo(0);
+
+        // Counted: the photo is next; then approved
+        post("/kirana/products/" + maggi + "/stock", Map.of("clientRef", UUID.randomUUID().toString(), "reason",
+                "COUNT", "quantity", 6), owner);
+        assertThat(get("/kirana/setup", owner).body().get("nextStep")).isEqualTo("PHOTOS");
+        pictureAll(owner);
+        assertThat(get("/kirana/setup", owner).body().get("nextStep")).isEqualTo("DONE");
+        assertThat(get("/kirana/setup", owner).body().get("beforeApproval")).isEqualTo(false);
+        // Every product removed: the owner is told to add products again, and the agent can't approve
+        jdbc.update("UPDATE kirana_products SET active = false WHERE shop_id = ?", shop);
+        Map<?, ?> empty = get("/kirana/setup", owner).body();
+        assertThat(empty.get("beforeApproval")).isEqualTo(true);
+        assertThat(empty.get("nextStep")).isEqualTo("ADD");
+        assertThat(post("/admin/shops/" + shop + "/approve", Map.of("version", version), admin).body().get("message"))
+                .isEqualTo("The shop has no products in the app. Ask the owner to finish in the app first.");
+        jdbc.update("UPDATE kirana_products SET active = true WHERE shop_id = ?", shop);
+        Reply approved = post("/admin/shops/" + shop + "/approve", Map.of("version", version), admin);
+        assertThat(approved.status()).as(approved.body().toString()).isEqualTo(200);
+        assertThat(((Map<?, ?>) get("/admin/shops/" + shop, admin).body().get("kirana")).get("productGaps")).isNull();
+        // Approved: a product added later never holds the shop back
+        post("/kirana/products", new HashMap<>(Map.of("name", "Surf Excel 1 kg", "unit", "PIECE", "pricePaise",
+                12000)), owner);
+        assertThat(get("/kirana/setup", owner).body().get("beforeApproval")).isEqualTo(false);
+    }
+
+    @Test
     void theSetupFinishesOnlyWithEveryProductCountedAndNoPageOrLineLeftAndLongListsComeInPages() throws Exception {
         String owner = kirana(OWNER, "Sharma General Store");
         assertThat(post("/kirana/setup/finish", Map.of(), owner).body().get("code")).isEqualTo("NO_PRODUCTS");
