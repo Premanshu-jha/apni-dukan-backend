@@ -45,8 +45,14 @@ public record AdminShopDetail(AdminShopResponse shop, Salon salon, Kirana kirana
      * @param fssai          its FSSAI licence as checked so far (status NONE when not added): Submit takes one still
      *                       being checked, so the field team sees here how it went (number, refusal reason, last day)
      */
+    /**
+     * A kirana's own facts for the field team.
+     * @param productGaps before its first approval: its products still missing a count or a photo (approving is
+     *                    refused until there are none); null once it was ever approved
+     */
     public record Kirana(String upiId, Instant upiUpdatedAt, Boolean sellsFood,
-                         in.apnidukan.common.context.KiranaFacts.Fssai fssai) {
+                         in.apnidukan.common.context.KiranaFacts.Fssai fssai,
+                         in.apnidukan.common.context.KiranaFacts.ProductGaps productGaps) {
     }
 
     /** The next timeline page's query values: afterAt and afterSeq, exactly as given. */

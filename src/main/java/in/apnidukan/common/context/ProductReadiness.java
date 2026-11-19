@@ -13,6 +13,9 @@ public interface ProductReadiness {
     /** When the owner said all the shop's products are added; empty until then. */
     Optional<Instant> productsReadyAt(UUID shopId);
 
+    /** Whether the shop was ever approved (its products then no longer wait for a first visit). */
+    boolean everApproved(UUID shopId);
+
     /**
      * The owner says all the products are added ({@code products}: how many, for the field team's timeline): the shop
      * is marked ready, and if it was submitted and waits for its first visit, the visit is booked now (assigned to a

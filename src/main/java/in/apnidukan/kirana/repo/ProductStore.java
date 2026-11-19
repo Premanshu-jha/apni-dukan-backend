@@ -14,6 +14,7 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -323,6 +324,11 @@ public class ProductStore {
     }
 
     /** Its stock was just counted by hand (added with a count, or Count): it may be offered online. */
+    /** Sets when the product was last counted (null: not counted); an undone recount puts the earlier time back. */
+    public void setCountedAt(UUID productId, Instant at) {
+        jdbc.update("UPDATE kirana_products SET counted_at = ? WHERE id = ?", at(at), productId);
+    }
+
     public void markCounted(UUID productId, Instant now) {
         jdbc.update("UPDATE kirana_products SET counted_at = ? WHERE id = ?", at(now), productId);
     }
@@ -354,6 +360,30 @@ public class ProductStore {
         return jdbc.query("SELECT id, name FROM kirana_products WHERE shop_id = ? AND active AND counted_at IS NULL "
                 + "ORDER BY lower(name) LIMIT ?", (rs, i) -> new Named(rs.getObject("id", UUID.class),
                 rs.getString("name")), shopId, limit);
+    }
+
+    /** Names and stock of these products of the shop (to show beside a line counted on them). */
+    public Map<UUID, Product> byIds(UUID shopId, Collection<UUID> ids) {
+        Map<UUID, Product> out = new java.util.HashMap<>();
+        if (ids.isEmpty()) {
+            return out;
+        }
+        jdbc.query(COLUMNS + " WHERE shop_id = ? AND id = ANY (?)", ps -> {
+            ps.setObject(1, shopId);
+            ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids.toArray()));
+        }, ProductStore::product).forEach(p -> out.put(p.id(), p));
+        return out;
+    }
+
+    /** Up to {@code limit} active products missing a count or a picture, by name ("Tata Salt 1 kg: count, photo"). */
+    public List<String> notReady(UUID shopId, int limit) {
+        return jdbc.query("SELECT p.name, p.counted_at IS NULL AS uncounted, "
+                + "(p.photo_file_id IS NULL AND i.photo_file_id IS NULL) AS no_picture FROM kirana_products p "
+                + "LEFT JOIN kirana_catalogue_items i ON i.id = p.catalogue_item_id WHERE p.shop_id = ? AND p.active "
+                + "AND (p.counted_at IS NULL OR (p.photo_file_id IS NULL AND i.photo_file_id IS NULL)) "
+                + "ORDER BY lower(p.name) LIMIT ?", (rs, i) -> rs.getString(1) + ": "
+                + (rs.getBoolean(2) && rs.getBoolean(3) ? "count, photo" : rs.getBoolean(2) ? "count" : "photo"),
+                shopId, limit);
     }
 
     /** Records stock changes in one round trip. */
