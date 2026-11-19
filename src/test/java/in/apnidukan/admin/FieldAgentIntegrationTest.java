@@ -1068,9 +1068,11 @@ class FieldAgentIntegrationTest {
     }
 
     private String lastLog(UUID shop) {
-        // The clock stands still in these tests: the log is insert-only, so its physical order is the order written
-        return jdbc.queryForObject("SELECT reason FROM shop_assignments WHERE shop_id = ? ORDER BY at DESC, ctid DESC "
-                + "LIMIT 1", String.class, shop);
+        // The clock stands still in these tests, so entries share their time. SUBMITTED is always a waiting shop's
+        // first entry; among the rest the physical order is the order written (space freed by an earlier test's
+        // clean-up can be reused, which once put a later entry before the first)
+        return jdbc.queryForObject("SELECT reason FROM shop_assignments WHERE shop_id = ? ORDER BY at DESC, "
+                + "(reason = 'SUBMITTED'), ctid DESC LIMIT 1", String.class, shop);
     }
 
     private long version(UUID shop) {
