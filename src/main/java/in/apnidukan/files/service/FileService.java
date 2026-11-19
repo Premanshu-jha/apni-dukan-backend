@@ -94,6 +94,9 @@ public class FileService {
             throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE",
                     "A file for support is sent with POST /files/ticket, not here");
         }
+        if (purpose == FilePurpose.CATALOGUE_PHOTO) {   // the platform's own (PlatformFiles), never a shop's upload
+            throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE", "Upload a product's photo as PRODUCT_PHOTO");
+        }
         requireOwnerFor(user, purpose);
 
         if (upload == null || upload.isEmpty()) {
