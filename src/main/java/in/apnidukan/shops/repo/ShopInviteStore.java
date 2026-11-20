@@ -77,6 +77,12 @@ public class ShopInviteStore {
         return out;
     }
 
+    /** Whether a helper invitation of this shop is still waiting (not yet accepted, declined, cancelled or expired). */
+    public boolean helperWaiting(UUID shopId, Instant now) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM shop_invites WHERE shop_id = ? "
+                + "AND role = 'HELPER' AND status = 'PENDING' AND expires_at > ?)", Boolean.class, shopId, at(now)));
+    }
+
     /** Invitations still waiting for this phone, newest first (through ix_shop_invites_to_phone). */
     public List<Invite> waitingForPhone(String phone, Instant now) {
         return jdbc.query("SELECT " + COLUMNS + " FROM shop_invites WHERE to_phone = ? AND status = 'PENDING' "

@@ -13,6 +13,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, a kirana's GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and trade licence (checked automatically with AI), Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
+| `kirana` | The kirana's own counter (on `main` with the salons, switched off on the server until kirana launches: see "Kirana switch"): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit); stock from photos of distributors' bills and scans, unknown barcodes linked in one tap, counter suggestions and paper bills (round 3) |
 | `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
@@ -392,12 +393,13 @@ sequenceDiagram
 | `GET /api/v1/shops/me/invites` · `DELETE /api/v1/shops/me/invites/{id}` | Owner. The shop's invitations still waiting (helpers and barbers), by the phone typed, never a name: `[{id, phone, role, staffId, createdAt, expiresAt}]`. `DELETE`: cancel one (204; 404 `INVITE_NOT_FOUND` for another shop's) |
 | `GET /api/v1/me/invites` · `POST /api/v1/me/invites/{id}/accept` · `.../decline` | Anyone signed in: invitations waiting for their phone, `[{id, shopId, shopCode, shopName, type, area, city, role, createdAt, expiresAt}]`. Accept: 200 with the shop (`myRole` HELPER or BARBER), then `POST /auth/refresh`. Decline: 204 (the owner is told). 404 `INVITE_NOT_FOUND` (not for your phone), 409 `INVITE_GONE` with `details.status` (`ACCEPTED`, `DECLINED`, `CANCELLED`, `EXPIRED`, `CLOSED`, `CHANGED`, `STAFF_CHANGED`), 409 `ALREADY_IN_A_SHOP` (leave your shop first), 409 `TOO_MANY_HELPERS` |
 | `POST /api/v1/shops/me/leave` | A helper or barber leaves the shop (204), e.g. a phone added without asking. A barber's profile, hours and bookings stay with the salon; only his sign-in goes. 409 `OWNER_CANT_LEAVE` |
-| `PUT /api/v1/shops/me/registration-document` | A salon's owner (403 `OWNER_ONLY`; 409 `NOT_A_SALON` for a kirana): its **trade licence**. Optional (many salons have none), and the owner can add, replace or remove it at any time. `{version, type: "TRADE_LICENCE", fileId}` (any other `type`: 400 `VALIDATION_FAILED` naming `type`), `fileId` a `POST /files` upload with purpose `REG_DOC` (a photo, cleaned like the others, or a PDF kept as it came; only the owner uploads, opens or deletes it). 200 with the shop: `registrationDocType`, `registrationDocFileId`, `licenceCheck` (`PENDING` now), `licenceCheckReason`, `licenceValidUntil`, `registrationDocCheckedAt` (the owner's only). Checked automatically (see "The trade licence, checked automatically" below); the salon's status doesn't change (an approved one stays live). The same file again: nothing changes, unless its check FAILED (then it is checked again). 400 `VALIDATION_FAILED` naming `fileId`, 409 `SHOP_CHANGED` |
-| `DELETE /api/v1/shops/me/registration-document?version=` | The owner removes it: no "Licensed" badge; the status doesn't change; the upload stays for him to delete. 409 `SHOP_CHANGED`, 409 `NOT_A_SALON` |
+| `PUT /api/v1/shops/me/registration-document` | The owner (403 `OWNER_ONLY`): the shop's document, **optional**, added, replaced or removed at any time. A salon's **trade licence** (`type: "TRADE_LICENCE"`); a kirana's **trade licence or Shops and Establishments certificate** (`"TRADE_LICENCE"` or `"SHOPS_ESTABLISHMENT"`). Any other `type`: 400 `VALIDATION_FAILED` naming `type`. `{version, type, fileId}`, `fileId` a `POST /files` upload with purpose `REG_DOC` (a photo, cleaned like the others, or a PDF kept as it came; only the owner uploads, opens or deletes it). 200 with the shop: `registrationDocType`, `registrationDocFileId`, `licenceCheck` (`PENDING` now), `licenceCheckReason`, `licenceValidUntil`, `registrationDocCheckedAt` (the owner's only). Checked automatically (see "The trade licence, checked automatically" below; a kirana's rules in "A kirana's documents"); the shop's status doesn't change (an approved one stays live). The same file again: nothing changes, unless its check FAILED (then it is checked again). 400 `VALIDATION_FAILED` naming `fileId`, 409 `SHOP_CHANGED` |
+| `DELETE /api/v1/shops/me/registration-document?version=` | The owner removes it (a salon's or a kirana's): no "Licensed" badge; the status doesn't change; the upload stays for him to delete. 409 `SHOP_CHANGED` |
 | `GET /api/v1/admin/shops/licence-ai-usage` | Super admins: the licence checks' AI this credit period (reads, cost of the budget), whether Anthropic refuses our account, whether the key is set and who the alerts reach. See "Credit alerts for the licence checks" |
 | `POST /api/v1/admin/shops/{id}/registration-document/recheck` · `GET /api/v1/admin/shops/licences-to-follow-up` | Send the licence for checking again; the super admins' list of licences not accepted or waiting long. See "The trade licence, checked automatically" |
 | `POST /api/v1/admin/shops/{id}/registration-document/remove` | `{version, reason}`: a wrong or someone else's licence comes off; the owner gets `SHOP_DOCUMENT_REMOVED` with the reason; a note on the timeline. Any status but CLOSED; a field agent only for a business assigned to them. 409 `NO_DOCUMENT`, `SHOP_CHANGED`, `WRONG_STATUS`. (No one marks a licence as checked: the automatic check decides) |
-| `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos (and a salon's video) are set; then, for a salon, 409 `REGISTRATION_INCOMPLETE` with `details` naming each of `services` (at least one active), `hours` (the opening hours) still missing. The registration document is optional |
+| `PUT /api/v1/shops/me/type` | Owner (403 `OWNER_ONLY`). `{version, type: KIRANA\|SALON}`: the kind of shop picked by mistake, changed **while registering** (DRAFT, never approved; a registration sent back counts). Name, owner, address, pin, photos and video stay. The document stays and is **checked again for the new kind** (a kirana's trade licence must be a grocery or general store's); a Shops and Establishments certificate, a kirana's only, comes off a shop becoming a salon (its upload released: a salon has no screen for it). A salon's services and hours, and a kirana's UPI ID, food answer and GSTIN (a salon never shows one), stay stored and are used again if it changes back. A `NOTE` on the field team's timeline ("Owner changed it from kirana to salon while registering"). The same type again: 200, nothing changes. 409 `WRONG_STATUS` (submitted, or ever approved), 409 `HAS_BARBERS` (a barber has his own sign-in here, or is invited: a kirana has no barbers), 409 `HAS_COUNTER_DATA` (a kirana sent back after its visit that already has bills, products, khata customers, helpers or a helper invitation waiting stays a kirana: a salon would hide them), 409 `SHOP_CHANGED`, 429 `TOO_MANY_REQUESTS` past 10 changes a day, 400 naming `type`. A barber invitation sent at the same moment as a change to kirana is refused (409 `NOT_A_SALON`, read again under the members' lock). Access to the salon and kirana screens follows at once (read from the database on every call, never from the token) |
+| `POST /api/v1/shops/me/submit` | Owner. `{version}`: DRAFT → PENDING_VISIT. 409 `PHOTOS_REQUIRED` until both photos and the shop's video (a salon's and a kirana's) are set; then 409 `REGISTRATION_INCOMPLETE` with `details` naming what is still missing: for a salon each of `services` (at least one active) and `hours` (the opening hours); for a kirana each of `upiId` (`PUT /kirana/settings/upi-id`), `sellsFood` (the answer to "do you sell any food items?", `PUT /kirana/settings/sells-food`) and, when it sells food, `fssai` (its FSSAI licence, `PUT /kirana/online/fssai`: one still being checked will do, a refused or expired one won't; the message says which). The registration document is optional |
 | `POST /api/v1/shops/me/close` | Owner. `{version, reason?}` (reason 2–200 characters, for the field team): closes the shop for good, see "Closing a shop or handing it over". 200 with the shop (`status: CLOSED`). 409 `SHOP_CHANGED` for a stale version, 403 `OWNER_ONLY` |
 | `POST /api/v1/shops/me/handover` · `GET` · `DELETE` | Owner. `{phone, version}`: asks the person with that phone to take the shop over. 202 `{message, handover: {id, phone, createdAt, expiresAt}}`, the same `message` for any number. 409 `HANDOVER_PENDING` while one waits, 429 `TOO_MANY_REQUESTS` after 5 a day, 400 `INVALID_PHONE` / `VALIDATION_FAILED` (`details.phone`: your own number). `GET`: the waiting one (404 `NO_HANDOVER`). `DELETE`: cancel it (204, also when none waits) |
 | `GET /api/v1/me/handover` · `POST /api/v1/me/handover/{id}/accept` · `.../decline` | Anyone signed in: requests waiting for their phone, `[{id, shopId, shopCode, shopName, type, area, city, ownerName, createdAt, expiresAt}]`. Accept: 200 with the shop (`myRole: OWNER`), then `POST /auth/refresh`. Decline: 204. 404 `HANDOVER_NOT_FOUND` (not for your phone), 409 `HANDOVER_GONE` with `details.status` (`ACCEPTED`, `DECLINED`, `CANCELLED`, `EXPIRED`, `CLOSED`, `OWNER_CHANGED`), 409 `ALREADY_IN_A_SHOP` (you work in another shop: leave it first), 403 `PROFILE_INCOMPLETE` |
@@ -555,8 +557,9 @@ allowed. A helper accepting while deleting their account: either the deletion is
 now) or the accept is (401, or 409 `TRY_AGAIN` when the database broke a tie); the shop always has exactly one live
 owner.
 
-Rules: the GPS pin is required and must be inside India; pincode is 6 digits; a kirana's GSTIN and Udyam are optional,
-checked, and stored in capitals (a salon has none: anything sent is ignored, and an old value is never shown); text is
+Rules: the GPS pin is required and must be inside India; pincode is 6 digits; a kirana's GSTIN is optional,
+checked, and stored in capitals (a salon has none; no shop is asked for a Udyam number: anything sent is ignored, and an
+old value is never shown); text is
 trimmed. Unknown fields are refused with 400 `UNKNOWN_FIELD`, so nobody can send
 `"status": "APPROVED"` for their own shop. Status moves DRAFT → (both photos, Submit) → PENDING_VISIT → (field team
 visits and approves) → APPROVED; from any status the owner can close it for good (CLOSED). **Once approved, the
@@ -570,8 +573,9 @@ reason) or suspends it. A new name or owner's name needs no check. A new address
 pending booking reminders, so customers are sent to the new place. A photo that a shop or barber uses can't be deleted
 (409 `FILE_IN_USE`).
 
-A shop is a **kirana** or a **salon**: send `"type": "SALON"` when registering (left out = `KIRANA`). The type can't
-be changed later; `GET /shops/me` returns it.
+A shop is a **kirana** or a **salon**: send `"type": "SALON"` when registering (left out = `KIRANA`); `GET /shops/me`
+returns it. An owner who picked the wrong one changes it with `PUT /shops/me/type` **only while registering** (a draft
+never approved, also one the field team sent back); once submitted, and for good once ever approved, it is locked.
 
 ## The admin website (`/api/v1/admin`)
 
@@ -809,6 +813,583 @@ free time (`pricePaise`, and `listPricePaise` when an offer applies at that star
 publishing or ending one moves the salon's `setup_version` (triggers in V37, like a change to its services), so every
 server prices free times and bookings with the current offers at its next read. The cards read the badge in their
 one query per page (`SalonCardStore`). A deleted account's mutes go (`SalonAccountDeletion`).
+
+## Kirana switch
+
+Salons and kiranas are on one branch (`main`): the `kirana` branch was merged into it, with its migrations V66–V82
+(they run on the next deploy whatever the switch says; their notes are in the kirana sections below). Kirana stays
+**off on the server until it launches**, with one switch: `app.kirana.enabled`, the environment variable
+`KIRANA_ENABLED`, **`false` unless set** (`KiranaSwitch`; `ConfigurationDefaultsTest` checks the default).
+
+**Off** (the default):
+- Every request under `/api/v1/kirana/**`, `/api/v1/admin/kirana/**` and `/api/v1/payments/razorpayx/**` answers
+  **404** `{"code": "KIRANA_OFF", "message", "details"}`, signed in or not, admin or not: `KiranaSwitchFilter` runs in
+  the security chain right after CORS and before the sign-in token is read (whole path segments only: `/api/v1/kiranaX`
+  isn't the kirana API).
+- No shop becomes a kirana: `POST /shops` with `type: KIRANA` (or no `type`, which means a kirana) and
+  `PUT /shops/me/type` to `KIRANA` answer 400 `KIRANA_OFF`; a kirana row made earlier can't be submitted for its visit
+  (409 `KIRANA_OFF`); `POST /files` with purpose `BILL` or `PRODUCT_PHOTO` (a kirana's bills and packs) answers 400
+  `KIRANA_OFF`. The customers' kirana lists (shops, products, items nearby) are empty.
+- The kirana jobs do nothing (`ReadJob`, `FssaiCheckJob`, `Gs1Job`, `OrderJobs`: timeouts, expiry, refunds, payouts);
+  the licence check reads no kirana's document (it stays `PENDING`, untouched, and is read once kirana is on) and the
+  licence expiry job tells no kirana (salons' as before); Razorpay
+  payment and refund events are never a kirana's (the subscriptions' webhook goes on as before); a hand-over clears no
+  kirana UPI ID or FSSAI licence.
+- Nothing goes to the AI, GS1 DataKart or RazorpayX for a kirana: besides the above, `KiranaDocumentAi`,
+  `KiranaRazorpay` and `KiranaPayoutGateway` say "not configured" while it is off.
+- The admin website's shop lists and pages work as before (they show existing kirana rows, if any).
+- Salons work exactly the same either way. Every kirana bean still exists (others inject them); each asks the switch.
+
+**On** (`KIRANA_ENABLED=true`): exactly as described in the kirana sections below. On Railway: the backend service's
+Variables, add `KIRANA_ENABLED` = `true` (setting a variable redeploys; removing it or setting `false` turns kirana off
+again). The tests run with it on (`TestContainers.register`), except `KiranaSwitchOffIntegrationTest` (every kirana path
+404 signed in or out, as a customer, an admin or a salon owner; no kirana registered, changed to or submitted; no bill
+or pack photo; the jobs and outside calls idle; a salon found and booked as always) and `KiranaSwitchFilterTest` (which
+paths count, written any way the controllers would read them). The scenarios are in `docs/scenarios.md`.
+
+## The kirana counter (V66–V67)
+
+The kirana's own counter in the partner app: what it stocks, what it sells to walk-in customers, and who owes it on
+khata. **No money passes through Clozest here**: a walk-in customer pays the shop directly (cash, or the shop's own UPI
+QR) or buys on the shop's khata, and the app only records it. Online orders (Clozest's Razorpay, splitting across
+shops, payouts) are in "Kirana online orders" below. Everything is under `/api/v1/kirana`, for the shop's owner and helpers; anyone
+else gets 404 `NO_SHOP`, and **salon people 409 `NOT_A_KIRANA`**: no kirana screen or data ever reaches a salon.
+
+```mermaid
+sequenceDiagram
+    participant A as Partner app (counter)
+    participant B as Backend
+    participant D as Neon
+    A->>B: GET /kirana/products/barcode/8901262150019 (scan)
+    B-->>A: the product and its pack (or 404 PRODUCT_NOT_FOUND: link the barcode)
+    A->>B: POST /kirana/bills {clientRef, lines, payment}
+    B->>D: lock kirana_settings (bills one at a time) → same clientRef? return it
+    B->>D: lock the products (id order) → bill + lines, stock down, kirana_stock_moves (SALE)
+    B->>D: KHATA: lock the customer → limit check → kirana_khata_entries (SALE), balance up
+    B-->>A: 201 bill + each product's stock before/after
+```
+
+**The tables** (V66; V67 validates the keys to `shops` and `users`):
+
+| Table | What it holds |
+| --- | --- |
+| `kirana_settings` | One row per kirana: the next bill number, the shop's **UPI ID** (owner only) and when it was set |
+| `kirana_products` | The catalogue: name (one active product per name, case aside), unit `PIECE` or `KG`, price per piece or kg in paise, **stock** (NUMERIC(12,3); may go below zero), "running out" alert, `active` (removed products stay for old bills) |
+| `kirana_barcodes` | A product's barcodes (up to 10: MRP batches, pack designs, a carton), each with its **pack**: how many pieces (or kg) one scan means (1 for a single pack, 12 for a carton of 12). One active product per barcode in a shop; a removed product keeps its barcodes inactive and gets them back when restored (except any another product has meanwhile) |
+| `kirana_stock_moves` | Every stock change with its reason: `SALE`, `VOID` (a cancelled sale), `RETURN` (items brought back), `RESTOCK`, `DAMAGED`, `COUNT` (a count by hand), the stock after it, the bill, a note, who and when |
+| `kirana_bills` + `kirana_bill_lines` | Walk-in bills: the shop's running number, the app's `client_ref` (a double tap finds the first bill), subtotal, **discount**, total, payment `CASH`/`UPI`/`KHATA`, the khata customer, what of a khata bill was **paid now** (cash or UPI), what was refunded for returns; lines copy the name, unit and price, so a later price change never changes an old bill (a line without a product is an item not in the list; a loose item sold by amount keeps the amount asked for), with how much of each came back; `voided_at`/`void_reason` when cancelled |
+| `kirana_bill_returns` + `kirana_bill_return_lines` | Items brought back: which lines and how much, each line's value, the refund split into what came off the khata and what was handed back (cash or UPI), the app's `client_ref` |
+| `kirana_bill_changes` | A bill's payment changed after saving: from what to what (payment, khata customer, paid now), who and when; the day's totals count it on that day |
+| `kirana_khata_customers` | The khata book: name, optional phone (for the WhatsApp reminder) and note, credit limit (**₹2,000 for a new customer** unless the owner sets another or none), **balance** (what they owe; below zero it is their advance, used up by their next khata bill) |
+| `kirana_khata_entries` | Each sale on khata (+, the part not paid now), payment received (−, cash or UPI, with the app's `client_ref`), cancelled sale (−), return (−), bill moved on or off the khata (`CHANGE`, ±), a payment undone (`REVERSAL`, +, naming the payment) and an advance given back (`REFUND`, +), with the balance after it |
+
+**Who may do what:** the owner and helpers bill, scan, link barcodes, add products and stock, add khata customers and
+take their payments. A helper may take up to ₹10 off a bill (a round-off), cancel, take a return on or change the
+payment of **a bill he made, within 10 minutes**, and undo **a khata payment he recorded, within 10 minutes** (a
+mistake fixed on the spot). Only the owner changes a product (name, price, unit before its first sale, alert, removing
+it), unlinks a barcode or corrects its pack, sets a credit limit or none, undoes anyone's khata payment, gives an
+advance back, sets the UPI ID, takes more off a bill, and changes any bill at any time (403 `OWNER_ONLY`; the window
+ones say a helper can within 10 minutes).
+
+| Call | What it does |
+| --- | --- |
+| `PUT /kirana/settings/sells-food` | Owner. `{sellsFood: true\|false}` (400 naming `sellsFood` without it): whether the shop sells any food, packed or loose, asked at registration. Yes needs its FSSAI licence before Submit for visit (and, once round 2's food filter is in, before online orders; No then means no food listed online). `GET /kirana/settings` returns it (`sellsFood`, null until answered); the field team sees it on the shop's page (`kirana.sellsFood`). Once verified, a change needs the edit code (403 `EDIT_LOCKED`); after Submit, Yes needs an FSSAI licence being checked or verified and not expired (409 `FSSAI_REQUIRED`); the same answer again changes nothing |
+| `GET /kirana/settings` · `PUT /kirana/settings/upi-id` | The shop's name (the QR's payee) and UPI ID; the helper sees it too (he shows the QR). `PUT {upiId}` (owner): spaces removed, lower case, must look like `name@bank` (400 naming `upiId`). Once the shop is verified, a change needs the edit code like every checked detail (403 `EDIT_LOCKED`). The field team sees it (and when it was set) on the shop's page (`kirana` in `GET /admin/shops/{id}`). **A hand-over forgets it**: it was the old owner's account, so the new owner sets his own |
+| `GET /kirana/products?q=&cursor=` | The catalogue in name order, 50 a page (`next` for the following page; a broken token is the first page). `q`: a name containing it anywhere ("salt" finds "Tata Salt 1 kg"), or a barcode starting with it (digits typed from a pack that won't scan); `%` and `_` are plain letters |
+| `GET /kirana/products/running-out` | Products at or below their alert, or below zero (up to 200) |
+| `GET /kirana/products/barcode/{code}` | A scan: `{product, pack}`: the active product with it and how many one scan means (the app adds that many to the bill), or 404 `PRODUCT_NOT_FOUND` (also for a misread code) |
+| `GET /kirana/products/{id}` | The product and its latest 50 stock changes (who, why, the bill number) |
+| `POST /kirana/products` | `{name, barcode?, pack?, unit, pricePaise, stock?, lowStockAt?}` → 201 (products carry `barcodes: [{code, pack}]`). Pieces whole, kg to the gram (3 decimals), 0 to 9999; price ₹0.01–₹1,00,000; `pack` 1 if left out (400 without a barcode). 409 `NAME_TAKEN`, `BARCODE_TAKEN` (with the product that has it). A first stock is recorded as a count |
+| `PATCH /kirana/products/{id}` | Owner. `{version, name?, unit?, pricePaise?, lowStockAt?, noLowStockAlert?, active?}`. `unit` only until it is first sold (409 `PRODUCT_SOLD`; to piece its stock, alert and packs must be whole, 400 naming `unit`). 409 `PRODUCT_CHANGED` (stale version), `NAME_TAKEN` (also when putting a removed product back). Restoring a product brings its barcodes back except any another product has now |
+| `POST /kirana/products/{id}/barcodes` · `DELETE /kirana/products/{id}/barcodes/{code}` | Link a barcode `{code, pack?}` (owner or helper; the same code and pack again changes nothing; the owner sending another pack corrects it) → the product. 409 `BARCODE_TAKEN` (another product has it, or a helper sends another pack), `TOO_MANY_BARCODES` (10), `PRODUCT_REMOVED`; 400 naming `code` or `pack` (whole for pieces). Unlink: owner, 404 `BARCODE_NOT_FOUND` |
+| `POST /kirana/products/{id}/stock` | `{clientRef, reason: RESTOCK\|DAMAGED\|COUNT, quantity, note?}`: adds (up to 9999 at a time), takes off, or sets the stock to the count (up to 999999). The same `clientRef` again (a retry) changes nothing. A count equal to the stock records nothing. 409 `PRODUCT_REMOVED` |
+| `POST /kirana/bills` | `{clientRef, lines (1–100), payment: CASH\|UPI\|KHATA, khataCustomerId?, discountPaise?, paidNowPaise?, paidNowBy?: CASH\|UPI}` → 201 `{bill, stock: [{before, after, runningOut}], khata, upi, repeated: false}`. A line is `{productId, quantity}`, a loose (kg) product by the amount asked for `{productId, amountPaise}` (the weight worked out to the gram), or an item not in the list `{name, amountPaise (each), quantity? (pieces, 1 if left out)}` (no stock kept; 409 `ITEM_IN_LIST` with the `productId` when it is the name of a product in the list, which must be scanned or picked). `discountPaise`: off the whole bill, at most its lines' total; a helper up to ₹10 (403 `OWNER_ONLY` past it). `paidNowPaise`/`paidNowBy`: a KHATA bill part paid at the counter, less than the total; only the rest goes on the khata. `khata` is the customer after a KHATA bill (balance, what is still available), `upi` the QR (`upiId`, `payeeName`, `amountPaise`, `uri` = `upi://pay?pa=…&pn=…&am=…&cu=INR&tn=Bill%20N`, ready to draw) for a UPI bill's total or a khata bill's part paid by UPI; null otherwise or before the UPI ID is set. `upiIdMissing`: true when a QR was needed but the UPI ID isn't set. The same `clientRef` again → 200 with the first bill and its stock changes, `repeated: true`, nothing billed. Listed prices from the catalogue. 400 naming `lines[i]…`, `discountPaise`, `paidNowPaise`, `paidNowBy` or `khataCustomerId`; 409 `PRODUCT_GONE` (`details.productIds`: removed meanwhile or not this shop's); 404 `KHATA_CUSTOMER_NOT_FOUND`; 409 `KHATA_LIMIT` (`details.availablePaise`, `limitPaise`, `balancePaise`). A sale is never refused for the app's stock count |
+| `GET /kirana/bills?cursor=` · `GET /kirana/bills/{id}` | Bills newest first, 50 a page (line count, the first three names, cancelled or not, refunded); one bill with its lines (`lineNo`, `returnedQuantity`), who made it (`byName`, and `byId`: the app tells a helper's own bills by it), `subtotalPaise`, `discountPaise`, `paidNowPaise`, `onKhataPaise`, `refundedPaise`, its `returns` and payment `changes` |
+| `POST /kirana/bills/{id}/void` | `{reason}` (2–200) → `{bill, stock, khata}`: stock back (`VOID` moves), what it put on a khata comes off, its cash and UPI (a khata bill's part paid now too) counted as handed back on the day of cancelling. A customer taken out of the book meanwhile comes back into it (without their phone if someone else has it now), so their advance stays in sight. 409 `BILL_VOIDED`, `BILL_HAS_RETURNS` (return the rest instead) |
+| `POST /kirana/bills/{id}/payment` | `{version, payment, khataCustomerId?, paidNowPaise?, paidNowBy?, advance?}` → `{bill, khata: [customers it touched], upi, upiIdMissing}`: UPI failed and they paid cash, put on khata after all, moved to another customer's khata. Same bill number; the khata moves with `CHANGE` entries; the change is kept in `bill.changes` and counts in the day's totals on the day it was made. The same payment as now changes nothing (also with an old version). The limit is checked only when it puts more on a khata. 409 `BILL_CHANGED` (stale version), `KHATA_LIMIT` (nothing moved), `KHATA_ALREADY_PAID` (the customer's payments already cover it, so they'd be left an advance: `details.advanceAfterPaise`; send `advance: true` to keep it), `BILL_VOIDED`, `BILL_HAS_RETURNS` |
+| `POST /kirana/bills/{id}/returns` | `{clientRef, lines: [{lineNo, quantity}], reason?}` → 201 `{bill, returned, stock, khata, repeated}`: listed products back into stock (`RETURN` moves); the refund is each line's share of the bill after its discount, and the last return gives back exactly what is left of the total; it goes back the way the bill was paid: `handBackPaise` in `handBackBy` (`CASH`/`UPI`) for a cash or UPI bill; for a khata bill `offKhataPaise` first (up to what the bill still has on the khata) and the rest, its part paid now, handed back as it was paid. The same `clientRef` → 200, made once. 400 naming `lines[i].lineNo` (no such line, or twice) or `lines[i].quantity` (more than is left); 409 `BILL_VOIDED` |
+| `GET /kirana/day?date=` | One India day (today without `date`; 400 more than 2 years away). **Everything counts on the day it happened, so a day's figures never change after its drawer was counted**: bills made that day as they were paid then, cancelled since or not (count, sales after discounts, `discountPaise`; cash and UPI include the part paid now of khata bills; khata is what went on it); **payment changes made that day** (`paymentChanges`, what moved into cash, UPI and khata, ± ); khata payments received less those undone and advances given back that day (cash and UPI apart); **returns made that day** (handed back in cash or UPI, or off the khata); **bills cancelled that day** (their cash and UPI handed back, their khata part taken off); and `cashInPaise` / `upiInPaise`: what the drawer and the shop's UPI should have gained that day |
+| `GET /kirana/khata?q=&owing=&cursor=` | The book in name order, 50 a page, with `owedPaise` (everyone together); `owing=true`: only those who owe. `q`: a name or note containing it ("1204" finds "Tower B 1204"), or digits of their phone |
+| `GET /kirana/khata/{id}?cursor=` | A customer and their entries, newest first (50 a page), with each sale's bill number |
+| `POST /kirana/khata` · `PATCH /kirana/khata/{id}` | `{name, phone?, note?, creditLimitPaise?, noLimit?}` (limit ₹2,000 unless the owner sets another or `noLimit`; the phone as people type or paste it: "+91 98480-12345", "098480 12345"; kept as 10 digits); edits `{version, …, noLimit?, active?}`. 409 `PHONE_TAKEN` (with the customer), `KHATA_CHANGED`, `STILL_OWES` (taking out someone who owes, or is owed) |
+| `POST /kirana/khata/{id}/payments` | `{clientRef, amountPaise, method: CASH\|UPI, note?, advance?}` → 201 `{customer, entry, repeated}`; the same `clientRef` → 200, recorded once. Entries carry `byName` and `byId` (who recorded them: a helper may undo his own payment within 10 minutes). Customers carry `owesPaise` and `advancePaise`; the book `advancesPaise` (all advances held). More than they owe: 409 `MORE_THAN_OWED` (`details.balancePaise`, `advancePaise`, `advanceAfterPaise`: "Keep ₹25 as their advance?"); sent again with `advance: true` the extra is kept as their advance (balance below zero) |
+| `POST /kirana/khata/{id}/payments/{entryId}/reverse` | The owner, or the helper who recorded it within 10 minutes. `{reason}` → 201 `{customer, entry}`: a payment recorded by mistake (on the wrong customer, ₹500 for ₹50) is undone with a `REVERSAL` entry; the payment stays in the history marked `reversed`. 404 `KHATA_ENTRY_NOT_FOUND` (not one of this customer's payments), 409 `PAYMENT_REVERSED` |
+| `POST /kirana/khata/{id}/advance-back` | Owner. `{clientRef, amountPaise, method}` → 201: gives a customer's advance back (all or part; e.g. before taking them out of the book), a `REFUND` entry; counted off the day's khata money. The same `clientRef` → 200. 409 `MORE_THAN_ADVANCE` (`details.advancePaise`) |
+
+**Many at once.** Every bill of a shop first locks its `kirana_settings` row, so a shop's bills are saved one after
+the other (a counter does one at a time; two helpers billing together wait milliseconds): each gets the next number,
+and a double tap or a retry finds the first bill. Products are locked in id order (bills, cancellations), so two bills
+with the same products never wait on each other in a circle; the khata customer is locked last. Different shops never
+wait on each other. Lists are pages of 50 read by index (`(shop, lower(name) COLLATE "C", id)` for names;
+`(shop, created_at DESC, id DESC)` for bills and entries); "running out" reads
+the shop's catalogue (no index mentions `stock`, so a sale updates the product row in place without touching any
+index). Searches use `pg_trgm` GIN indexes (a word anywhere in a product's name, or a customer's name and note). One
+bill's stock changes are written in one batch. Changes to a saved bill (cancel, return, payment change) lock the bill's
+row first, then its products in id order, then khata customers in id order (a payment change between two customers
+locks both in that order), so the same return or change sent twice waits for the first and then sees it. Product pages
+read their barcodes in one query for the page; a scan is one lookup on the unique `(shop, code)` key, whose `C`
+collation also serves the search by a barcode's first digits. Two requests about the same barcode (linking it, restoring
+a product that has it) or the same khata phone (adding a customer, changing a phone, putting a customer back in the
+book) wait for each other on a transaction-level advisory lock, so their "is it free?" checks never race into an error.
+A stock change's `clientRef` sent for another product is a 409 `STOCK_CHANGE_REPEATED`; a stock that would leave its
+column's range a 409 `STOCK_OUT_OF_RANGE`. Messages write money as people in India do (₹2,000, ₹1,00,000). Page tokens carry Postgres's own `lower(name)`, so no name is skipped
+or shown twice across pages. Times are kept to the microsecond, as Postgres stores them. Quantities go out as plain
+JSON numbers (`10`, never `1E+1`). Validation messages are in a shopkeeper's words ("The price can be at most
+₹1,00,000").
+
+**Registration.** A kirana needs its UPI ID before Submit for visit (409 `REGISTRATION_INCOMPLETE`, `details.upiId`;
+the field team checks it at the visit, on the shop's page). The shops module asks through `KiranaFacts` (common,
+implemented by `KiranaFactsService`, which needs only the settings store: anything more would make a constructor loop
+with `ShopService`, which the kirana access check needs), so it doesn't depend on
+the kirana module. A kirana's GSTIN stays optional (a GST-registered shop shows it on its bills); **no shop is asked
+for a Udyam number any more** (2026-11-17): one sent by an older app is ignored, one stored before stays unshown.
+
+**Deploying V66–V67:** new tables only, nothing existing is changed; safe while the old version runs.
+
+## Kirana online orders (V68–V69)
+
+Customers order from a kirana near them in the customer app and pay Clozest by Razorpay (UPI or Pay Later); the shop
+packs and delivers; Clozest keeps **₹10 per checkout** and pays each shop its items to its UPI ID by RazorpayX, two
+working days after delivery. When the chosen shop lacks something, **shops near it fill in** (see the plans below).
+Scenario list: `docs/scenarios-kirana-orders.md`.
+
+```mermaid
+sequenceDiagram
+    participant C as Customer app
+    participant B as Backend
+    participant R as Razorpay
+    participant S as Shop (partner app)
+    C->>B: POST /kirana/quote {shopId, where, cart}
+    B-->>C: combined / separate plans with totals (or what isn't available)
+    C->>B: POST /kirana/checkouts {clientRef, plan, expectedTotalPaise}
+    B->>R: create order (outside the transaction)
+    B-->>C: {checkoutId, razorpayOrderId, keyId}
+    C->>R: pay (Razorpay checkout)
+    C->>B: POST /kirana/checkouts/{id}/paid {signature}  (or R→B webhook payment.captured)
+    B-->>S: "New order" (3 minutes to accept)
+    S->>B: accept → packed → (nearby shop: handed) → out → deliver {otp}
+    B->>B: earnings due in 2 working days → RazorpayX payout to the shop's UPI ID
+```
+
+**When a shop takes orders.** All of: approved by the field team, its UPI ID set, its **FSSAI licence verified and
+not expired**, and the owner's "Taking orders" switch on. `GET /kirana/online` lists what is `missing`
+(`APPROVAL`, `UPI_ID`, `FSSAI`, `SWITCHED_OFF`). The owner adds the 14-digit number and a photo or PDF of the
+certificate (a file uploaded as `REG_DOC`); within a minute the AI reads it (`FssaiCheckJob`, at most
+`KIRANA_AI_CALLS_PER_DAY` calls a day, 5 tries) and verifies it when it is an FSSAI certificate, its number is the
+one typed, it hasn't expired, and the business or operator name shares a word with the shop's or the owner's name
+(the usual shop words like "General", "Stores" don't count); otherwise it is refused with the reason in plain words.
+**A renewal never takes the shop offline** (V71): when the owner uploads a renewed certificate of the same licence
+(the same number) while the verified one is still valid, the earlier licence's last day and certificate are kept
+(`fssai.currentValidUntil`; the reason and the refusal notice say so) and the shop takes orders until then, whether the
+new one is being checked or refused; once the new one is verified it replaces it. A different number keeps nothing. A
+super admin refusing with `endCurrent: true` (the licence was cancelled, or isn't genuine) ends the earlier one too.
+**A hand-over forgets the licence** the old owner added (it was issued to him as the food business operator): orders
+stop until the new owner adds his own. A licence is only verified with its last day (read by the AI, or typed by the super admin), and stops orders the day
+after it. When the AI can't decide (5 tries without an answer) the owner is told "our team will check it" and it waits
+on the admin website (`GET /admin/kirana/fssai`); an owner sending the same certificate again after a refusal asks for
+a person's look the same way. A corrected number is read afresh, and a read already under way for the old number is
+thrown away. **A verified shop changing its UPI ID** (also the first one a new owner sets after a hand-over: the money
+still owed may be the old owner's) holds its payouts until the field team checks the new ID with the owner; then any
+payout that had failed goes to the new ID.
+
+**The shared catalogue.** The first shop to add a product with a barcode makes a catalogue item (name, brand, size,
+unit, MRP, category); every shop that scans that barcode later gets its details filled in, and its product is linked
+to the item. That link is how the customer app finds the same item at nearby shops. Super admins correct items.
+
+**Plans.** A cart line is one of the shop's products, or a catalogue item the shop doesn't list (from
+`nearby-items`).
+
+- *Quantity short* (the shop has 5, the cart says 7): the rest comes from a shop **within 1 km of the chosen shop**,
+  which hands it to the chosen shop: always combined.
+- *Whole item missing*: the customer chooses **combined** (the nearby shop hands it over, one delivery) or
+  **separate** (another shop within 2 km of the customer delivers it itself, a second order).
+- At most 2 other shops in the whole plan (those handing items over and those delivering separately together). The
+  shop covering the most of what is missing is chosen first (then the nearest), each item at that shop's lowest price,
+  and no shop's stock is promised twice. `nearby-items` shows the lowest price near the shop, so a quote can be a little
+  higher when another shop covers more. What nobody can give is listed in `unavailable` (its `line` is the cart
+  position from 0, as in error fields). ₹10 is charged once per checkout, on its first order (it comes back when every
+  order of the checkout is cancelled). No minimum order, no delivery fee.
+
+**Order states.** Order: `WAITING_PAYMENT → PLACED → ACCEPTED → PACKED → OUT_FOR_DELIVERY → DELIVERED`, or `CANCELLED`.
+Each shop's share is a **part**: `OWN` (delivers) or `SUPPLIER` (hands its items to the delivering shop):
+`WAITING → ACCEPTED → PACKED | HANDED`, or `REJECTED`, `TIMED_OUT`, `CANCELLED`. Stock goes down when a part is
+accepted (`ORDER` move) and comes back for items marked missing or a cancelled part (`ORDER_BACK`). A supplier never
+sees the customer.
+
+| Who | Rule |
+| --- | --- |
+| Shop | 3 minutes to accept (owner or helper); not accepted → the part times out (`accept` answers 409 `TOO_LATE` until the job runs, `WRONG_STATUS` after). The delivering shop's part rejected or timed out cancels the whole order; a supplier's only its items. An order left with nothing to deliver is cancelled, the ₹10 refunded |
+| Shop | A shop that stopped taking orders (switched off, licence expired, approval removed) between the checkout and the payment gets no order: its part is dropped and refunded, the whole order when it was to deliver it |
+| Shop | The delivering shop sees the customer (name, phone, address, location) only once it accepted; after delivery the name and address only. Shops of one order see each other's phone while it is open, and the customer the shop's |
+| Shop | A supplier hands over only once the delivering shop accepted (409 `NOT_ACCEPTED_YET`). An accepted order the shop can't finish (customer unreachable, wrong address, accepted by mistake) is cancelled by it with a reason, refunded in full, every shop's stock back (handed items are collected from it); a supplier can drop its part before handing over |
+| Shop | Items marked missing while packing are refunded; all missing cancels the order (₹10 refunded too) |
+| Shop | Out for delivery only once every supplier has handed over (409 `WAITING_FOR_SHOP`) |
+| Shop | Delivered with the customer's 4-digit code: every 5th wrong code locks it for 15 minutes, the 15th for a day (429 `CODE_LOCKED`) |
+| Customer | Pays within 30 minutes (the checkout expires 5 minutes later, so a payment made at the last moment still counts; one after that is refunded in full). Razorpay orders capture on their own. A second payment of the same checkout (paid again from another app) is refunded in full, once |
+| Customer | An account can't be deleted while a shop has accepted one of its orders (409 `KIRANA_ORDER_OPEN`); orders not accepted yet are cancelled and refunded with it |
+| Customer | Cancels until the shop accepts (409 `CANT_CANCEL` after); rates 1–5 stars within 7 days of delivery |
+| Customer | Corrects the address text (flat, tower, landmark) until the order goes out, at most 3 times (`canChangeAddress`); the pin stays, so the shop is still within 2 km; the shop is told once it accepted (409 `CANT_CHANGE_ADDRESS` once it is out or after 3: call the shop) |
+| Money | Refunds only before the delivery code is given. Each refund is one Razorpay refund with our id in its notes. A run claims each refund first (two backends never send one together); once asked, a refund is never PENDING again: a lost answer is looked up by our id before asking again, and a failed lookup waits for the next try. Razorpay refusing it makes it FAILED at once (on the admin website) |
+| Money | A payout's status only moves forward: SENDING and SENT may become anything, PROCESSED only REVERSED; FAILED and REVERSED stay (a late or out-of-order answer never undoes them) |
+| Money | Each shop earns its own items on delivery, due 2 working days later; one payout per shop and run, our id as RazorpayX's idempotency key. Without RazorpayX keys, earnings stay "due" |
+
+| Call | What it does |
+| --- | --- |
+| `GET /kirana/online` · `PUT /kirana/online/taking-orders` · `PUT /kirana/online/fssai` | The shop's readiness, FSSAI status, rating, money due and recent payouts (amounts for the owner). Switch `{on}` (owner; 409 `NOT_READY` with `details.missing`). Licence `{number, fileId}` (owner; 400 naming `number` or `fileId`) |
+| `GET /kirana/online/earnings?cursor=` | The owner (403 `OWNER_ONLY` for helpers): one row per delivered order (the shop's part of it), newest first, 50 a page: order number, amount, delivered, due on, and the payout it went in with its status, UPI ID and why it failed |
+| `GET /kirana/catalogue/barcode/{code}` | A scan's catalogue details to prefill a new product (404 `CATALOGUE_NOT_FOUND`) |
+| `GET /kirana/nearby?lat=&lng=&cursor=` | Shops taking orders within 2 km, nearest first, 50 a page |
+| `GET /kirana/shops/{id}/products?q=&cursor=` · `GET /kirana/shops/{id}/nearby-items?q=&cursor=` | The shop's products (in stock or not); items shops within 1 km of it have and it doesn't, at the lowest price. 409 `SHOP_NOT_TAKING_ORDERS` |
+| `POST /kirana/quote` | `{shopId, latitude, longitude, lines: [{productId \| catalogueItemId, quantity}]}` → `{combined, separate, choose, unavailable, separateUnavailable}` (`combined` null when nothing can be given). 409 `TOO_FAR`, `PRODUCT_GONE`, `SHOP_NOT_TAKING_ORDERS` |
+| `POST /kirana/checkouts` | `{clientRef, shopId, latitude, longitude, addressLine, lines, plan: COMBINED\|SEPARATE, method: UPI\|PAY_LATER, expectedTotalPaise}` → `{checkoutId, status, razorpayOrderId, keyId, amountPaise, orders}`. The same `clientRef` → the same checkout. 409 `PRICE_CHANGED` / `NOTHING_AVAILABLE` with `details.quote`; 503 `PAYMENTS_OFF` (keys not set) or `PAYMENTS_UNAVAILABLE` (Razorpay didn't answer: sending it again asks again) |
+| `GET /kirana/checkouts/{id}` · `POST /kirana/checkouts/{id}/paid` | The checkout with its orders (item counts) and every refund (also a late or second payment's); Razorpay checkout's answer `{razorpayOrderId, razorpayPaymentId, razorpaySignature}` (400 `BAD_SIGNATURE`) |
+| `GET /kirana/orders?cursor=` · `GET /kirana/orders/{id}` | The customer's orders; one order with its lines (`fromNearbyShop`, `missing`), refunds, the delivery `otp` (until delivered), `acceptBy` while waiting for the shop, the shop's phone while open, `canCancel`, `canRate`, its rating and comment |
+| `PATCH /kirana/orders/{id}/address` | `{addressLine}` (3–200 letters) → the order |
+| `POST /kirana/orders/{id}/cancel` · `POST /kirana/orders/{id}/rating` | `{reason?}`; `{stars, comment?}` (409 `CANT_CANCEL`, `CANT_RATE`, `ALREADY_RATED`) |
+| `GET /kirana/shop-orders?open=&cursor=` · `GET /kirana/shop-orders/{partId}` | The shop's parts, newest first: `open=true` what it still has to do, `open=false` what is done. Items, `secondsLeft` to accept, the customer (delivering shop, once accepted), what other shops send it and their phones, or for a supplier the shop to hand over to and its phone |
+| `POST /kirana/shop-orders/{partId}/accept \| reject \| missing \| packed \| handed \| out \| deliver \| cancel` | The steps above. `reject {reason}`; `missing {lineNos}` (a supplier left with nothing ends its part); `deliver {otp}` (400 `WRONG_CODE` with `details.triesLeft`); `cancel {reason}`. 409 `TOO_LATE`, `NOT_ACCEPTED_YET`, `WAITING_FOR_SHOP`, `WRONG_STATUS` |
+| `POST /payments/razorpay/webhook` | The same URL as subscriptions: `payment.authorized` (captured), `payment.captured` / `order.paid` (marks the checkout paid), `refund.processed` / `refund.failed`; each event once (`X-Razorpay-Event-Id`) |
+| `POST /payments/razorpayx/webhook` | RazorpayX's own URL and secret: `payout.processed`, `payout.failed`, `payout.reversed` (the owner is told when one fails) |
+| `GET /admin/kirana/catalogue?q=&cursor=` · `PATCH /admin/kirana/catalogue/{id}` | Super admins: the catalogue with its barcodes; corrections `{version, name?, brand?, size?, mrpPaise?, category?}` (409 `CATALOGUE_CHANGED`) |
+| `GET /admin/kirana/fssai?status=` · `POST /admin/kirana/shops/{id}/fssai` | Super admins: certificates waiting for a person (`CHECKING`, default) or refused (`REJECTED`), with the number and file; a decision `{verified, reason?, validUntil, endCurrent?}` (`validUntil` needed to verify, 400 naming it; `endCurrent` ends a licence kept during a renewal), the owner told; refused renewals show `keptUntil` |
+| `GET /admin/kirana/orders/open` · `POST /admin/kirana/orders/{id}/cancel` | The team: paid orders still open 2 hours after they were placed, with the shop's phone; super admins cancel one no one can finish `{reason}` (refunded in full; 409 `WRONG_STATUS`) |
+| `GET /admin/kirana/upi-checks` · `POST /admin/kirana/shops/{id}/upi-check` | The team: shops whose UPI ID changed after approval; checked (404 `NOTHING_TO_CHECK`) |
+| `GET /admin/kirana/refunds/failed` · `GET /admin/kirana/payouts?status=` · `POST /admin/kirana/payouts/{id}/retry` | Super admins: refunds Razorpay refused; payouts by status; a failed or reversed payout sent again |
+
+**Many at once.** A checkout is unique per customer and `clientRef`, so eight taps make one. Razorpay and RazorpayX
+are always called outside database transactions; a checkout, its orders and parts are locked in that order
+(checkout → orders by number → parts → products by id), so the shop accepting, the timeout job and the customer
+cancelling never cross. Jobs (timeouts every 15 s, expiry every minute, refunds every 30 s, payouts every 10 minutes,
+the FSSAI check every minute) each run on one replica at a time (`job_leases`) and take their rows with
+`FOR UPDATE SKIP LOCKED` (refunds are claimed one by one, so a run outlasting its lease never sends one twice). The
+shop's order screens read `(shop_id, board, updated_at DESC, id DESC)` (`board` is OPEN or DONE, kept with the part and
+its order); the timeout job reads a partial index on `accept_by` of waiting parts; the payout run reads earnings by
+payout and skips shops that can't be paid (so they never hold other shops' places); shops near a customer come from
+the PostGIS `location` index.
+Lists are pages read in one query for the page (lines, shops and people fetched in batches).
+
+**Configuration:** `RAZORPAY_*` as for subscriptions (the same webhook URL; add the `payment.*`, `order.paid` and
+`refund.*` events); `RAZORPAYX_KEY_ID`, `RAZORPAYX_KEY_SECRET`, `RAZORPAYX_ACCOUNT_NUMBER`,
+`RAZORPAYX_WEBHOOK_SECRET` (webhook URL `https://<backend>/api/v1/payments/razorpayx/webhook`, the `payout.*`
+events); `KIRANA_AI_KEY` (defaults to `ANTHROPIC_API_KEY`), `KIRANA_AI_MODEL`, `KIRANA_AI_CALLS_PER_DAY` (500).
+
+**Deploying V68–V69:** new tables, a new nullable column on `kirana_products` and `kirana_stock_moves`, the stock
+move reasons widened and `created_by` made optional for order moves; keys and checks on the existing tables are added
+`NOT VALID` and checked by V69 without blocking writes; V71 adds a nullable column (no rewrite); V70 builds the stock moves' order index `CONCURRENTLY`
+(counter bills go on meanwhile). Safe while the old version runs.
+
+## Kirana stock from photos and scans (V72–V73)
+
+Round 3: getting stock in without typing. Everything is under `/api/v1/kirana` for the shop's owner and helpers
+(salon people 409 `NOT_A_KIRANA`); the team's parts are under `/api/v1/admin/kirana` (super admins).
+
+```mermaid
+sequenceDiagram
+    participant A as Partner app
+    participant B as Backend
+    participant J as ReadJob (every 15 s)
+    participant AI as Sonnet
+    A->>B: POST /files?purpose=BILL (photo of the distributor's bill)
+    A->>B: POST /kirana/reads {clientRef, kind: PURCHASE, fileIds}
+    J->>B: claim the read (lease), take the shop's and the day's AI call
+    J->>AI: the pages + the answer's JSON shape
+    AI-->>J: distributor, bill no., lines (brand, name, size, quantity, rate, MRP)
+    J->>B: draft: each line matched (remembered wording, else one clear match in code)
+    A->>B: GET /kirana/purchases/{id} → lines to check, with up to 3 likely products
+    A->>B: PATCH …/lines/{n} (pick / quantity / skip) → POST …/add (stock + cost, once)
+    A->>B: POST /kirana/scans {clientRef, purchaseId?, scans[]} (while shelving)
+    B-->>A: ADDED / TICKED / UNKNOWN (+ needsLabel) / REJECTED
+```
+
+**Bills in any format** (`BillFiles`). A distributor's bill may come as a photo (JPEG, PNG, WEBP), a PDF (up to 20
+pages), an Excel file (`.xlsx`, `.xls`), a Word file (`.docx`), a CSV, a GST e-invoice's JSON (signed or not) or plain
+text: whatever reached the owner's phone (WhatsApp, email, the distributor's app), he uploads it in the app (or shares
+it into the app) with purpose `BILL` (spreadsheets, documents and text at most 2 MB; an iPhone HEIC photo: 400 with
+"share it as JPEG"). Before any AI, the reading job reads it in code: an Excel or CSV bill whose columns it finds (item
+/ description / particulars, qty, free, rate, amount, MRP; bill no. and date above them) and an e-invoice's item list
+become the draft **with no AI call at all**; a PDF made by billing software, a Word file or a sheet it can't place goes
+to the AI as **text** (far fewer tokens than pictures); only photos and scanned PDFs go as pictures.
+
+**Photos read by AI** (`kirana_reads`). Upload the file first (`POST /files`, purpose `BILL` for bills, 1–3 files;
+`PRODUCT_PHOTO` for packs), then `POST /reads {clientRef, kind: PURCHASE | PAPER_BILL, fileIds}` (201, `READING`;
+the same `clientRef` again returns the first). `ReadJob` reads 10 at a time under a lease, each claimed for 5 minutes
+(`SKIP LOCKED`), outside any transaction. The photo is downloaded first; then a shop may have 30 reads a day, all
+shops together `app.kirana.ai-calls-per-day` (500): over either, the read waits until 00:05 without losing a try. The
+AI or storage down, or anything unexpected: tried again after 1, 2, 4, 8, 16 minutes, then `FAILED` with "send it
+again later or enter it by hand"; a photo that isn't a bill or can't be read: `FAILED` with why. A thrown-away or
+failed bill photo is deleted unless something else uses it.
+`GET /reads?kind=`, `GET /reads/{id}`, `POST /reads/{id}/discard` (409 `READ_USED` once it became stock or a bill).
+Photos of bills and products have their own 600 uploads a day per shop, apart from the other 100.
+
+**Distributors' bills** (`kirana_purchases`, `kirana_purchase_lines`). Each line's product: this distributor's
+wording matched before (`REMEMBERED`, `kirana_wordings`), else one clear match by name (`SURE`); the rest wait for the
+shop with up to 3 suggestions (its products, then catalogue items it doesn't have). Names are compared in Java
+(`NameMatcher`): flexible about units (500ML, 0.5 L), short forms (TM = toned milk), spellings (Taza/Taaza), word order
+and brand; never a match for another size; a different variant (toned/gold) is never one tap. `PATCH
+/purchases/{id}/lines/{n} {version, productId?, quantity?, skip?}`; `POST /purchases/{id}/add {version, addAgain?}`:
+409 `LINES_TO_CHECK` (naming them), 409 `BILL_ALREADY_ADDED` (the same distributor, number and date added before:
+send `addAgain` for another delivery), 409 `PURCHASE_CHANGED` (stale version), 409 `PURCHASE_DONE`, 409
+`PRODUCT_REMOVED`. Adding takes a lock on the bill's distributor and number (two copies added at the same moment go one
+at a time: the second gets `BILL_ALREADY_ADDED`), locks the products in id order, adds each one's stock in one
+`RESTOCK` move (with the bill), sets each product's cost to the rate paid and remembers the wordings. What was paid
+(`ratePaise`, `amountPaise`, `totalPaise`, `costPaise`) is the owner's only: null for a helper.
+`PATCH /purchases/{id}/lines {version, lines: [...]}` changes many lines at once (accepting suggestions down the bill);
+`newProduct {itemId | name, unit, pricePaise}` instead of `productId` makes and picks a product the shop doesn't have;
+`ratePaise` (owner) corrects a misread rate; `POST /purchases/{id}/lines` adds a line the reading missed; `PATCH
+/purchases/{id} {version, distributor, billNo, billDate}` corrects the bill's top. Once added, `POST
+/purchases/{id}/lines/{n}/correct {productId | newProduct}` (owner) moves a wrongly picked line's stock to the right
+product (one `MOVE` each), sets its cost and remembers the wording for it. `POST /purchases/{id}/discard` throws a
+draft away.
+
+**Scanning while shelving.** The phone reads barcodes (BarcodeDetector, or ZXing compiled to WebAssembly) and sends
+them in batches: `POST /scans {clientRef, purchaseId?, scans: [{code, times}]}` (1–200). Each scan: `ADDED` (its pack
+times `times` into stock, one `RESTOCK` move per product and barcode), `REJECTED` (a wrong EAN-8/12/13/14 check digit,
+or too many at once: scan again) or `UNKNOWN`. With `purchaseId` (a draft) nothing goes into stock by scanning: each
+product's scans are **held with the bill** (`kirana_purchase_scans`): `TICKED` when it is on one of its lines (with
+`scannedTotal` and the line's `lineQuantity`: "12 of 24"), `HELD` otherwise. Adding the bill adds its lines'
+quantities plus what was held of products on none of its lines; throwing the draft away (from the bill or its photo)
+puts everything held into stock, since it is on the shelves. So stock is never counted twice, whichever comes first. Shop-printed loose labels (20–23…) carry the weight in grams or the price; the
+first 7 digits are linked to the kg product like a barcode. The same `clientRef` again counts nothing (`repeated`).
+
+**Unknown barcodes ("Needs a tap").** `GET /scans/unknown` (20 a page) lists each unknown barcode with its scans, what
+the shared catalogue says (`catalogue`, `trusted`), its label as read, the brand other barcodes of the same company
+have, and up to 3 likely products with `sure` for one clear match. When nobody knows the barcode (`needsLabel`), the
+app sends the scan frame: `POST /scans/unknown/{id}/label {clientRef, fileId}`; Sonnet reads it once for the whole
+network (another shop scanning the same pack reuses that read: no photo, no AI call). `POST /scans/unknown/{id}/link
+{productId | itemId/name/unit/pricePaise, pack?, oneTap?}` links the barcode (as `POST /products/{id}/barcodes`) and
+settles every open entry of it (one per bill it was scanned with): held with a bill still a draft; nothing when the
+bill was added with this product on it (the bill brought them); else into stock (`quantity`, `held`, `note` when a
+loose label adds nothing or a pack was rounded). `needsPhoto` asks for a front photo when neither the product nor its
+catalogue item has one. `POST /scans/unknown/{id}/dismiss` (204) puts one away; `GET /scans/unknown?dismissed=true`
+lists them and `POST /scans/unknown/{id}/reopen` brings one back. Another shop's read of a pack is reused, but a shop
+may send its own photo over it (that read may have been of the wrong pack).
+
+**The owner's corrections, any time.** `POST /products/{id}/move-barcode {code, toProductId, moveStock?}` (owner):
+the barcode moves with its pack; with `moveStock` the stock scanned in with it moves in the same go, else
+`suggestedQuantity` (the stock scanned in with it) is offered for `POST /products/{id}/move-stock
+{clientRef, toProductId, quantity}` (owner; one `MOVE` on each; same unit only: 409 `UNITS_DIFFER`; at most the
+first product's stock: 400 naming quantity). Setting the
+count stays `POST /products/{id}/stock` (`COUNT`); names and prices `PATCH /products/{id}` (the unit can't change after
+a sale; bills keep what they were). `PUT /products/{id}/photo {clientRef, fileId}` (owner or helper);
+`PUT /products/{id}/cost {costPaise}` (owner). Products now carry `photoFileId` (the shop's own, else the catalogue's
+shared one), `photoUrl` (a signed link: a shared photo is another shop's file) and `costPaise` (owner only). A file a
+product, the catalogue, a paper bill, an FSSAI certificate or a read still points at can't be deleted (409
+`FILE_IN_USE`), and a photo the kirana stops using is deleted only when nothing else points at it (uploads of the same
+bytes share one file). `NAME_TAKEN` names the product that has the name (`details.productId`).
+
+**The shared catalogue's trust.** A barcode one shop linked is a suggestion until a second shop links it to the same
+item (or it came from a product master or the team): then `trusted`. A shop that links it to another item keeps its
+own link, and the barcode goes to the team's review list (`CONFLICT`); an owner moving a barcode corrects the
+catalogue when the link was only his shop's say, else the team reviews it (`CORRECTION`). A product's photo whose label
+shows its catalogue item becomes that item's shared photo (once). Admin: `GET /admin/kirana/catalogue/reviews`,
+`POST /admin/kirana/catalogue/reviews/{id} {itemId}` (one of the two, or any item when both are wrong; 204; 409
+`REVIEW_DONE`; an item made only for the review that lost goes), `POST /admin/kirana/catalogue/import` (a distributor's
+product master: a CSV file, multipart field `file`, up to 5,000 rows / 2 MB: a header naming at least barcode and name;
+bad rows listed; a row confirms a shop's link only when the names clearly match, else it is reviewed as `IMPORT`), `GET /admin/kirana/scans/stats?days=30` (scans, the unknown-barcode
+rate, one-tap / picked / new links per day).
+
+**Counter suggestions.** `GET /suggestions?khataCustomerId=&with=…`: `now` (sold most around this hour in the last 14
+days), `usual` (the khata customer's), `together` (often on the same bill as the last 5 items on it). Each list is
+counted at most once per 10 minutes per server and kept in Redis for every server (Redis down: counted in the
+database); products removed or out of stock, and those on the bill already, are left out. "This hour" wraps around
+midnight.
+
+**Paper bills.** A backup for when the counter couldn't scan: `POST /reads {kind: PAPER_BILL}`, then `GET
+/paper-bills/{readId}` (the lines matched to products; `readDate` as read and `writtenOn` when usable, else
+`dateProblem`; `failure` when it couldn't be read) and `POST
+/paper-bills/{readId}/confirm {writtenOn, lines, payment, …}`: exactly a new bill (every check of `POST /bills`),
+plus `writtenOn` (the day on the paper, today or up to 7 days back: 400 otherwise) and the photo kept on the bill
+(`paperPhotoFileId`). The bill's `createdAt` is when it was confirmed, so the day's totals count it on that day, like
+any money that moves then. Confirming again returns the same bill (`repeated`), even after midnight; 409 `READ_NOT_READY` while reading.
+
+**Under load.** No AI call or file download ever runs inside a transaction or a lock; reads are claimed with `SKIP
+LOCKED` and leases, so several servers share the queue. Matching reads the shop's products once per request (at most
+8,000) and compares in memory; catalogue candidates come from a trigram index. Locks are always taken in one order:
+bills (by id; a photo's bill before its read), then unknown scans (by barcode, then id), then products by id. Two
+batches opening the same unknown barcode at once end on one entry (unique key); retries are counted once
+(`kirana_scan_batches`, kept a day, derived `clientRef`s). A product master import runs in one transaction (super
+admins only, at most 5,000 rows).
+
+**Deploying V72–V73:** new tables; nullable columns on `kirana_products`, `kirana_stock_moves`, `kirana_bills`,
+`kirana_catalogue_items` and `kirana_catalogue_barcodes` (the barcodes' `source` and `confirmed` have constant
+defaults: no rewrite); keys and checks added `NOT VALID` with `lock_timeout` 3 s, then checked by V73 without blocking
+writes. Every barcode shops linked before starts as a `SHOP` link; each shop's existing link is counted as its say, and those
+two shops already agree on start trusted. Set `ANTHROPIC_API_KEY` (or
+`app.kirana.ai-key`) for the reading; without it reads fail at once with "enter it by hand".
+
+**Deploying V74–V75** (backend PR "kirana ↔ salon while registering; a kirana's video, food answer and documents"):
+V74 adds the nullable `kirana_settings.sells_food` (no default: instant, no rewrite) and replaces the PASSED rule on
+`shops` (`ck_shops_licence_passed`: a Shops and Establishments certificate may pass with no last day), added `NOT VALID`
+with `lock_timeout` 3 s; V75 checks it without blocking writes. Every row the old rule allowed the new one allows.
+Safe while the old version runs: it never writes `sells_food`, and its PASSED rows all have a last day.
+
+### A kirana's registration and documents
+
+- **Video:** a kirana records the shop's video like a salon (15–45 s, the same upload); Submit needs it.
+- **"Do you sell any food items (packed or loose)?"** (`PUT /kirana/settings/sells-food`): needed before Submit. Yes:
+  the FSSAI licence (`PUT /kirana/online/fssai`, checked by the AI within a minute) is needed too, one still being
+  checked will do (the field team sees how it went on the shop's page, `kirana.fssai`: status, number, reason, last
+  day), a refused or **expired** one won't. No: no FSSAI asked. After Submit (waiting for the visit, or live), No can
+  become Yes only with an FSSAI licence that counts (409 `FSSAI_REQUIRED`), so the Submit rule can't be skipped by
+  answering No first; the change holds the shop's row, so it can't slip between a Submit's check and its save. Online
+  orders still need a verified FSSAI from every kirana until round 2's food filter (No shops then list no food).
+- **One upload as two papers:** uploads of the same bytes share one file, so a PDF with both certificates can be the
+  shop's document and its FSSAI certificate. Neither side deletes the file while the other still points at it (the
+  document dropped by a kind change or replaced; the FSSAI certificate replaced).
+- **A kirana that became a salon while registering** keeps its FSSAI row (for if it changes back), but the FSSAI job
+  spends no AI read on it meanwhile.
+- **Its document, optional:** a municipal trade licence or a Shops and Establishments certificate, checked by the same
+  job as a salon's licence (`LicenceCheckJob`, the AI reads both kinds). For a kirana: a trade licence must be for a
+  grocery, kirana, provisions or general store (`retailTrade`; else `NOT_A_SHOP_TRADE`); a certificate must be one
+  (`NOT_SHOPS_ESTABLISHMENT`), and a nature of business printed on it must be a grocery or general store's; one that
+  prints **no last day passes with no end date** (`licenceValidUntil` null, never "expiring"). The name, address,
+  editing, number and one-shop-per-licence checks are the salon's. The owner's messages point at `/register/licences`
+  while registering, else `/kirana/licences`, and speak of the shop (never "salon"); a kirana's "Licensed" badge is
+  promised for when customers can find kiranas, not claimed as shown, and a reminder names the paper (trade licence or
+  Shops and Establishments certificate).
+
+**GS1 later.** Once the company is registered, unknown barcodes are to be looked up in GS1 India's product data before
+the label is read (see the project's future plans): Sonnet then reads only packs GS1 doesn't know.
+
+## Kirana product setup after Submit (V76–V78)
+
+A kirana is approved only once the field agent has seen that its products are in the app. So after Submit the owner
+(and helpers) set up **every product the shop sells, each with a count** of what is on the shelf. Signup itself is
+unchanged; the counter works from Submit, so a sale after a product is counted takes it off the stock.
+
+```mermaid
+sequenceDiagram
+    participant A as Partner app
+    participant B as Backend
+    participant J as ReadJob
+    A->>B: POST /files?purpose=BILL (one page of the shop's list)
+    A->>B: POST /kirana/reads {clientRef, kind: STOCK_LIST, fileIds: [page]}
+    J->>B: the page read by AI into lines (wording, brand, name, size, by weight, MRP, quantity)
+    A->>B: GET /kirana/setup/lines → 20 lines, each with likely products
+    A->>B: POST /kirana/setup/lines/{id} {action: ADD, productId? | name/unit/price?, quantity} / SKIP / UNDO
+    A->>B: GET /kirana/setup → progress, canFinish
+    A->>B: POST /kirana/setup/finish (owner) → the field visit booked
+```
+
+- **`GET /kirana/setup`** (owner or helper): `products`, `uncounted` and up to 20 `uncountedProducts` (`{id, name}`),
+  `linesToCheck`, `linesAdded`, `linesSkipped`, `pagesReading`, `pagesFailed`, `pagesLeft` (of 60), `pages` (each kept
+  page: `pageNo`, `fileId`, `status`, `failure`, `linesLeftOut` past the 150 one read keeps, its lines' counts),
+  `canFinish`, `youCanFinish` (the owner only), `readyAt`.
+- **Pages of the list** (`kind: STOCK_LIST`): one BILL photo or file each, at most 60 kept a shop (409
+  `TOO_MANY_PAGES`, counted under a per-shop lock; a page deleted or that failed frees its place) and 100 sent a day,
+  deleted and failed ones too (409 `TOO_MANY_PAGES_TODAY`: each was an AI read). They don't use the shop's 30 daily AI
+  reads for bills. A page that isn't a list, or can't be read, fails with the reason, to retake. Deleting a page takes
+  its unchecked lines away (deciding one: 404); products added from it stay.
+- **`GET /kirana/setup/lines?status=&cursor=`**: lines to check (`NEW`, the default, with suggestions), `SKIPPED` (to
+  bring one back) or `ADDED` (with what was `counted`), 20 a page, in the order the pages were sent, each with `pageNo`.
+- **`POST /kirana/setup/lines/{id}`**: `ADD` with `quantity` (400 naming it if missing) either onto a product the shop
+  has (`productId`: its stock becomes the count; when another line was already added onto it, 409 `ALREADY_COUNTED`
+  with its stock until `addToCount` true adds or false replaces) or as a new one (`itemId` from the catalogue and/or
+  `name`, `unit`, `pricePaise`; left out: brand + name + size as read, kg for loose goods else piece, the MRP read if
+  a product may have it, else 400 naming `pricePaise`; 409 `NAME_TAKEN`). Sent again: the line as it is. `SKIP` /
+  `UNDO` (409 `LINE_ADDED` once added: the product is changed instead). 404 `LINE_NOT_FOUND`.
+- **`POST /kirana/setup/finish`** (owner; 403 `OWNER_ONLY`): 409 `NO_PRODUCTS`, `LINES_TO_CHECK` (also while a page
+  is reading), `PAGES_FAILED` (retake or delete), `PRODUCTS_NOT_COUNTED` (with `{id, name}`s). Checked under the
+  shop's setup lock (lines and pages wait). Then `shops.products_ready_at` is set, a note goes on the shop's timeline
+  and, if it was submitted and never approved, the visit is booked with the agent covering its pincode. Again: as it
+  is.
+- **A picture for every product** before finishing (409 `PHOTOS_NEEDED`: `missing`, `checking`, `refused`): its
+  shared catalogue item's, or the shop's own photo once checked. `GET /kirana/setup/photos?cursor=` lists the products
+  without one, 20 a page, each with `sizeToShow` and `loose` (for the camera screen's guidance) and its photo's check.
+  `PUT /kirana/products/{id}/photo {clientRef, fileId, sizeFileId?}`: the photo is checked by AI before it shows
+  (`photoCheck` CHECKING; the old picture stays meanwhile) against the product (`PhotoRules`): the right product and
+  variant, the right size (code compares it with the name's), the front of the pack, sharp, one product, no people;
+  loose goods only need to be those goods. Refused (`REFUSED` / `NEED_SIZE`: a photo of the side with the size, sent with
+  the front's) with `photoCheckReason` in the shop's words. 300 checks a day a shop (409 `TOO_MANY_PHOTOS_TODAY`); they
+  don't use the 30 daily reads for bills. Removing the shop's own photo needs a catalogue picture (409 `PHOTO_NEEDED`).
+  A checked photo of a pack matching its catalogue item becomes the item's picture where it has none, only while the
+  shop is approved (`KiranaFacts.shareCheckedPhotos` at approval, then at each check). Each refusal has a `code`
+  (WRONG_SIZE, OTHER_PRODUCT, NEED_SIZE, BLURRY …) and what the photo showed (`seen`) for the app to word in Hindi or
+  Telugu. After NEED_SIZE the side alone is sent; `fileId` null lets go of a waiting or refused photo, keeping the
+  accepted one. A product renamed or its unit changed has its photo checked again. **AI cost:** each photo check is one
+  AI call, from the platform's own daily allowance for photos (`app.kirana.photo-checks-per-day`, 3,000), so bills
+  (`app.kirana.ai-calls-per-day`, 500) are never held up; set both to what the budget allows.
+- **The field team:** a submitted kirana still setting up is in no review group, not on the dashboard and not assigned
+  (nor counted in an agent's load; one held from before is let go when it is submitted); its page shows
+  `waitingForVisit` false and `productsReadyAt`; approving it is refused with 409 `PRODUCTS_NOT_READY`. A kirana ever
+  approved is never held back. (`ShopAssignmentStore.setUp`, `Shop.visitBookable`.)
+- **Counted products** (`kirana_products.counted_at`): set when a product is added with a stock or counted (Count, a
+  setup line, or created from a distributor's bill or a scan: it starts at 0 and what came in is added); cleared when a
+  sale takes it below zero or it is missing while packing an online order. **Only counted products are offered
+  online** (the shop's list and nearby shops' items); each product says `counted`.
+
+**Deploying V76–V78:** V76 adds nullable `shops.products_ready_at`, `kirana_products.counted_at`, the photo-check
+columns of `kirana_products` (`photo_shareable` NOT NULL DEFAULT false: no rewrite; its keys and rule `NOT VALID`) and
+`kirana_reads.lines_left_out` (no default: no rewrite), marks products with stock above 0 as counted and lets go of
+the agent holding a kirana waiting for its first visit (kiranas aren't live yet: few rows; they are booked again when
+they finish their setup), widens the read kinds (`NOT VALID`) and creates the empty `kirana_list_lines`; V77
+validates; V78 builds the uncounted-products index `CONCURRENTLY`. Safe while the old version runs: it never reads the
+new columns. **Deploy with the partner app's setup screens** (its next PR): without them a new kirana can't finish its
+setup, so its visit is never booked.
+
+## GS1 DataKart: official pictures and barcodes (V79–V80)
+
+**Off until both `GS1_DATAKART_URL` and `GS1_DATAKART_KEY` are set** (Railway variables; `GS1_IMAGE_HOSTS` optionally
+lists other hosts DataKart's pictures may come from). Railway can't keep a variable without a value, so `NULL`, `NONE`
+or `OFF` (any case) count as not set: GS1 stays off with those. Then `Gs1Job` runs every minute on one server:
+
+- **By barcode (CODE):** every barcode new to the shared catalogue whose item has no picture is queued. GS1's product
+  must be ours (brand, name and size agree) and its picture must pass the AI photo check; it becomes the item's
+  picture for every shop selling it (stored as the platform's own file, `CATALOGUE_PHOTO`, no shop's), and the item's
+  missing brand and size are filled in.
+- **By name (NAME):** a packed product added without a barcode, with its size in its name ("Tata Salt 1 kg"), is
+  queued; loose goods and names without a size aren't (they can't be matched clearly). On one clear match (a sure
+  score, clearly ahead of any other likely product) its barcode joins the catalogue (source `GS1`, trusted) and the
+  product is linked to that item, so its picture follows; the product's own barcode is still set only by the shop: the
+  product shows `suggestedBarcode` ("Is this its barcode? Tap to add").
+- **The shop's view:** a product shows `pictureFrom` (SHOP, CATALOGUE or null) and `findingPicture` while GS1 may still
+  bring a picture. Setup counts those as `photosFinding` (listed last in the photos to take, `findingPicture: true`):
+  with only those left, `nextStep` is WAIT, but the shop may photograph them anyway.
+- **"Not this product"** (`POST /kirana/products/{id}/not-this-product`, owner): GS1's match by name was wrong; the
+  link, picture and suggestion go and it isn't looked for again under that name (409 HAS_BARCODE: matched by its
+  barcode; 409 NOT_MATCHED). Renaming a product without a barcode drops what was found and looks again under the new
+  name.
+- **Admin:** `GET /admin/kirana/gs1?status=REFUSED|NOT_FOUND|WAITING|FOUND&cursor=` (super admins): lookups newest change
+  first with their note, shop and product, the counts at each status, and whether GS1 is switched on.
+- Not found: looked up again a month later. GS1 or the AI unreachable or busy: 30 minutes later, for a day, then a
+  month later; the shop is never kept waiting on it (after 3 failures or a day it's a photo to take). A wrong key
+  (401/403) or URL stops the run and gives the lookups back untouched (logged), so fixing the variable is enough. A picture the AI can't make out is skipped. GS1's picture
+  checks have their own daily allowance, `GS1_CHECKS_PER_DAY` (1000), apart from shops' photos
+  (`KIRANA_PHOTO_CHECKS_PER_DAY`).
+- GTIN-14s with leading zeros are read as the EAN-13 (or EAN-8) a pack prints.
+- `DataKart` was written before access to DataKart's API documentation (it calls `GET <url>/products/<gtin>` and
+  `GET <url>/products?q=<name>` with the key as a bearer token, and reads GS1's core attribute names); when access
+  comes, only that class is adjusted to the real API.
+
+**Deploying V79–V80:** V79 widens two `files` rules and the catalogue barcodes' sources (`NOT VALID`) and creates the
+empty `kirana_gs1_lookups` and `kirana_gs1_ai_calls`; V80 validates. Safe while the old version runs.
+
+## Recount pages, products added after finishing, failure codes (V81–V82)
+
+- **Recount** (`POST /kirana/reads {kind: STOCK_LIST, recount: true}`): a page of the list sent again to update counts.
+  A line clearly naming one of the shop's products, with a count written, takes that count without asking (as the
+  shop's Count would); the line is ADDED with `autoCounted`, `countBefore`, `productName` and `stockNow`, the page says
+  `linesAutoCounted`; `GET /kirana/setup/lines?status=ADDED&readId=` lists what one page changed. Never guessed, so
+  asked as usual: a product named twice on the page, kg against pieces, a product the shop never counted itself, one
+  that changed after the photo was sent, one counted from a list in the last 12 hours, a count it can't have.
+  `UNDO` on such a line puts the count back as it was, keeping sales since (a newer count stands), and brings the
+  line back to check; its answer says `countPutBack` (true, or false when the count was left as it is). `ADD` or
+  `SKIP` on it is 409 `AUTO_COUNTED`. A page's `pageNo` is its place among all pages kept (a recount page no longer shown
+  included), so it only changes when an earlier page is thrown away; a
+  recount page is shown in setup for a week (and however old while read, failed, or with lines to check). Lines'
+  `countBefore`, `productName` and `stockNow` are null until the line is added. Throwing the page away puts its counts back first. Recount
+  pages aren't among the 60 kept pages (the 100 a day still count them). 400 naming `recount` for another kind.
+- **Before the first approval** every product needs its count and picture, those added after
+  `POST /kirana/setup/finish` too: setup says `beforeApproval` (`nextStep` COUNT, PHOTOS or WAIT; the visit stays
+  booked), the field team's shop page lists them (`kirana.productGaps`, with how many photos are still `checking`)
+  and approving answers 409 `PRODUCTS_INCOMPLETE` until none is left (also for a shop with no products at all). A shop ever approved is never held back.
+- **`failureCode`** beside every `failure` of a read (reads, list pages, paper bills, scanned labels), from
+  `ReadFailure`, for the app to word in the shop's language; `OTHER` for a reason kept from an older version.
+- Scenarios: `docs/scenarios-kirana-recount.md`.
+
+**Deploying V81–V82:** V81 adds `kirana_reads.recount` (NOT NULL DEFAULT false: no rewrite) and V82 the nullable
+`kirana_list_lines.auto_before`, each under a 3 s lock timeout and in its own migration (one table locked at a time).
+Safe while the old version runs. Next migration: V83.
 
 ## Run it on your laptop
 
@@ -1933,6 +2514,8 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
   `RAZORPAY_KEY_SECRET`, `RAZORPAY_PLAN_ID` and `RAZORPAY_WEBHOOK_SECRET` on Railway, and a webhook in Razorpay to
   `https://<backend>/api/v1/payments/razorpay/webhook` for the `subscription.*` events. Test keys (`rzp_test_…`) first;
   live keys once the website is approved. Only then `SUBSCRIPTIONS_ENFORCED=true` (hides unpaid salons).
+- **Kirana stays off:** leave `KIRANA_ENABLED` unset (or `false`) until kirana launches (see "Kirana switch"); salons
+  don't need it.
 - **Alerts:** on the log lines "80% of the daily SMS limit used", "SMS for new numbers paused", "Daily SMS limit",
   "80% of the daily booking-SMS limit used", "Daily booking-SMS limit" and "A transaction has been open for".
 - **Migrations through the direct URL:** set `DB_URL_DIRECT` to Neon's direct connection string (no `-pooler` in
@@ -2247,7 +2830,8 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V44__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V83__...`; V66–V82 are
+kirana's, merged into `main` with it, so a salon change after them takes the next number too). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).

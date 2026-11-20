@@ -13,6 +13,18 @@ public interface ShopDirectory {
 
     Optional<ShopCard> find(UUID shopId);
 
+    /**
+     * Whether the shop is verified (approved now or before, and not a draft): its owner then confirms changes to its
+     * checked details with a code to his phone first (EditUnlocks), so a phone left signed in can't change them.
+     */
+    boolean needsEditCode(UUID shopId);
+
+    /**
+     * Whether the shop is approved right now (live, not suspended, sent back or closed), its row held in shared mode to
+     * the end of the transaction: an approval being saved is waited for. The caller holds a transaction.
+     */
+    boolean approvedNow(UUID shopId);
+
     /** find() for many shops in one query, by id (unknown ids are left out). */
     java.util.Map<UUID, ShopCard> findAll(java.util.Collection<UUID> shopIds);
 
@@ -56,4 +68,10 @@ public interface ShopDirectory {
                     BigDecimal latitude, BigDecimal longitude, String status, String type, UUID shopPhotoFileId,
                     Double distanceKm, Double distanceMetres) {
     }
+
+    /**
+     * Whether a shop still points at this file (a photo, the video, its registration document): the kirana module
+     * then keeps it when its FSSAI certificate lets go of it (uploads of the same bytes share one file).
+     */
+    boolean usesFile(UUID fileId);
 }

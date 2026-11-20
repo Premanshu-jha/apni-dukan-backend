@@ -397,6 +397,50 @@ class LicenceCheckIntegrationTest {
 
     // ---------- helpers ----------
 
+    @Test
+    void aKiranasShopsAndEstablishmentsCertificateWithNoEndDatePassesAndAHairLicenceDoesNot() {
+        UUID kiranaOwner = person();
+        UUID kirana = UUID.randomUUID();
+        TestData.shop(jdbc, kirana, kiranaOwner);
+        jdbc.update("UPDATE shops SET name = 'Sharma General Store', owner_name = 'Ravi Sharma' WHERE id = ?", kirana);
+        // A salon's document type that a kirana can't send, and one a salon can't
+        Reply udyam = put("/shops/me/registration-document", Map.of("version", version(kirana), "type", "UDYAM",
+                "fileId", upload(kirana, kiranaOwner, "x").toString()), kiranaOwner);
+        assertThat(udyam.status()).isEqualTo(400);
+        Reply salonSe = put("/shops/me/registration-document", Map.of("version", version(salon), "type",
+                "SHOPS_ESTABLISHMENT", "fileId", upload(salon, owner, "y").toString()), owner);
+        assertThat(salonSe.status()).isEqualTo(400);
+
+        ai = text -> new LicenceExtract(true, false, false, false, false, "Labour Department, Telangana", "SEA/HYD/1234",
+                "Sharma General Stores", "Ravi Sharma", "Shop 4, Main Road, Kondapur 500084", "500084",
+                "Retail - Kirana and general goods", null, true, true);
+        Reply sent = put("/shops/me/registration-document", Map.of("version", version(kirana), "type",
+                "SHOPS_ESTABLISHMENT", "fileId", upload(kirana, kiranaOwner, "se-1").toString()), kiranaOwner);
+        assertThat(sent.status()).as(sent.text()).isEqualTo(200);
+        assertThat(job.runOnce()).isEqualTo(1);
+        Reply mine = get("/shops/me", kiranaOwner);
+        assertThat(field(mine.body(), "licenceCheck")).as(mine.text()).isEqualTo("PASSED");
+        assertThat(field(mine.body(), "licenceValidUntil")).isNull();   // no end date printed: none kept
+        assertThat(count("notification_jobs WHERE type = 'SHOP_LICENCE_PASSED' AND url = '/register/licences' "
+                + "AND user_id = '" + kiranaOwner + "'")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT note FROM shop_events WHERE shop_id = ? AND event = 'NOTE'",
+                String.class, kirana)).contains("SEAHYD1234").contains("no end date");
+        // Never "expiring": nothing to remind about
+        CLOCK.set(Instant.parse("2036-01-01T06:00:00Z"));
+        assertThat(expiry.runOnce()).isZero();
+        CLOCK.set(NOW);
+
+        // A trade licence for a salon trade isn't a kirana's
+        ai = text -> genuine("TR-2002", "Sharma General Store");
+        Reply hair = put("/shops/me/registration-document", Map.of("version", version(kirana), "type",
+                "TRADE_LICENCE", "fileId", upload(kirana, kiranaOwner, "tl-1").toString()), kiranaOwner);
+        assertThat(hair.status()).as(hair.text()).isEqualTo(200);
+        assertThat(job.runOnce()).isEqualTo(1);
+        Reply failed = get("/shops/me", kiranaOwner);
+        assertThat(field(failed.body(), "licenceCheck")).isEqualTo("FAILED");
+        assertThat(field(failed.body(), "licenceCheckReason")).isEqualTo("NOT_A_SHOP_TRADE");
+    }
+
     /** A live salon in Kondapur with a service, hours and a barber, so it shows in the salon list. */
     private UUID liveSalon(UUID who, String name) {
         UUID id = UUID.randomUUID();

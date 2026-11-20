@@ -25,7 +25,10 @@ import java.util.UUID;
  * @param addressRequested the owner asked for a new address and it waits for the field team (approve applies it)
  * @param waitingForVisit waiting for the field team: its first visit, a reinstated shop's visit, or a live shop's
  *                      re-check (status APPROVED: it stays live meanwhile). Approve is for these only; Send back for
- *                      PENDING_VISIT, Ask the owner to fix for a live re-check.
+ *                      PENDING_VISIT, Ask the owner to fix for a live re-check. A kirana still setting up its
+ *                      products (never approved) isn't waiting yet.
+ * @param productsReadyAt a kirana: when its owner said all its products are added (its visit booked then); null
+ *                      until then, and for a salon
  */
 public record AdminShopResponse(UUID id, long shopCode, String name, String ownerName, String addressLine,
                                 String area, String city, String pincode, BigDecimal latitude, BigDecimal longitude,
@@ -33,7 +36,7 @@ public record AdminShopResponse(UUID id, long shopCode, String name, String owne
                                 String shopPhotoUrl,
                                 long version, Instant createdAt, ReviewGroup group, String ownerPhone,
                                 String gstin, String udyamNumber, Instant statusSince, Assignee assignedTo,
-                                boolean waitingForVisit, boolean addressRequested) {
+                                boolean waitingForVisit, boolean addressRequested, Instant productsReadyAt) {
 
     public static AdminShopResponse from(Shop shop, String ownerPhotoUrl, String shopPhotoUrl, boolean everApproved,
                                          String ownerPhone, Instant statusSince, Assignee assignedTo,
@@ -42,10 +45,12 @@ public record AdminShopResponse(UUID id, long shopCode, String name, String owne
         return new AdminShopResponse(shop.getId(), shop.getShopCode(), d.name(), d.ownerName(), d.addressLine(),
                 d.area(), d.city(), d.pincode(), d.latitude(), d.longitude(), shop.getType(), shop.getStatus(),
                 shop.getStatusReason(), ownerPhotoUrl, shopPhotoUrl, shop.getVersion(), shop.getCreatedAt(),
-                ReviewGroup.of(shop.getStatus(), shop.getStatusReason(), everApproved, shop.getRecheckSince() != null),
+                ReviewGroup.of(shop.getStatus(), shop.getStatusReason(), everApproved, shop.getRecheckSince() != null,
+                        !shop.visitBookable()),
                 ownerPhone, shop.getType() == ShopType.SALON ? null : d.gstin(),
-                shop.getType() == ShopType.SALON ? null : d.udyamNumber(), statusSince == null ? shop.getCreatedAt() : statusSince,
-                assignedTo, shop.waitingForVisit(), addressRequested);
+                null, statusSince == null ? shop.getCreatedAt() : statusSince,
+                assignedTo, shop.waitingForVisit() && shop.visitBookable(), addressRequested,
+                shop.getProductsReadyAt());
     }
 
     /** @param name null if they haven't set one (or deleted their account) */

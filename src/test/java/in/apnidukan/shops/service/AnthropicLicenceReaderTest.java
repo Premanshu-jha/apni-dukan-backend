@@ -107,7 +107,7 @@ class AnthropicLicenceReaderTest {
         assertThat(sent.path("output_config").path("effort").asString()).isEqualTo("low");
         JsonNode schema = sent.path("output_config").path("format").path("schema");
         assertThat(sent.path("output_config").path("format").path("type").asString()).isEqualTo("json_schema");
-        assertThat(schema.path("required").size()).isEqualTo(13);
+        assertThat(schema.path("required").size()).isEqualTo(15);   // a kirana's two facts too
         assertThat(schema.path("additionalProperties").asBoolean(true)).isFalse();
         JsonNode file = sent.path("messages").get(0).path("content").get(0);
         assertThat(file.path("type").asString()).isEqualTo("image");

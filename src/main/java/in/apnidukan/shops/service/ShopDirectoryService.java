@@ -66,8 +66,27 @@ public class ShopDirectoryService implements ShopDirectory {
 
     @Override
     @Transactional(readOnly = true)
+    public boolean needsEditCode(UUID shopId) {
+        return shops.needsEditCode(shopId);
+    }
+
+    @Override
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public boolean approvedNow(UUID shopId) {
+        return Boolean.TRUE.equals(jdbc.query("SELECT status = 'APPROVED' FROM shops WHERE id = ? FOR SHARE",
+                (rs, i) -> rs.getBoolean(1), shopId).stream().findFirst().orElse(false));
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public Optional<ShopCard> find(UUID shopId) {
         return shops.findById(shopId).map(ShopDirectoryService::card);
+    }
+
+    @Override
+    public boolean usesFile(UUID fileId) {
+        return shops.existsByOwnerPhotoFileIdOrShopPhotoFileIdOrShopVideoFileId(fileId, fileId, fileId)
+                || shops.existsByRegistrationDocFileId(fileId);
     }
 
     @Override

@@ -15,10 +15,14 @@ public enum ReviewGroup {
     SUSPENDED,
     CLOSED;
 
-    /** Null for a draft that was never sent back (registration not finished). */
-    public static ReviewGroup of(ShopStatus status, String statusReason, boolean everApproved, boolean rechecking) {
+    /**
+     * Null for a draft that was never sent back (registration not finished), and for a kirana submitted while its
+     * products aren't set up yet ({@code settingUp}: its visit isn't booked until then).
+     */
+    public static ReviewGroup of(ShopStatus status, String statusReason, boolean everApproved, boolean rechecking,
+                                 boolean settingUp) {
         return switch (status) {
-            case PENDING_VISIT -> everApproved ? RECHECK : FIRST_VISIT;
+            case PENDING_VISIT -> everApproved ? RECHECK : settingUp ? null : FIRST_VISIT;
             case DRAFT -> statusReason == null ? null : SENT_BACK;
             case APPROVED -> rechecking ? RECHECK : LIVE;
             case SUSPENDED -> SUSPENDED;

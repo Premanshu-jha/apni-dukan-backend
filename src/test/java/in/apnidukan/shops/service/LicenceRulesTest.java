@@ -135,6 +135,17 @@ class LicenceRulesTest {
     }
 
     @Test
+    void aSalonsFreshOrSuperStillTellsItsNameApartAsBeforeKiranasCame() {
+        // A kirana's store words ("Fresh", "Super", "Mart") are only noise in a kirana's name
+        assertThat(LicenceRules.sameName("FRESH CUTS UNISEX SALON", "Fresh Cuts")).isTrue();
+        assertThat(LicenceRules.sameName("SUPER SALON", "Super Cuts")).isTrue();
+        LicenceRules.Salon fresh = new LicenceRules.Salon("Fresh Cuts", "Anil Verma", "Road 2", "Tolichowki",
+                "Hyderabad", "500008");
+        assertThat(LicenceRules.decide(with(genuine(), "FRESH CUTS UNISEX SALON", "Suresh Verma", "Tolichowki",
+                "500008"), fresh, TODAY).passed()).isTrue();
+    }
+
+    @Test
     void aPincodeIsNeverTakenFromAPlotRoadOrPhoneNumber() {
         assertThat(LicenceRules.pincode("Plot 12, Road No 3 500033")).isEqualTo("500033");
         assertThat(LicenceRules.pincode("Hyderabad 500033 Ph 9848022338")).isEqualTo("500033");
@@ -167,5 +178,52 @@ class LicenceRulesTest {
         assertThat(LicenceRules.licenceNumber("ab-1")).isNull();
         assertThat(LicenceRules.licenceNumber(null)).isNull();
         assertThat(LicenceRules.licenceNumber("1".repeat(60))).hasSize(40);
+    }
+
+    @Test
+    void aKiranasDocumentIsAGroceryOrGeneralStoresAndAShopsAndEstablishmentsCertificateNeedsNoLastDay() {
+        LicenceRules.Salon kirana = new LicenceRules.Salon("Sharma General Store", "Ravi Kumar Sharma",
+                "Shop 4, Main Road", "Kondapur", "Hyderabad", "500084");
+        LicenceExtract se = new LicenceExtract(true, false, false, false, false, "Labour Department", "SEA/1234",
+                "SHARMA GENERAL STORES", "RAVI SHARMA", "Shop 4, Kondapur 500084", "500084", "Kirana retail", null,
+                true, true);
+        LicenceRules.Outcome passed = LicenceRules.decide(se, kirana, true, true, TODAY);
+        assertThat(passed.passed()).as(String.valueOf(passed.reason())).isTrue();
+        assertThat(passed.validUntil()).isNull();
+        assertThat(passed.licenceNumber()).isEqualTo("SEA1234");
+        // A certificate sent as a trade licence isn't one
+        assertThat(LicenceRules.decide(se, kirana, true, false, TODAY).reason())
+                .isEqualTo(LicenceCheckReason.NOT_TRADE_LICENCE);
+        LicenceExtract tl = new LicenceExtract(true, true, false, false, false, "GHMC", "TR-77", "Sharma Kirana",
+                "Ravi Sharma", "Kondapur 500084", "500084", "Saloon", LocalDate.of(2027, 3, 31), false, false);
+        assertThat(LicenceRules.decide(tl, kirana, true, true, TODAY).reason())
+                .isEqualTo(LicenceCheckReason.NOT_SHOPS_ESTABLISHMENT);
+        // A trade licence for another trade
+        assertThat(LicenceRules.decide(tl, kirana, true, false, TODAY).reason())
+                .isEqualTo(LicenceCheckReason.NOT_A_SHOP_TRADE);
+        // A certificate that prints no nature of business isn't refused for it
+        LicenceExtract plain = new LicenceExtract(true, false, false, false, false, null, "SEA/99", "Sharma Stores",
+                "Ravi Sharma", "Kondapur 500084", "500084", null, null, true, false);
+        assertThat(LicenceRules.decide(plain, kirana, true, true, TODAY).passed()).isTrue();
+        // A kirana's trade licence still needs its last day; an expired certificate is expired
+        LicenceExtract noDay = new LicenceExtract(true, true, false, false, false, "GHMC", "TR-78", "Sharma Kirana",
+                "Ravi Sharma", "Kondapur 500084", "500084", "Kirana", null, false, true);
+        assertThat(LicenceRules.decide(noDay, kirana, true, false, TODAY).reason())
+                .isEqualTo(LicenceCheckReason.NO_VALIDITY);
+        LicenceExtract old = new LicenceExtract(true, false, false, false, false, null, "SEA/98", "Sharma Stores",
+                "Ravi Sharma", "Kondapur 500084", "500084", "Retail", TODAY.minusDays(1), true, true);
+        assertThat(LicenceRules.decide(old, kirana, true, true, TODAY).reason()).isEqualTo(LicenceCheckReason.EXPIRED);
+        // "General Store" words alone don't make two shops the same
+        assertThat(LicenceRules.sameKiranaName("New General Stores", "Lakshmi General Store")).isFalse();
+    }
+
+    @org.junit.jupiter.api.Test
+    void aKiranaIsToldInAShopsWordsNeverASalons() {
+        for (in.apnidukan.shops.domain.LicenceCheckReason r : in.apnidukan.shops.domain.LicenceCheckReason.values()) {
+            org.assertj.core.api.Assertions.assertThat(LicenceCheckJob.explain(r, true)).doesNotContain("salon");
+            org.assertj.core.api.Assertions.assertThat(LicenceCheckJob.describe(r, true)).doesNotContain("salon");
+        }
+        org.assertj.core.api.Assertions.assertThat(LicenceCheckJob.explain(
+                in.apnidukan.shops.domain.LicenceCheckReason.ADDRESS_MISMATCH, false)).contains("your salon's address");
     }
 }

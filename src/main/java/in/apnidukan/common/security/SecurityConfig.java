@@ -1,5 +1,7 @@
 package in.apnidukan.common.security;
 
+import in.apnidukan.common.config.KiranaSwitch;
+import in.apnidukan.common.web.KiranaSwitchFilter;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -15,6 +17,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.CorsFilter;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -25,7 +28,9 @@ import java.util.List;
  * - sign-in endpoints (OTP, refresh, logout, recovery) are open, and so is the support inbox (POST
  *   /api/v1/helpdesk/inbound), which checks the Email Worker's signature itself;
  * - everything else needs a valid access token;
- * - /api/v1/admin/** additionally needs an admin (field team) account.
+ * - /api/v1/admin/** additionally needs an admin (field team) account;
+ * - while kirana is switched off, the kirana API answers 404 KIRANA_OFF to everyone, before the token is looked at
+ *   (KiranaSwitchFilter).
  * No server sessions and no cookies: every request carries its token, so CSRF protection isn't needed.
  */
 @Configuration
@@ -33,7 +38,8 @@ public class SecurityConfig {
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtService jwt,
-                                                   SessionRevocations revocations) throws Exception {
+                                                   SessionRevocations revocations, KiranaSwitch kirana)
+            throws Exception {
         http
                 .csrf(csrf -> csrf.disable())
                 .cors(Customizer.withDefaults())
@@ -53,7 +59,9 @@ public class SecurityConfig {
                                 // Signed by the Email Worker (HMAC), checked by InboundEmailController
                                 "/api/v1/helpdesk/inbound",
                                 // Signed by Razorpay (HMAC), checked by SubscriptionService.webhook
-                                "/api/v1/payments/razorpay/webhook").permitAll()
+                                "/api/v1/payments/razorpay/webhook",
+                                // Signed by RazorpayX (HMAC), checked by KiranaPaymentEvents.payoutEvent
+                                "/api/v1/payments/razorpayx/webhook").permitAll()
                         .requestMatchers("/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
@@ -73,6 +81,8 @@ public class SecurityConfig {
                         })
                         .accessDeniedHandler((request, response, ex) ->
                                 writeError(response, 403, "FORBIDDEN", "You are not allowed to do this.")))
+                // Right after CORS (the answer is readable in a browser), before the token is read: see the filter
+                .addFilterAfter(new KiranaSwitchFilter(kirana), CorsFilter.class)
                 .addFilterBefore(new JwtAuthFilter(jwt, revocations), UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }

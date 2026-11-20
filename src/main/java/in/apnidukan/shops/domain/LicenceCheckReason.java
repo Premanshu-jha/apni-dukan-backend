@@ -1,6 +1,6 @@
 package in.apnidukan.shops.domain;
 
-/** Why a salon's trade licence didn't pass the automatic check. The owner's app turns each into a short fix. */
+/** Why a shop's trade licence (or a kirana's Shops and Establishments certificate) didn't pass the automatic check. The owner's app turns each into a short fix. */
 public enum LicenceCheckReason {
     /** Too blurred, cut off or dark to read. */
     UNREADABLE,
@@ -23,5 +23,9 @@ public enum LicenceCheckReason {
     /** Another salon on the app already has this licence. */
     DUPLICATE,
     /** The AI answered something we couldn't use, several times in a row. */
-    NOT_READ
+    NOT_READ,
+    /** A kirana's licence or certificate for another kind of business, not a grocery or general store. */
+    NOT_A_SHOP_TRADE,
+    /** Sent as a Shops and Establishments certificate, but it isn't one. */
+    NOT_SHOPS_ESTABLISHMENT
 }

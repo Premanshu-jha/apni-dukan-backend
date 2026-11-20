@@ -1,5 +1,6 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.common.notify.Notifications.Notice;
@@ -43,10 +44,12 @@ public class LicenceExpiryJob {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final boolean enabled;
+    private final KiranaSwitch kirana;
 
     public LicenceExpiryJob(LicenceCheckStore store, Notifications notifications, JobLeases leases,
                             PlatformTransactionManager transactions, Clock clock,
-                            @Value("${app.jobs.enabled:true}") boolean enabled) {
+                            @Value("${app.jobs.enabled:true}") boolean enabled, KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.store = store;
         this.notifications = notifications;
         this.leases = leases;
@@ -75,7 +78,8 @@ public class LicenceExpiryJob {
         int before;
         do {
             before = sent;
-            due = store.expiring(today, today.plusDays(REMIND_DAYS), BATCH);
+            // Kirana switched off: no message about a kirana's document (salons' as before)
+            due = store.expiring(today, today.plusDays(REMIND_DAYS), BATCH, kirana.on());
             for (LicenceCheckStore.Expiring e : due) {
                 boolean expired = e.validUntil().isBefore(today);
                 Boolean told = transactions.execute(s -> {
@@ -83,16 +87,21 @@ public class LicenceExpiryJob {
                         return false;   // another server, or the licence changed meanwhile
                     }
                     String day = LicenceCheckJob.day(e.validUntil());
+                    boolean se = "SHOPS_ESTABLISHMENT".equals(e.document());
+                    String paper = se ? "Shops and Establishments certificate" : "trade licence";
+                    String title = se ? "Shops and Establishments certificate" : "Trade licence";
+                    // A kirana's badge comes with the customer app's kirana pages: not claimed as shown yet
+                    String badge = e.kirana() ? "the \"Licensed\" badge your shop gets" : "\"Licensed\" on your salon";
                     for (UUID owner : store.owners(e.shopId())) {
                         notifications.queue(expired
-                                ? new Notice(owner, EXPIRED_TYPE, null, now, "Trade licence expired",
-                                        "Your trade licence expired on " + day + ": customers no longer see "
-                                                + "\"Licensed\". Upload the renewed licence to show it again.",
-                                        LicenceCheckJob.url(e.draft()), Map.of())
-                                : new Notice(owner, EXPIRING_TYPE, null, now, "Trade licence ends soon",
-                                        "Your trade licence is valid until " + day + ". Upload the renewed licence "
-                                                + "before then to keep \"Licensed\" on your salon.",
-                                        LicenceCheckJob.url(e.draft()), Map.of()));
+                                ? new Notice(owner, EXPIRED_TYPE, null, now, title + " expired",
+                                        "Your " + paper + " expired on " + day + ", so " + badge + " is off. Upload "
+                                                + "the renewed one to get it back.",
+                                        LicenceCheckJob.url(e.draft(), e.kirana()), Map.of())
+                                : new Notice(owner, EXPIRING_TYPE, null, now, title + " ends soon",
+                                        "Your " + paper + " is valid until " + day + ". Upload the renewed one before "
+                                                + "then to keep " + badge + ".",
+                                        LicenceCheckJob.url(e.draft(), e.kirana()), Map.of()));
                     }
                     return true;
                 });

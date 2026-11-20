@@ -27,12 +27,19 @@ public class LicenceCheckStore {
      * @param unusable answers so far the job couldn't use
      * @param draft    the salon is still registering (its owner's messages open the registration step, not More)
      */
+    /**
+     * A check to run.
+     * @param kirana             the shop is a kirana (its rules: a grocery or general store's document)
+     * @param shopsEstablishment the document was sent as a Shops and Establishments certificate (a kirana's)
+     */
     public record Due(UUID shopId, UUID fileId, String name, String ownerName, String addressLine, String area,
-                      String city, String pincode, int attempt, int unusable, boolean draft) {
+                      String city, String pincode, int attempt, int unusable, boolean draft, boolean kirana,
+                      boolean shopsEstablishment) {
     }
 
     /** A licence coming to its last day (LicenceExpiryJob). */
-    public record Expiring(UUID shopId, LocalDate validUntil, boolean draft) {
+    /** @param document the kind of paper (TRADE_LICENCE or SHOPS_ESTABLISHMENT), named in the reminder */
+    public record Expiring(UUID shopId, LocalDate validUntil, boolean draft, boolean kirana, String document) {
     }
 
     private final JdbcTemplate jdbc;
@@ -64,31 +71,37 @@ public class LicenceCheckStore {
                             licence_check_attempts = 0, licence_check_unusable = 0, licence_check_due_at = ?,
                             licence_check_since = ?, licence_expiry_notice = 0, registration_doc_checked_at = NULL
                         WHERE id = ? AND registration_doc_file_id IS NOT NULL
-                          AND registration_doc_type = 'TRADE_LICENCE'""",
+                          AND (registration_doc_type = 'TRADE_LICENCE'
+                            OR (registration_doc_type = 'SHOPS_ESTABLISHMENT' AND type = 'KIRANA'))""",
                 Timestamp.from(dueAt), Timestamp.from(now), shopId);
     }
 
     /**
      * Takes up to {@code limit} trade licence checks due by {@code now} (soonest first, ix_shops_licence_due),
      * skipping rows another transaction holds, and moves each one's due time to {@code retryAt}: if this server dies
-     * mid-read, the check is taken again then. Counts the try.
+     * mid-read, the check is taken again then. Counts the try. Kiranas' documents only when {@code kiranas} (kirana
+     * switched off: they are left PENDING, untouched, and taken once it is on).
      */
-    public List<Due> claim(Instant now, Instant retryAt, int limit) {
+    public List<Due> claim(Instant now, Instant retryAt, int limit, boolean kiranas) {
         return jdbc.query("""
                         UPDATE shops s SET licence_check_attempts = s.licence_check_attempts + 1,
                             licence_check_due_at = ?
                         FROM (SELECT id FROM shops WHERE licence_check_status = 'PENDING' AND licence_check_due_at <= ?
-                                AND registration_doc_type = 'TRADE_LICENCE'
+                                AND (registration_doc_type = 'TRADE_LICENCE'
+                                  OR (registration_doc_type = 'SHOPS_ESTABLISHMENT' AND type = 'KIRANA'))
+                                AND (?::boolean OR type <> 'KIRANA')
                               ORDER BY licence_check_due_at, id LIMIT ? FOR UPDATE SKIP LOCKED) d
                         WHERE s.id = d.id
                         RETURNING s.id, s.registration_doc_file_id, s.name, s.owner_name, s.address_line, s.area,
-                            s.city, s.pincode, s.licence_check_attempts, s.licence_check_unusable, s.status""",
+                            s.city, s.pincode, s.licence_check_attempts, s.licence_check_unusable, s.status, s.type,
+                            s.registration_doc_type""",
                 (rs, i) -> new Due(rs.getObject("id", UUID.class), rs.getObject("registration_doc_file_id", UUID.class),
                         rs.getString("name"), rs.getString("owner_name"), rs.getString("address_line"),
                         rs.getString("area"), rs.getString("city"), rs.getString("pincode"),
                         rs.getInt("licence_check_attempts"), rs.getInt("licence_check_unusable"),
-                        "DRAFT".equals(rs.getString("status"))),
-                Timestamp.from(retryAt), Timestamp.from(now), limit);
+                        "DRAFT".equals(rs.getString("status")), "KIRANA".equals(rs.getString("type")),
+                        "SHOPS_ESTABLISHMENT".equals(rs.getString("registration_doc_type"))),
+                Timestamp.from(retryAt), Timestamp.from(now), kiranas, limit);
     }
 
     /** Another salon's check already PASSED with this licence number. */
@@ -158,18 +171,20 @@ public class LicenceCheckStore {
     /**
      * Passed licences whose owner hasn't been told yet that the last day is near (on or before {@code remindBy}) or,
      * past it, that it expired (ix_shops_licence_expiry): notice 0 and the day within reach, or notice below 2 and the
-     * day gone. At most {@code limit}, soonest first.
+     * day gone. At most {@code limit}, soonest first. Kiranas' only when {@code kiranas} (kirana switched off: none).
      */
-    public List<Expiring> expiring(LocalDate today, LocalDate remindBy, int limit) {
+    public List<Expiring> expiring(LocalDate today, LocalDate remindBy, int limit, boolean kiranas) {
         return jdbc.query("""
-                        SELECT id, licence_valid_until, status FROM shops
+                        SELECT id, licence_valid_until, status, type, registration_doc_type FROM shops
                         WHERE licence_check_status = 'PASSED' AND licence_expiry_notice < 2
                           AND licence_valid_until <= ? AND status <> 'CLOSED'
                           AND (licence_expiry_notice = 0 OR licence_valid_until < ?)
+                          AND (?::boolean OR type <> 'KIRANA')
                         ORDER BY licence_valid_until, id LIMIT ?""",
                 (rs, i) -> new Expiring(rs.getObject("id", UUID.class),
-                        rs.getObject("licence_valid_until", LocalDate.class), "DRAFT".equals(rs.getString("status"))),
-                remindBy, today, limit);
+                        rs.getObject("licence_valid_until", LocalDate.class), "DRAFT".equals(rs.getString("status")),
+                        "KIRANA".equals(rs.getString("type")), rs.getString("registration_doc_type")),
+                remindBy, today, kiranas, limit);
     }
 
     /** Marks the message sent (1: the last day is near, 2: expired), once (false if another server did it first). */
