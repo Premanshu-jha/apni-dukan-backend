@@ -108,8 +108,18 @@ public final class TestContainers {
         return "redis://" + r.getHost() + ":" + r.getMappedPort(6379);
     }
 
-    /** Points the app at the test containers, using the same names application.properties reads. */
+    /**
+     * Points the app at the test containers, using the same names application.properties reads. Kirana is switched on
+     * (app.kirana.enabled; the server's default is off): the kirana tests need it, and salons work the same either way.
+     */
     public static void register(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        register(registry, true);
+    }
+
+    /** Like {@link #register(org.springframework.test.context.DynamicPropertyRegistry)}, kirana on or off. */
+    public static void register(org.springframework.test.context.DynamicPropertyRegistry registry,
+                                boolean kiranaEnabled) {
+        registry.add("app.kirana.enabled", () -> Boolean.toString(kiranaEnabled));
         registry.add("app.sms.provider", () -> "log"); // tests capture SMS and email (CapturingSenders),
         registry.add("app.mail.enabled", () -> "false"); // nothing is really sent
         registry.add("DB_URL", TestContainers::jdbcUrl);

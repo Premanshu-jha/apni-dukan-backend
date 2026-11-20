@@ -38,7 +38,8 @@ class FssaiCheckJobTest {
         when(members.members(SHOP)).thenReturn(List.of(new ShopMemberships.Member(OWNER, "OWNER")));
         UserDirectory users = mock(UserDirectory.class);
         when(users.find(any())).thenReturn(Map.of(OWNER, new UserDirectory.Person(OWNER, "Ramesh Kumar", "9848000000")));
-        job = new FssaiCheckJob(null, null, null, shops, members, users, null, null, null, null, 500);
+        job = new FssaiCheckJob(null, null, null, shops, members, users, null, null, null, null, 500,
+                new in.apnidukan.common.config.KiranaSwitch(true));
     }
 
     private static KiranaDocumentAi.FssaiFacts facts(boolean readable, boolean fssai, String number, String business,

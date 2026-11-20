@@ -135,6 +135,17 @@ class LicenceRulesTest {
     }
 
     @Test
+    void aSalonsFreshOrSuperStillTellsItsNameApartAsBeforeKiranasCame() {
+        // A kirana's store words ("Fresh", "Super", "Mart") are only noise in a kirana's name
+        assertThat(LicenceRules.sameName("FRESH CUTS UNISEX SALON", "Fresh Cuts")).isTrue();
+        assertThat(LicenceRules.sameName("SUPER SALON", "Super Cuts")).isTrue();
+        LicenceRules.Salon fresh = new LicenceRules.Salon("Fresh Cuts", "Anil Verma", "Road 2", "Tolichowki",
+                "Hyderabad", "500008");
+        assertThat(LicenceRules.decide(with(genuine(), "FRESH CUTS UNISEX SALON", "Suresh Verma", "Tolichowki",
+                "500008"), fresh, TODAY).passed()).isTrue();
+    }
+
+    @Test
     void aPincodeIsNeverTakenFromAPlotRoadOrPhoneNumber() {
         assertThat(LicenceRules.pincode("Plot 12, Road No 3 500033")).isEqualTo("500033");
         assertThat(LicenceRules.pincode("Hyderabad 500033 Ph 9848022338")).isEqualTo("500033");
@@ -203,7 +214,7 @@ class LicenceRulesTest {
                 "Ravi Sharma", "Kondapur 500084", "500084", "Retail", TODAY.minusDays(1), true, true);
         assertThat(LicenceRules.decide(old, kirana, true, true, TODAY).reason()).isEqualTo(LicenceCheckReason.EXPIRED);
         // "General Store" words alone don't make two shops the same
-        assertThat(LicenceRules.sameName("New General Stores", "Lakshmi General Store")).isFalse();
+        assertThat(LicenceRules.sameKiranaName("New General Stores", "Lakshmi General Store")).isFalse();
     }
 
     @org.junit.jupiter.api.Test

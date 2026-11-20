@@ -1,5 +1,6 @@
 package in.apnidukan.files.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.context.CurrentUser;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.error.ApiException;
@@ -72,7 +73,7 @@ class FileServiceTest {
     void setUp() {
         service = new FileService(repository, storage, currentUser, Clock.fixed(NOW, ZoneOffset.UTC), 5,
                 List.of(usageChecker), List.of(attachedElsewhere), new PhotoCleaning(4), transactions,
-                deletions);
+                deletions, new KiranaSwitch(true));
         lenient().when(currentUser.requireShop()).thenReturn(new CurrentUser(USER, SHOP));
     }
 

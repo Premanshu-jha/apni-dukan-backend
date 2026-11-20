@@ -142,7 +142,7 @@ class FieldAgentIntegrationTest {
         assertThat(id(added)).isEqualTo(customer);   // the same account: their bookings and history stay
         assertThat(jdbc.queryForObject("SELECT email_verified_at IS NULL FROM users WHERE id = ?", Boolean.class,
                 customer)).isTrue();
-        assertThat(LAST_EMAIL.get("9000000003@test.in")).contains("w***@example.com");   // the old verified address
+        assertThat(CapturingSenders.messageTo(LAST_EMAIL, "9000000003@test.in")).contains("w***@example.com");   // the old verified address
         assertThat(get("/auth/me", held).status()).isEqualTo(401);   // signed out: rights come with a new sign-in
     }
 

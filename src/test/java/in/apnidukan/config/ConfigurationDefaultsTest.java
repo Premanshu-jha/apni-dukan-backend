@@ -80,4 +80,10 @@ class ConfigurationDefaultsTest {
         assertThat(r.getProperty("app.notifications.owner-booking-sms")).isEqualTo("false");
         assertThat(r.getProperty("app.jobs.salon-closing-batch")).isEqualTo("500");
     }
+
+    @Test
+    void kiranaIsSwitchedOffUnlessKiranaEnabledIsSet() throws IOException {
+        // Until kirana launches the server runs salons only: KIRANA_ENABLED=true turns kirana on
+        assertThat(defaults().getProperty("app.kirana.enabled")).isEqualTo("false");
+    }
 }
