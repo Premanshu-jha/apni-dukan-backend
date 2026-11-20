@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.FileRefs;
@@ -81,10 +82,12 @@ public class CheckoutService {
     private final FileRefs files;
     private final TransactionTemplate transactions;
     private final Clock clock;
+    private final KiranaSwitch kirana;
 
     public CheckoutService(OrderStore orders, OrderPlanner planner, OrderFlow flow, MoneyStore money,
                            OnlineStore online, KiranaRazorpay razorpay, ShopDirectory shops, FileRefs files,
-                           TransactionTemplate transactions, Clock clock) {
+                           TransactionTemplate transactions, Clock clock, KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.orders = orders;
         this.planner = planner;
         this.flow = flow;
@@ -103,6 +106,9 @@ public class CheckoutService {
     @Transactional(readOnly = true)
     public ShopPage shops(BigDecimal lat, BigDecimal lng, String cursor) {
         requireLocation(lat, lng);
+        if (kirana.off()) {
+            return new ShopPage(List.of(), null);   // kirana switched off: no kirana is listed
+        }
         Optional<String[]> after = Cursors.decode(cursor);
         Double afterMetres = after.flatMap(a -> number(a[0])).orElse(null);
         List<OrderStore.ShopListing> rows = orders.nearby(lat, lng, OrderPlanner.CUSTOMER_METRES,
@@ -123,6 +129,9 @@ public class CheckoutService {
     /** A shop's products in name order, 50 a page; q: names containing it. 409 SHOP_NOT_TAKING_ORDERS. */
     @Transactional(readOnly = true)
     public ListedPage products(UUID shopId, String q, String cursor) {
+        if (kirana.off()) {
+            return new ListedPage(List.of(), null);   // kirana switched off: nothing is listed
+        }
         requireReady(shopId);
         Optional<String[]> after = Cursors.decode(cursor);
         List<OrderStore.Listed> rows = orders.listed(shopId, KiranaChecks.prefix(q), after.map(a -> a[0]).orElse(null),
@@ -141,6 +150,9 @@ public class CheckoutService {
      */
     @Transactional(readOnly = true)
     public NearbyPage nearbyItems(UUID shopId, String q, String cursor) {
+        if (kirana.off()) {
+            return new NearbyPage(List.of(), null);   // kirana switched off: nothing is listed
+        }
         BigDecimal[] at = requireReady(shopId);
         Optional<String[]> after = Cursors.decode(cursor);
         List<OrderStore.NetworkItem> rows = orders.networkItems(shopId, at[0], at[1], OrderPlanner.NETWORK_METRES,

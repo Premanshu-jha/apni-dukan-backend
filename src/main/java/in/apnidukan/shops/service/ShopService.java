@@ -1,5 +1,6 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.context.EditUnlocks;
 import in.apnidukan.common.context.KiranaFacts;
 import in.apnidukan.common.context.SalonFacts;
@@ -90,6 +91,7 @@ public class ShopService implements ShopMemberships {
     private final LicenceCheckStore licences;
     private final RateLimiter limits;
     private final DashboardCounts dashboardCounts;
+    private final KiranaSwitch kirana;
     /** How many licence checks one salon may start a day (each is a paid AI read). */
     static final int CHECKS_PER_DAY = 10;
     static final String CHECKS_KEY = "licence-checks:";
@@ -99,7 +101,8 @@ public class ShopService implements ShopMemberships {
                        ShopInvitesService invites,
                        ShopAssignments assignments, SalonFacts salons, KiranaFacts kiranas,
                        EditUnlocks editUnlocks, LicenceCheckStore licences, RateLimiter limits,
-                       DashboardCounts dashboardCounts) {
+                       DashboardCounts dashboardCounts, KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.dashboardCounts = dashboardCounts;
         this.licences = licences;
         this.limits = limits;
@@ -134,7 +137,11 @@ public class ShopService implements ShopMemberships {
             throw alreadyHasShop();
         }
         Instant now = now();
-        ShopType type = in.type() == null ? ShopType.KIRANA : in.type();
+        // No type sent: a kirana as before, but a salon while kirana is switched off (only salons register then)
+        ShopType type = in.type() != null ? in.type() : kirana.on() ? ShopType.KIRANA : ShopType.SALON;
+        if (type == ShopType.KIRANA) {
+            kirana.requireOn(HttpStatus.BAD_REQUEST);   // switched off: only salons register (400 KIRANA_OFF)
+        }
         boolean salon = type == ShopType.SALON;
         // No shop gives a Udyam number now, and a salon no GSTIN either (its trade licence is what counts): anything
         // sent is ignored. A kirana's GSTIN stays optional (a GST-registered shop shows it on its bills)
@@ -382,6 +389,9 @@ public class ShopService implements ShopMemberships {
         if (shop.getType() == in.type()) {
             return ShopResponse.from(shop, ShopRole.OWNER);
         }
+        if (in.type() == ShopType.KIRANA) {
+            kirana.requireOn(HttpStatus.BAD_REQUEST);   // switched off: nothing becomes a kirana (400 KIRANA_OFF)
+        }
         if (shop.getStatus() != ShopStatus.DRAFT || shop.isEverApproved()) {
             throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
                     "The kind of shop can only be changed while you're registering, before you submit it.");
@@ -440,6 +450,9 @@ public class ShopService implements ShopMemberships {
         if (shop.getStatus() != ShopStatus.DRAFT) {
             throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS",
                     "Only a shop still in DRAFT can be submitted; this one is " + shop.getStatus() + ".");
+        }
+        if (shop.getType() == ShopType.KIRANA) {
+            kirana.requireOn(HttpStatus.CONFLICT);   // switched off: no kirana goes to the field team (409 KIRANA_OFF)
         }
         if (!shop.readyForVisit()) {
             Map<String, Object> missing = new java.util.LinkedHashMap<>();

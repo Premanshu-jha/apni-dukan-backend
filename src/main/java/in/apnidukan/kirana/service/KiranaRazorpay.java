@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.error.ApiException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -34,10 +35,13 @@ public class KiranaRazorpay {
     private final String keyId;
     private final String keySecret;
     private final RazorpayHttp http;
+    private final KiranaSwitch kirana;
 
     public KiranaRazorpay(@Value("${app.razorpay.key-id:}") String keyId,
                           @Value("${app.razorpay.key-secret:}") String keySecret,
-                          @Value("${app.razorpay.endpoint:https://api.razorpay.com}") URI endpoint) {
+                          @Value("${app.razorpay.endpoint:https://api.razorpay.com}") URI endpoint,
+                          KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.keyId = keyId;
         this.keySecret = keySecret;
         this.http = new RazorpayHttp(endpoint, keyId, keySecret);
@@ -47,8 +51,9 @@ public class KiranaRazorpay {
     public record KnownRefund(String id, String status, String ourId) {
     }
 
+    /** Keys are set and kirana is switched on: never a call to Razorpay for a kirana while it is off. */
     public boolean configured() {
-        return !keyId.isBlank() && !keySecret.isBlank();
+        return kirana.on() && !keyId.isBlank() && !keySecret.isBlank();
     }
 
     /** The key id the customer app's checkout opens with (public: it is in every checkout page). */

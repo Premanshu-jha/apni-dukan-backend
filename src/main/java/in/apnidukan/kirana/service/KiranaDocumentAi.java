@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -163,18 +164,22 @@ public class KiranaDocumentAi {
     private final String model;
     private final URI endpoint;
     private final HttpClient http;
+    private final KiranaSwitch kirana;
 
     public KiranaDocumentAi(@Value("${app.kirana.ai-key:${app.licence.ai-key:}}") String apiKey,
                             @Value("${app.kirana.ai-model:claude-sonnet-5-5}") String model,
-                            @Value("${app.kirana.ai-url:https://api.anthropic.com/v1/messages}") URI endpoint) {
+                            @Value("${app.kirana.ai-url:https://api.anthropic.com/v1/messages}") URI endpoint,
+                            KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.apiKey = apiKey;
         this.model = model;
         this.endpoint = endpoint;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
+    /** A key is set and kirana is switched on: never a call to the AI for a kirana while it is off. */
     public boolean configured() {
-        return !apiKey.isBlank();
+        return kirana.on() && !apiKey.isBlank();
     }
 
     /** Reads an FSSAI certificate (a photo or a PDF). */

@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.files.PlatformFiles;
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.kirana.domain.NameMatcher;
@@ -71,11 +72,13 @@ public class Gs1Job {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final int checksPerDay;
+    private final KiranaSwitch kirana;
 
     public Gs1Job(Gs1Store lookups, DataKart gs1, CatalogueStore catalogue, ProductStore products,
                   PlatformFiles files, KiranaDocumentAi ai, OnlineStore online, JobLeases leases,
                   TransactionTemplate transactions, Clock clock,
-                  @Value("${app.kirana.gs1.checks-per-day:1000}") int checksPerDay) {
+                  @Value("${app.kirana.gs1.checks-per-day:1000}") int checksPerDay, KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.lookups = lookups;
         this.gs1 = gs1;
         this.catalogue = catalogue;
@@ -92,6 +95,9 @@ public class Gs1Job {
     @Scheduled(fixedDelayString = "${app.kirana.gs1.every-ms:60000}",
             initialDelayString = "${app.kirana.jobs-delay-ms:50000}")
     public void run() {
+        if (kirana.off()) {
+            return;   // kirana switched off: nothing is asked of GS1 or the AI
+        }
         if (!gs1.configured()) {
             return;   // switched off until GS1_DATAKART_URL and GS1_DATAKART_KEY are set
         }

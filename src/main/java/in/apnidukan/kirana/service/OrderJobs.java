@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.jobs.JobLeases;
@@ -64,11 +65,14 @@ public class OrderJobs {
     private final JobLeases leases;
     private final TransactionTemplate transactions;
     private final Clock clock;
+    private final KiranaSwitch kirana;
 
     public OrderJobs(OrderStore orders, OrderFlow flow, CheckoutService checkouts, MoneyStore money,
                      OnlineStore online, KiranaSettingsStore settings, KiranaRazorpay razorpay,
                      KiranaPayoutGateway payouts, ShopDirectory shops, ShopMemberships memberships,
-                     Notifications notifications, JobLeases leases, TransactionTemplate transactions, Clock clock) {
+                     Notifications notifications, JobLeases leases, TransactionTemplate transactions, Clock clock,
+                     KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.orders = orders;
         this.flow = flow;
         this.checkouts = checkouts;
@@ -90,6 +94,9 @@ public class OrderJobs {
     @Scheduled(fixedDelayString = "${app.kirana.timeouts-ms:15000}",
             initialDelayString = "${app.kirana.jobs-delay-ms:20000}")
     public void timeouts() {
+        if (kirana.off()) {
+            return;   // kirana switched off: nothing to do
+        }
         leases.runExclusively("kirana-order-timeouts", Duration.ofMinutes(2), () -> {
             for (UUID id : orders.overdueParts(clock.instant(), BATCH)) {
                 timeOut(id);
@@ -122,6 +129,9 @@ public class OrderJobs {
     @Scheduled(fixedDelayString = "${app.kirana.expiry-ms:60000}",
             initialDelayString = "${app.kirana.jobs-delay-ms:40000}")
     public void expiry() {
+        if (kirana.off()) {
+            return;   // kirana switched off: nothing to do
+        }
         leases.runExclusively("kirana-checkout-expiry", Duration.ofMinutes(5), () -> {
             // 5 minutes past the 30: a payment made at the last moment and confirmed a little late still counts
             Instant before = clock.instant().minus(CheckoutService.PAY_WITHIN.plusMinutes(5));
@@ -136,7 +146,7 @@ public class OrderJobs {
     @Scheduled(fixedDelayString = "${app.kirana.refunds-ms:30000}",
             initialDelayString = "${app.kirana.jobs-delay-ms:45000}")
     public void refunds() {
-        if (!razorpay.configured()) {
+        if (kirana.off() || !razorpay.configured()) {   // kirana switched off, or Razorpay not set up
             return;
         }
         leases.runExclusively("kirana-refunds", Duration.ofMinutes(10), () -> {
@@ -207,7 +217,7 @@ public class OrderJobs {
     @Scheduled(fixedDelayString = "${app.kirana.payouts-ms:600000}",
             initialDelayString = "${app.kirana.jobs-delay-ms:60000}")
     public void payouts() {
-        if (!payouts.configured()) {
+        if (kirana.off() || !payouts.configured()) {   // kirana switched off, or RazorpayX not set up
             return;
         }
         leases.runExclusively("kirana-payouts", Duration.ofMinutes(30), () -> {

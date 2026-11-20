@@ -1,5 +1,6 @@
 package in.apnidukan.files.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.context.CurrentUser;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.error.ApiException;
@@ -62,6 +63,8 @@ public class FileService {
     private final TransactionOperations transactions;
     private final FileDeletionStore deletions;
 
+    private final KiranaSwitch kirana;
+
     public FileService(StoredFileRepository repository,
                        FileStorage storage,
                        CurrentUserProvider currentUser,
@@ -71,7 +74,9 @@ public class FileService {
                        List<AttachedFiles> attachedElsewhere,
                        PhotoCleaning photos,
                        TransactionOperations transactions,
-                       FileDeletionStore deletions) {
+                       FileDeletionStore deletions,
+                       KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.photos = photos;
         this.transactions = transactions;
         this.deletions = deletions;
@@ -96,6 +101,9 @@ public class FileService {
         }
         if (purpose == FilePurpose.CATALOGUE_PHOTO) {   // the platform's own (PlatformFiles), never a shop's upload
             throw ApiException.badRequest("UNSUPPORTED_FILE_TYPE", "Upload a product's photo as PRODUCT_PHOTO");
+        }
+        if (STOCK_PHOTOS.contains(purpose)) {
+            kirana.requireOn(HttpStatus.BAD_REQUEST);   // a kirana's bills and packs: 400 KIRANA_OFF while it is off
         }
         requireOwnerFor(user, purpose);
 

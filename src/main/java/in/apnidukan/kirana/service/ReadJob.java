@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.kirana.domain.ReadFailure;
@@ -63,13 +64,16 @@ public class ReadJob {
     private final Clock clock;
     private final int callsPerDay;
     private final int photoCallsPerDay;
+    private final KiranaSwitch kirana;
 
     public ReadJob(ReadStore reads, OnlineStore online, KiranaDocumentAi ai, FileRefs files, PurchaseService purchases,
                    ScanService scans, ScanStore scanStore, BillFiles billFiles, ProductSetupService setup,
                    PhotoChecks photoChecks, JobLeases leases,
                    TransactionTemplate transactions, Clock clock,
                    @Value("${app.kirana.ai-calls-per-day:500}") int callsPerDay,
-                   @Value("${app.kirana.photo-checks-per-day:3000}") int photoCallsPerDay) {
+                   @Value("${app.kirana.photo-checks-per-day:3000}") int photoCallsPerDay,
+                   KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.reads = reads;
         this.online = online;
         this.ai = ai;
@@ -90,6 +94,9 @@ public class ReadJob {
     @Scheduled(fixedDelayString = "${app.kirana.read-ms:15000}",
             initialDelayString = "${app.kirana.jobs-delay-ms:30000}")
     public void run() {
+        if (kirana.off()) {
+            return;   // kirana switched off: nothing to do
+        }
         leases.runExclusively("kirana-photo-reads", Duration.ofMinutes(10), () -> {
             for (UUID id : reads.due(KiranaChecks.now(clock), BATCH)) {
                 try {

@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.context.RazorpayEvents;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.kirana.repo.MoneyStore;
@@ -44,10 +45,12 @@ public class KiranaPaymentEvents implements RazorpayEvents {
     private final KiranaPayoutGateway payouts;
     private final TransactionTemplate transactions;
     private final Clock clock;
+    private final KiranaSwitch kirana;
 
     public KiranaPaymentEvents(CheckoutService checkouts, OrderJobs jobs, MoneyStore money, OrderStore orders,
                                KiranaRazorpay razorpay, KiranaPayoutGateway payouts, TransactionTemplate transactions,
-                               Clock clock) {
+                               Clock clock, KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.checkouts = checkouts;
         this.jobs = jobs;
         this.money = money;
@@ -60,6 +63,9 @@ public class KiranaPaymentEvents implements RazorpayEvents {
 
     @Override
     public String handle(String event, byte[] body, String eventId) {
+        if (kirana.off()) {
+            return null;   // kirana switched off: never a kirana's (the subscriptions' webhook goes on as before)
+        }
         if (!event.startsWith("payment.") && !event.startsWith("order.") && !event.startsWith("refund.")) {
             return null;
         }
@@ -116,6 +122,7 @@ public class KiranaPaymentEvents implements RazorpayEvents {
 
     /** A RazorpayX webhook (payouts): 403 BAD_SIGNATURE unless signed with its webhook secret. */
     public String payoutEvent(byte[] body, String signature, String eventId) {
+        kirana.requireOn(HttpStatus.NOT_FOUND);   // also refused in front (KiranaSwitchFilter): 404 KIRANA_OFF
         if (!payouts.webhookSigned(body, signature)) {
             log.warn("A RazorpayX webhook with a wrong or missing signature was refused");
             throw new ApiException(HttpStatus.FORBIDDEN, "BAD_SIGNATURE", "Not signed by RazorpayX.");

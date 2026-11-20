@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.JsonNode;
@@ -28,12 +29,15 @@ public class KiranaPayoutGateway {
     private final String accountNumber;
     private final String webhookSecret;
     private final RazorpayHttp http;
+    private final KiranaSwitch kirana;
 
     public KiranaPayoutGateway(@Value("${app.razorpayx.key-id:}") String keyId,
                                @Value("${app.razorpayx.key-secret:}") String keySecret,
                                @Value("${app.razorpayx.account-number:}") String accountNumber,
                                @Value("${app.razorpayx.webhook-secret:}") String webhookSecret,
-                               @Value("${app.razorpayx.endpoint:https://api.razorpay.com}") URI endpoint) {
+                               @Value("${app.razorpayx.endpoint:https://api.razorpay.com}") URI endpoint,
+                               KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.keyId = keyId;
         this.keySecret = keySecret;
         this.accountNumber = accountNumber;
@@ -45,8 +49,9 @@ public class KiranaPayoutGateway {
     public record Sent(String id, String status) {
     }
 
+    /** Keys are set and kirana is switched on: never a call to RazorpayX while it is off. */
     public boolean configured() {
-        return !keyId.isBlank() && !keySecret.isBlank() && !accountNumber.isBlank();
+        return kirana.on() && !keyId.isBlank() && !keySecret.isBlank() && !accountNumber.isBlank();
     }
 
     /** A RazorpayX contact for the shop (vendor); its id. */
@@ -85,7 +90,8 @@ public class KiranaPayoutGateway {
 
     /** Whether a RazorpayX webhook is genuine. */
     public boolean webhookSigned(byte[] body, String signature) {
-        return !webhookSecret.isBlank() && RazorpayHttp.matches(RazorpayHttp.hmac(webhookSecret, body), signature);
+        return kirana.on() && !webhookSecret.isBlank()
+                && RazorpayHttp.matches(RazorpayHttp.hmac(webhookSecret, body), signature);
     }
 
     private static String id(JsonNode answer, String prefix) {

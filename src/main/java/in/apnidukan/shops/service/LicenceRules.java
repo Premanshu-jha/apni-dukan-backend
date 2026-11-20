@@ -36,14 +36,21 @@ public final class LicenceRules {
         }
     }
 
-    /** Words that say "salon" or "store" in a name: they don't make two names the same business. */
+    /** Words that say "salon" in a name: they don't make two names the same business. */
     private static final Set<String> NAME_NOISE = Set.of("salon", "saloon", "salons", "hair", "hairs", "cut", "cuts",
             "style", "styles", "studio", "unisex", "men", "mens", "gents", "ladies", "beauty", "parlour", "parlor",
             "spa", "shop", "the", "and", "new", "family", "care", "point", "zone", "center", "centre", "barber",
-            "barbers", "makeover", "looks", "academy", "sri", "shri", "m/s", "ms",
-            "kirana", "general", "store", "stores", "provision", "provisions", "traders", "trading", "mart", "super",
-            "supermarket", "market", "bazaar", "bazar", "enterprises", "enterprise", "agencies", "departmental",
-            "grocery", "groceries", "daily", "needs", "fresh");
+            "barbers", "makeover", "looks", "academy", "sri", "shri", "m/s", "ms");
+
+    /**
+     * A kirana's: the salon words and the words that say "store". Kept apart: in a salon's name "Fresh" or "Super"
+     * is what tells it from others ("Fresh Cuts"), so a salon is matched exactly as before.
+     */
+    private static final Set<String> KIRANA_NAME_NOISE = java.util.stream.Stream.concat(NAME_NOISE.stream(),
+            java.util.stream.Stream.of("kirana", "general", "store", "stores", "provision", "provisions", "traders",
+                    "trading", "mart", "super", "supermarket", "market", "bazaar", "bazar", "enterprises", "enterprise",
+                    "agencies", "departmental", "grocery", "groceries", "daily", "needs", "fresh"))
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
 
     /**
      * Names and surnames shared by many unrelated people in Hyderabad: one of them alone doesn't make two names the
@@ -114,22 +121,24 @@ public final class LicenceRules {
             return Outcome.fail(LicenceCheckReason.NOT_A_SHOP_TRADE);
         }
         if (read.validUntil() == null) {
-            return shopsEstablishment ? sameBusiness(read, salon, number, null)
+            return shopsEstablishment ? sameBusiness(read, salon, kirana, number, null)
                     : Outcome.fail(LicenceCheckReason.NO_VALIDITY);
         }
         if (read.validUntil().isBefore(today)) {
             return Outcome.fail(LicenceCheckReason.EXPIRED);
         }
         if (read.validUntil().isAfter(today.plusYears(MAX_YEARS_VALID))) {
-            return shopsEstablishment ? sameBusiness(read, salon, number, null)
+            return shopsEstablishment ? sameBusiness(read, salon, kirana, number, null)
                     : Outcome.fail(LicenceCheckReason.NO_VALIDITY);
         }
-        return sameBusiness(read, salon, number, read.validUntil());
+        return sameBusiness(read, salon, kirana, number, read.validUntil());
     }
 
     /** The last checks, the same for every document: it is this shop's (name, then place). */
-    private static Outcome sameBusiness(LicenceExtract read, Salon salon, String number, LocalDate validUntil) {
-        if (!sameName(read.tradeName(), salon.name()) && !sameName(read.ownerName(), salon.ownerName())) {
+    private static Outcome sameBusiness(LicenceExtract read, Salon salon, boolean kirana, String number,
+                                        LocalDate validUntil) {
+        Set<String> noise = kirana ? KIRANA_NAME_NOISE : NAME_NOISE;
+        if (!sameName(read.tradeName(), salon.name(), noise) && !sameName(read.ownerName(), salon.ownerName(), noise)) {
             return Outcome.fail(LicenceCheckReason.NAME_MISMATCH);
         }
         if (!samePlace(read, salon)) {
@@ -156,13 +165,23 @@ public final class LicenceRules {
      * they share two words even if common ("Syed Ali" and "Ali Syed").
      */
     static boolean sameName(String onLicence, String inApp) {
-        Set<String> a = words(onLicence, NAME_NOISE, 2);
-        Set<String> b = words(inApp, NAME_NOISE, 2);
+        return sameName(onLicence, inApp, NAME_NOISE);
+    }
+
+    /** sameName() for a kirana: its store words ("General Stores", "Mart") don't make two names the same. */
+    static boolean sameKiranaName(String onLicence, String inApp) {
+        return sameName(onLicence, inApp, KIRANA_NAME_NOISE);
+    }
+
+    /** sameName() with the shop type's own noise words (a kirana's also drop "store", "mart", "fresh"…). */
+    static boolean sameName(String onLicence, String inApp, Set<String> noise) {
+        Set<String> a = words(onLicence, noise, 2);
+        Set<String> b = words(inApp, noise, 2);
         if (a.isEmpty() || b.isEmpty()) {
             return false;
         }
-        String flatA = flat(onLicence, NAME_NOISE);
-        String flatB = flat(inApp, NAME_NOISE);
+        String flatA = flat(onLicence, noise);
+        String flatB = flat(inApp, noise);
         boolean flatDistinctive = !COMMON_NAMES.contains(flatA) && !COMMON_NAMES.contains(flatB);
         if (flatDistinctive && flatA.length() >= 4 && flatB.length() >= 4
                 && (flatA.contains(flatB) || flatB.contains(flatA))) {

@@ -1,5 +1,6 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.common.notify.Notifications.Notice;
@@ -43,10 +44,12 @@ public class LicenceExpiryJob {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final boolean enabled;
+    private final KiranaSwitch kirana;
 
     public LicenceExpiryJob(LicenceCheckStore store, Notifications notifications, JobLeases leases,
                             PlatformTransactionManager transactions, Clock clock,
-                            @Value("${app.jobs.enabled:true}") boolean enabled) {
+                            @Value("${app.jobs.enabled:true}") boolean enabled, KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.store = store;
         this.notifications = notifications;
         this.leases = leases;
@@ -75,7 +78,8 @@ public class LicenceExpiryJob {
         int before;
         do {
             before = sent;
-            due = store.expiring(today, today.plusDays(REMIND_DAYS), BATCH);
+            // Kirana switched off: no message about a kirana's document (salons' as before)
+            due = store.expiring(today, today.plusDays(REMIND_DAYS), BATCH, kirana.on());
             for (LicenceCheckStore.Expiring e : due) {
                 boolean expired = e.validUntil().isBefore(today);
                 Boolean told = transactions.execute(s -> {

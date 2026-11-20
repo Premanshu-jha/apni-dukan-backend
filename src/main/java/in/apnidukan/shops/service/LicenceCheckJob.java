@@ -1,5 +1,6 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.common.notify.Notifications;
@@ -79,11 +80,13 @@ public class LicenceCheckJob {
     private final Clock clock;
     private final LicenceAiWatch watch;
     private final boolean enabled;
+    private final KiranaSwitch kirana;
 
     public LicenceCheckJob(LicenceCheckStore store, ObjectProvider<LicenceReader> reader, FileRefs files,
                            ShopReviewStore review, Notifications notifications, JobLeases leases,
                            PlatformTransactionManager transactions, Clock clock, LicenceAiWatch watch,
-                           @Value("${app.jobs.enabled:true}") boolean enabled) {
+                           @Value("${app.jobs.enabled:true}") boolean enabled, KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.store = store;
         this.reader = reader;
         this.files = files;
@@ -121,7 +124,8 @@ public class LicenceCheckJob {
         List<LicenceCheckStore.Due> due;
         do {
             Instant now = now();
-            due = transactions.execute(s -> store.claim(now, now.plus(CLAIM_FOR), BATCH));
+            // Kirana switched off: kiranas' documents wait (no AI read for a kirana), salons' go on as before
+            due = transactions.execute(s -> store.claim(now, now.plus(CLAIM_FOR), BATCH, kirana.on()));
             for (LicenceCheckStore.Due check : due) {
                 check(ai, check);
                 done++;

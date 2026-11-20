@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.context.ShopChangeListener;
 import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.kirana.repo.KiranaSettingsStore;
@@ -24,8 +25,11 @@ class KiranaShopChanges implements ShopChangeListener {
     private final OnlineStore online;
     private final FileRefs files;
     private final Clock clock;
+    private final KiranaSwitch kirana;
 
-    KiranaShopChanges(KiranaSettingsStore settings, OnlineStore online, FileRefs files, Clock clock) {
+    KiranaShopChanges(KiranaSettingsStore settings, OnlineStore online, FileRefs files, Clock clock,
+                      KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.settings = settings;
         this.online = online;
         this.files = files;
@@ -50,7 +54,11 @@ class KiranaShopChanges implements ShopChangeListener {
     @Override
     public void memberRemoved(UUID shopId, UUID userId) {
         // Only an owner sets the UPI ID: the one who set it leaving means the shop was handed over. A helper leaving
-        // changes nothing (access is read from the membership on every call). No row (a salon): nothing to do
+        // changes nothing (access is read from the membership on every call). No row (a salon): nothing to do.
+        // Kirana switched off: nothing either (no kirana can exist then)
+        if (kirana.off()) {
+            return;
+        }
         settings.clearUpiIdSetBy(shopId, userId);
         online.forgetFssaiSetBy(shopId, userId, KiranaChecks.now(clock)).forEach(files::release);
     }

@@ -1,5 +1,6 @@
 package in.apnidukan.kirana.service;
 
+import in.apnidukan.common.config.KiranaSwitch;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.context.ShopMemberships;
 import in.apnidukan.common.context.UserDirectory;
@@ -58,11 +59,13 @@ public class FssaiCheckJob {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final int callsPerDay;
+    private final KiranaSwitch kirana;
 
     public FssaiCheckJob(OnlineStore online, KiranaDocumentAi ai, FileRefs files, ShopDirectory shops,
                          ShopMemberships memberships, UserDirectory users, Notifications notifications,
                          JobLeases leases, TransactionTemplate transactions, Clock clock,
-                         @Value("${app.kirana.ai-calls-per-day:500}") int callsPerDay) {
+                         @Value("${app.kirana.ai-calls-per-day:500}") int callsPerDay, KiranaSwitch kirana) {
+        this.kirana = kirana;
         this.online = online;
         this.ai = ai;
         this.files = files;
@@ -79,7 +82,7 @@ public class FssaiCheckJob {
     @Scheduled(fixedDelayString = "${app.kirana.fssai-check-ms:60000}",
             initialDelayString = "${app.kirana.jobs-delay-ms:30000}")
     public void run() {
-        if (!ai.configured()) {
+        if (kirana.off() || !ai.configured()) {   // kirana switched off, or no AI key: nothing is read
             return;
         }
         leases.runExclusively("kirana-fssai-check", Duration.ofMinutes(10), () -> {
