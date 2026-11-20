@@ -13,7 +13,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, a kirana's GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and trade licence (checked automatically with AI), Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
-| `kirana` | The kirana's own counter (on the `kirana` branch until the kirana flow is finished): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit); stock from photos of distributors' bills and scans, unknown barcodes linked in one tap, counter suggestions and paper bills (round 3) |
+| `kirana` | The kirana's own counter (on `main` with the salons, switched off on the server until kirana launches: see "Kirana switch"): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit); stock from photos of distributors' bills and scans, unknown barcodes linked in one tap, counter suggestions and paper bills (round 3) |
 | `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
 | `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
@@ -814,7 +814,40 @@ publishing or ending one moves the salon's `setup_version` (triggers in V37, lik
 server prices free times and bookings with the current offers at its next read. The cards read the badge in their
 one query per page (`SalonCardStore`). A deleted account's mutes go (`SalonAccountDeletion`).
 
-## The kirana counter (V66–V67, `kirana` branch)
+## Kirana switch
+
+Salons and kiranas are on one branch (`main`): the `kirana` branch was merged into it, with its migrations V66–V82
+(they run on the next deploy whatever the switch says; their notes are in the kirana sections below). Kirana stays
+**off on the server until it launches**, with one switch: `app.kirana.enabled`, the environment variable
+`KIRANA_ENABLED`, **`false` unless set** (`KiranaSwitch`; `ConfigurationDefaultsTest` checks the default).
+
+**Off** (the default):
+- Every request under `/api/v1/kirana/**`, `/api/v1/admin/kirana/**` and `/api/v1/payments/razorpayx/**` answers
+  **404** `{"code": "KIRANA_OFF", "message", "details"}`, signed in or not, admin or not: `KiranaSwitchFilter` runs in
+  the security chain right after CORS and before the sign-in token is read (whole path segments only: `/api/v1/kiranaX`
+  isn't the kirana API).
+- No shop becomes a kirana: `POST /shops` with `type: KIRANA` (or no `type`, which means a kirana) and
+  `PUT /shops/me/type` to `KIRANA` answer 400 `KIRANA_OFF`; a kirana row made earlier can't be submitted for its visit
+  (409 `KIRANA_OFF`); `POST /files` with purpose `BILL` or `PRODUCT_PHOTO` (a kirana's bills and packs) answers 400
+  `KIRANA_OFF`. The customers' kirana lists (shops, products, items nearby) are empty.
+- The kirana jobs do nothing (`ReadJob`, `FssaiCheckJob`, `Gs1Job`, `OrderJobs`: timeouts, expiry, refunds, payouts);
+  the licence check reads no kirana's document (it stays `PENDING`, untouched, and is read once kirana is on) and the
+  licence expiry job tells no kirana (salons' as before); Razorpay
+  payment and refund events are never a kirana's (the subscriptions' webhook goes on as before); a hand-over clears no
+  kirana UPI ID or FSSAI licence.
+- Nothing goes to the AI, GS1 DataKart or RazorpayX for a kirana: besides the above, `KiranaDocumentAi`,
+  `KiranaRazorpay` and `KiranaPayoutGateway` say "not configured" while it is off.
+- The admin website's shop lists and pages work as before (they show existing kirana rows, if any).
+- Salons work exactly the same either way. Every kirana bean still exists (others inject them); each asks the switch.
+
+**On** (`KIRANA_ENABLED=true`): exactly as described in the kirana sections below. On Railway: the backend service's
+Variables, add `KIRANA_ENABLED` = `true` (setting a variable redeploys; removing it or setting `false` turns kirana off
+again). The tests run with it on (`TestContainers.register`), except `KiranaSwitchOffIntegrationTest` (every kirana path
+404 signed in or out, as a customer, an admin or a salon owner; no kirana registered, changed to or submitted; no bill
+or pack photo; the jobs and outside calls idle; a salon found and booked as always) and `KiranaSwitchFilterTest` (which
+paths count, written any way the controllers would read them). The scenarios are in `docs/scenarios.md`.
+
+## The kirana counter (V66–V67)
 
 The kirana's own counter in the partner app: what it stocks, what it sells to walk-in customers, and who owes it on
 khata. **No money passes through Clozest here**: a walk-in customer pays the shop directly (cash, or the shop's own UPI
@@ -913,7 +946,7 @@ for a Udyam number any more** (2026-11-17): one sent by an older app is ignored,
 
 **Deploying V66–V67:** new tables only, nothing existing is changed; safe while the old version runs.
 
-## Kirana online orders (V68–V69, `kirana` branch)
+## Kirana online orders (V68–V69)
 
 Customers order from a kirana near them in the customer app and pay Clozest by Razorpay (UPI or Pay Later); the shop
 packs and delivers; Clozest keeps **₹10 per checkout** and pays each shop its items to its UPI ID by RazorpayX, two
@@ -1045,7 +1078,7 @@ move reasons widened and `created_by` made optional for order moves; keys and ch
 `NOT VALID` and checked by V69 without blocking writes; V71 adds a nullable column (no rewrite); V70 builds the stock moves' order index `CONCURRENTLY`
 (counter bills go on meanwhile). Safe while the old version runs.
 
-## Kirana stock from photos and scans (V72–V73, `kirana` branch)
+## Kirana stock from photos and scans (V72–V73)
 
 Round 3: getting stock in without typing. Everything is under `/api/v1/kirana` for the shop's owner and helpers
 (salon people 409 `NOT_A_KIRANA`); the team's parts are under `/api/v1/admin/kirana` (super admins).
@@ -1218,7 +1251,7 @@ Safe while the old version runs: it never writes `sells_food`, and its PASSED ro
 **GS1 later.** Once the company is registered, unknown barcodes are to be looked up in GS1 India's product data before
 the label is read (see the project's future plans): Sonnet then reads only packs GS1 doesn't know.
 
-## Kirana product setup after Submit (V76–V78, `kirana` branch)
+## Kirana product setup after Submit (V76–V78)
 
 A kirana is approved only once the field agent has seen that its products are in the app. So after Submit the owner
 (and helpers) set up **every product the shop sells, each with a count** of what is on the shelf. Signup itself is
@@ -1294,7 +1327,7 @@ validates; V78 builds the uncounted-products index `CONCURRENTLY`. Safe while th
 new columns. **Deploy with the partner app's setup screens** (its next PR): without them a new kirana can't finish its
 setup, so its visit is never booked.
 
-## GS1 DataKart: official pictures and barcodes (V79–V80, `kirana` branch)
+## GS1 DataKart: official pictures and barcodes (V79–V80)
 
 **Off until both `GS1_DATAKART_URL` and `GS1_DATAKART_KEY` are set** (Railway variables; `GS1_IMAGE_HOSTS` optionally
 lists other hosts DataKart's pictures may come from). Railway can't keep a variable without a value, so `NULL`, `NONE`
@@ -1331,7 +1364,7 @@ or `OFF` (any case) count as not set: GS1 stays off with those. Then `Gs1Job` ru
 **Deploying V79–V80:** V79 widens two `files` rules and the catalogue barcodes' sources (`NOT VALID`) and creates the
 empty `kirana_gs1_lookups` and `kirana_gs1_ai_calls`; V80 validates. Safe while the old version runs.
 
-## Recount pages, products added after finishing, failure codes (V81–V82, `kirana` branch)
+## Recount pages, products added after finishing, failure codes (V81–V82)
 
 - **Recount** (`POST /kirana/reads {kind: STOCK_LIST, recount: true}`): a page of the list sent again to update counts.
   A line clearly naming one of the shop's products, with a count written, takes that count without asking (as the
@@ -2481,6 +2514,8 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
   `RAZORPAY_KEY_SECRET`, `RAZORPAY_PLAN_ID` and `RAZORPAY_WEBHOOK_SECRET` on Railway, and a webhook in Razorpay to
   `https://<backend>/api/v1/payments/razorpay/webhook` for the `subscription.*` events. Test keys (`rzp_test_…`) first;
   live keys once the website is approved. Only then `SUBSCRIPTIONS_ENFORCED=true` (hides unpaid salons).
+- **Kirana stays off:** leave `KIRANA_ENABLED` unset (or `false`) until kirana launches (see "Kirana switch"); salons
+  don't need it.
 - **Alerts:** on the log lines "80% of the daily SMS limit used", "SMS for new numbers paused", "Daily SMS limit",
   "80% of the daily booking-SMS limit used", "Daily booking-SMS limit" and "A transaction has been open for".
 - **Migrations through the direct URL:** set `DB_URL_DIRECT` to Neon's direct connection string (no `-pooler` in
@@ -2795,7 +2830,8 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V81__...`). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V83__...`; V66–V82 are
+kirana's, merged into `main` with it, so a salon change after them takes the next number too). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
