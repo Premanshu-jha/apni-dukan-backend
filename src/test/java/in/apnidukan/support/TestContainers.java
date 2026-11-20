@@ -139,6 +139,9 @@ public final class TestContainers {
         registry.add("app.sms.booking-daily-limit", () -> "300");
         registry.add("app.auth.ip-sends-per-hour", () -> "10");
         registry.add("app.auth.ip-verifies-per-hour", () -> "30");
+        // Every message a test queues must say in English exactly what notices/en.properties says (the translations
+        // are made from that file): a difference fails the test instead of being logged
+        registry.add("app.notifications.strict-texts", () -> "true");
     }
 
     /** A plain S3 client for the test itself, to look inside the bucket. */

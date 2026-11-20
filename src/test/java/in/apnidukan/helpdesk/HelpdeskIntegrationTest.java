@@ -295,6 +295,70 @@ class HelpdeskIntegrationTest {
     }
 
     @Test
+    void ourEmailsAreInTheLanguageOfTheirAccountWithTheTicketNumberAndTheReplyAsTyped() {
+        UUID neha = support("9800000001", "Neha Singh");
+        jdbc.update("UPDATE users SET language = 'hi' WHERE id = ?", customer);
+        String id = ask(customer, "My offer was not applied\nto my booking");
+        assertThat(emailJob.runOnce()).isEqualTo(1);
+        Map<String, Object> ack = ticketEmail(id, false);
+        // The number exactly as in English (an answer finds the ticket by it); the words in Hindi
+        assertThat(ack.get("subject")).isEqualTo("[CLZ-1001] हमें आपकी रिक्वेस्ट मिल गई है");
+        assertThat(ack.get("body")).isEqualTo("नमस्ते Asha,\n\n"
+                + "Clozest सपोर्ट को आपकी रिक्वेस्ट मिल गई है और हमने टिकट CLZ-1001 बना दिया है। हमारी सपोर्ट टीम "
+                + "जितनी जल्दी हो सके आपको जवाब देगी, आमतौर पर एक कामकाजी दिन के अंदर।\n\n"
+                + "आपका मैसेज:\n> My offer was not applied\n> to my booking\n\n"
+                + "कुछ और जोड़ना हो (फ़ोटो या स्क्रीनशॉट भी), तो बस इस ईमेल का जवाब दें (सब्जेक्ट में CLZ-1001 "
+                + "रहने दें)।\n\nClozest सपोर्ट");
+
+        long seen = ((Number) field(get("/admin/tickets/" + id, neha).body(), "lastIncomingSeq")).longValue();
+        Reply replied = post("/admin/tickets/" + id + "/reply", Map.of("seenSeq", seen,
+                "body", "We have refunded the difference.", "resolve", true), neha);
+        assertThat(replied.status()).as(replied.text()).isEqualTo(200);
+        emailJob.runOnce();
+        Map<String, Object> reply = ticketEmail(id, true);
+        assertThat(reply.get("subject")).asString().startsWith("Re: [CLZ-1001] ");
+        // The support person's words and the quoted message exactly as written
+        assertThat(reply.get("body")).isEqualTo("नमस्ते Asha,\n\nWe have refunded the difference.\n\n"
+                + "हमने टिकट CLZ-1001 को हल हुआ मार्क कर दिया है। अगर अब भी मदद चाहिए, तो बस इस ईमेल का जवाब दें, "
+                + "यह फिर से खुल जाएगा।\n\nNeha, Clozest सपोर्ट\n\nआपने लिखा था:\n"
+                + "> My offer was not applied\n> to my booking");
+        // A reply to it comes back to the same ticket
+        assertThat(inbound(email("9000000003@test.in", "Asha", "Re: [CLZ-1001]", "Thanks!",
+                "<hi1@mail.test>")).body()).isEqualTo(Map.of("result", "ADDED"));
+
+        // Someone with no account (they only emailed): English, as before
+        inbound(email("vikram@gmail.com", "Vikram S", "", "Can you list my salon?", "<en1@x>"));
+        String emailed = jdbc.queryForObject("SELECT id::text FROM tickets WHERE requester_email = 'vikram@gmail.com'",
+                String.class);
+        emailJob.runOnce();
+        assertThat(ticketEmail(emailed, false).get("subject")).isEqualTo("[CLZ-1002] We've got your request");
+        assertThat(ticketEmail(emailed, false).get("body")).asString()
+                .startsWith("Hi Vikram,\n\nWe've got your request to Clozest support and created ticket CLZ-1002.")
+                .endsWith("in the subject).\n\nClozest Support");
+        long seenTheirs = ((Number) field(get("/admin/tickets/" + emailed, neha).body(), "lastIncomingSeq"))
+                .longValue();
+        assertThat(post("/admin/tickets/" + emailed + "/reply", Map.of("seenSeq", seenTheirs, "body", "Yes."), neha)
+                .status()).isEqualTo(200);
+        emailJob.runOnce();
+        assertThat(ticketEmail(emailed, true).get("subject")).isEqualTo("Re: [CLZ-1002] Your request");
+        assertThat(ticketEmail(emailed, true).get("body")).asString()
+                .contains("Reply to this email if you have anything to add.\n\nNeha, Clozest Support");
+
+        // Back to no language: English for her too
+        jdbc.update("UPDATE users SET language = NULL WHERE id = ?", customer);
+        String again = ask(customer, "Another question");
+        emailJob.runOnce();
+        assertThat(ticketEmail(again, false).get("subject")).isEqualTo("[CLZ-1003] We've got your request");
+        assertThat(ticketEmail(again, false).get("body")).asString().startsWith("Hi Asha,\n\n");
+    }
+
+    /** A ticket's acknowledgement (its only email not starting "Re:") or its one reply: subject and body. */
+    private Map<String, Object> ticketEmail(String ticketId, boolean reply) {
+        return jdbc.queryForMap("SELECT subject, body FROM ticket_emails WHERE ticket_id = ?::uuid AND (subject LIKE "
+                + "'Re:%') = ?", ticketId, reply);
+    }
+
+    @Test
     void aReplyWrittenBeforeTheirNewMessageIsRefused() {
         UUID neha = support("9800000001", "Neha");
         String id = ask(customer, "Where is my refund for the booking?");

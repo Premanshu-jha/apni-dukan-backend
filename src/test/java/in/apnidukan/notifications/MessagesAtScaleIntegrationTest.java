@@ -159,6 +159,11 @@ class MessagesAtScaleIntegrationTest {
                 }
 
                 @Override
+                public Map<UUID, String> languages(Collection<UUID> userIds) {
+                    return real.languages(userIds);
+                }
+
+                @Override
                 public boolean isActive(UUID userId) {
                     return real.isActive(userId);
                 }
