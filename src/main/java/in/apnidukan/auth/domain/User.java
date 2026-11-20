@@ -28,6 +28,10 @@ public class User {
     @Column(length = 254)
     private String email;
 
+    /** The language the apps show and messages are written in ("hi", ...: Language codes, V83); null: English. */
+    @Column(length = 2)
+    private String language;
+
     @Column(name = "email_verified_at")
     private Instant emailVerifiedAt;
 
@@ -99,6 +103,14 @@ public class User {
         this.updatedAt = now;
     }
 
+    /** @param language a Language code, or null for none chosen (English) */
+    public void setLanguage(String language, Instant now) {
+        this.language = language;
+        this.updatedAt = now;
+    }
+
+    public String getLanguage() { return language; }
+
     public void changePhone(String phone, Instant now) {
         detailsChanged();
         this.phone = phone;
@@ -112,6 +124,7 @@ public class User {
     public void anonymise(Instant now) {
         this.phone = null;
         this.name = null;
+        this.language = null;
         this.email = null;
         this.emailVerifiedAt = null;
         this.adminRole = AdminRole.NONE;

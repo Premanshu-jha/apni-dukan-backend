@@ -62,6 +62,36 @@ public final class AuthRequests {
     }
 
     /** Your name as salons and shops see it, e.g. "Ravi". 2 to 60 characters after cleaning. */
-    public record UpdateMe(@NotBlank @Size(min = 2, max = 60) String name) {
+    /**
+     * PATCH /me: each field only when sent. {@code name} 2 to 60 characters; {@code language} one of en, hi, te, mr,
+     * ta, kn, or null to clear it (a property left out changes nothing, which a record can't tell from null).
+     */
+    public static final class UpdateMe {
+        @Size(min = 2, max = 60)
+        private String name;
+        private String language;
+        private boolean languageSent;
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public String getLanguage() {
+            return language;
+        }
+
+        public void setLanguage(String language) {
+            this.language = language;
+            this.languageSent = true;
+        }
+
+        /** True when the body had "language" (null included). */
+        public boolean languageSent() {
+            return languageSent;
+        }
     }
 }
