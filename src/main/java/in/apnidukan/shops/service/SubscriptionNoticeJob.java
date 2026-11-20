@@ -1,6 +1,7 @@
 package in.apnidukan.shops.service;
 
 import in.apnidukan.common.jobs.JobLeases;
+import in.apnidukan.common.notify.Notifications.Text;
 import in.apnidukan.shops.repo.SubscriptionStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -14,6 +15,7 @@ import java.time.Instant;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Tells salon owners without AutoPay about their trial's or paid month's end, each message once per end
@@ -90,20 +92,31 @@ public class SubscriptionNoticeJob {
                     // Hidden from midnight starting bookableUntil's day: paying any time the day before is in time
                     String payBy = SubscriptionService.day(r.bookableUntil().minusSeconds(1));
                     String price = "₹" + SubscriptionService.PRICE_RUPEES + " a month";
+                    // The same words for an owner who reads another language (notices/*.properties)
+                    Text whatText = Text.of(trial ? "sub.freeTrial" : "sub.paidMonth");
+                    Object dayValue = SubscriptionService.dayValue(r.accessUntil());
+                    Text priceText = Text.of("sub.pricePerMonth", Map.of("price", SubscriptionService.PRICE_RUPEES));
                     switch (level) {
                         case 1 -> subscriptions.tell(r.shopId(), "SUBSCRIPTION_ENDING",
                                 "Your " + what + " ends on " + day,
                                 "Set up AutoPay (" + price + ") in Clozest so customers can keep booking you. "
-                                        + "Nothing is taken before " + day + ".", now);
+                                        + "Nothing is taken before " + day + ".", now,
+                                Text.of("SUBSCRIPTION_ENDING", Map.of("what", whatText, "day", dayValue,
+                                        "price", priceText)));
                         case 2 -> subscriptions.tell(r.shopId(), "SUBSCRIPTION_ENDED",
                                 r.autoPayFailed(now) ? "Your AutoPay payment didn't go through"
                                         : "Your " + what + " has ended",
                                 "Pay ₹" + SubscriptionService.PRICE_RUPEES + " in Clozest by " + payBy
-                                        + ", or customers won't find your salon from the next day.", now);
+                                        + ", or customers won't find your salon from the next day.", now,
+                                Text.of(r.autoPayFailed(now) ? "SUBSCRIPTION_ENDED_AUTOPAY" : "SUBSCRIPTION_ENDED",
+                                        Map.of("what", whatText, "price", SubscriptionService.PRICE_RUPEES,
+                                                "payBy", SubscriptionService.dayValue(
+                                                        r.bookableUntil().minusSeconds(1)))));
                         default -> subscriptions.tell(r.shopId(), "SUBSCRIPTION_HIDDEN",
                                 "Customers can't find your salon",
                                 "Your salon is hidden on Clozest and takes no new online bookings until you pay "
-                                        + price + ". Bookings already made stay.", now);
+                                        + price + ". Bookings already made stay.", now,
+                                Text.of("SUBSCRIPTION_HIDDEN", Map.of("price", priceText)));
                     }
                     return true;
                 });

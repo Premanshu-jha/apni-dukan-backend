@@ -27,6 +27,17 @@ public interface UserDirectory {
     /** Name (null if not set) and phone of each person found; unknown ids are left out. */
     Map<UUID, Person> find(Collection<UUID> userIds);
 
+    /**
+     * The language each person chose (users.language: "hi", "te", ...), for those who chose one; the others read
+     * English. One query for any number of people.
+     */
+    Map<UUID, String> languages(Collection<UUID> userIds);
+
+    /** The person's chosen language code, or null (English). */
+    default String language(UUID userId) {
+        return userId == null ? null : languages(List.of(userId)).get(userId);
+    }
+
     /** False once the person deleted their account (or for an unknown id). */
     boolean isActive(UUID userId);
 

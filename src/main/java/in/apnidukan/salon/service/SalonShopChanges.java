@@ -160,7 +160,7 @@ class SalonShopChanges implements ShopChangeListener {
     @Transactional(propagation = Propagation.MANDATORY)
     public void locationChanged(UUID shopId) {
         shops.find(shopId).ifPresent(card -> appointments.rewriteReminders(shopId, clock.instant(),
-                SalonDayService.LATE_ALLOWANCE, notices.reminderText(card)));
+                SalonDayService.LATE_ALLOWANCE, notices.reminderTexts(card)));
     }
 
     /**

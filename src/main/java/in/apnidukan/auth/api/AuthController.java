@@ -20,8 +20,10 @@ import in.apnidukan.auth.service.AuthService;
 import in.apnidukan.auth.service.EditUnlockStore;
 import in.apnidukan.auth.service.AuthService.PhoneChangeSent;
 import in.apnidukan.common.context.CurrentUserProvider;
+import in.apnidukan.common.error.ApiException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -30,6 +32,9 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Map;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/auth")
@@ -89,10 +94,26 @@ public class AuthController {
         return UserResponse.from(auth.me(currentUser.get().userId()));
     }
 
-    /** Set your name (2 to 60 characters; spaces and look-alike letters are tidied). Shown to salons you book. */
+    /**
+     * Set your name (2 to 60 characters; spaces and look-alike letters are tidied; shown to salons you book) and/or
+     * your language ({@code "language": "hi"}: en, hi, te, mr, ta, kn; null clears it): your messages are written in
+     * it from then on. Only what is sent changes. 400 VALIDATION_FAILED (details.name / details.language), also when
+     * neither is sent; nothing is saved then.
+     */
     @PatchMapping("/me")
     public UserResponse updateMe(@Valid @RequestBody UpdateMe body) {
-        return UserResponse.from(auth.rename(currentUser.get().userId(), body.name()));
+        UUID me = currentUser.get().userId();
+        if (body.getName() == null && !body.languageSent()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("name", "send a name or a language"));
+        }
+        if (body.languageSent()) {
+            AuthService.checkedLanguage(body.getLanguage());   // before the name is saved: all or nothing
+        }
+        if (body.getName() != null) {
+            auth.rename(me, body.getName());
+        }
+        return UserResponse.from(body.languageSent() ? auth.setLanguage(me, body.getLanguage()) : auth.me(me));
     }
 
     /**

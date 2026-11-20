@@ -35,7 +35,10 @@ import java.util.UUID;
  * @param licenceRead what the check read from it (LicenceExtract's fields: the name, holder, address, pincode the owner
  *                    compares with his salon's when it wasn't accepted); null if not read; the owner's only
  * @param statusReason why the field team sent it back to DRAFT or suspended it, or the fix they asked for on a live
- *                     shop's re-check; null otherwise (and for barbers)
+ *                     shop's re-check, in their words (the note under the reasons); null otherwise, when they picked
+ *                     only reasons, and for barbers
+ * @param statusReasonCodes the fixed reasons of a send back or fix asked for (ReviewReason names, in the order
+ *                     picked: the app shows each in the owner's language); empty when none, and for barbers
  * @param version send this back with PATCH /shops/me
  * @param recheckSince when the field team's re-check of a live shop's changes started waiting (a photo, the video,
  *                     the GSTIN or Udyam number changed); null when nothing waits. The shop stays live meanwhile. The
@@ -51,7 +54,8 @@ public record ShopResponse(UUID id, long shopCode, String name, String ownerName
                            Instant registrationDocCheckedAt, LicenceCheckStatus licenceCheck,
                            LicenceCheckReason licenceCheckReason, LocalDate licenceValidUntil,
                            Instant licenceCheckSince, tools.jackson.databind.JsonNode licenceRead, long version,
-                           Instant createdAt, Instant updatedAt, Instant recheckSince, boolean addressLocked) {
+                           Instant createdAt, Instant updatedAt, Instant recheckSince, boolean addressLocked,
+                           java.util.List<String> statusReasonCodes) {
 
     private static final tools.jackson.databind.json.JsonMapper READ =
             tools.jackson.databind.json.JsonMapper.builder().build();
@@ -61,7 +65,7 @@ public record ShopResponse(UUID id, long shopCode, String name, String ownerName
         return new ShopResponse(id, shopCode, name, ownerName, addressLine, area, city, pincode, latitude, longitude,
                 null, null, status, null, type, myRole, null, shopPhotoFileId, null, null, null, null, null, null, null,
                 null, null, version,
-                createdAt, updatedAt, null, addressLocked);
+                createdAt, updatedAt, null, addressLocked, java.util.List.of());
     }
 
     public static ShopResponse from(Shop shop, ShopRole myRole) {
@@ -71,7 +75,7 @@ public record ShopResponse(UUID id, long shopCode, String name, String ownerName
         return new ShopResponse(shop.getId(), shop.getShopCode(), d.name(), d.ownerName(), d.addressLine(), d.area(),
                 d.city(), d.pincode(), d.latitude(), d.longitude(), salon ? null : d.gstin(),
                 null, shop.getStatus(),
-                shop.getStatusReason(), shop.getType(), myRole, shop.getOwnerPhotoFileId(), shop.getShopPhotoFileId(),
+                shop.statusNote(), shop.getType(), myRole, shop.getOwnerPhotoFileId(), shop.getShopPhotoFileId(),
                 myRole == ShopRole.OWNER ? shop.getShopVideoFileId() : null,
                 myRole == ShopRole.OWNER ? shop.getRegistrationDocType() : null,
                 myRole == ShopRole.OWNER ? shop.getRegistrationDocFileId() : null,
@@ -81,6 +85,6 @@ public record ShopResponse(UUID id, long shopCode, String name, String ownerName
                 owner && shop.getLicenceExtract() != null ? READ.readTree(shop.getLicenceExtract()) : null,
                 shop.getVersion(),
                 shop.getCreatedAt(), shop.getUpdatedAt(), myRole == ShopRole.OWNER ? shop.getRecheckSince() : null,
-                shop.addressLocked());
+                shop.addressLocked(), shop.statusReasonCodes());
     }
 }

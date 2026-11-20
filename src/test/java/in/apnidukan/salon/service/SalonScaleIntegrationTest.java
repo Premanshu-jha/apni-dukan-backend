@@ -3,7 +3,9 @@ package in.apnidukan.salon.service;
 import in.apnidukan.common.context.ShopChangeListener;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.common.jobs.LongStatements;
+import in.apnidukan.common.notify.Language;
 import in.apnidukan.common.notify.MessageText;
+import in.apnidukan.common.notify.NoticeTexts;
 import in.apnidukan.common.security.AuthPrincipal;
 import in.apnidukan.common.security.JwtService;
 import in.apnidukan.common.security.SessionRevocations;
@@ -1254,6 +1256,50 @@ class SalonScaleIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT body FROM notification_jobs WHERE ref_id = ? AND type = "
                 + "'BOOKING_REMINDER' AND channel = 'PUSH'", String.class, b)).contains("Shop 9, New Market Road")
                 .startsWith("10:00 AM at Test Shop. Start code ").contains(". Held until 10:10 AM. ");
+    }
+
+    @Test
+    void aCustomerWhoChoosesAnotherLanguageGetsHisWaitingRemindersInItAndOnlyHis() {
+        UUID other = person("9000000102");
+        UUID mine = id(book(customer, at("10:00").plus(Duration.ofDays(2))));
+        UUID theirs = id(book(other, at("11:00").plus(Duration.ofDays(2))));
+        String sms = jdbc.queryForObject("SELECT sms_variables FROM notification_jobs WHERE ref_id = ? AND type = "
+                + "'BOOKING_REMINDER' AND channel = 'SMS'", String.class, mine);
+        String theirBody = reminder(theirs).get("body").toString();
+        assertThat(reminder(mine).get("body")).asString().startsWith("10:00 AM at Test Shop. Start code ");
+
+        Reply hindi = patch("/auth/me", Map.of("language", "hi"), customer);
+        assertThat(hindi.status()).as(hindi.text()).isEqualTo(200);
+        var card = shopDirectory.find(salon).orElseThrow();
+        var expected = SalonNotices.reminder(appointment(mine), card);
+        Map<String, Object> push = reminder(mine);
+        // Exactly what a reminder queued for a Hindi reader says (the same text as Java renders it)
+        assertThat(push.get("title")).isEqualTo(MessageText.cut(NoticeTexts.title(Language.HI, expected.text())
+                .orElseThrow(), MessageText.MAX_TITLE));
+        assertThat(push.get("body")).isEqualTo(MessageText.cut(NoticeTexts.body(Language.HI, expected.text())
+                .orElseThrow(), MessageText.MAX_BODY));
+        assertThat(push.get("body")).asString().startsWith("10:00 AM").doesNotContain("Start code");
+        // The SMS is the DLT template's: unchanged; someone else's reminder: untouched
+        assertThat(jdbc.queryForObject("SELECT sms_variables FROM notification_jobs WHERE ref_id = ? AND type = "
+                + "'BOOKING_REMINDER' AND channel = 'SMS'", String.class, mine)).isEqualTo(sms);
+        assertThat(reminder(theirs).get("body")).isEqualTo(theirBody);
+
+        // Back to none: English again, as Java writes it
+        Map<String, Object> none = new HashMap<>();
+        none.put("language", null);
+        assertThat(patch("/auth/me", none, customer).status()).isEqualTo(200);
+        assertThat(reminder(mine).get("title")).isEqualTo(MessageText.cut(expected.title(), MessageText.MAX_TITLE));
+        assertThat(reminder(mine).get("body")).isEqualTo(MessageText.cut(expected.body(), MessageText.MAX_BODY));
+
+        // A reminder already sent stays as it went out
+        jdbc.update("UPDATE notification_jobs SET status = 'SENT' WHERE ref_id = ?", mine);
+        assertThat(patch("/auth/me", Map.of("language", "te"), customer).status()).isEqualTo(200);
+        assertThat(reminder(mine).get("body")).isEqualTo(MessageText.cut(expected.body(), MessageText.MAX_BODY));
+    }
+
+    private Map<String, Object> reminder(UUID booking) {
+        return jdbc.queryForMap("SELECT title, body FROM notification_jobs WHERE ref_id = ? AND type = "
+                + "'BOOKING_REMINDER' AND channel = 'PUSH'", booking);
     }
 
     // ---------- closed days ----------

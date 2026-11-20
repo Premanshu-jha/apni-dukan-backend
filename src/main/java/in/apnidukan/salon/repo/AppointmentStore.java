@@ -631,12 +631,18 @@ public class AppointmentStore {
      * SalonNotices writes them, already fitted to the stored sizes. Times are "h:mm AM" (7 or 8 characters), so the
      * text before {@code tails} is one of three lengths, and the body's cut at 500 characters (in the tail: the address
      * comes last) is worked out in Java for each: tails[0] when both times are 7 characters, [1] for 15, [2] for 16.
+     * @param language the readers it is for: users.language ("en" also for those who chose none)
      */
-    public record ReminderText(String title, String afterTime, String afterCode, List<String> tails, String smsHead,
-                               String smsMiddle) {
+    public record ReminderText(String language, String title, String afterTime, String afterCode, List<String> tails,
+                               String smsHead, String smsMiddle) {
 
         public ReminderText {
             tails = List.copyOf(tails);
+        }
+
+        /** The same words for the readers of another language (one that has no reminder text of its own). */
+        public ReminderText as(String otherLanguage) {
+            return new ReminderText(otherLanguage, title, afterTime, afterCode, tails, smsHead, smsMiddle);
         }
     }
 
@@ -644,11 +650,23 @@ public class AppointmentStore {
      * Rewrites the pending reminders of every online booking of the salon still to come (CONFIRMED, starting after
      * {@code since}) with the salon's new name and address, in one statement: each booking's own parts (its time,
      * start code and held-until time, in India time) are put in by the database, so a salon with thousands of
-     * bookings ahead is never loaded into memory. Only reminders still waiting (PENDING) change; they become unread
-     * again, like any rewritten message. Returns how many rows changed.
+     * bookings ahead is never loaded into memory. Each reminder gets the words of its reader's language (one
+     * ReminderText per language, joined on users.language; none chosen: "en"). The SMS is the same in every language
+     * (the first text's parts). Only reminders still waiting (PENDING) change; they become unread again, like any
+     * rewritten message. Returns how many rows changed.
      * Found through ix_appointments_shop_confirmed and the pending messages' ref index (ix_notification_jobs_ref).
      */
-    public int rewriteReminders(UUID shopId, Instant since, java.time.Duration heldFor, ReminderText t) {
+    public int rewriteReminders(UUID shopId, Instant since, java.time.Duration heldFor, List<ReminderText> texts) {
+        return rewriteReminders(shopId, since, heldFor, texts, null);
+    }
+
+    /**
+     * rewriteReminders() for one customer's bookings at the salon only ({@code customerId}; null: everyone's), e.g.
+     * after he chose another language.
+     */
+    public int rewriteReminders(UUID shopId, Instant since, java.time.Duration heldFor, List<ReminderText> texts,
+                                UUID customerId) {
+        ReminderText sms = texts.get(0);
         return jdbc.update("""
                         WITH due AS (
                             SELECT id, start_code,
@@ -656,17 +674,51 @@ public class AppointmentStore {
                                 to_char((starts_at + make_interval(mins => ?)) AT TIME ZONE 'Asia/Kolkata',
                                         'FMHH12:MI AM') AS u
                             FROM appointments
-                            WHERE shop_id = ? AND kind = 'BOOKING' AND status = 'CONFIRMED' AND starts_at > ?)
-                        UPDATE notification_jobs j SET title = ?, url = '/bookings/' || d.id, read_at = NULL,
-                            body = d.t || ? || d.start_code || ? || d.u
-                                || (ARRAY[?, ?, ?]::text[])[length(d.t) + length(d.u) - 13],
+                            WHERE shop_id = ? AND kind = 'BOOKING' AND status = 'CONFIRMED' AND starts_at > ?
+                                AND (?::uuid IS NULL OR customer_id = ?::uuid)),
+                        words AS (
+                            SELECT * FROM unnest(?::text[], ?::text[], ?::text[], ?::text[], ?::text[], ?::text[],
+                                ?::text[]) AS w(lang, title, after_time, after_code, tail0, tail1, tail2))
+                        UPDATE notification_jobs j SET title = w.title, url = '/bookings/' || d.id, read_at = NULL,
+                            body = d.t || w.after_time || d.start_code || w.after_code || d.u
+                                || (ARRAY[w.tail0, w.tail1, w.tail2]::text[])[length(d.t) + length(d.u) - 13],
                             sms_variables = CASE WHEN j.channel = 'SMS' THEN ? || d.start_code || ?
                                 || replace(replace(d.t, ':', '%3A'), ' ', '+') || '&UNTIL='
                                 || replace(replace(d.u, ':', '%3A'), ' ', '+') ELSE NULL END
-                        FROM due d
-                        WHERE j.ref_id = d.id AND j.type = 'BOOKING_REMINDER' AND j.status = 'PENDING'""",
-                (int) heldFor.toMinutes(), shopId, at(since), t.title(), t.afterTime(), t.afterCode(),
-                t.tails().get(0), t.tails().get(1), t.tails().get(2), t.smsHead(), t.smsMiddle());
+                        FROM due d, users u, words w
+                        WHERE j.ref_id = d.id AND j.type = 'BOOKING_REMINDER' AND j.status = 'PENDING'
+                            AND u.id = j.user_id AND w.lang = coalesce(u.language, 'en')""",
+                ps -> {
+                    java.sql.Connection c = ps.getConnection();
+                    ps.setInt(1, (int) heldFor.toMinutes());
+                    ps.setObject(2, shopId);
+                    ps.setObject(3, at(since));
+                    ps.setObject(4, customerId, java.sql.Types.OTHER);   // null: everyone's
+                    ps.setObject(5, customerId, java.sql.Types.OTHER);
+                    ps.setArray(6, c.createArrayOf("text", texts.stream().map(ReminderText::language).toArray()));
+                    ps.setArray(7, c.createArrayOf("text", texts.stream().map(ReminderText::title).toArray()));
+                    ps.setArray(8, c.createArrayOf("text", texts.stream().map(ReminderText::afterTime).toArray()));
+                    ps.setArray(9, c.createArrayOf("text", texts.stream().map(ReminderText::afterCode).toArray()));
+                    for (int i = 0; i < 3; i++) {
+                        int tail = i;
+                        ps.setArray(10 + i, c.createArrayOf("text",
+                                texts.stream().map(t -> t.tails().get(tail)).toArray()));
+                    }
+                    ps.setString(13, sms.smsHead());
+                    ps.setString(14, sms.smsMiddle());
+                });
+    }
+
+    /**
+     * The salons where this customer has an online booking still to come (CONFIRMED, starting after {@code since})
+     * whose reminder is still waiting: at most a few (the 2-booking limit), through ix_appointments_customer and the
+     * pending messages' ref index.
+     */
+    public List<UUID> shopsWithPendingReminders(UUID customerId, Instant since) {
+        return jdbc.queryForList("SELECT DISTINCT a.shop_id FROM appointments a WHERE a.customer_id = ? "
+                + "AND a.kind = 'BOOKING' AND a.status = 'CONFIRMED' AND a.starts_at > ? AND EXISTS (SELECT 1 FROM "
+                + "notification_jobs j WHERE j.ref_id = a.id AND j.type = 'BOOKING_REMINDER' AND j.status = 'PENDING')",
+                UUID.class, customerId, at(since));
     }
 
     /**

@@ -10,6 +10,7 @@ import in.apnidukan.auth.repo.RefreshTokenStore;
 import in.apnidukan.auth.repo.UserRepository;
 import in.apnidukan.common.async.BackgroundTasks;
 import in.apnidukan.common.context.AccountDeletionListener;
+import in.apnidukan.common.context.LanguageChangeListener;
 import in.apnidukan.common.context.PersonDetailsListener;
 import in.apnidukan.common.context.PhoneChangeListener;
 import in.apnidukan.common.context.SignOutEverywhereListener;
@@ -100,6 +101,7 @@ public class AuthService {
     private final TestAccountShops testAccountShops;
     private final AdminTeamService team;
     private final EditUnlockStore editUnlocks;
+    private final List<LanguageChangeListener> languageListeners;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
@@ -112,6 +114,7 @@ public class AuthService {
                        List<PersonDetailsListener> detailsListeners, SmsBudget smsBudget,
                        RefreshTokenStore tokenStore, TestAccountShops testAccountShops, AdminTeamService team,
                        List<PhoneChangeListener> phoneListeners, EditUnlockStore editUnlocks,
+                       List<LanguageChangeListener> languageListeners,
                        @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds) {
         if (refreshGraceSeconds < 0 || refreshGraceSeconds > RETRY_GRACE.toSeconds()) {
             // Longer than the retry time would let an old token get new pairs after it should raise the alarm
@@ -120,6 +123,7 @@ public class AuthService {
         this.refreshGrace = Duration.ofSeconds(refreshGraceSeconds);
         this.phoneListeners = phoneListeners;
         this.editUnlocks = editUnlocks;
+        this.languageListeners = languageListeners == null ? List.of() : languageListeners;
         this.team = team;
         this.testMode = testMode;
         this.smsBudget = smsBudget;
@@ -857,6 +861,35 @@ public class AuthService {
             throw new ApiException(HttpStatus.CONFLICT, "SUPER_ADMIN",
                     "You are a super admin. Ask another super admin to change your role on the Team page first.");
         }
+    }
+
+    /**
+     * Saves the language the person reads the apps in (a Language code: en, hi, te, mr, ta, kn), or none (null):
+     * their messages are written in it from now on. 400 VALIDATION_FAILED (details.language) for any other value.
+     */
+    @Transactional
+    public User setLanguage(UUID userId, String code) {
+        String language = checkedLanguage(code);
+        User user = users.lockById(userId).filter(u -> !u.isDeleted())
+                .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+        if (!java.util.Objects.equals(language, user.getLanguage())) {
+            user.setLanguage(language, Instant.now(clock));
+            users.saveAndFlush(user);
+            // Saved (flushed) first: the messages still waiting are written again in the language read from the row
+            languageListeners.forEach(l -> l.languageChanged(userId));
+        }
+        return user;
+    }
+
+    /** The code as saved: null stays null; one of ours as it is; anything else 400 VALIDATION_FAILED. */
+    public static String checkedLanguage(String code) {
+        if (code == null) {
+            return null;
+        }
+        return in.apnidukan.common.notify.Language.of(code).map(in.apnidukan.common.notify.Language::code)
+                .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
+                        "Some fields are not valid",
+                        java.util.Map.of("language", "must be one of en, hi, te, mr, ta, kn")));
     }
 
     /** Sets the person's name, cleaned like shop names (see TextCleaner). */

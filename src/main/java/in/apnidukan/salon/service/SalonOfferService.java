@@ -62,7 +62,8 @@ public class SalonOfferService {
      */
     static final String TYPE = "BOOKING_OFFER";
 
-    private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH);
+    private static final String DAY_PATTERN = "d MMM";
+    private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern(DAY_PATTERN, Locale.ENGLISH);
     private static final DateTimeFormatter PAUSE = DateTimeFormatter.ofPattern("d MMM, h:mm a", Locale.ENGLISH)
             .withZone(SalonTime.ZONE);
 
@@ -149,8 +150,11 @@ public class SalonOfferService {
             String title = cut(offer.percentOff() + "% off at " + checked.salon().name(), 100);
             String body = cut(what(checked) + " · " + when(offer) + ". Book in the app.", 500);
             String url = "/salons/" + c.shopId() + "?offer=" + offer.id();
+            Notifications.Text text = Notifications.Text.of(TYPE, Map.of("percent", offer.percentOff(),
+                    "salon", checked.salon().name(), "what", whatValue(checked), "when", whenValue(offer)));
             notifications.queueAll(to.stream()
-                    .map(u -> new Notice(u, TYPE, offer.id(), now, title, body, url, Map.of()))
+                    .map(u -> new Notice(u, TYPE, offer.id(), now, title, body, url, Map.of()).in(text.key(),
+                            text.values()))
                     .toList());
         }
         return ownerView(offer, 0, today(now));
@@ -317,6 +321,27 @@ public class SalonOfferService {
                 : DAY.format(o.startsOn()) + " – " + DAY.format(o.endsOn());
         return o.fromMin() == null ? days
                 : days + ", " + SalonTime.format(o.fromMin()) + "–" + SalonTime.format(o.toMin());
+    }
+
+    /** when() as a text's value: the days' names in the reader's language, the times as they are. */
+    static Object whenValue(SalonOffer o) {
+        Object days = o.startsOn().equals(o.endsOn()) ? new Notifications.Day(o.startsOn(), DAY_PATTERN)
+                : Notifications.Text.of("offer.days", Map.of("from", new Notifications.Day(o.startsOn(), DAY_PATTERN),
+                        "to", new Notifications.Day(o.endsOn(), DAY_PATTERN)));
+        return o.fromMin() == null ? days
+                : Notifications.Text.of("offer.daysAndTimes", Map.of("days", days,
+                        "from", SalonTime.format(o.fromMin()), "to", SalonTime.format(o.toMin())));
+    }
+
+    /** what() as a text's value. */
+    private static Object whatValue(Checked c) {
+        if (c.all()) {
+            return Notifications.Text.of("offer.allServices");
+        }
+        List<String> names = c.names();
+        return names.size() <= 3 ? String.join(", ", names)
+                : Notifications.Text.of("offer.andMore", Map.of("names", String.join(", ", names.subList(0, 3)),
+                        "count", names.size() - 3));
     }
 
     /** "All services", or up to 3 names and how many more. */

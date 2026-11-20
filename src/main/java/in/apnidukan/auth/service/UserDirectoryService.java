@@ -21,9 +21,28 @@ import java.util.stream.Collectors;
 public class UserDirectoryService implements UserDirectory {
 
     private final UserRepository users;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
-    public UserDirectoryService(UserRepository users) {
+    public UserDirectoryService(UserRepository users, org.springframework.jdbc.core.JdbcTemplate jdbc) {
         this.users = users;
+        this.jdbc = jdbc;
+    }
+
+    /** One statement for the whole batch (the primary key, by an array): a message to lakhs of people is one read. */
+    @Override
+    @Transactional(readOnly = true)
+    public Map<UUID, String> languages(Collection<UUID> userIds) {
+        Map<UUID, String> out = new java.util.HashMap<>();
+        if (userIds.isEmpty()) {
+            return out;
+        }
+        Object[] ids = userIds.stream().distinct().toArray();
+        jdbc.query("SELECT id, language FROM users WHERE id = ANY (?) AND language IS NOT NULL",
+                ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", ids)),
+                rs -> {
+                    out.put(rs.getObject("id", UUID.class), rs.getString("language"));
+                });
+        return out;
     }
 
     @Override

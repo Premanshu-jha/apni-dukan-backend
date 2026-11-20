@@ -16,11 +16,12 @@ public final class AuthResponses {
      * @param admin     true for the admin website's users (ADMIN or SUPER_ADMIN)
      * @param adminRole NONE, ADMIN or SUPER_ADMIN
      */
+    /** @param language the language the person chose ("hi", "te", ...), or null (none chosen: English) */
     public record UserResponse(UUID id, String phone, String name, String email, boolean emailVerified,
-                               boolean admin, AdminRole adminRole) {
+                               boolean admin, AdminRole adminRole, String language) {
         static UserResponse from(User u) {
             return new UserResponse(u.getId(), u.getPhone(), u.getName(), u.getEmail(), u.isEmailVerified(),
-                    u.isAdmin(), u.getAdminRole());
+                    u.isAdmin(), u.getAdminRole(), u.getLanguage());
         }
     }
 

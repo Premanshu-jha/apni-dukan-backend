@@ -190,9 +190,11 @@ public class LicenceCheckJob {
                 // A kirana's badge comes with the customer app's kirana pages: it is promised, not claimed shown
                 String shown = check.kirana() ? "Customers will see \"Licensed\" on your shop when they can find it in Clozest"
                         : "Customers now see \"Licensed\" on your salon";
+                // A salon's always has an end date (LicenceRules); a kirana's message stays English for now
                 tell(check.shopId(), PASSED_TYPE, document(check) + " checked",
                         shown + (outcome.validUntil() == null ? "." : ", until " + day(outcome.validUntil()) + "."),
-                        url(check), now);
+                        url(check), now, check.kirana() || outcome.validUntil() == null ? null
+                                : Notifications.Text.of(PASSED_TYPE, Map.of("day", dayValue(outcome.validUntil()))));
                 return true;
             });
             if (Boolean.TRUE.equals(wrote)) {
@@ -230,7 +232,9 @@ public class LicenceCheckJob {
                     document(check) + " not accepted automatically: " + describe(reason, check.kirana()), List.of());
             tell(check.shopId(), FAILED_TYPE, document(check) + " not accepted",
                     explain(reason, check.kirana()) + " Open " + (check.kirana() ? "Licences" : "Trade licence") + " to see what to do.",
-                    url(check), now);
+                    url(check), now, check.kirana() ? null   // a kirana's stays English for now
+                            : Notifications.Text.of(FAILED_TYPE, Map.of("why",
+                                    Notifications.Text.of("licence." + reason.name()))));
             return true;
         });
         if (Boolean.TRUE.equals(wrote)) {
@@ -238,10 +242,17 @@ public class LicenceCheckJob {
         }
     }
 
-    private void tell(UUID shopId, String type, String title, String body, String url, Instant now) {
+    private void tell(UUID shopId, String type, String title, String body, String url, Instant now,
+                      Notifications.Text text) {
         for (UUID owner : store.owners(shopId)) {
-            notifications.queue(new Notice(owner, type, null, now, title, body, url, Map.of()));
+            Notice notice = new Notice(owner, type, null, now, title, body, url, Map.of());
+            notifications.queue(text == null ? notice : notice.in(text.key(), text.values()));
         }
+    }
+
+    /** day() as a text's value: the month's name in the reader's language. */
+    static Notifications.Day dayValue(LocalDate date) {
+        return new Notifications.Day(date, "d MMM yyyy");
     }
 
     /** The owner's page about the licence: the registration step while the salon is a draft, else the Salon tab's. */

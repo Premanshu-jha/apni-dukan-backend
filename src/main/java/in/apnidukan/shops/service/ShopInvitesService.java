@@ -318,7 +318,9 @@ public class ShopInvitesService {
         String who = me == null || me.name() == null ? asked.toPhone() : me.name();
         notifications.queue(new Notice(asked.invitedBy(), "SHOP_INVITE_ACCEPTED", inviteId, now, "Invitation accepted",
                 who + " joined " + shop.details().name() + " as " + (role == ShopRole.HELPER ? "a helper" : "a barber")
-                        + ".", "/shops/me", Map.of()));
+                        + ".", "/shops/me", Map.of())
+                .in("SHOP_INVITE_ACCEPTED", Map.of("who", who, "name", shop.details().name(),
+                        "role", Notifications.Text.of(role == ShopRole.HELPER ? "role.helper" : "role.barber"))));
         assignments.memberJoined(shop.getId(), userId);   // a field agent can't visit a business they work in
         return ShopResponse.from(shop, role);
     }
@@ -332,10 +334,13 @@ public class ShopInvitesService {
             Invite v = invites.find(inviteId).orElseThrow();
             throw gone("PENDING".equals(v.status()) ? "EXPIRED" : v.status());
         }
-        String shopName = shops.findById(asked.shopId()).map(s -> s.details().name()).orElse("your shop");
+        java.util.Optional<String> found = shops.findById(asked.shopId()).map(s -> s.details().name());
+        String shopName = found.orElse("your shop");
         notifications.queue(new Notice(asked.invitedBy(), "SHOP_INVITE_DECLINED", inviteId, now,
                 "Invitation declined", "The person with " + asked.toPhone() + " won't join " + shopName + ".",
-                "/shops/me", Map.of()));
+                "/shops/me", Map.of())
+                .in("SHOP_INVITE_DECLINED", Map.of("phone", asked.toPhone(),
+                        "name", found.<Object>map(n -> n).orElse(Notifications.Text.of("who.yourShop")))));
     }
 
     // ---------- helpers ----------
@@ -345,7 +350,9 @@ public class ShopInvitesService {
         users.findByPhone(v.toPhone()).ifPresent(to -> notifications.queue(new Notice(to, "SHOP_INVITE", v.id(),
                 v.createdAt(), "An invitation to join " + shop.details().name(), shop.details().name() + " ("
                 + shop.details().area() + ") invited you to join as " + as + ". Open Clozest to accept or decline.",
-                "/invites", Map.of())));
+                "/invites", Map.of())
+                .in("SHOP_INVITE", Map.of("name", shop.details().name(), "area", shop.details().area(),
+                        "role", Notifications.Text.of("a helper".equals(as) ? "role.helper" : "role.barber")))));
     }
 
     /** The invitation, if it was made for the phone of this person; 404 otherwise (other people's ids reveal nothing). */

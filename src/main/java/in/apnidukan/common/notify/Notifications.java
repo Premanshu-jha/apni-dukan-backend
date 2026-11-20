@@ -56,14 +56,23 @@ public interface Notifications {
      * @param url    the app page to open when tapped (a path like /bookings/...); may be null
      * @param smsVariables the values for the SMS template's variables (MSG91 names, e.g. SALON), at most 30
      *                     characters each; the SMS text itself is the DLT-approved template
+     * @param text   the same title and body as a text of the notices/*.properties files (key and values), so a
+     *               person who reads another language gets it in theirs (see {@link NoticeTexts}); null: everyone
+     *               gets title and body as they are. title and body stay the English: what English readers get,
+     *               and what anyone gets when their language has no such text
      */
     record Notice(UUID userId, String type, UUID refId, Instant sendAt, String title, String body, String url,
-                  Map<String, String> smsVariables, UUID aboutUserId) {
+                  Map<String, String> smsVariables, UUID aboutUserId, Text text) {
 
         /** A notice that carries only the receiver's own details. */
         public Notice(UUID userId, String type, UUID refId, Instant sendAt, String title, String body, String url,
                       Map<String, String> smsVariables) {
-            this(userId, type, refId, sendAt, title, body, url, smsVariables, null);
+            this(userId, type, refId, sendAt, title, body, url, smsVariables, null, null);
+        }
+
+        public Notice(UUID userId, String type, UUID refId, Instant sendAt, String title, String body, String url,
+                      Map<String, String> smsVariables, UUID aboutUserId) {
+            this(userId, type, refId, sendAt, title, body, url, smsVariables, aboutUserId, null);
         }
 
         /** Its own copy of the SMS variables (none = empty), so nobody can change a queued notice. */
@@ -71,9 +80,58 @@ public interface Notifications {
             smsVariables = smsVariables == null ? Map.of() : Map.copyOf(smsVariables);
         }
 
+        /**
+         * The same notice, also as the text {@code key} (its "key.title" and "key.body" in notices/*.properties)
+         * with these values, for readers of other languages.
+         */
+        public Notice in(String key, Map<String, ?> values) {
+            return new Notice(userId, type, refId, sendAt, title, body, url, smsVariables, aboutUserId,
+                    new Text(key, values));
+        }
+
+        /** The same notice with another title and body (written in the reader's language), the rest as it was. */
+        public Notice withWords(String newTitle, String newBody) {
+            return new Notice(userId, type, refId, sendAt, newTitle, newBody, url, smsVariables, aboutUserId, text);
+        }
+
         @Override
         public Map<String, String> smsVariables() {
             return Map.copyOf(smsVariables);   // already immutable: returns the same map, no copying
+        }
+    }
+
+    /**
+     * A text of the notices/*.properties files: {@code key} and the values of its {blanks}. A value is data (a
+     * String or a number: names, codes, amounts, a time like "6:30 PM", never translated), another Text (a piece
+     * written in the reader's language too), a {@link DayTime}, a {@link Day}, an {@link AndList}, or a List of such
+     * values (joined with ", ").
+     */
+    record Text(String key, Map<String, ?> values) {
+        public Text {
+            values = values == null ? Map.of() : Map.copyOf(values);
+        }
+
+        public static Text of(String key) {
+            return new Text(key, Map.of());
+        }
+
+        public static Text of(String key, Map<String, ?> values) {
+            return new Text(key, values);
+        }
+    }
+
+    /** "Fri 7 Nov, 4:30 PM" in India time: the day's names in the reader's language, the time as in English. */
+    record DayTime(Instant at) {
+    }
+
+    /** A date with a java.time pattern ("d MMM yyyy"), its day and month names in the reader's language. */
+    record Day(java.time.LocalDate date, String pattern) {
+    }
+
+    /** "A", "A and B", "A, B and C" (names as they are; the "and" in the reader's language). */
+    record AndList(java.util.List<String> items) {
+        public AndList {
+            items = java.util.List.copyOf(items);
         }
     }
 }

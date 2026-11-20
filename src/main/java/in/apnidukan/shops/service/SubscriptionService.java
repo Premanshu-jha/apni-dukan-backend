@@ -78,7 +78,8 @@ public class SubscriptionService implements SmartInitializingSingleton {
     /** The app's theme for Razorpay's checkout (the partner app's navy). */
     public static final String THEME_COLOR = "#0B0F26";
     static final ZoneId INDIA = ZoneId.of("Asia/Kolkata");
-    private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH);
+    private static final String DAY_PATTERN = "d MMM yyyy";
+    private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern(DAY_PATTERN, Locale.ENGLISH);
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final Set<String> STATUSES = Set.of("CREATED", "AUTHENTICATED", "ACTIVE", "PENDING", "HALTED",
             "CANCELLED", "COMPLETED", "EXPIRED", "PAUSED");
@@ -355,14 +356,16 @@ public class SubscriptionService implements SmartInitializingSingleton {
                     if (kept) {
                         tell(row.shopId(), "SUBSCRIPTION_AUTOPAY", "AutoPay is on",
                                 "₹" + PRICE_RUPEES + " will be paid each month by itself. You can stop it any time "
-                                        + "in your UPI app.", now);
+                                        + "in your UPI app.", now,
+                                Notifications.Text.of("SUBSCRIPTION_AUTOPAY", Map.of("price", PRICE_RUPEES)));
                     }
                 }
                 case "subscription.pending" -> {
                     if (kept) {
                         tell(row.shopId(), "SUBSCRIPTION_FAILED", "Payment didn't go through",
                                 "This month's ₹" + PRICE_RUPEES + " AutoPay failed. It will be tried again; check "
-                                        + "your UPI app or bank has money and the AutoPay is on.", now);
+                                        + "your UPI app or bank has money and the AutoPay is on.", now,
+                                Notifications.Text.of("SUBSCRIPTION_FAILED", Map.of("price", PRICE_RUPEES)));
                     }
                 }
                 case "subscription.halted", "subscription.cancelled" -> {
@@ -370,7 +373,9 @@ public class SubscriptionService implements SmartInitializingSingleton {
                         Row after = store.find(row.shopId()).orElseThrow();
                         tell(row.shopId(), "SUBSCRIPTION_STOPPED", "AutoPay stopped",
                                 "AutoPay for your salon has stopped. It stays on until " + day(after.accessUntil())
-                                        + "; open Clozest to pay and keep taking online bookings.", now);
+                                        + "; open Clozest to pay and keep taking online bookings.", now,
+                                Notifications.Text.of("SUBSCRIPTION_STOPPED",
+                                        Map.of("day", dayValue(after.accessUntil()))));
                     }
                 }
                 default -> {
@@ -386,7 +391,9 @@ public class SubscriptionService implements SmartInitializingSingleton {
         if (store.paid(row, paidUntil, now)) {
             tell(row.shopId(), "SUBSCRIPTION_PAID", "Payment received",
                     "₹" + PRICE_RUPEES + " received for your salon. Paid up to " + day(paidUntil)
-                            + ". Customers can find and book it.", now);
+                            + ". Customers can find and book it.", now,
+                    Notifications.Text.of("SUBSCRIPTION_PAID", Map.of("price", PRICE_RUPEES,
+                            "day", dayValue(paidUntil))));
         }
     }
 
@@ -534,14 +541,21 @@ public class SubscriptionService implements SmartInitializingSingleton {
                 && r.subscriptionMadeAt().isAfter(now.minus(REUSE_FOR));
     }
 
-    void tell(UUID shopId, String type, String title, String body, Instant now) {
+    /** To the salon's owner, in English here and as {@code text} for an owner who reads another language. */
+    void tell(UUID shopId, String type, String title, String body, Instant now, Notifications.Text text) {
         for (UUID owner : store.owners(shopId)) {
-            notifications.queue(new Notice(owner, type, shopId, now, title, body, PAY_URL, Map.of()));
+            notifications.queue(new Notice(owner, type, shopId, now, title, body, PAY_URL, Map.of())
+                    .in(text.key(), text.values()));
         }
     }
 
     static String day(Instant at) {
         return LocalDate.ofInstant(at, INDIA).format(DAY);
+    }
+
+    /** day() as a text's value: "20 Nov 2026" with the month's name in the reader's language. */
+    static Notifications.Day dayValue(Instant at) {
+        return new Notifications.Day(LocalDate.ofInstant(at, INDIA), DAY_PATTERN);
     }
 
     private ShopMember membership(UUID userId) {

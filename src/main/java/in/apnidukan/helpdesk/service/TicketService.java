@@ -3,6 +3,7 @@ package in.apnidukan.helpdesk.service;
 import in.apnidukan.common.context.ProfileFacts;
 import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.common.context.UserDirectory;
+import in.apnidukan.common.notify.Language;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.FileRefs;
 import in.apnidukan.common.notify.Notifications;
@@ -291,8 +292,9 @@ public class TicketService {
             log.warn("Support acknowledgement skipped: over app.helpdesk.emails-per-hour");
         } else {
             // A From we couldn't prove may be someone else's address: their own words are never quoted back to it
-            store.queueEmail(t.id(), email, TicketEmails.ackSubject(t),
-                    TicketEmails.ackBody(t, requesterName(t), verified ? text : null), now);
+            Language language = emailLanguage(t);
+            store.queueEmail(t.id(), email, TicketEmails.ackSubject(t, language),
+                    TicketEmails.ackBody(t, requesterName(t), verified ? text : null, language), now);
         }
         return t;
     }
@@ -496,7 +498,8 @@ public class TicketService {
         notifications.queue(new Notifications.Notice(t.requesterId(), type, t.id(), now,
                 resolved ? "Support resolved " + t.label() : "Support replied on " + t.label(),
                 (resolved ? "We answered" : "We replied to") + " your question. Tap to read it.",
-                "/help/requests/" + t.id(), Map.of()));
+                "/help/requests/" + t.id(), Map.of())
+                .in(resolved ? "HELP_RESOLVED" : "HELP_REPLIED", Map.of("ticket", t.label())));
     }
 
 
@@ -803,7 +806,7 @@ public class TicketService {
                 events.stream().map(e -> new Event(e.event(), e.actorId() == null ? null
                         : names.getOrDefault(e.actorId(), DELETED), e.detail(), e.at())).toList(),
                 profile, earlier, emails.getOrDefault("PENDING", 0L), emails.getOrDefault("FAILED", 0L),
-                store.lastIncomingSeq(t.id()), t.version(), t.senderVerified());
+                store.lastIncomingSeq(t.id()), t.version(), t.senderVerified(), users.language(t.requesterId()));
     }
 
     /**
@@ -848,11 +851,12 @@ public class TicketService {
         UserDirectory.Person me = users.find(List.of(adminId)).get(adminId);
         // Signed with the support person's name only (never their phone)
         // The files themselves stay in the app (an email link would expire): the email says where they are
-        String emailed = sent.isEmpty() ? text : (text.isBlank() ? "" : text + "\n\n") + "(We sent " + sent.size()
-                + (sent.size() == 1 ? " file" : " files") + " with this reply. "
-                + "See them in the Clozest app: Need help, then My requests.)";
-        store.queueEmail(t.id(), to, TicketEmails.replySubject(t), TicketEmails.replyBody(t, requesterName(t), emailed,
-                resolve, me == null ? null : me.name(), lastIncoming(t)), now);
+        // In the language their account reads (the support person's own words as typed)
+        Language language = emailLanguage(t);
+        String emailed = sent.isEmpty() ? text : (text.isBlank() ? "" : text + "\n\n")
+                + TicketEmails.filesNote(sent.size(), language);
+        store.queueEmail(t.id(), to, TicketEmails.replySubject(t, language), TicketEmails.replyBody(t,
+                requesterName(t), emailed, resolve, me == null ? null : me.name(), lastIncoming(t), language), now);
         notifyReplied(t, resolve, now);
         return get(adminId, ticketId);
     }
@@ -1007,6 +1011,11 @@ public class TicketService {
         return m.direction().equals("IN") && t.requesterId() != null && m.authorId() == null;
     }
 
+    /** The language of our emails to them: their account's (users.language); English with none or no account. */
+    private Language emailLanguage(Ticket t) {
+        return t.requesterId() == null ? Language.EN : Language.orEnglish(users.language(t.requesterId()));
+    }
+
     /** The name to greet the person with in our emails (null: just "Hi,"). */
     private String requesterName(Ticket t) {
         if (t.requesterId() != null) {
@@ -1075,11 +1084,13 @@ public class TicketService {
      * @param lastIncomingSeq send it back with a reply (409 NEW_MESSAGE if they wrote after it)
      * @param version        send it back with an assignment
      * @param senderVerified false when the first email's From couldn't be proven: confirm who it is before acting
+     * @param requesterLanguage the language their account reads ("hi", "te", ...: users.language); null when they
+     *                       chose none (English) or have no account
      */
     public record Detail(Summary ticket, UUID requesterId, String requesterEmail, List<Message> messages,
                          List<Event> events, List<ProfileFacts.Section> profile, long earlierTickets,
                          long emailsWaiting, long emailsFailed, long lastIncomingSeq, long version,
-                         boolean senderVerified) {
+                         boolean senderVerified, String requesterLanguage) {
         public Detail {
             messages = List.copyOf(messages);
             events = List.copyOf(events);
