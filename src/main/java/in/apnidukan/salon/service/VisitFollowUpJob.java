@@ -124,7 +124,9 @@ public class VisitFollowUpJob {
             out.add(new Notice(p.customerId(), RATE_TYPE, p.appointmentId(), now, "How was your visit?",
                     "Rate your " + services(p.services()) + " at " + p.salonName()
                             + ". It helps others choose, and tells the salon what went well.",
-                    "/bookings/" + p.appointmentId() + "?rate=1", java.util.Map.of()));
+                    "/bookings/" + p.appointmentId() + "?rate=1", java.util.Map.of())
+                    .in(RATE_TYPE, java.util.Map.of("services", servicesValue(p.services()),
+                            "salon", p.salonName())));
         }
         if (!out.isEmpty()) {
             notifications.queueAll(out);
@@ -142,7 +144,8 @@ public class VisitFollowUpJob {
                 continue;
             }
             long days = ChronoUnit.DAYS.between(LocalDate.ofInstant(r.completedAt(), SalonTime.ZONE), today);
-            String what = services(r.serviceNames().subList(0, Math.min(MAX_LINK_SERVICES, r.serviceNames().size())));
+            List<String> named = r.serviceNames().subList(0, Math.min(MAX_LINK_SERVICES, r.serviceNames().size()));
+            String what = services(named);
             out.add(new Notice(r.customerId(), COME_BACK_TYPE, r.appointmentId(), now,
                     "Time for your next " + what + "?",
                     "It's been " + ago(days) + " since your " + what + " at " + r.salonName()
@@ -150,7 +153,9 @@ public class VisitFollowUpJob {
                     "/salons/" + r.shopId() + "?services="
                             + r.serviceIds().stream().limit(MAX_LINK_SERVICES).map(UUID::toString)
                                     .collect(Collectors.joining(",")),
-                    java.util.Map.of()));
+                    java.util.Map.of())
+                    .in(COME_BACK_TYPE, java.util.Map.of("services", servicesValue(named), "ago", agoValue(days),
+                            "salon", r.salonName())));
         }
         if (!out.isEmpty()) {
             notifications.queueAll(out);
@@ -179,6 +184,29 @@ public class VisitFollowUpJob {
             return names.get(0);
         }
         return String.join(", ", names.subList(0, names.size() - 1)) + " and " + names.get(names.size() - 1);
+    }
+
+    /** services() as a text's value: the names as they are, joined with the reader's "and". */
+    static Object servicesValue(List<String> names) {
+        return names.isEmpty() ? Notifications.Text.of("followUp.visit") : new Notifications.AndList(names);
+    }
+
+    /** ago() as a text's value, in the reader's language. */
+    static Notifications.Text agoValue(long days) {
+        if (days >= 60) {
+            return Notifications.Text.of("ago.months", java.util.Map.of("count", days / 30));
+        }
+        if (days >= 28 && days < 35) {
+            return Notifications.Text.of("ago.month");
+        }
+        if (days >= 14 && days % 7 == 0) {
+            return Notifications.Text.of("ago.weeks", java.util.Map.of("count", days / 7));
+        }
+        if (days == 7) {
+            return Notifications.Text.of("ago.week");
+        }
+        return days == 1 ? Notifications.Text.of("ago.day")
+                : Notifications.Text.of("ago.days", java.util.Map.of("count", days));
     }
 
     /** "a week", "2 weeks", "10 days", "a month", "3 months". */
