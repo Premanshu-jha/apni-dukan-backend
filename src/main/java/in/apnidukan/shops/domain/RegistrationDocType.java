@@ -1,6 +1,9 @@
 package in.apnidukan.shops.domain;
 
-/** Which registration document a salon added for its visit (any one of these will do). */
+/**
+ * Which registration document a shop added: a salon's municipal trade licence; a kirana's trade licence or its Shops
+ * and Establishments certificate. UDYAM is only in old rows (never accepted any more).
+ */
 public enum RegistrationDocType {
     /** The state's Shops and Establishments registration certificate. */
     SHOPS_ESTABLISHMENT("Shops and Establishments certificate"),

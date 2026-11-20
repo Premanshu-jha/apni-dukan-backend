@@ -16,8 +16,18 @@ public interface StoredFileRepository extends JpaRepository<StoredFile, UUID> {
 
     Optional<StoredFile> findByShopIdAndPurposeAndSha256(UUID shopId, FilePurpose purpose, String sha256);
 
+    /** A platform file (no shop's) with these bytes (ux_files_shop_purpose_sha256: shop_id IS NULL leads it). */
+    Optional<StoredFile> findFirstByShopIdIsNullAndPurposeAndSha256(FilePurpose purpose, String sha256);
+
     /** Uploads of this shop since a moment (today's count, for the daily limit). */
-    long countByShopIdAndCreatedAtGreaterThanEqual(UUID shopId, java.time.Instant since);
+    long countByShopIdAndPurposeInAndCreatedAtGreaterThanEqual(UUID shopId,
+                                                               java.util.Collection<in.apnidukan.files.domain.FilePurpose>
+                                                                       purposes, java.time.Instant since);
+
+    long countByShopIdAndPurposeNotInAndCreatedAtGreaterThanEqual(UUID shopId,
+                                                                  java.util.Collection<in.apnidukan.files.domain
+                                                                          .FilePurpose> purposes,
+                                                                  java.time.Instant since);
 
     /** A person's files of one purpose since a moment (ticket files: ix_files_ticket_uploader). */
     long countByUploadedByAndPurposeAndCreatedAtGreaterThanEqual(UUID uploadedBy, FilePurpose purpose,

@@ -25,7 +25,8 @@ import java.util.List;
  * @param timelineNext           where the next 50 start (GET /admin/shops/{id}/timeline with these); null when the
  *                               timeline has no more
  */
-public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> changes, Long pinMovedMetres,
+public record AdminShopDetail(AdminShopResponse shop, Salon salon, Kirana kirana, List<Change> changes,
+                              Long pinMovedMetres,
                               String previousOwnerPhotoUrl, String previousShopPhotoUrl, String videoUrl,
                               RegistrationDoc registrationDoc, AddressRequestView addressRequest,
                               List<TimelineEntry> timeline,
@@ -34,6 +35,24 @@ public record AdminShopDetail(AdminShopResponse shop, Salon salon, List<Change> 
     public AdminShopDetail {
         changes = List.copyOf(changes);
         timeline = List.copyOf(timeline);
+    }
+
+    /**
+     * A kirana's counter details the field team checks at the visit (null for a salon).
+     * @param upiId          the shop's UPI ID (its walk-in QR, later Clozest's payouts); null until set
+     * @param upiUpdatedAt   when it was last set (a change after approval shows up here)
+     * @param sellsFood      whether it sells any food (Yes: its FSSAI licence was needed); null until answered
+     * @param fssai          its FSSAI licence as checked so far (status NONE when not added): Submit takes one still
+     *                       being checked, so the field team sees here how it went (number, refusal reason, last day)
+     */
+    /**
+     * A kirana's own facts for the field team.
+     * @param productGaps before its first approval: its products still missing a count or a photo (approving is
+     *                    refused until there are none); null once it was ever approved
+     */
+    public record Kirana(String upiId, Instant upiUpdatedAt, Boolean sellsFood,
+                         in.apnidukan.common.context.KiranaFacts.Fssai fssai,
+                         in.apnidukan.common.context.KiranaFacts.ProductGaps productGaps) {
     }
 
     /** The next timeline page's query values: afterAt and afterSeq, exactly as given. */

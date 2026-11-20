@@ -190,15 +190,23 @@ class SalonVideoIntegrationTest {
     }
 
     @Test
-    void aKiranaNeedsNoVideoToSubmitAndCantSendOne() {
+    void aKiranaRecordsItsVideoTooAndNeedsItToSubmit() throws Exception {
         jdbc.update("UPDATE shops SET owner_photo_file_id = ?::uuid, shop_photo_file_id = ?::uuid WHERE id = ?",
                 photoFile(KIRANA, KIRANA_OWNER, "OWNER_PHOTO"), photoFile(KIRANA, KIRANA_OWNER, "SHOP_PHOTO"), KIRANA);
-        Reply start = startReply(KIRANA_OWNER, 1000, "video/mp4", 30);
-        assertThat(start.status()).isEqualTo(409);
-        assertThat(code(start)).isEqualTo("NOT_A_SALON");
+        TestData.kiranaUpiId(jdbc, KIRANA);
+        jdbc.update("UPDATE kirana_settings SET sells_food = false WHERE shop_id = ?", KIRANA);
+        Reply early = post("/shops/me/submit", Map.of("version", version(KIRANA)), KIRANA_OWNER);
+        assertThat(code(early)).isEqualTo("PHOTOS_REQUIRED");
+        assertThat(early.text()).contains("shopVideoFileId").contains("a short video of the shop");
+
+        byte[] video = fakeMp4(4096);
+        Map<?, ?> link = start(KIRANA_OWNER, video.length, "video/mp4", 30);
+        assertThat(put((String) link.get("uploadUrl"), video, "video/mp4")).isEqualTo(200);
+        Reply done = post("/files/video-uploads/" + link.get("uploadId") + "/complete", Map.of(), KIRANA_OWNER);
+        assertThat(done.status()).as(done.text()).isEqualTo(201);
         Reply set = call(HttpMethod.PUT, "/shops/me/video", Map.of("version", version(KIRANA),
-                "fileId", UUID.randomUUID().toString()), KIRANA_OWNER);
-        assertThat(code(set)).isEqualTo("NOT_A_SALON");
+                "fileId", done.body().get("id")), KIRANA_OWNER);
+        assertThat(set.status()).as(set.text()).isEqualTo(200);
         Reply submitted = post("/shops/me/submit", Map.of("version", version(KIRANA)), KIRANA_OWNER);
         assertThat(submitted.status()).as(submitted.text()).isEqualTo(200);
         assertThat(submitted.body().get("status")).isEqualTo("PENDING_VISIT");

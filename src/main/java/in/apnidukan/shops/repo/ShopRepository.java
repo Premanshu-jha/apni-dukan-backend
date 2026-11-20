@@ -14,6 +14,10 @@ import java.util.UUID;
 
 public interface ShopRepository extends JpaRepository<Shop, UUID> {
 
+    /** The shop's kind as committed now (a query, never an entity already loaded in this transaction). */
+    @Query(value = "SELECT type FROM shops WHERE id = :id", nativeQuery = true)
+    java.util.Optional<String> typeOf(@org.springframework.data.repository.query.Param("id") UUID id);
+
     /** The next shop code (1001, 1002, ...). The database hands each one out once, even under parallel sign-ups. */
     @Query(value = "SELECT nextval('shop_code_seq')", nativeQuery = true)
     long nextShopCode();

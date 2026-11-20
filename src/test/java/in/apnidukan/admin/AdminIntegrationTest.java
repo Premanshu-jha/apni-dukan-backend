@@ -809,7 +809,7 @@ class AdminIntegrationTest {
     }
 
     @Test
-    void aKiranasNewGstinOrUdyamNumberStillWaitsForAReCheckWhileLive() {
+    void aKiranasNewGstinStillWaitsForAReCheckWhileLiveAndAUdyamNumberIsIgnored() {
         UUID kirana = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000021");
         approve(kirana);
         UUID owner = ownerOf(kirana);
@@ -820,9 +820,12 @@ class AdminIntegrationTest {
         List<?> changes = (List<?>) field(get("/admin/shops/" + kirana, boss).body(), "changes");
         assertThat(changes).extracting(c -> field(c, "field")).containsExactly("gstin");
         approve(kirana);
+        // Udyam is no longer asked for: one sent is ignored, so nothing waits for a re-check
         Reply udyam = patch("/shops/me", Map.of("version", version(kirana), "udyamNumber", "UDYAM-TS-02-0012345"),
                 owner);
-        assertThat(field(udyam.body(), "recheckSince")).as(udyam.text()).isNotNull();
+        assertThat(udyam.status()).as(udyam.text()).isEqualTo(200);
+        assertThat(field(udyam.body(), "udyamNumber")).isNull();
+        assertThat(field(udyam.body(), "recheckSince")).isNull();
     }
 
     @Test
@@ -1347,7 +1350,27 @@ class AdminIntegrationTest {
         return id;
     }
 
-    /** A shop with an owner, in a status, set straight in the database (its history starts with the next change). */
+    @Test
+    void theFieldTeamSeesAKiranasFoodAnswerAndHowItsFssaiLicenceWent() {
+        UUID kirana = shop("KIRANA", "PENDING_VISIT", "Gupta Store", "9200000031");
+        UUID cert = file(kirana, ownerOf(kirana), "REG_DOC");
+        jdbc.update("INSERT INTO kirana_settings (shop_id, next_bill_no, sells_food) VALUES (?, 1, true)", kirana);
+        jdbc.update("INSERT INTO kirana_online (shop_id, taking_orders, fssai_number, fssai_file_id, fssai_status, "
+                + "fssai_reason, fssai_tries, upi_recheck, rating_sum, rating_count, updated_at) "
+                + "VALUES (?, false, '10012345678901', ?, 'REJECTED', 'A GST certificate', 1, false, 0, 0, now())",
+                kirana, cert);
+        Map<?, ?> k = (Map<?, ?>) field(get("/admin/shops/" + kirana, boss).body(), "kirana");
+        assertThat(k.get("sellsFood")).isEqualTo(true);
+        Map<?, ?> fssai = (Map<?, ?>) k.get("fssai");
+        assertThat(fssai.get("status")).isEqualTo("REJECTED");
+        assertThat(fssai.get("number")).isEqualTo("10012345678901");
+        assertThat(fssai.get("reason")).isEqualTo("A GST certificate");
+    }
+
+    /**
+     * A shop with an owner, in a status, set straight in the database (its history starts with the next change). A
+     * kirana has its products set up (its visit can be booked); KiranaStockIntegrationTest covers one still setting up.
+     */
     private UUID shop(String type, String status, String name, String ownerPhone) {
         UUID owner = person(ownerPhone);
         UUID id = UUID.randomUUID();
@@ -1355,6 +1378,12 @@ class AdminIntegrationTest {
             TestData.salon(jdbc, id, owner);
         } else {
             TestData.shop(jdbc, id, owner);
+            jdbc.update("UPDATE shops SET products_ready_at = now() WHERE id = ?", id);
+            // One product, counted and with its picture: what its first approval needs
+            jdbc.update("INSERT INTO kirana_products (id, shop_id, name, unit, price_paise, stock, active, version, "
+                    + "created_by, created_at, updated_at, counted_at, photo_file_id) VALUES (gen_random_uuid(), ?, "
+                    + "'Tata Salt 1 kg', 'PIECE', 2800, 5, true, 0, ?, now(), now(), now(), ?)", id, owner,
+                    file(id, owner, "PRODUCT_PHOTO"));
         }
         jdbc.update("UPDATE shops SET status = ?, name = ?, updated_at = ? WHERE id = ?", status, name,
                 Timestamp.from(CLOCK.instant().plusSeconds(jdbc.queryForObject("SELECT count(*) FROM shops",

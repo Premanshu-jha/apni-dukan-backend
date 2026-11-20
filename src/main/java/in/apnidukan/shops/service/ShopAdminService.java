@@ -45,6 +45,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -85,13 +86,15 @@ public class ShopAdminService {
 
     private final LicenceAiWatch licenceAi;
     private final SubscriptionService subscriptions;
+    private final in.apnidukan.common.context.KiranaFacts kiranas;
 
     public ShopAdminService(ShopRepository shops, ShopMemberRepository members, UserDirectory users, FileRefs files,
                             Notifications notifications, List<ShopChangeListener> listeners, ShopReviewStore review,
                             SalonFacts salons, DashboardCounts dashboardCounts, ShopAssignments assignments,
                             ShopService shopService, AddressRequestStore addressRequests, Clock clock,
                             in.apnidukan.shops.repo.LicenceCheckStore licences, LicenceAiWatch licenceAi,
-                            SubscriptionService subscriptions) {
+                            SubscriptionService subscriptions, in.apnidukan.common.context.KiranaFacts kiranas) {
+        this.kiranas = kiranas;
         this.subscriptions = subscriptions;
         this.licences = licences;
         this.licenceAi = licenceAi;
@@ -209,7 +212,17 @@ public class ShopAdminService {
         String video = shop.getShopVideoFileId() == null ? null : existingLink(shop.getShopVideoFileId());
         AddressRequestView addressRequest = addressRequests.pending(shopId).map(AddressRequestService::view)
                 .orElse(null);
-        return new AdminShopDetail(views(List.of(shop)).get(0), salon, changes, moved, oldOwnerPhoto, oldShopPhoto,
+        AdminShopDetail.Kirana kirana = null;
+        if (shop.getType() == ShopType.KIRANA) {
+            in.apnidukan.common.context.KiranaFacts.ProductGaps gaps = shop.isEverApproved() ? null
+                    : kiranas.productGaps(shopId);
+            Optional<in.apnidukan.common.context.KiranaFacts.UpiId> upi = kiranas.upiId(shopId);
+            kirana = new AdminShopDetail.Kirana(upi.map(in.apnidukan.common.context.KiranaFacts.UpiId::upiId)
+                    .orElse(null), upi.map(in.apnidukan.common.context.KiranaFacts.UpiId::updatedAt).orElse(null),
+                    kiranas.sellsFood(shopId), kiranas.fssai(shopId), gaps);
+        }
+        return new AdminShopDetail(views(List.of(shop)).get(0), salon, kirana, changes, moved, oldOwnerPhoto,
+                oldShopPhoto,
                 video, doc, addressRequest, timeline.items(), timeline.next());
     }
 
@@ -353,12 +366,39 @@ public class ShopAdminService {
      * pin are the shop's from now on (as changeAddress; the owner is told).
      * Decline the request first (declineAddressRequest) to approve the rest without it. {@code version} is the one shown in the list the field team checked: if the owner
      * changed anything since (photos, address), 409 SHOP_CHANGED, so nothing unchecked is approved. 409 WRONG_STATUS
-     * from any other status (a live shop with nothing to re-check too); 404 if there's no such shop.
+     * from any other status (a live shop with nothing to re-check too); 409 PRODUCTS_NOT_READY for a kirana whose
+     * owner hasn't finished adding its products; 404 if there's no such shop.
      */
     @Transactional
     public AdminShopResponse approve(UUID adminId, UUID shopId, long version, String noteInput) {
         assignments.lockForAssignment();   // first: an approved new address may change the pincode
         Shop shop = checkedWaiting(adminId, shopId, version, "approved");
+        if (!shop.visitBookable()) {
+            // A kirana's products are checked at the visit: none set up yet, nothing to check
+            throw new ApiException(HttpStatus.CONFLICT, "PRODUCTS_NOT_READY", "The owner hasn't finished adding the "
+                    + "shop's products yet. The visit is booked when they have.");
+        }
+        if (shop.getType() == ShopType.KIRANA && !shop.isEverApproved()) {
+            // Products added after the owner finished need their count and picture too, before the first approval
+            in.apnidukan.common.context.KiranaFacts.ProductGaps gaps = kiranas.productGaps(shopId);
+            if (!gaps.none()) {
+                long toDo = gaps.noPicture() - gaps.checking();
+                String what = gaps.active() == 0 ? "The shop has no products in the app"
+                        : String.join(", ", java.util.stream.Stream.of(
+                                gaps.uncounted() == 0 ? null : gaps.uncounted() == 1 ? "1 product has no count"
+                                        : gaps.uncounted() + " products have no count",
+                                toDo <= 0 ? null : toDo == 1 ? "1 product has no photo"
+                                        : toDo + " products have no photo",
+                                gaps.checking() == 0 ? null : gaps.checking() == 1
+                                        ? "1 photo is still being checked (try again in a few minutes)"
+                                        : gaps.checking() + " photos are still being checked (try again in a few "
+                                        + "minutes)").filter(Objects::nonNull).toList());
+                throw new ApiException(HttpStatus.CONFLICT, "PRODUCTS_INCOMPLETE", what + (gaps.active() == 0
+                        || gaps.uncounted() + toDo > 0 ? ". Ask the owner to finish in the app first." : "."),
+                        Map.of("uncounted", gaps.uncounted(), "noPicture", gaps.noPicture(), "checking",
+                                gaps.checking(), "products", gaps.products()));
+            }
+        }
         boolean wasLive = shop.getStatus() == ShopStatus.APPROVED;
         String note = optionalNote(noteInput);
         shop.approve(now());
@@ -366,6 +406,9 @@ public class ShopAdminService {
         // A salon's first approval: its free trial starts (later ones keep the trial it had)
         java.util.Optional<java.time.Instant> trialEnds = subscriptions.startTrial(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.APPROVED, null, note, List.of());
+        if (shop.getType() == in.apnidukan.shops.domain.ShopType.KIRANA) {
+            kiranas.shareCheckedPhotos(shopId);   // its photos checked while registering may now be shared
+        }
         // After approving: no longer waiting, so a new pincode doesn't send it to another agent's visit list
         addressRequests.pending(shopId).ifPresent(r -> applyAddressRequest(adminId, shop, r));
         dashboardCounts.clearAfterCommit();
@@ -568,8 +611,10 @@ public class ShopAdminService {
         review.addEvent(shopId, now(), adminId, true, ShopEventType.REINSTATED, null, note, List.of());
         assignments.startedWaiting(shopId, "REINSTATED");
         dashboardCounts.clearAfterCommit();
-        tellOwner(shop, "SHOP_REINSTATED", "Your shop will be checked again",
-                shop.details().name() + " is no longer suspended. Our team will visit; it goes live once approved.");
+        tellOwner(shop, "SHOP_REINSTATED", "Your shop will be checked again", shop.details().name()
+                + (shop.visitBookable() ? " is no longer suspended. Our team will visit; it goes live once approved."
+                : " is no longer suspended. Finish adding your products in the app: then our team will visit, and "
+                + "it goes live once approved."));
         return view(shop);
     }
 

@@ -136,6 +136,19 @@
             <artifactId>s3</artifactId>
         </dependency>
 
+        <!-- Distributors' bills sent as files: Excel and Word (POI), and the text of PDFs (PDFBox), read in code so
+             the AI gets text (or nothing at all for a spreadsheet it can read itself), not pictures -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.4.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>3.0.5</version>
+        </dependency>
+
         <!-- Tests -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

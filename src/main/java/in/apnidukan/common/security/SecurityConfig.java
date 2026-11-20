@@ -53,7 +53,9 @@ public class SecurityConfig {
                                 // Signed by the Email Worker (HMAC), checked by InboundEmailController
                                 "/api/v1/helpdesk/inbound",
                                 // Signed by Razorpay (HMAC), checked by SubscriptionService.webhook
-                                "/api/v1/payments/razorpay/webhook").permitAll()
+                                "/api/v1/payments/razorpay/webhook",
+                                // Signed by RazorpayX (HMAC), checked by KiranaPaymentEvents.payoutEvent
+                                "/api/v1/payments/razorpayx/webhook").permitAll()
                         .requestMatchers("/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")

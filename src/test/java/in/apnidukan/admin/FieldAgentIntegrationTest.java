@@ -338,6 +338,87 @@ class FieldAgentIntegrationTest {
     }
 
     @Test
+    void aKiranaSettingUpItsProductsIsBookedForItsVisitOnlyWhenItsOwnerSaysAllAreAdded() {
+        UUID ravi = agent("9800000001", "500084");
+        UUID kirana = draftKirana("500084");
+        submit(kirana);
+        UUID owner = ownerOf(kirana);
+
+        // Submitted, its products not set up yet: no visit booked, in no group, and nobody can approve it
+        assertThat(assignee(kirana)).isNull();
+        assertThat(count("shop_assignments WHERE shop_id = '" + kirana + "'")).isZero();
+        Object shown = field(get("/admin/shops/" + kirana, boss).body(), "shop");
+        assertThat(field(shown, "waitingForVisit")).as(shown.toString()).isEqualTo(false);   // no Approve on its page
+        assertThat(field(shown, "productsReadyAt")).isNull();
+        assertThat((List<?>) get("/admin/shops?type=KIRANA&group=FIRST_VISIT", boss).body()).isEmpty();
+        assertThat(field(((Map<?, ?>) get("/admin/dashboard", boss).body()).get("KIRANA"), "FIRST_VISIT"))
+                .isEqualTo(0);
+        Reply early = post("/admin/shops/" + kirana + "/approve", Map.of("version", version(kirana)), boss);
+        assertThat(early.status()).as(early.text()).isEqualTo(409);
+        assertThat(code(early)).isEqualTo("PRODUCTS_NOT_READY");
+        // It doesn't count towards Ravi's load: the next salon in his pincode still goes to him
+        assertThat(assignee(waitingSalon("500084"))).isEqualTo(ravi);
+
+        // Nothing to finish with no products, or with one never counted
+        assertThat(code(post("/kirana/setup/finish", Map.of(), owner))).isEqualTo("NO_PRODUCTS");
+        Map<String, Object> salt = new HashMap<>(Map.of("name", "Tata Salt 1 kg", "unit", "PIECE", "pricePaise", 2800));
+        String saltId = (String) field(post("/kirana/products", salt, owner).body(), "id");
+        Reply uncounted = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(code(uncounted)).as(uncounted.text()).isEqualTo("PRODUCTS_NOT_COUNTED");
+        assertThat(((List<?>) field(field(uncounted.body(), "details"), "products")).stream()
+                .map(x -> field(x, "id")).toList()).containsExactly(saltId);
+        assertThat(post("/kirana/products/" + saltId + "/stock", Map.of("clientRef",
+                UUID.randomUUID().toString(), "reason", "COUNT", "quantity", 12), owner)
+                .status()).isEqualTo(200);
+        assertThat(code(post("/kirana/setup/finish", Map.of(), owner))).isEqualTo("PHOTOS_NEEDED");
+        pictureAll(kirana, owner);
+
+        // All added: the visit is booked with the agent covering the pincode, once however often it's said
+        Reply done = post("/kirana/setup/finish", Map.of(), owner);
+        assertThat(done.status()).as(done.text()).isEqualTo(200);
+        assertThat(field(done.body(), "readyAt")).isNotNull();
+        assertThat(field(done.body(), "canFinish")).isEqualTo(false);
+        assertThat(assignee(kirana)).isEqualTo(ravi);
+        assertThat(post("/kirana/setup/finish", Map.of(), owner).status()).isEqualTo(200);
+        assertThat(count("shop_events WHERE shop_id = '" + kirana + "' AND event = 'NOTE'")).isEqualTo(1);
+        assertThat(((List<?>) get("/admin/shops?type=KIRANA&group=FIRST_VISIT", ravi).body()).stream()
+                .map(x -> field(x, "id")).toList()).containsExactly(kirana.toString());
+        approveAs(kirana, ravi);
+    }
+
+    @Test
+    void aKiranaHeldByAnAgentWhileSettingUpIsLetGoAndOneThatFinishedFirstOrWasApprovedBeforeIsBookedAsUsual() {
+        UUID ravi = agent("9800000001", "500084");
+        // Assigned before it had to set up its products (a salon sent back and made a kirana, or one from before
+        // V76): submitted again, nobody holds it until it finishes
+        UUID held = draftKirana("500084");
+        jdbc.update("UPDATE shops SET assigned_admin_id = ?, assigned_at = now() WHERE id = ?", ravi, held);
+        submit(held);
+        assertThat(assignee(held)).isNull();
+        assertThat(lastLog(held)).isEqualTo("SUBMITTED");
+
+        // Finished while still a draft: booked when submitted
+        UUID early = draftKirana("500084");
+        UUID owner = ownerOf(early);
+        Map<String, Object> rice = new HashMap<>(Map.of("name", "Sona Masoori Rice", "unit", "KG", "pricePaise", 6000,
+                "stock", 25));
+        assertThat(post("/kirana/products", rice, owner).status()).isEqualTo(201);
+        pictureAll(early, owner);
+        assertThat(post("/kirana/setup/finish", Map.of(), owner).status()).isEqualTo(200);
+        assertThat(assignee(early)).isNull();
+        submit(early);
+        assertThat(assignee(early)).isEqualTo(ravi);
+
+        // Approved before (suspended, then reinstated) with no setup on record: never held back
+        UUID old = draftKirana("500084");
+        jdbc.update("UPDATE shops SET status = 'SUSPENDED', ever_approved = true WHERE id = ?", old);
+        Reply back = post("/admin/shops/" + old + "/reinstate", Map.of("version", version(old)), boss);
+        assertThat(back.status()).as(back.text()).isEqualTo(200);
+        assertThat(assignee(old)).isEqualTo(ravi);
+        approveAs(old, ravi);
+    }
+
+    @Test
     void removingAPincodeSendsItsWaitingBusinessesToAnotherAgentOrUnassigned() {
         UUID ravi = agent("9800000001", "500084", "500081");
         UUID waiting = waitingSalon("500084");
@@ -928,6 +1009,21 @@ class FieldAgentIntegrationTest {
         return id;
     }
 
+    /** A DRAFT kirana in this pincode with its photos, video, UPI ID and "sells no food": ready to submit. */
+    private UUID draftKirana(String pincode) {
+        phones++;
+        UUID owner = person("92000" + String.format("%05d", phones));
+        UUID id = UUID.randomUUID();
+        TestData.shop(jdbc, id, owner);
+        jdbc.update("UPDATE shops SET pincode = ?, name = ? WHERE id = ?", pincode, "Kirana " + phones, id);
+        jdbc.update("UPDATE shops SET owner_photo_file_id = ?, shop_photo_file_id = ?, shop_video_file_id = ? "
+                + "WHERE id = ?", file(id, owner, "OWNER_PHOTO", "image/jpeg"), file(id, owner, "SHOP_PHOTO",
+                "image/jpeg"), file(id, owner, "SHOP_VIDEO", "video/mp4"), id);
+        TestData.kiranaUpiId(jdbc, id);
+        jdbc.update("UPDATE kirana_settings SET sells_food = false WHERE shop_id = ?", id);
+        return id;
+    }
+
     /** A salon submitted by its owner (so the rule assigns it). */
     private UUID waitingSalon(String pincode) {
         UUID id = draftSalon(pincode);
@@ -961,14 +1057,22 @@ class FieldAgentIntegrationTest {
         return id;
     }
 
+    /** Every product of the shop given a checked photo of its own (as if each had passed its check). */
+    private void pictureAll(UUID shop, UUID owner) {
+        jdbc.update("UPDATE kirana_products SET photo_file_id = ? WHERE shop_id = ?",
+                file(shop, owner, "PRODUCT_PHOTO", "image/jpeg"), shop);
+    }
+
     private UUID assignee(UUID shop) {
         return jdbc.queryForObject("SELECT assigned_admin_id FROM shops WHERE id = ?", UUID.class, shop);
     }
 
     private String lastLog(UUID shop) {
-        // The clock stands still in these tests: the log is insert-only, so its physical order is the order written
-        return jdbc.queryForObject("SELECT reason FROM shop_assignments WHERE shop_id = ? ORDER BY at DESC, ctid DESC "
-                + "LIMIT 1", String.class, shop);
+        // The clock stands still in these tests, so entries share their time. SUBMITTED is always a waiting shop's
+        // first entry; among the rest the physical order is the order written (space freed by an earlier test's
+        // clean-up can be reused, which once put a later entry before the first)
+        return jdbc.queryForObject("SELECT reason FROM shop_assignments WHERE shop_id = ? ORDER BY at DESC, "
+                + "(reason = 'SUBMITTED'), ctid DESC LIMIT 1", String.class, shop);
     }
 
     private long version(UUID shop) {

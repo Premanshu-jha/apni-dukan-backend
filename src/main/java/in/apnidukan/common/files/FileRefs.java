@@ -57,7 +57,8 @@ public interface FileRefs {
 
     /**
      * @param shopId      null for a ticket file (it belongs to a person)
-     * @param purpose     SHOP_PHOTO, OWNER_PHOTO, STAFF_PHOTO, SHOP_VIDEO, REG_DOC, BILL, RECEIPT or TICKET_FILE
+     * @param purpose     SHOP_PHOTO, OWNER_PHOTO, STAFF_PHOTO, SHOP_VIDEO, REG_DOC, BILL, RECEIPT, TICKET_FILE or
+     *                    PRODUCT_PHOTO
      * @param contentType e.g. image/jpeg
      * @param uploadedBy  who sent it
      * @param name        the name it had on the phone or computer; may be null

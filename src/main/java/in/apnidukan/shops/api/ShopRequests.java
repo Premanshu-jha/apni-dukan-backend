@@ -25,7 +25,7 @@ public final class ShopRequests {
      * Step 1 of registration.
      * @param latitude  the shop's GPS pin ("Use my location" in the app), inside India
      * @param gstin     optional, 15 characters, e.g. 27AAPFU0939F1ZV
-     * @param udyamNumber optional, e.g. UDYAM-TS-02-0012345
+     * @param udyamNumber no longer asked for: ignored (kept so older apps sending it aren't refused)
      * @param type      KIRANA or SALON; optional, KIRANA if left out. Can't be changed later.
      */
     public record CreateShop(
@@ -74,7 +74,8 @@ public final class ShopRequests {
     }
 
     /**
-     * My shop edits. Leave a field out (or null) to keep it; send "" for gstin/udyamNumber to remove it.
+     * My shop edits. Leave a field out (or null) to keep it; send "" for gstin to remove it
+     * (a salon's gstin and anyone's udyamNumber are ignored).
      * @param version the version you last read (GET /shops/me); if someone saved in between you get 409 SHOP_CHANGED
      */
     public record UpdateShop(
@@ -116,6 +117,10 @@ public final class ShopRequests {
 
     /** Registration done: ask for the field team's visit. Needs both photos and the salon video. */
     public record Submit(@NotNull Long version) {
+    }
+
+    /** The kind of shop, changed during registration (PUT /shops/me/type). */
+    public record ChangeType(@NotNull Long version, @NotNull(message = "Choose kirana or salon") ShopType type) {
     }
 
     /**

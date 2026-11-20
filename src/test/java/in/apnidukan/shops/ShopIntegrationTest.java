@@ -105,7 +105,7 @@ class ShopIntegrationTest {
     }
 
     @Test
-    void textIsTidiedAndGstinIsStoredInCapitals() {
+    void textIsTidiedGstinIsStoredInCapitalsAndAUdyamNumberIsIgnored() {
         String access = token(OWNER_PHONE);
         Map<String, Object> shop = validShop();
         shop.put("name", "  Sharma    Kirana   ");
@@ -117,7 +117,9 @@ class ShopIntegrationTest {
         assertThat(r.status()).as(r.body().toString()).isEqualTo(201);
         assertThat(r.body().get("name")).isEqualTo("Sharma Kirana");
         assertThat(r.body().get("gstin")).isEqualTo("27AAPFU0939F1ZV");
-        assertThat(r.body().get("udyamNumber")).isEqualTo("UDYAM-TS-02-0012345");
+        // Udyam is no longer asked for (2026-11-17): one sent by an older app is ignored, not stored
+        assertThat(r.body().get("udyamNumber")).isNull();
+        assertThat(jdbc.queryForObject("SELECT udyam_number FROM shops", String.class)).isNull();
         assertThat(new BigDecimal(r.body().get("latitude").toString())).isEqualByComparingTo("17.465123");
     }
 
@@ -245,7 +247,6 @@ class ShopIntegrationTest {
         assertInvalid(access, "gstin", "27AAPFU0939F1Z");                 // 14 characters
         assertInvalid(access, "gstin", "27AAPFU0939F1ZW");                // typo: check character doesn't match
         assertInvalid(access, "gstin", "00AAPFU0939F1ZB");                // no state 00 (check character is right)
-        assertInvalid(access, "udyamNumber", "UDYAM-12345");
         assertInvalid(access, "name", "   ");
         assertInvalid(access, "name", " a ");
         assertInvalid(access, "city", null);
@@ -371,6 +372,232 @@ class ShopIntegrationTest {
                 "city", "Hyderabad", "pincode", "500084"), token(OWNER_PHONE));
         assertThat(r.status()).isEqualTo(503);
         assertThat(r.body().get("code")).isEqualTo("GEOCODING_OFF");
+    }
+
+    @Test
+    void theOwnerChangesKiranaToSalonAndBackWhileRegisteringKeepingTheDetailsAndPhotos() {
+        String access = token(OWNER_PHONE);
+        Map<String, Object> kirana = validShop();
+        kirana.put("gstin", "27AAPFU0939F1ZV");
+        Reply made = post("/shops", kirana, access);
+        assertThat(made.body().get("type")).isEqualTo("KIRANA");
+
+        Reply salon = put("/shops/me/type", Map.of("version", 0, "type", "SALON"), access);
+        assertThat(salon.status()).as(salon.body().toString()).isEqualTo(200);
+        assertThat(salon.body().get("type")).isEqualTo("SALON");
+        assertThat(salon.body().get("name")).isEqualTo("Sharma Kirana Store");
+        assertThat(salon.body().get("status")).isEqualTo("DRAFT");
+        assertThat(salon.body().get("gstin")).as("a salon shows no GSTIN").isNull();
+        assertThat(jdbc.queryForObject("SELECT gstin FROM shops", String.class)).as("kept for changing back")
+                .isEqualTo("27AAPFU0939F1ZV");
+        assertThat(((Number) salon.body().get("version")).longValue()).isEqualTo(1);
+        // The field team's timeline says so; nothing about the shop's status moved
+        assertThat(jdbc.queryForObject("SELECT note FROM shop_events WHERE event = 'NOTE'", String.class))
+                .isEqualTo("Owner changed it from kirana to salon while registering");
+
+        // The same kind again changes nothing (no new version)
+        Reply same = put("/shops/me/type", Map.of("version", 1, "type", "SALON"), access);
+        assertThat(((Number) same.body().get("version")).longValue()).isEqualTo(1);
+        // A stale version is refused
+        Reply stale = put("/shops/me/type", Map.of("version", 0, "type", "KIRANA"), access);
+        assertThat(stale.status()).isEqualTo(409);
+        assertThat(stale.body().get("code")).isEqualTo("SHOP_CHANGED");
+        // Salon access follows the type at once (read from the database, not the token)
+        assertThat(statusOf("/salon/services", access)).isEqualTo(200);
+
+        Reply back = put("/shops/me/type", Map.of("version", 1, "type", "KIRANA"), access);
+        assertThat(back.body().get("type")).isEqualTo("KIRANA");
+        assertThat(back.body().get("gstin")).as("the kirana's GSTIN is back").isEqualTo("27AAPFU0939F1ZV");
+        assertThat(get("/salon/services", access).body().get("code")).isEqualTo("NOT_A_SALON");
+    }
+
+    @Test
+    void theVideoAndATradeLicenceStayAndAreCheckedAgainWhileAShopsAndEstablishmentsCertificateLeavesASalon() {
+        Map<?, ?> session = signIn(OWNER_PHONE);
+        String access = (String) session.get("accessToken");
+        UUID owner = UUID.fromString((String) ((Map<?, ?>) session.get("user")).get("id"));
+        Map<String, Object> salon = validShop();
+        salon.put("type", "SALON");
+        UUID shopId = UUID.fromString((String) post("/shops", salon, access).body().get("id"));
+        UUID video = file(shopId, owner, "SHOP_VIDEO", "video/mp4");
+        UUID licence = file(shopId, owner, "REG_DOC", "image/jpeg");
+        jdbc.update("UPDATE shops SET shop_video_file_id = ?, registration_doc_type = 'TRADE_LICENCE', "
+                + "registration_doc_file_id = ?, licence_check_status = 'FAILED', licence_check_reason = "
+                + "'NOT_A_SALON_TRADE' WHERE id = ?", video, licence, shopId);
+
+        // A kirana now: the video stays, and the trade licence is checked again for a kirana's trade
+        Reply r = put("/shops/me/type", Map.of("version", 0, "type", "KIRANA"), access);
+        assertThat(r.status()).as(r.body().toString()).isEqualTo(200);
+        assertThat(r.body().get("shopVideoFileId")).isEqualTo(video.toString());
+        assertThat(r.body().get("registrationDocFileId")).isEqualTo(licence.toString());
+        assertThat(r.body().get("licenceCheck")).isEqualTo("PENDING");
+        assertThat(r.body().get("licenceCheckReason")).isNull();
+        assertThat(jdbc.queryForObject("SELECT licence_check_due_at IS NOT NULL FROM shops", Boolean.class)).isTrue();
+
+        // A kirana's Shops and Establishments certificate, then back to a salon: it goes (a salon's can't be one)
+        UUID certificate = file(shopId, owner, "REG_DOC", "image/jpeg");
+        Reply se = put("/shops/me/registration-document", Map.of("version", 1, "type", "SHOPS_ESTABLISHMENT",
+                "fileId", certificate.toString()), access);
+        assertThat(se.status()).as(se.body().toString()).isEqualTo(200);
+        Reply back = put("/shops/me/type", Map.of("version", 2, "type", "SALON"), access);
+        assertThat(back.status()).as(back.body().toString()).isEqualTo(200);
+        assertThat(back.body().get("registrationDocFileId")).isNull();
+        assertThat(back.body().get("licenceCheck")).isNull();
+        assertThat(back.body().get("shopVideoFileId")).isEqualTo(video.toString());
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?", Long.class, certificate)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?", Long.class, video)).isOne();
+    }
+
+    @Test
+    void oneUploadUsedAsBothTheCertificateAndTheFssaiLicenceIsKeptWhileEitherStillPointsAtIt() {
+        Map<?, ?> session = signIn(OWNER_PHONE);
+        String access = (String) session.get("accessToken");
+        UUID owner = UUID.fromString((String) ((Map<?, ?>) session.get("user")).get("id"));
+        Map<String, Object> kirana = validShop();
+        kirana.put("type", "KIRANA");
+        UUID shopId = UUID.fromString((String) post("/shops", kirana, access).body().get("id"));
+        // One PDF holding both papers (the same bytes share one file)
+        UUID both = file(shopId, owner, "REG_DOC", "application/pdf");
+        assertThat(put("/shops/me/registration-document", Map.of("version", 0, "type", "SHOPS_ESTABLISHMENT",
+                "fileId", both.toString()), access).status()).isEqualTo(200);
+        Reply fssai = put("/kirana/online/fssai", Map.of("number", "10012345678901", "fileId", both.toString()),
+                access);
+        assertThat(fssai.status()).as(fssai.body().toString()).isEqualTo(200);
+
+        // A salon now: the certificate comes off the shop, but the FSSAI licence still points at the file
+        Reply salon = put("/shops/me/type", Map.of("version", 1, "type", "SALON"), access);
+        assertThat(salon.status()).as(salon.body().toString()).isEqualTo(200);
+        assertThat(salon.body().get("registrationDocFileId")).isNull();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?", Long.class, both)).isOne();
+
+        // And the other way: back to a kirana with it as the trade licence, then a new FSSAI certificate
+        assertThat(put("/shops/me/type", Map.of("version", 2, "type", "KIRANA"), access).status()).isEqualTo(200);
+        assertThat(put("/shops/me/registration-document", Map.of("version", 3, "type", "TRADE_LICENCE",
+                "fileId", both.toString()), access).status()).isEqualTo(200);
+        UUID fresh = file(shopId, owner, "REG_DOC", "image/jpeg");
+        Reply replaced = put("/kirana/online/fssai", Map.of("number", "10012345678902", "fileId", fresh.toString()),
+                access);
+        assertThat(replaced.status()).as(replaced.body().toString()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM files WHERE id = ?", Long.class, both)).isOne();
+        assertThat(jdbc.queryForObject("SELECT registration_doc_file_id FROM shops WHERE id = ?", UUID.class, shopId))
+                .isEqualTo(both);
+    }
+
+    @Test
+    void aKiranaThatAlreadyWorksAtItsCounterStaysAKirana() {
+        Map<?, ?> session = signIn(OWNER_PHONE);
+        String access = (String) session.get("accessToken");
+        Map<String, Object> kirana = validShop();
+        kirana.put("type", "KIRANA");
+        UUID shopId = UUID.fromString((String) post("/shops", kirana, access).body().get("id"));
+
+        // A helper invited, not yet accepted: the same
+        Reply invited = post("/shops/me/helpers", Map.of("phone", "9848099999"), access);
+        assertThat(invited.status()).as(invited.body().toString()).isEqualTo(202);
+        Reply withInvite = put("/shops/me/type", Map.of("version", 0, "type", "SALON"), access);
+        assertThat(withInvite.body().get("code")).isEqualTo("HAS_COUNTER_DATA");
+        jdbc.update("DELETE FROM shop_invites WHERE shop_id = ?", shopId);
+
+        // A helper with his own sign-in: a salon would hide him
+        Map<?, ?> helper = signIn(HELPER_PHONE);
+        UUID helperId = UUID.fromString((String) ((Map<?, ?>) helper.get("user")).get("id"));
+        TestData.member(jdbc, shopId, helperId, "HELPER");
+        Reply withHelper = put("/shops/me/type", Map.of("version", 0, "type", "SALON"), access);
+        assertThat(withHelper.status()).isEqualTo(409);
+        assertThat(withHelper.body().get("code")).isEqualTo("HAS_COUNTER_DATA");
+        jdbc.update("DELETE FROM shop_members WHERE user_id = ?", helperId);
+
+        // A product in its list (it billed while waiting for the visit, then was sent back)
+        Reply product = post("/kirana/products", Map.of("name", "Tata Salt 1 kg", "unit", "PIECE", "pricePaise", 2800),
+                access);
+        assertThat(product.status()).as(product.body().toString()).isEqualTo(201);
+        Reply withProduct = put("/shops/me/type", Map.of("version", 0, "type", "SALON"), access);
+        assertThat(withProduct.body().get("code")).isEqualTo("HAS_COUNTER_DATA");
+        assertThat(jdbc.queryForObject("SELECT type FROM shops WHERE id = ?", String.class, shopId)).isEqualTo("KIRANA");
+    }
+
+    @Test
+    void theTypeIsLockedOnceSubmittedOrEverApprovedAndAKiranaHasNoBarbers() {
+        Map<?, ?> session = signIn(OWNER_PHONE);
+        String access = (String) session.get("accessToken");
+        Map<String, Object> salon = validShop();
+        salon.put("type", "SALON");
+        UUID shopId = UUID.fromString((String) post("/shops", salon, access).body().get("id"));
+
+        // A barber with his own sign-in: a kirana can't have him
+        Map<?, ?> barber = signIn(HELPER_PHONE);
+        UUID barberId = UUID.fromString((String) ((Map<?, ?>) barber.get("user")).get("id"));
+        TestData.member(jdbc, shopId, barberId, "BARBER");
+        Reply refused = put("/shops/me/type", Map.of("version", 0, "type", "KIRANA"), access);
+        assertThat(refused.status()).isEqualTo(409);
+        assertThat(refused.body().get("code")).isEqualTo("HAS_BARBERS");
+        // Only the owner
+        Reply helper = put("/shops/me/type", Map.of("version", 0, "type", "KIRANA"), (String) barber.get("accessToken"));
+        assertThat(helper.status()).isEqualTo(403);
+        jdbc.update("DELETE FROM shop_members WHERE user_id = ?", barberId);
+        // A barber invited, not yet joined: the same
+        UUID ownerId = UUID.fromString((String) ((Map<?, ?>) session.get("user")).get("id"));
+        UUID invite = UUID.randomUUID();
+        jdbc.update("INSERT INTO shop_invites (id, shop_id, role, staff_id, to_phone, invited_by, status, created_at, "
+                + "expires_at) VALUES (?, ?, 'BARBER', ?, '9848099999', ?, 'PENDING', now(), now() + interval '7 days')",
+                invite, shopId, UUID.randomUUID(), ownerId);
+        Reply invited = put("/shops/me/type", Map.of("version", 0, "type", "KIRANA"), access);
+        assertThat(invited.body().get("code")).isEqualTo("HAS_BARBERS");
+        jdbc.update("UPDATE shop_invites SET status = 'CANCELLED' WHERE id = ?", invite);
+
+        // Submitted: locked
+        jdbc.update("UPDATE shops SET status = 'PENDING_VISIT' WHERE id = ?", shopId);
+        Reply submitted = put("/shops/me/type", Map.of("version", 0, "type", "KIRANA"), access);
+        assertThat(submitted.status()).isEqualTo(409);
+        assertThat(submitted.body().get("code")).isEqualTo("WRONG_STATUS");
+        // Sent back by the field team (a draft again, never approved, with their reason): still registering, so it
+        // may change; their reason stays for the owner to fix, and the next Submit clears it
+        jdbc.update("UPDATE shops SET status = 'DRAFT', status_reason = 'Shop board not visible' WHERE id = ?", shopId);
+        Reply sentBack = put("/shops/me/type", Map.of("version", 0, "type", "KIRANA"), access);
+        assertThat(sentBack.status()).as(sentBack.body().toString()).isEqualTo(200);
+        assertThat(sentBack.body().get("statusReason")).isEqualTo("Shop board not visible");
+        // A draft that was approved once (suspended, reinstated, sent back): its kind was verified, locked for good
+        jdbc.update("UPDATE shops SET ever_approved = true WHERE id = ?", shopId);
+        Reply verified = put("/shops/me/type", Map.of("version", 1, "type", "SALON"), access);
+        assertThat(verified.status()).isEqualTo(409);
+        assertThat(verified.body().get("code")).isEqualTo("WRONG_STATUS");
+        // A missing type names the field
+        Reply none = put("/shops/me/type", Map.of("version", 1), access);
+        assertThat(none.status()).isEqualTo(400);
+        assertThat(((Map<?, ?>) none.body().get("details")).containsKey("type")).isTrue();
+    }
+
+    @Test
+    void theKindChangesAtMostTenTimesADay() {
+        String access = token(OWNER_PHONE);
+        post("/shops", validShop(), access);
+        for (int v = 0; v < 10; v++) {
+            Reply r = put("/shops/me/type", Map.of("version", v, "type", v % 2 == 0 ? "SALON" : "KIRANA"), access);
+            assertThat(r.status()).as(r.body().toString()).isEqualTo(200);
+        }
+        Reply eleventh = put("/shops/me/type", Map.of("version", 10, "type", "SALON"), access);
+        assertThat(eleventh.status()).isEqualTo(429);
+        assertThat(eleventh.body().get("code")).isEqualTo("TOO_MANY_REQUESTS");
+        // The same kind again is no change and never counts
+        assertThat(put("/shops/me/type", Map.of("version", 10, "type", "KIRANA"), access).status()).isEqualTo(200);
+    }
+
+    private UUID file(UUID shopId, UUID by, String purpose, String contentType) {
+        UUID id = UUID.randomUUID();
+        jdbc.update("INSERT INTO files (id, shop_id, purpose, storage_key, content_type, size_bytes, sha256, "
+                + "uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, 10, ?, ?, now())", id, shopId, purpose,
+                "test/" + id, contentType, id.toString().replace("-", "") + "0".repeat(32), by);
+        return id;
+    }
+
+    /** The status alone (a list answer can't be read as the Map the other helpers read). */
+    private int statusOf(String path, String token) {
+        return http.get().uri(path).headers(h -> bearer(h, token)).exchange((rq, res) -> res.getStatusCode().value());
+    }
+
+    private Reply put(String path, Object body, String token) {
+        return http.put().uri(path).headers(h -> bearer(h, token)).contentType(MediaType.APPLICATION_JSON)
+                .body(body).exchange((rq, res) -> reply(res));
     }
 
     private static Map<String, Object> validShop() {
