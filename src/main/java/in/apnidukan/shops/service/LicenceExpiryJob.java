@@ -94,14 +94,14 @@ public class LicenceExpiryJob {
                     String badge = e.kirana() ? "the \"Licensed\" badge your shop gets" : "\"Licensed\" on your salon";
                     for (UUID owner : store.owners(e.shopId())) {
                         notifications.queue(expired
-                                ? new Notice(owner, EXPIRED_TYPE, null, now, title + " expired",
+                                ? text(e, new Notice(owner, EXPIRED_TYPE, null, now, title + " expired",
                                         "Your " + paper + " expired on " + day + ", so " + badge + " is off. Upload "
                                                 + "the renewed one to get it back.",
-                                        LicenceCheckJob.url(e.draft(), e.kirana()), Map.of())
-                                : new Notice(owner, EXPIRING_TYPE, null, now, title + " ends soon",
+                                        LicenceCheckJob.url(e.draft(), e.kirana()), Map.of()), EXPIRED_TYPE)
+                                : text(e, new Notice(owner, EXPIRING_TYPE, null, now, title + " ends soon",
                                         "Your " + paper + " is valid until " + day + ". Upload the renewed one before "
                                                 + "then to keep " + badge + ".",
-                                        LicenceCheckJob.url(e.draft(), e.kirana()), Map.of()));
+                                        LicenceCheckJob.url(e.draft(), e.kirana()), Map.of()), EXPIRING_TYPE));
                     }
                     return true;
                 });
@@ -111,5 +111,10 @@ public class LicenceExpiryJob {
             }
         } while (due.size() == BATCH && sent > before);   // a full batch none of which changed: stop, never loop
         return sent;
+    }
+
+    /** A salon's message also as its text (other languages); a kirana's stays English for now. */
+    private static Notice text(LicenceCheckStore.Expiring e, Notice notice, String key) {
+        return e.kirana() ? notice : notice.in(key, Map.of("day", LicenceCheckJob.dayValue(e.validUntil())));
     }
 }

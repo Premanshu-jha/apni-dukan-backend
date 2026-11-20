@@ -272,7 +272,8 @@ public class ShopOwnershipService implements TestAccountShops {
         // Told in the app if the number has an account; nothing in the answer depends on it
         users.findByPhone(phone).ifPresent(to -> notifications.queue(new Notice(to, "SHOP_HANDOVER_REQUEST", h.id(),
                 now, "A shop for you", "The owner of " + shop.details().name() + " wants to hand the shop over to "
-                + "you. Open Clozest to accept or decline.", "/handover", Map.of())));
+                + "you. Open Clozest to accept or decline.", "/handover", Map.of())
+                .in("SHOP_HANDOVER_REQUEST", Map.of("name", shop.details().name()))));
         return new HandoverRequested(SAME_ANSWER, view(h));
     }
 
@@ -380,9 +381,12 @@ public class ShopOwnershipService implements TestAccountShops {
         notifications.queue(new Notice(oldOwner.getUserId(), "SHOP_HANDOVER_ACCEPTED", handoverId, now,
                 "Shop handed over", name + " now belongs to the person you chose. You are no longer in it."
                         + (autoPayStopped ? " Your Clozest AutoPay for it is stopped: nothing more is taken." : ""),
-                "/shops/me", Map.of()));
+                "/shops/me", Map.of())
+                .in("SHOP_HANDOVER_ACCEPTED", Map.of("name", name, "autoPay",
+                        autoPayStopped ? Notifications.Text.of("SHOP_HANDOVER_ACCEPTED.autoPay") : "")));
         notifications.queue(new Notice(userId, "SHOP_HANDOVER_DONE", handoverId, now, "The shop is yours",
-                "You now own " + name + " on Clozest. Check its details and photos.", "/shops/me", Map.of()));
+                "You now own " + name + " on Clozest. Check its details and photos.", "/shops/me", Map.of())
+                .in("SHOP_HANDOVER_DONE", Map.of("name", name)));
         assignments.memberJoined(shop.getId(), userId);   // a field agent can't visit a business they work in
         return ShopResponse.from(shop, ShopRole.OWNER);
     }
@@ -400,7 +404,8 @@ public class ShopOwnershipService implements TestAccountShops {
         }
         notifications.queue(new Notice(h.fromUser(), "SHOP_HANDOVER_DECLINED", handoverId, now,
                 "Hand-over declined", "The person you asked won't take over " + shop.details().name() + ".",
-                "/shops/me", Map.of()));
+                "/shops/me", Map.of())
+                .in("SHOP_HANDOVER_DECLINED", Map.of("name", shop.details().name())));
     }
 
     // ---------- helpers ----------

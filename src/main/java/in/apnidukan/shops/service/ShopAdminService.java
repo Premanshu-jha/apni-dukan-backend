@@ -4,8 +4,11 @@ import in.apnidukan.common.context.SalonFacts;
 import in.apnidukan.common.context.ShopChangeListener;
 import in.apnidukan.common.context.TeamRole;
 import in.apnidukan.common.context.UserDirectory;
+import in.apnidukan.common.notify.Language;
+import in.apnidukan.common.notify.NoticeTexts;
 import in.apnidukan.common.notify.Notifications;
 import in.apnidukan.common.notify.Notifications.Notice;
+import in.apnidukan.common.notify.Notifications.Text;
 import in.apnidukan.common.text.TextCleaner;
 import in.apnidukan.common.text.TextCleaner.TextField;
 import in.apnidukan.common.files.FileRefs;
@@ -18,6 +21,7 @@ import in.apnidukan.shops.api.AdminShopDetail.TimelinePage;
 import in.apnidukan.shops.api.AdminShopResponse;
 import in.apnidukan.shops.domain.RegistrationDocType;
 import in.apnidukan.shops.domain.ReviewGroup;
+import in.apnidukan.shops.domain.ReviewReason;
 import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopDetails;
 import in.apnidukan.shops.domain.ShopEventType;
@@ -32,6 +36,7 @@ import in.apnidukan.shops.repo.AddressRequestStore;
 import in.apnidukan.shops.repo.ShopRepository;
 import in.apnidukan.shops.repo.ShopReviewStore;
 import in.apnidukan.shops.repo.ShopReviewStore.Snapshot;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
@@ -210,7 +215,8 @@ public class ShopAdminService {
         TimelinePage timeline = timelinePage(shopId, null);
         // The salon video only here (the field team's shop page), never in lists or anything customers see
         String video = shop.getShopVideoFileId() == null ? null : existingLink(shop.getShopVideoFileId());
-        AddressRequestView addressRequest = addressRequests.pending(shopId).map(AddressRequestService::view)
+        AddressRequestView addressRequest = addressRequests.pending(shopId)
+                .map(r -> AddressRequestService.view(r, users.language(r.requestedBy())))
                 .orElse(null);
         AdminShopDetail.Kirana kirana = null;
         if (shop.getType() == ShopType.KIRANA) {
@@ -246,7 +252,7 @@ public class ShopAdminService {
         ShopReviewStore.Event last = shown.isEmpty() ? null : shown.get(shown.size() - 1);
         return new TimelinePage(shown.stream()
                 .map(e -> new TimelineEntry(e.at(), e.event(), e.byName(), e.byAdmin(), e.reason(), e.note(),
-                        e.checklist()))
+                        e.checklist(), e.reasonCodes()))
                 .toList(), events.size() > page ? new TimelineNext(last.at(), last.seq()) : null);
     }
 
@@ -339,7 +345,8 @@ public class ShopAdminService {
             throw new ApiException(HttpStatus.CONFLICT, "NO_DOCUMENT", "This salon has no registration document.");
         }
         String reason = TextCleaner.clean(REASON, reasonInput);
-        String label = shop.getRegistrationDocType().label();
+        RegistrationDocType type = shop.getRegistrationDocType();
+        String label = type.label();
         shop.setRegistrationDoc(null, null, now());
         save(shop);
         review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null,
@@ -347,8 +354,19 @@ public class ShopAdminService {
         tellOwner(shop, "SHOP_DOCUMENT_REMOVED", "Trade licence removed",
                 "We removed the " + label.toLowerCase(java.util.Locale.ROOT) + " from " + shop.details().name() + ": "
                         + reason + " " + afterRemoval(shop.getStatus()),
-                shop.getStatus() == ShopStatus.DRAFT ? "/register/photos" : "/setup/document");
+                shop.getStatus() == ShopStatus.DRAFT ? "/register/photos" : "/setup/document",
+                Text.of("SHOP_DOCUMENT_REMOVED", Map.of("doc", Text.of("doc." + type.name()),
+                        "name", shop.details().name(), "reason", reason, "after", afterRemovalText(shop.getStatus()))));
         return view(shop);
+    }
+
+    /** afterRemoval as a text, in the owner's language. */
+    static Text afterRemovalText(ShopStatus status) {
+        return Text.of(switch (status) {
+            case APPROVED -> "removed.afterApproved";
+            case DRAFT -> "removed.afterDraft";
+            default -> "removed.afterOther";
+        });
     }
 
     /** What a removed licence means for the salon now, and where to add the right one. */
@@ -412,18 +430,24 @@ public class ShopAdminService {
         // After approving: no longer waiting, so a new pincode doesn't send it to another agent's visit list
         addressRequests.pending(shopId).ifPresent(r -> applyAddressRequest(adminId, shop, r));
         dashboardCounts.clearAfterCommit();
+        String name = shop.details().name();
         if (wasLive) {
             tellOwner(shop, "SHOP_RECHECKED", "Your changes are checked",
-                    "Our field team checked the changes to " + shop.details().name() + ". Nothing more to do.");
+                    "Our field team checked the changes to " + name + ". Nothing more to do.",
+                    Text.of("SHOP_RECHECKED", Map.of("name", name)));
         } else if (shop.getType() == in.apnidukan.shops.domain.ShopType.SALON) {
             tellOwner(shop, "SHOP_APPROVED", "Your shop is live",
-                    shop.details().name() + " is approved. Customers nearby can find it now."
+                    name + " is approved. Customers nearby can find it now."
                             + trialEnds.map(ends -> " Your free trial runs until " + SubscriptionService.day(ends)
                                     + "; then ₹" + SubscriptionService.PRICE_RUPEES + " a month. Nothing to pay now.")
-                                    .orElse(""));
+                                    .orElse(""),
+                    Text.of("SHOP_APPROVED", Map.of("name", name, "trial", trialEnds.<Object>map(ends -> Text.of(
+                            "SHOP_APPROVED.trial", Map.of("day", SubscriptionService.dayValue(ends),
+                                    "price", SubscriptionService.PRICE_RUPEES))).orElse(""))));
         } else {
             tellOwner(shop, "SHOP_APPROVED", "Your shop is live",
-                    shop.details().name() + " is approved. Customers nearby can find it now.");
+                    name + " is approved. Customers nearby can find it now.",
+                    Text.of("SHOP_APPROVED", Map.of("name", name, "trial", "")));
         }
         return view(shop);
     }
@@ -460,15 +484,28 @@ public class ShopAdminService {
     @Transactional
     public AdminShopResponse reject(UUID adminId, UUID shopId, long version, String reasonInput, String noteInput,
                                     Collection<VisitIssue> checklist) {
+        return reject(adminId, shopId, version, reasonInput, noteInput, checklist, null);
+    }
+
+    /**
+     * @param reasonCodes the fixed reasons (ReviewReason names) the owner is shown in his language; with them the
+     *                    reason (the owner's note) is optional (see {@link #reasons})
+     */
+    @Transactional
+    public AdminShopResponse reject(UUID adminId, UUID shopId, long version, String reasonInput, String noteInput,
+                                    Collection<VisitIssue> checklist, List<String> reasonCodes) {
+        Reasons reasons = reasons(reasonCodes, reasonInput);
         Shop shop = checked(adminId, shopId, version, "sent back", false, ShopStatus.PENDING_VISIT);
-        String reason = TextCleaner.clean(REASON, reasonInput);
         String note = optionalNote(noteInput);
-        shop.reject(reason, now());
+        shop.reject(reasons.words(), reasons.codes(), now());
         save(shop);
-        review.addEvent(shopId, now(), adminId, true, ShopEventType.SENT_BACK, reason, note, issues(checklist));
+        review.addEvent(shopId, now(), adminId, true, ShopEventType.SENT_BACK, reasons.words(), note,
+                issues(checklist), reasons.codes());
         dashboardCounts.clearAfterCommit();
+        String name = shop.details().name();
         tellOwner(shop, "SHOP_NOT_APPROVED", "Your shop needs a change",
-                shop.details().name() + " wasn't approved yet: " + reason + " Fix it in the app and submit again.");
+                name + " wasn't approved yet: " + reasons.english() + " Fix it in the app and submit again.",
+                Text.of("SHOP_NOT_APPROVED", Map.of("name", name, "reason", reasons.value())));
         return view(shop);
     }
 
@@ -480,19 +517,28 @@ public class ShopAdminService {
     @Transactional
     public AdminShopResponse askToFix(UUID adminId, UUID shopId, long version, String reasonInput, String noteInput,
                                       Collection<VisitIssue> checklist) {
+        return askToFix(adminId, shopId, version, reasonInput, noteInput, checklist, null);
+    }
+
+    /** @param reasonCodes as for reject */
+    @Transactional
+    public AdminShopResponse askToFix(UUID adminId, UUID shopId, long version, String reasonInput, String noteInput,
+                                      Collection<VisitIssue> checklist, List<String> reasonCodes) {
+        Reasons reasons = reasons(reasonCodes, reasonInput);
         Shop shop = checkedWaiting(adminId, shopId, version, "asked for a fix");
         if (shop.getStatus() != ShopStatus.APPROVED) {
             throw new ApiException(HttpStatus.CONFLICT, "WRONG_STATUS", "A shop that is " + shop.getStatus()
                     + " is sent back, not asked for a fix.", Map.of("status", shop.getStatus().name()));
         }
-        String reason = TextCleaner.clean(REASON, reasonInput);
         String note = optionalNote(noteInput);
-        shop.askToFix(reason, now());
+        shop.askToFix(reasons.words(), reasons.codes(), now());
         save(shop);
-        review.addEvent(shopId, now(), adminId, true, ShopEventType.FIX_ASKED, reason, note, issues(checklist));
+        review.addEvent(shopId, now(), adminId, true, ShopEventType.FIX_ASKED, reasons.words(), note,
+                issues(checklist), reasons.codes());
         tellOwner(shop, "SHOP_FIX_ASKED", "Please fix your change", "Our field team checked the changes to "
-                + shop.details().name() + ": " + reason + " Fix it in the Salon tab → Salon details (or Photos and "
-                + "video). Your salon stays live.", "/setup");
+                + shop.details().name() + ": " + reasons.english() + " Fix it in the Salon tab → Salon details (or "
+                + "Photos and video). Your salon stays live.", "/setup",
+                Text.of("SHOP_FIX_ASKED", Map.of("name", shop.details().name(), "reason", reasons.value())));
         return view(shop);
     }
 
@@ -522,7 +568,8 @@ public class ShopAdminService {
                     + "team: " + addressText(old) + " → " + addressText(now), List.of());
             dashboardCounts.clearAfterCommit();
             tellOwner(shop, "SHOP_ADDRESS_CHANGED", "Your address is updated", "Our field team changed the address "
-                    + "of " + now.name() + " to " + addressText(now) + ". Customers see the new one now.");
+                    + "of " + now.name() + " to " + addressText(now) + ". Customers see the new one now.",
+                    Text.of("SHOP_ADDRESS_CHANGED", Map.of("name", now.name(), "address", addressText(now))));
         }
         return view(shop);
     }
@@ -537,7 +584,8 @@ public class ShopAdminService {
             review.addEvent(shop.getId(), now(), adminId, true, ShopEventType.NOTE, null, "Address change approved: "
                     + addressText(old) + " → " + addressText(now), List.of());
             tellOwner(shop, "SHOP_ADDRESS_CHANGED", "Your new address is approved", "Our field team approved the new "
-                    + "address of " + now.name() + ": " + addressText(now) + ". Customers see it now.");
+                    + "address of " + now.name() + ": " + addressText(now) + ". Customers see it now.",
+                    Text.of("SHOP_ADDRESS_APPROVED", Map.of("name", now.name(), "address", addressText(now))));
         }
     }
 
@@ -550,23 +598,45 @@ public class ShopAdminService {
      */
     @Transactional
     public AdminShopResponse declineAddressRequest(UUID adminId, UUID shopId, long version, String reasonInput) {
+        return declineAddressRequest(adminId, shopId, version, reasonInput, null);
+    }
+
+    /** @param reasonCodes as for reject */
+    @Transactional
+    public AdminShopResponse declineAddressRequest(UUID adminId, UUID shopId, long version, String reasonInput,
+                                                   List<String> reasonCodes) {
+        return declineAddressRequest(adminId, shopId, version, reasonInput, reasonCodes, REASON.name());
+    }
+
+    /**
+     * @param reasonCodes as for reject
+     * @param wordsField  the request's field the words came in ("note", or "reason" from an older admin app): a
+     *                    400 about the words names it
+     */
+    @Transactional
+    public AdminShopResponse declineAddressRequest(UUID adminId, UUID shopId, long version, String reasonInput,
+                                                   List<String> reasonCodes, String wordsField) {
+        Reasons reasons = reasons(reasonCodes, reasonInput, wordsField);
         Shop shop = checked(adminId, shopId, version, "changed", false, ShopStatus.DRAFT, ShopStatus.PENDING_VISIT,
                 ShopStatus.APPROVED, ShopStatus.SUSPENDED);
-        String reason = TextCleaner.clean(REASON, reasonInput);
         shop.touch(now());
         save(shop);   // the row is locked from here
-        if (!addressRequests.decide(shopId, "DECLINED", reason, adminId, now())) {
+        if (!addressRequests.decide(shopId, "DECLINED", reasons.words(), reasons.codes(), adminId, now())) {
             throw new ApiException(HttpStatus.CONFLICT, "NO_ADDRESS_REQUEST",
                     "No address change waits for this shop any more. Reload.");
         }
         shopService.endRecheckIfNothingLeft(shop);   // the address was all there was to check: done
         save(shop);
         dashboardCounts.clearAfterCommit();
-        review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null, "Address change declined: " + reason,
-                List.of());
+        // Only the typed words go in the note (VARCHAR 500): the picked reasons are in reason_codes (many of them
+        // in words, with the words, would not fit). Words alone (an older admin app): the same note as before.
+        review.addEvent(shopId, now(), adminId, true, ShopEventType.NOTE, null,
+                "Address change declined" + (reasons.words() == null ? "" : ": " + reasons.words()), List.of(),
+                reasons.codes());
         tellOwner(shop, "SHOP_ADDRESS_DECLINED", "Your new address wasn't approved", "Our field team didn't approve "
-                + "the new address of " + shop.details().name() + ": " + reason + " Your address stays as it was; "
-                + "you can ask again in the Salon tab → Salon details.", "/setup/address");
+                + "the new address of " + shop.details().name() + ": " + reasons.english() + " Your address stays as "
+                + "it was; you can ask again in the Salon tab → Salon details.", "/setup/address",
+                Text.of("SHOP_ADDRESS_DECLINED", Map.of("name", shop.details().name(), "reason", reasons.value())));
         return view(shop);
     }
 
@@ -593,7 +663,8 @@ public class ShopAdminService {
         dashboardCounts.clearAfterCommit();
         listeners.forEach(l -> l.suspended(shop.getId()));
         tellOwner(shop, "SHOP_SUSPENDED", "Your shop is off the app",
-                shop.details().name() + " is hidden from customers: " + reason + " Contact Clozest to fix this.");
+                shop.details().name() + " is hidden from customers: " + reason + " Contact Clozest to fix this.",
+                Text.of("SHOP_SUSPENDED", Map.of("name", shop.details().name(), "reason", reason)));
         return view(shop);
     }
 
@@ -611,10 +682,12 @@ public class ShopAdminService {
         review.addEvent(shopId, now(), adminId, true, ShopEventType.REINSTATED, null, note, List.of());
         assignments.startedWaiting(shopId, "REINSTATED");
         dashboardCounts.clearAfterCommit();
+        // A kirana still adding its products is told so, in English for now (kirana messages aren't texts yet)
         tellOwner(shop, "SHOP_REINSTATED", "Your shop will be checked again", shop.details().name()
                 + (shop.visitBookable() ? " is no longer suspended. Our team will visit; it goes live once approved."
                 : " is no longer suspended. Finish adding your products in the app: then our team will visit, and "
-                + "it goes live once approved."));
+                + "it goes live once approved."),
+                shop.visitBookable() ? Text.of("SHOP_REINSTATED", Map.of("name", shop.details().name())) : null);
         return view(shop);
     }
 
@@ -655,17 +728,103 @@ public class ShopAdminService {
         }
     }
 
-    /** A message to the shop's owner, in the same transaction as the decision. */
-    private void tellOwner(Shop shop, String type, String title, String body) {
-        tellOwner(shop, type, title, body, "/shops/me");
+    /**
+     * A message to the shop's owner, in the same transaction as the decision: the English here, and the same as a
+     * text of notices/*.properties for an owner who reads another language.
+     */
+    private void tellOwner(Shop shop, String type, String title, String body, Text text) {
+        tellOwner(shop, type, title, body, "/shops/me", text);
     }
 
     /** @param url the partner app's page the message opens */
-    private void tellOwner(Shop shop, String type, String title, String body, String url) {
+    private void tellOwner(Shop shop, String type, String title, String body, String url, Text text) {
         members.findByShopIdOrderByCreatedAtAscIdAsc(shop.getId()).stream()
                 .filter(m -> m.getRole() == ShopRole.OWNER)
-                .forEach(m -> notifications.queue(new Notice(m.getUserId(), type, null, shop.getUpdatedAt(), title,
-                        body, url, Map.of())));
+                .forEach(m -> {
+                    Notice notice = new Notice(m.getUserId(), type, null, shop.getUpdatedAt(), title, body, url,
+                            Map.of());
+                    notifications.queue(text == null ? notice : notice.in(text.key(), text.values()));
+                });
+    }
+
+    /**
+     * What the field team asks the owner to fix: fixed reasons (ReviewReason names, each once, in the order picked)
+     * and/or their words (the old "reason" field, now the owner's note: optional with reasons).
+     * @param words the words, cleaned; null when there are none
+     */
+    record Reasons(List<String> codes, String words) {
+
+        /** The reasons for the message's text: "the licence has expired, the PIN code is wrong." and the words. */
+        Object value() {
+            List<Text> listed = codes.stream().filter(c -> !ReviewReason.OTHER.name().equals(c))
+                    .map(c -> Text.of("reason." + c)).toList();
+            if (listed.isEmpty()) {
+                return words;   // the words alone, as before reasons existed (an older admin app)
+            }
+            return Text.of("review.reasons", Map.of("list", listed, "note", words == null ? "" : " " + words));
+        }
+
+        /**
+         * value() in English: the words alone exactly as before when no fixed reason is picked. A reason without its
+         * reason.* text in en.properties (a gap the enum test catches) never fails the decision: its name instead.
+         */
+        String english() {
+            Object v = value();
+            if (!(v instanceof Text t)) {
+                return words;
+            }
+            return NoticeTexts.render(Language.EN, t.key(), t.values()).orElseGet(() -> {
+                LoggerFactory.getLogger(ShopAdminService.class)
+                        .warn("notices/en.properties lacks a text for the reasons {}", codes);
+                List<String> listed = codes.stream().filter(c -> !ReviewReason.OTHER.name().equals(c)).toList();
+                String list = listed.isEmpty() ? "" : String.join(", ", listed) + ".";
+                return list.isEmpty() ? (words == null ? "" : words) : list + (words == null ? "" : " " + words);
+            });
+        }
+    }
+
+    /**
+     * 400 VALIDATION_FAILED: reasonCodes with a name not in ReviewReason (details.reasonCodes); no reasonCodes and no
+     * reason (details.reason, the old rule); OTHER without a reason (the owner must be told what).
+     */
+    static Reasons reasons(List<String> codesInput, String wordsInput) {
+        return reasons(codesInput, wordsInput, REASON.name());
+    }
+
+    /** reasons() with the words checked as the request's field {@code wordsField} (a 400 names it). */
+    static Reasons reasons(List<String> codesInput, String wordsInput, String wordsField) {
+        TextField field = new TextField(wordsField, REASON.minLength(), REASON.maxLength());
+        List<String> codes = new ArrayList<>();
+        if (codesInput != null) {
+            if (codesInput.size() > ReviewReason.values().length) {
+                throw invalid("reasonCodes", "at most " + ReviewReason.values().length + " reasons");
+            }
+            for (String code : codesInput) {
+                ReviewReason r;
+                try {
+                    r = ReviewReason.valueOf(code == null ? "" : code);
+                } catch (IllegalArgumentException unknown) {
+                    throw invalid("reasonCodes", "unknown reason: " + code);
+                }
+                if (!codes.contains(r.name())) {
+                    codes.add(r.name());
+                }
+            }
+        }
+        if (codes.isEmpty()) {
+            // An older admin app (no reasonCodes): the reason is required, as it always was
+            return new Reasons(List.of(), TextCleaner.clean(field, wordsInput == null ? "" : wordsInput));
+        }
+        String words = wordsInput == null || wordsInput.isBlank() ? null : TextCleaner.clean(field, wordsInput);
+        if (codes.contains(ReviewReason.OTHER.name()) && words == null) {
+            throw invalid(wordsField, "say what else to fix");
+        }
+        return new Reasons(List.copyOf(codes), words);
+    }
+
+    private static ApiException invalid(String field, String problem) {
+        return new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                Map.of(field, problem));
     }
 
     private Instant now() {
@@ -680,7 +839,7 @@ public class ShopAdminService {
     private List<AdminShopResponse> views(List<Shop> list) {
         List<UUID> ids = list.stream().map(Shop::getId).toList();
         Set<UUID> approvedBefore = review.everApproved(ids);
-        Map<UUID, String> phones = review.ownerPhones(ids);
+        Map<UUID, ShopReviewStore.Owner> owners = review.owners(ids);
         Map<UUID, Instant> since = review.statusSince(ids);
         Map<UUID, UUID> assignees = assignments.assignees(ids);
         Map<UUID, UserDirectory.Person> agents = users.find(new java.util.HashSet<>(assignees.values()));
@@ -689,10 +848,14 @@ public class ShopAdminService {
                 .flatMap(shop -> java.util.stream.Stream.of(shop.getOwnerPhotoFileId(), shop.getShopPhotoFileId()))
                 .filter(Objects::nonNull).toList());
         Set<UUID> addressAsked = addressRequests.withPending(ids);
-        return list.stream().map(shop -> AdminShopResponse.from(shop, link(links, shop.getOwnerPhotoFileId()),
-                link(links, shop.getShopPhotoFileId()), approvedBefore.contains(shop.getId()), phones.get(shop.getId()),
-                since.get(shop.getId()), assignee(assignees.get(shop.getId()), agents),
-                addressAsked.contains(shop.getId()))).toList();
+        return list.stream().map(shop -> {
+            ShopReviewStore.Owner owner = owners.get(shop.getId());
+            return AdminShopResponse.from(shop, link(links, shop.getOwnerPhotoFileId()),
+                    link(links, shop.getShopPhotoFileId()), approvedBefore.contains(shop.getId()),
+                    owner == null ? null : owner.phone(), since.get(shop.getId()),
+                    assignee(assignees.get(shop.getId()), agents), addressAsked.contains(shop.getId()),
+                    owner == null ? null : owner.language());
+        }).toList();
     }
 
     private static AdminShopResponse.Assignee assignee(UUID id, Map<UUID, UserDirectory.Person> agents) {

@@ -114,14 +114,21 @@ public record AdminShopDetail(AdminShopResponse shop, Salon salon, Kirana kirana
 
     /**
      * @param byName who did it; null for the system or a deleted account
-     * @param reason what the owner was told
+     * @param reason what the owner was told in words (null when only reasonCodes were picked)
      * @param note   for admins only
+     * @param reasonCodes the fixed reasons the owner was given (ReviewReason names); empty when none
      */
     public record TimelineEntry(Instant at, ShopEventType event, String byName, boolean byAdmin, String reason,
-                                String note, List<VisitIssue> checklist) {
+                                String note, List<VisitIssue> checklist, List<String> reasonCodes) {
 
         public TimelineEntry {
             checklist = List.copyOf(checklist);
+            reasonCodes = reasonCodes == null ? List.of() : List.copyOf(reasonCodes);
+        }
+
+        public TimelineEntry(Instant at, ShopEventType event, String byName, boolean byAdmin, String reason,
+                             String note, List<VisitIssue> checklist) {
+            this(at, event, byName, byAdmin, reason, note, checklist, List.of());
         }
     }
 }

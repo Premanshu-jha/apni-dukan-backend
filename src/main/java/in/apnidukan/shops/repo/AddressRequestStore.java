@@ -19,10 +19,17 @@ import java.util.UUID;
 @Repository
 public class AddressRequestStore {
 
-    /** A request as stored. status: PENDING, APPROVED, DECLINED or CANCELLED; reason only when DECLINED. */
+    /**
+     * A request as stored. status: PENDING, APPROVED, DECLINED or CANCELLED; reason (the team's words) and reasonCodes
+     * (ReviewReason names, V84) only when DECLINED.
+     */
     public record Request(UUID id, UUID shopId, UUID requestedBy, String addressLine, String area, String city,
                           String pincode, BigDecimal latitude, BigDecimal longitude, String status, String reason,
-                          Instant createdAt, Instant decidedAt) {
+                          Instant createdAt, Instant decidedAt, List<String> reasonCodes) {
+
+        public Request {
+            reasonCodes = reasonCodes == null ? List.of() : List.copyOf(reasonCodes);
+        }
 
         public boolean pending() {
             return "PENDING".equals(status);
@@ -30,14 +37,15 @@ public class AddressRequestStore {
     }
 
     private static final String COLUMNS = "id, shop_id, requested_by, address_line, area, city, pincode, latitude, "
-            + "longitude, status, reason, created_at, decided_at";
+            + "longitude, status, reason, created_at, decided_at, reason_codes";
 
     private static final RowMapper<Request> ROW = (rs, n) -> new Request(rs.getObject("id", UUID.class),
             rs.getObject("shop_id", UUID.class), rs.getObject("requested_by", UUID.class), rs.getString("address_line"),
             rs.getString("area"), rs.getString("city"), rs.getString("pincode"), rs.getBigDecimal("latitude"),
             rs.getBigDecimal("longitude"), rs.getString("status"), rs.getString("reason"),
             rs.getTimestamp("created_at").toInstant(),
-            rs.getTimestamp("decided_at") == null ? null : rs.getTimestamp("decided_at").toInstant());
+            rs.getTimestamp("decided_at") == null ? null : rs.getTimestamp("decided_at").toInstant(),
+            rs.getArray("reason_codes") == null ? List.of() : List.of((String[]) rs.getArray("reason_codes").getArray()));
 
     private final JdbcTemplate jdbc;
 
@@ -79,7 +87,7 @@ public class AddressRequestStore {
                         + "latitude, longitude, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 id, shopId, by, addressLine, area, city, pincode, latitude, longitude, Timestamp.from(now));
         return new Request(id, shopId, by, addressLine, area, city, pincode, latitude, longitude, "PENDING", null, now,
-                null);
+                null, List.of());
     }
 
     /**
@@ -87,7 +95,20 @@ public class AddressRequestStore {
      * was waiting.
      */
     public boolean decide(UUID shopId, String status, String reason, UUID by, Instant now) {
-        return jdbc.update("UPDATE address_change_requests SET status = ?, reason = ?, decided_by = ?, decided_at = ? "
-                + "WHERE shop_id = ? AND status = 'PENDING'", status, reason, by, Timestamp.from(now), shopId) > 0;
+        return decide(shopId, status, reason, List.of(), by, now);
+    }
+
+    /** decide() with the fixed reasons of a decline (ReviewReason names; none: stored as null). */
+    public boolean decide(UUID shopId, String status, String reason, List<String> reasonCodes, UUID by, Instant now) {
+        return jdbc.update("UPDATE address_change_requests SET status = ?, reason = ?, reason_codes = ?, "
+                + "decided_by = ?, decided_at = ? WHERE shop_id = ? AND status = 'PENDING'", ps -> {
+                    ps.setString(1, status);
+                    ps.setString(2, reason);
+                    ps.setArray(3, reasonCodes == null || reasonCodes.isEmpty() ? null
+                            : ps.getConnection().createArrayOf("text", reasonCodes.toArray()));
+                    ps.setObject(4, by);
+                    ps.setTimestamp(5, Timestamp.from(now));
+                    ps.setObject(6, shopId);
+                }) > 0;
     }
 }

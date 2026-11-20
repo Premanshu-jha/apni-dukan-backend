@@ -182,9 +182,18 @@ public class Shop {
     @NotAudited
     private boolean everApproved;
 
-    /** Why the field team sent it back to DRAFT or suspended it (shown to the owner); null otherwise. */
+    /**
+     * Why the field team sent it back to DRAFT or suspended it (shown to the owner); null otherwise. Since V84 a send
+     * back or a fix asked for may come with reasons from a fixed list (statusReasonCodes) and no words: then it is ""
+     * (never null, so "sent back" stays "a draft with a reason", as the lists and ix_shops_review_sent_back read it).
+     */
     @Column(name = "status_reason", length = 200)
     private String statusReason;
+
+    /** The fixed reasons (ReviewReason names) of a send back or a fix asked for; null when none (V84). */
+    @Column(name = "status_reason_codes", columnDefinition = "text[]")
+    @JdbcTypeCode(SqlTypes.ARRAY)
+    private String[] statusReasonCodes;
 
     @Version
     @Column(nullable = false)
@@ -331,6 +340,7 @@ public class Shop {
         }
         this.status = ShopStatus.PENDING_VISIT;
         this.statusReason = null;
+        this.statusReasonCodes = null;
         this.updatedAt = now;
     }
 
@@ -347,6 +357,7 @@ public class Shop {
         }
         this.updatedAt = now;
         this.statusReason = null;   // a fix asked for: this change answers it
+        this.statusReasonCodes = null;
         if (recheckSince != null) {
             return false;
         }
@@ -374,6 +385,7 @@ public class Shop {
         }
         this.recheckSince = null;
         this.statusReason = null;
+        this.statusReasonCodes = null;
         this.updatedAt = now;
         return true;
     }
@@ -383,11 +395,24 @@ public class Shop {
      * the owner sees the reason until he changes something or it is approved.
      */
     public void askToFix(String reason, Instant now) {
+        askToFix(reason, java.util.List.of(), now);
+    }
+
+    /**
+     * @param reason the words for the owner; null or blank with codes only
+     * @param codes  the fixed reasons (ReviewReason names), in the order picked
+     */
+    public void askToFix(String reason, java.util.List<String> codes, Instant now) {
         if (status != ShopStatus.APPROVED || recheckSince == null) {
             throw new IllegalStateException("Only a live shop waiting for its re-check can be asked for a fix");
         }
-        this.statusReason = reason;
+        setReasons(reason, codes);
         this.updatedAt = now;
+    }
+
+    private void setReasons(String reason, java.util.List<String> codes) {
+        this.statusReason = reason == null ? "" : reason;
+        this.statusReasonCodes = codes.isEmpty() ? null : codes.toArray(String[]::new);
     }
 
     /**
@@ -429,6 +454,7 @@ public class Shop {
         this.checks++;
         this.status = ShopStatus.APPROVED;
         this.statusReason = null;
+        this.statusReasonCodes = null;
         this.updatedAt = now;
         // The registration document isn't part of the visit: the automatic licence check decides on it
     }
@@ -438,11 +464,16 @@ public class Shop {
      * shop's re-check is never sent back (askToFix).
      */
     public void reject(String reason, Instant now) {
+        reject(reason, java.util.List.of(), now);
+    }
+
+    /** As askToFix: the words (null or blank with codes only) and the fixed reasons. */
+    public void reject(String reason, java.util.List<String> codes, Instant now) {
         if (status != ShopStatus.PENDING_VISIT) {
             throw new IllegalStateException("Only a PENDING_VISIT shop can be sent back, not " + status);
         }
         this.status = ShopStatus.DRAFT;
-        this.statusReason = reason;
+        setReasons(reason, codes);
         this.updatedAt = now;
     }
 
@@ -457,6 +488,7 @@ public class Shop {
         this.recheckSince = null;
         this.status = ShopStatus.SUSPENDED;
         this.statusReason = reason;
+        this.statusReasonCodes = null;
         this.updatedAt = now;
     }
 
@@ -470,6 +502,7 @@ public class Shop {
         }
         this.status = ShopStatus.PENDING_VISIT;
         this.statusReason = null;
+        this.statusReasonCodes = null;
         this.updatedAt = now;
     }
 
@@ -484,6 +517,7 @@ public class Shop {
         this.recheckSince = null;
         this.status = ShopStatus.CLOSED;
         this.statusReason = reason;
+        this.statusReasonCodes = null;
         // Never opened again: its licence goes, so its number never blocks a new registration of the same business
         setRegistrationDoc(null, null, now);
         this.updatedAt = now;
@@ -497,6 +531,14 @@ public class Shop {
     public long getShopCode() { return shopCode; }
     public ShopStatus getStatus() { return status; }
     public String getStatusReason() { return statusReason; }
+
+    /** The words the owner is told with a send back, fix or suspension; null for none ("" with codes only). */
+    public String statusNote() { return statusReason == null || statusReason.isEmpty() ? null : statusReason; }
+
+    /** The fixed reasons (ReviewReason names) of a send back or a fix asked for; empty when none. */
+    public java.util.List<String> statusReasonCodes() {
+        return statusReasonCodes == null ? java.util.List.of() : java.util.List.of(statusReasonCodes);
+    }
     public ShopType getType() { return type; }
     public UUID getOwnerPhotoFileId() { return ownerPhotoFileId; }
     public UUID getShopPhotoFileId() { return shopPhotoFileId; }

@@ -195,14 +195,26 @@ public class ShopReviewStore {
     /** Each shop's owner's phone (null once the owner deleted their account). */
     public Map<UUID, String> ownerPhones(Collection<UUID> shopIds) {
         Map<UUID, String> out = new HashMap<>();
+        owners(shopIds).forEach((shop, owner) -> out.put(shop, owner.phone()));
+        return out;
+    }
+
+    /** A shop's owner as the field team's lists show him: his phone and the language he reads (null: English). */
+    public record Owner(String phone, String language) {
+    }
+
+    /** ownerPhones with each owner's language, in the same one query. */
+    public Map<UUID, Owner> owners(Collection<UUID> shopIds) {
+        Map<UUID, Owner> out = new HashMap<>();
         if (shopIds.isEmpty()) {
             return out;
         }
-        jdbc.query("SELECT m.shop_id, u.phone FROM shop_members m JOIN users u ON u.id = m.user_id "
+        jdbc.query("SELECT m.shop_id, u.phone, u.language FROM shop_members m JOIN users u ON u.id = m.user_id "
                         + "WHERE m.role = 'OWNER' AND m.shop_id = ANY (?)",
                 ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", shopIds.toArray())),
                 rs -> {
-                    out.put(rs.getObject("shop_id", UUID.class), rs.getString("phone"));
+                    out.put(rs.getObject("shop_id", UUID.class),
+                            new Owner(rs.getString("phone"), rs.getString("language")));
                 });
         return out;
     }
@@ -253,11 +265,29 @@ public class ShopReviewStore {
     /** Writes a timeline entry; a trigger (V16) keeps the shop's status_since and ever_approved from it. */
     public void addEvent(UUID shopId, Instant at, UUID by, boolean byAdmin, ShopEventType event, String reason,
                          String note, Collection<VisitIssue> checklist) {
-        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event, reason, note, checklist) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                UUID.randomUUID(), shopId, Timestamp.from(at), by, byAdmin, event.name(), reason, note,
-                checklist == null || checklist.isEmpty() ? null
-                        : String.join(",", checklist.stream().map(Enum::name).toList()));
+        addEvent(shopId, at, by, byAdmin, event, reason, note, checklist, List.of());
+    }
+
+    /** @param reasonCodes the fixed reasons the owner was given (ReviewReason names; V84), stored as they are */
+    public void addEvent(UUID shopId, Instant at, UUID by, boolean byAdmin, ShopEventType event, String reason,
+                         String note, Collection<VisitIssue> checklist, List<String> reasonCodes) {
+        String list = checklist == null || checklist.isEmpty() ? null
+                : String.join(",", checklist.stream().map(Enum::name).toList());
+        jdbc.update("INSERT INTO shop_events (id, shop_id, at, by_user, by_admin, event, reason, note, checklist, "
+                        + "reason_codes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ps -> {
+                    ps.setObject(1, UUID.randomUUID());
+                    ps.setObject(2, shopId);
+                    ps.setTimestamp(3, Timestamp.from(at));
+                    ps.setObject(4, by);
+                    ps.setBoolean(5, byAdmin);
+                    ps.setString(6, event.name());
+                    ps.setString(7, reason);
+                    ps.setString(8, note);
+                    ps.setString(9, list);
+                    ps.setArray(10, reasonCodes == null || reasonCodes.isEmpty() ? null
+                            : ps.getConnection().createArrayOf("text", reasonCodes.toArray()));
+                });
     }
 
     /** Timeline entries per page (the shop page shows the first; the next ones come from .../timeline). */
@@ -274,10 +304,12 @@ public class ShopReviewStore {
     public List<Event> timeline(UUID shopId, TimelineCursor after, int limit) {
         RowMapper<Event> row = (rs, i) -> {
             String list = rs.getString("checklist");
+            java.sql.Array codes = rs.getArray("reason_codes");
             return new Event(rs.getTimestamp("at").toInstant(), ShopEventType.valueOf(rs.getString("event")),
                     rs.getString("by_name"), rs.getBoolean("by_admin"), rs.getString("reason"),
                     rs.getString("note"), list == null ? List.of()
-                            : Arrays.stream(list.split(",")).map(VisitIssue::valueOf).toList(), rs.getLong("seq"));
+                            : Arrays.stream(list.split(",")).map(VisitIssue::valueOf).toList(), rs.getLong("seq"),
+                    codes == null ? List.of() : List.of((String[]) codes.getArray()));
         };
         return after == null
                 ? jdbc.query(TIMELINE + NEWEST_FIRST, row, shopId, limit)
@@ -306,10 +338,11 @@ public class ShopReviewStore {
      * @param seq    the order of entries made in the same instant (for the next page's cursor)
      */
     public record Event(Instant at, ShopEventType event, String byName, boolean byAdmin, String reason, String note,
-                        List<VisitIssue> checklist, long seq) {
+                        List<VisitIssue> checklist, long seq, List<String> reasonCodes) {
 
         public Event {
             checklist = List.copyOf(checklist);
+            reasonCodes = List.copyOf(reasonCodes);
         }
     }
 }

@@ -117,9 +117,16 @@ public class AddressRequestService {
         }
     }
 
+    /** As the owner sees it (requesterLanguage: null, it is for the field team). */
     static AddressRequestView view(AddressRequestStore.Request r) {
+        return view(r, null);
+    }
+
+    /** @param requesterLanguage the language of the owner who asked (the field team's view) */
+    static AddressRequestView view(AddressRequestStore.Request r, String requesterLanguage) {
         return new AddressRequestView(r.id(), r.addressLine(), r.area(), r.city(), r.pincode(), r.latitude(),
-                r.longitude(), r.status(), r.reason(), r.createdAt(), r.decidedAt());
+                r.longitude(), r.status(), r.reason(), r.createdAt(), r.decidedAt(), r.reasonCodes(),
+                requesterLanguage);
     }
 
     private Shop lockedOwnShop(UUID userId, long version) {

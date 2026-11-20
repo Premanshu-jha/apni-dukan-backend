@@ -130,10 +130,16 @@ public class ShopAdminController {
         return admin.approve(caller(), id, body.version(), body.note());
     }
 
-    /** The visit didn't pass (PENDING_VISIT): back to DRAFT with the reason the owner sees. 409 WRONG_STATUS / SHOP_CHANGED. */
+    /**
+     * The visit didn't pass (PENDING_VISIT): back to DRAFT with what the owner must fix: {@code reasonCodes} (fixed
+     * reasons, ReviewReason names, shown in his language) and/or {@code reason} (the team's words, shown as the note
+     * under them; optional with reasonCodes, required with OTHER). 400 VALIDATION_FAILED (details.reasonCodes /
+     * details.reason); 409 WRONG_STATUS / SHOP_CHANGED.
+     */
     @PostMapping("/shops/{id}/reject")
     public AdminShopResponse reject(@PathVariable UUID id, @Valid @RequestBody Decision body) {
-        return admin.reject(caller(), id, body.version(), body.reason(), body.note(), body.checklist());
+        return admin.reject(caller(), id, body.version(), body.reason(), body.note(), body.checklist(),
+                body.reasonCodes());
     }
 
     /**
@@ -142,7 +148,8 @@ public class ShopAdminController {
      */
     @PostMapping("/shops/{id}/ask-to-fix")
     public AdminShopResponse askToFix(@PathVariable UUID id, @Valid @RequestBody Decision body) {
-        return admin.askToFix(caller(), id, body.version(), body.reason(), body.note(), body.checklist());
+        return admin.askToFix(caller(), id, body.version(), body.reason(), body.note(), body.checklist(),
+                body.reasonCodes());
     }
 
     /**
@@ -150,7 +157,7 @@ public class ShopAdminController {
      * bookings are cancelled and each customer gets a message.
      */
     @PostMapping("/shops/{id}/suspend")
-    public AdminShopResponse suspend(@PathVariable UUID id, @Valid @RequestBody Decision body) {
+    public AdminShopResponse suspend(@PathVariable UUID id, @Valid @RequestBody Suspension body) {
         return admin.suspend(caller(), id, body.version(), body.reason(), body.note(), body.checklist());
     }
 
@@ -178,16 +185,26 @@ public class ShopAdminController {
     }
 
     /**
-     * Decline the owner's waiting address change request: `{version, reason}` (the owner is told the reason; the shop
-     * keeps its address). 409 NO_ADDRESS_REQUEST when none waits; SHOP_CHANGED / WRONG_STATUS as for changeAddress.
+     * Decline the owner's waiting address change request: `{version, reasonCodes, note}` (fixed reasons and/or the
+     * team's words, as for reject; `reason` is the older name of `note` and still accepted). The owner is told; the
+     * shop keeps its address. 409 NO_ADDRESS_REQUEST when none waits; SHOP_CHANGED / WRONG_STATUS as for changeAddress.
      * To accept it, approve the shop (the request is applied with it).
      */
     @PostMapping("/shops/{id}/address-request/decline")
     public AdminShopResponse declineAddressRequest(@PathVariable UUID id, @Valid @RequestBody DeclineAddress body) {
-        return admin.declineAddressRequest(caller(), id, body.version(), body.reason());
+        // The words come from note (or, from an older admin app, reason): a problem with them names that field
+        boolean fromNote = body.note() != null && (!body.note().isBlank() || body.reason() == null);
+        return admin.declineAddressRequest(caller(), id, body.version(), fromNote ? body.note() : body.reason(),
+                body.reasonCodes(), fromNote ? "note" : "reason");
     }
 
-    public record DeclineAddress(@NotNull Long version, @NotBlank @Size(max = 200) String reason) {
+    /**
+     * @param reasonCodes ReviewReason names (at least one, unless words are given)
+     * @param note        the team's words for the owner (optional with reasonCodes)
+     * @param reason      the same, as older admin apps send it
+     */
+    public record DeclineAddress(@NotNull Long version, @Size(max = 200) String reason, @Size(max = 200) String note,
+                                 List<String> reasonCodes) {
     }
 
     /** End a suspension: back to PENDING_VISIT, live again after the field team approves it. */
@@ -288,12 +305,24 @@ public class ShopAdminController {
     }
 
     /**
-     * @param reason    what the owner should know, e.g. "The shop photo doesn't show the shop's name board."
+     * @param reason    the team's words for the owner, e.g. "The shop photo doesn't show the shop's name board."
+     *                  (shown as the note under the reasons); optional when reasonCodes are given
+     * @param note      optional, for admins only
+     * @param reasonCodes the fixed reasons (ReviewReason names) the owner is shown in his language
+     * @param checklist what was wrong (optional)
+     */
+    public record Decision(@NotNull Long version, @Size(max = 200) String reason,
+                           @Size(max = 500) String note, @Size(max = 7) List<VisitIssue> checklist,
+                           List<String> reasonCodes) {
+    }
+
+    /**
+     * Suspending: the reason is required (no fixed reasons: a suspension is explained in words).
      * @param note      optional, for admins only
      * @param checklist what was wrong (optional)
      */
-    public record Decision(@NotNull Long version, @NotBlank @Size(max = 200) String reason,
-                           @Size(max = 500) String note, @Size(max = 7) List<VisitIssue> checklist) {
+    public record Suspension(@NotNull Long version, @NotBlank @Size(max = 200) String reason,
+                             @Size(max = 500) String note, @Size(max = 7) List<VisitIssue> checklist) {
     }
 
     public record Note(@NotBlank @Size(max = 500) String note) {
