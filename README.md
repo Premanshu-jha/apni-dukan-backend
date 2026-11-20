@@ -15,7 +15,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
 | `kirana` | The kirana's own counter (on `main` with the salons, switched off on the server until kirana launches: see "Kirana switch"): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit); stock from photos of distributors' bills and scans, unknown barcodes linked in one tap, counter suggestions and paper bills (round 3) |
 | `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
-| `notifications` | Messages queued with the change they report, sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
+| `notifications` | Messages queued with the change they report, written in each reader's language (`users.language`; English for none), sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
 ## How file handling works
 
@@ -296,7 +296,7 @@ coming back counts as copied; an old device retrying a signed-out token just get
 | `POST /refresh` `{refreshToken}` | New token pair |
 | `POST /logout` `{refreshToken}` | Ends this session, 204 |
 | `POST /logout-all` | Signs out every device at once, this one too (204) |
-| `GET /me` · `PATCH /me {name}` | The signed-in person · set your name (salons see it on bookings) |
+| `GET /me` · `PATCH /me {name?, language?}` | The signed-in person (with `language`: `"hi"` or null) · set your name (salons see it on bookings) and/or the language your messages are written in (see "Messages in the reader's language") |
 | `POST /me/delete-code` · `POST /me/delete {code}` | Delete your account: a code to your own phone, then 204. 409 `SHOP_OWNER` for a shop owner: close the shop (`POST /shops/me/close`) or hand it over (`POST /shops/me/handover`) first. See below |
 | `POST /email/send-code` `{email, phoneCode?}` | Sends a 6-digit code to the email (10 min). Replacing an already verified email also needs `phoneCode` |
 | `POST /email/change-phone-code` | Sends a code to your own phone, needed to replace a verified email. The old email is told after the change |
@@ -1535,6 +1535,110 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
+
+### Messages in the reader's language; the field team's fixed reasons (V83–V84; partner app 0.29.0, customer app 0.26.0, admin app 0.19.0)
+
+**Each person's language** (`users.language`, V83: `en`, `hi`, `te`, `mr`, `ta`, `kn`, or null for none chosen, which
+reads English; `Language`).
+- `PATCH /api/v1/auth/me` takes `name` and/or `language` (only what is sent changes; `"language": null` clears it).
+  Anything but the six codes (a wrong case too): 400 `VALIDATION_FAILED` with `details.language`, and a name sent with
+  it isn't saved either (the language is checked first: all or nothing). Neither field: 400 with `details.name`, as
+  before. It needs no complete profile, so the apps save it right after the first sign-in. `GET /me` and the PATCH's
+  answer carry `language`. Deleting the account clears it.
+- **A change rewrites what still waits in the old language.** The customer's booking reminders still waiting
+  (`BOOKING_REMINDER`, PENDING) are written again in the new one, in the change's transaction, after his row is
+  locked and saved (`LanguageChangeListener`, `SalonLanguageChange`): one statement per salon he has such a booking at
+  (at most two, the booking limit), the same SQL a salon's move uses. His other messages go out as soon as they are
+  queued, so none waits long enough to matter; a reminder already sent stays as it went. The SMS never changes.
+
+**Push and inbox messages in the reader's language.** Every salon and shared message (bookings to the customer and
+to the salon, the shop's decisions, address changes, licence checks, the subscription, hand-overs, invitations, help
+replies: 50 types) is written in the recipient's language **when it is queued**.
+- **The words** are in `src/main/resources/notices/<language>.properties` (UTF-8): `TYPE.title` and `TYPE.body` per
+  message, other keys for the pieces put into them (`reason.<CODE>`, `doc.<TYPE>`, `offer.*`, `ago.*`…). `{blanks}`
+  are filled by the code: names, numbers, codes, amounts and times as they are (times "6:30 PM" in every language,
+  as today), dates with the language's day and month names (`Notifications.Day`, `DayTime`), digits 0-9, lists with
+  the language's "and" (`AndList`). English is the source the others are translated from (everyday words, loanwords
+  people use, data never translated, each language's own short form for minutes).
+- **A code queues a message** with its English title and body, as before, plus the same as a text (`Notice.in(key,
+  values)`). `NotificationService` writes it in each reader's language in `queue`, `queueAll`, `replacePending` and
+  `replacePendingAll`; **the readers' languages are looked up once per batch** (`UserDirectory.languages`: one
+  `SELECT … WHERE id = ANY (?)`, only when some notice in it has a text), never per message. A language that lacks the
+  title, the body, a piece or a blank's value: **title and body both in English**, never one of each. The SMS is
+  never changed (DLT templates).
+- **The English is checked against `en.properties`** only when `app.notifications.strict-texts=true` (the tests turn it
+  on in `TestContainers`): a message whose English differs from its text fails, so the translations, made from that
+  file, always say what the code says. Production doesn't check (it would render every English text on every
+  message). Day formatters are made once per pattern and language.
+- **A salon's move or rename** rewrites the waiting reminders in one statement as before, now with one set of words
+  per language, joined on each reader's `users.language` (`AppointmentStore.rewriteReminders`, a `ReminderText` per
+  language; a language without its own reminder text gets the English).
+- Kirana-only messages aren't texts yet: they stay English (so does a kirana's reinstatement while it still adds its
+  products).
+
+**Help ticket emails** (`TicketEmails`) are written in the requester's saved language: the subject's words, the
+greeting, the acknowledgement, "Your message:", "To add anything…", "We've marked ticket … as resolved", "Reply to
+this email…", "You wrote:", the files note and "Clozest Support" (`email.ticket.*` in the same files). `[CLZ-1042]`
+stays exactly so in every subject (a reply finds its ticket by it); the support person's reply and the quoted
+messages stay as written; someone with no account (they only emailed) gets English. A language missing any of the
+email's texts sends the whole email in English.
+
+**What the field team asks the owner to fix** (V84). Send back (`POST /admin/shops/{id}/reject`), ask to fix
+(`…/ask-to-fix`) and decline an address change (`…/address-request/decline`) take **`reasonCodes`**, fixed reasons
+(`ReviewReason`: `SHOP_FRONT_PHOTO`, `BOARD_NOT_VISIBLE`, `INSIDE_PHOTOS`, `LICENCE_UNREADABLE`, `LICENCE_NAME_MISMATCH`,
+`LICENCE_EXPIRED`, `LICENCE_WRONG_TYPE`, `ADDRESS_WRONG`, `PIN_WRONG_PLACE`, `SERVICES_MISSING`, `HOURS_MISSING`,
+`VIDEO_UNCLEAR`, `OWNER_NAME`, `OTHER`; stored by name: never rename one, only add), which the apps show in the
+owner's language, and the team's own words as an **optional note** (the old `reason` field; on a decline also
+`note`, its new name; both are accepted).
+- **Rules** (`ShopAdminService.reasons`): each code once, in the order sent (repeats dropped); a name not in the list,
+  or more than 14: 400 `VALIDATION_FAILED` `details.reasonCodes`. With codes the words are optional (2–200 when
+  given), but needed with `OTHER` (400 naming the words' field). **No codes: the words are required, exactly as
+  before**, and the owner's message is the old one word for word, so an older admin app works unchanged. A 400 about
+  the words names the field they came in (`note`, or `reason` from an older app). Suspend still takes a required
+  `reason` (no codes: a suspension is explained in words). Any reason is accepted on any of the three (the admin app
+  offers only address, pin and Other on a decline).
+- **Stored:** `shops.status_reason_codes` (and `shops_aud`), `address_change_requests.reason_codes`,
+  `shop_events.reason_codes` (`TEXT[]`, null for none). A send back with codes only keeps `status_reason = ''` (never
+  null), so "sent back" is still "a draft with a reason" for the lists and `ix_shops_review_sent_back`; every answer
+  shows `''` as null. The timeline's note of an address decline holds only the typed words ("Address change declined:
+  …", `VARCHAR(500)`): the reasons are in `reason_codes`, so every reason with 200 characters of words always fits.
+- **The owner's message** lists the reasons in his language ("the trade licence has expired, the address is wrong."),
+  then the words (`review.reasons`, `reason.<CODE>`). A code without its English text never fails the decision: its
+  name is used and a WARN logged (`ReviewTextsTest` checks every reason, licence answer and document type has its
+  text in every language). `OTHER` is never listed: its words say it.
+- **The answers:** the partner's `GET /shops/me` and `GET /shops/me/address-request` give `statusReasonCodes` (empty
+  when none) beside `statusReason` / `reason` (now the note: null when only codes were picked). Rows from before V84:
+  codes empty, the old words as the note. The admin shop (`AdminShopResponse`) gives `statusReasonCodes` and
+  **`ownerLanguage`** (read in the same one query as the owners' phones), its timeline entries `reasonCodes`, the
+  address request **`requesterLanguage`**, and a help ticket's detail **`requesterLanguage`**, so the team knows which
+  language the person reads.
+
+| Call | Change |
+|---|---|
+| `GET /auth/me`, `PATCH /auth/me` | `language` in the answer; PATCH takes `language` (name optional now, one of the two needed) |
+| `POST /admin/shops/{id}/reject`, `/ask-to-fix` | optional `reasonCodes`; `reason` optional with codes (needed with `OTHER`), required without |
+| `POST /admin/shops/{id}/suspend` | unchanged (`reason` required) |
+| `POST /admin/shops/{id}/address-request/decline` | `{version, reasonCodes?, note?}`; `reason` still accepted for `note` |
+| `GET /shops/me`, `GET /shops/me/address-request` | `statusReasonCodes` (empty when none); `statusReason` / `reason` may be null with codes |
+| `GET /admin/shops`, `GET /admin/shops/{id}` | `statusReasonCodes`, `ownerLanguage`; timeline `reasonCodes`; address request `statusReasonCodes`, `requesterLanguage` |
+| `GET /admin/tickets/{id}` | `requesterLanguage` |
+
+- **Migrations: V83 and V84, after kirana's V66–V82.** `main` holds the kirana migrations V66–V82 (merged with it), so
+  this round takes V83 and V84. V83 adds the nullable `users.language` (no rewrite) with its check `NOT VALID`; V84
+  validates it (without blocking writes) and adds the nullable arrays (no rewrite). Both start with
+  `SET LOCAL lock_timeout = '3s'`. **A rolling deploy is fine.** Release order: the backend, then the partner app
+  0.29.0 and the customer app 0.26.0, then the admin app 0.19.0 (a send back with codes only shows no words in a
+  partner app from before 0.29.0, and an older backend refuses codes without words). Apps on an older backend lose
+  nothing: the language stays on the phone and reasons stay words.
+- **Tests:** `LanguagesIntegrationTest` (the PATCH's rules, a new account, a send back in Hindi and in English, a batch
+  in three languages with one lookup, reason codes saved and shown, the old free reason word for word, a fix asked and
+  a declined address with their codes, every reason with the longest words fitting the timeline, the field named in
+  a 400, the languages on the admin pages), `NoticeTextsTest` (every language has every text with the same blanks;
+  English says what the code always said; day names, times and pieces; one formatter per pattern and language),
+  `ReadersLanguageTest` (title and body together; the English checked only when strict), `ReviewTextsTest`,
+  `TicketEmailsTest`, `HelpdeskIntegrationTest.ourEmailsAreInTheLanguageOfTheirAccount…`,
+  `SalonScaleIntegrationTest.aCustomerWhoChoosesAnotherLanguageGetsHisWaitingRemindersInItAndOnlyHis`. The scenarios
+  are in `docs/scenarios.md`.
 
 ### How the salon subscription works (V65; partner app 0.27.0, customer app 0.25.2, admin app 0.18.0)
 
@@ -2830,8 +2934,8 @@ All optional (environment variables on Railway; defaults in `application.propert
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V83__...`; V66–V82 are
-kirana's, merged into `main` with it, so a salon change after them takes the next number too). `users.admin` (replaced
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V85__...`; V66–V82 are
+kirana's, merged into `main` with it, so a salon change after them takes the next number too, as V83–V84 did). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't
 create tables, because Hibernate only validates).
