@@ -36,6 +36,16 @@ public final class TextCleaner {
         return cleaned;
     }
 
+    /**
+     * The same tidying as clean, without refusing anything: look-alike letters become normal ones (NFKC: full-width
+     * "Ｒａｊｕ" becomes "Raju", a one-character "फ़" becomes "फ" and its dot, as saved names have it), and any run of
+     * spaces in any script (a no-break space too) becomes one space, the ends trimmed. For text compared with saved
+     * names (the salon search), so it is written the way they were saved.
+     */
+    public static String tidy(String value) {
+        return collapseSpaces(toNormalLetters(value));
+    }
+
     /** Look-alike letters become normal ones: full-width "Sharma" from some keyboards becomes plain "Sharma". */
     private static String toNormalLetters(String value) {
         return Normalizer.normalize(value, Normalizer.Form.NFKC);

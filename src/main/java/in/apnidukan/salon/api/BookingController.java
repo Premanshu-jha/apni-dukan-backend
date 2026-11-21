@@ -55,12 +55,16 @@ public class BookingController {
     /**
      * Approved salons within 2 km of the point, nearest first, 30 at a time. For the next page send the last
      * salon's `distanceMetres` and `id` as `afterDistance` and `afterId` (both, or neither); a page shorter than 30
-     * is the last one.
+     * is the last one. With `q`, only the salons whose name or one of whose services matches it ("facial",
+     * "raju"): 2 to 60 characters once trimmed (else 400 VALIDATION_FAILED on "q"), blank for all; send the same q
+     * with the next page's cursor. A request with q counts towards the person's searches (429 TOO_MANY_REQUESTS
+     * with Retry-After past 30 a minute); without q it never does.
      */
     @GetMapping("/api/v1/salons")
     public List<SalonSummary> salons(@RequestParam BigDecimal lat, @RequestParam BigDecimal lng,
                                      @RequestParam(required = false) Double afterDistance,
-                                     @RequestParam(required = false) UUID afterId) {
+                                     @RequestParam(required = false) UUID afterId,
+                                     @RequestParam(required = false) String q) {
         if ((afterDistance == null) != (afterId == null)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
                     Map.of("afterId", "send afterDistance and afterId together"));
@@ -70,7 +74,7 @@ public class BookingController {
                     Map.of("afterDistance", "must be a distance in metres from the last salon of the page before"));
         }
         ShopDirectory.Cursor after = afterId == null ? null : new ShopDirectory.Cursor(afterDistance, afterId);
-        return bookings.salonsNear(lat, lng, after);
+        return bookings.salonsNear(me(), lat, lng, after, q);
     }
 
     /** A salon's page. Counts towards the person's salon reads (429 TOO_MANY_REQUESTS past 60 a minute). */
