@@ -49,12 +49,65 @@ public interface ShopDirectory {
      * so it reads only shops near the point, however many there are.
      * @param type                KIRANA or SALON
      * @param skipPausedSalons    leave out salons that paused online bookings (salon_pauses) right now
+     * @param search              only salons whose name or a service matches (see Search); null for all of them.
+     *                            The same radius, order and pages either way: it only leaves shops out
      */
     List<ShopCard> nearby(String type, BigDecimal latitude, BigDecimal longitude, int radiusMetres, int limit,
-                          Cursor after, boolean skipPausedSalons);
+                          Cursor after, boolean skipPausedSalons, Search search);
 
     /** Where a page of nearby shops ended: the last card's exact distance and id. */
     record Cursor(double distanceMetres, UUID id) {
+    }
+
+    /**
+     * A customer's search in the salon list (made by the salon module from what they typed). A salon matches when
+     * its name, or the name of an active service of it that a working barber does, matches the text (see
+     * textMatches), or that service shows one of `serviceIcons`.
+     * @param likePattern  "%text%" in lower case, with the text's own \, % and _ escaped by a backslash
+     * @param typoWords    the text in lower case, its words split by single spaces, when small spelling slips are
+     *                     forgiven (letters and spaces only, at least 4 of them), else null
+     * @param serviceIcons the service pictures (ServiceIcon names) the text names; may be empty
+     */
+    record Search(String likePattern, String typoWords, List<String> serviceIcons) {
+
+        /**
+         * How close a word must be to a word of the name to count as a slip of it: pg_trgm's similarity of the two
+         * words (shared three-letter pieces of all of theirs). "facal"/"facial" 0.44, "threding"/"threading" 0.58,
+         * "mehndi"/"mehendi" 0.5, "rajoo"/"raju" 0.375; "shave"/"shape" 0.33, "raju"/"ravi" 0.25 stay apart.
+         */
+        public static final double TYPO_SIMILARITY = 0.35;
+
+        public Search {
+            serviceIcons = List.copyOf(serviceIcons);
+        }
+
+        /**
+         * SQL that is true when this lower-case text (a column expression, such as "lower(s.name)") matches: it
+         * contains the whole text (LIKE likePattern), or, when slips are forgiven, every word of the text matches on
+         * its own, in any order. A word matches when the name contains it ("aju"), or, from 4 letters, when it is a
+         * slip of one of the name's words: about as long (1 letter more or fewer, 2 from 7 letters) and similar from
+         * TYPO_SIMILARITY ("facal" finds "Facial", "rajoo" "Raju"). Word by word, so one common word shared is never
+         * enough: "haircut" doesn't find "Raju Hair Salon" ("hair" is 3 letters shorter), nor "lakme salon" "Style
+         * Salon", nor "head massage" "Body Massage". Its parameters are textArgs(), in that order. All in the same
+         * statement: the words come as one text, split by the database.
+         */
+        public String textMatches(String lowerText) {
+            String like = lowerText + " LIKE ? ESCAPE '\\'";
+            if (typoWords == null) {
+                return "(" + like + ")";
+            }
+            return "(" + like + " OR NOT EXISTS (SELECT 1 FROM unnest(string_to_array(?, ' ')) AS qw(word)"
+                    + " WHERE strpos(" + lowerText + ", qw.word) = 0 AND NOT (char_length(qw.word) >= 4"
+                    + " AND EXISTS (SELECT 1 FROM unnest(string_to_array(" + lowerText + ", ' ')) AS nw(word)"
+                    + " WHERE abs(char_length(nw.word) - char_length(qw.word))"
+                    + " <= CASE WHEN char_length(qw.word) >= 7 THEN 2 ELSE 1 END"
+                    + " AND similarity(qw.word, nw.word) >= " + TYPO_SIMILARITY + "))))";
+        }
+
+        /** The parameters of textMatches, in order. */
+        public List<Object> textArgs() {
+            return typoWords == null ? List.of(likePattern) : List.of(likePattern, typoWords);
+        }
     }
 
     /**

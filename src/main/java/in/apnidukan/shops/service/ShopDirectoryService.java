@@ -51,6 +51,26 @@ public class ShopDirectoryService implements ShopDirectory {
 
     private static final String AFTER = " AND (ST_Distance(s.location, p.g, false), s.id) > (?, ?)";
 
+    /**
+     * A customer's search (ShopDirectory.Search): the salon's name, or one of its active services that an active
+     * barber with weekly hours does (the same services its card counts, and someone can be booked for it: a barber
+     * without hours has no free time ever, so a salon is never found by a service nobody there can do). It only
+     * narrows the shops near the point: the map index still finds those (a few hundred within 2 km even in
+     * the busiest area), and the radius, order and page cursor are unchanged. Each of them is then checked in the
+     * same statement, never a read per salon from Java: its services from ix_salon_services_search (V85: the
+     * salon's active services with their name, picture and id in the index itself, so no table rows are read), its
+     * barbers by ix_salon_staff_shop, staff_services' (staff_id, service_id) key and ix_staff_hours_staff. Starting
+     * from the words instead (a trigram index) would be slower for the common ones: "haircut" is in nearly every salon
+     * in India. The names are matched by Search.textMatches (in part, and word by word with small slips forgiven when
+     * the search allows them); the pictures come as one comma-separated text (empty: none).
+     */
+    private static final String SERVICE_MATCHES = " OR EXISTS (SELECT 1 FROM salon_services v WHERE v.shop_id = s.id"
+            + " AND v.active AND (";
+    private static final String SERVICE_DONE = " OR v.icon = ANY (string_to_array(?, ','))) AND v.id IN ("
+            + "SELECT k.service_id FROM salon_staff st JOIN staff_services k ON k.staff_id = st.id"
+            + " WHERE st.shop_id = s.id AND st.active"
+            + " AND EXISTS (SELECT 1 FROM staff_hours sh WHERE sh.staff_id = st.id))))";
+
     private final ShopRepository shops;
     private final JdbcTemplate jdbc;
     private final Clock clock;
@@ -114,7 +134,8 @@ public class ShopDirectoryService implements ShopDirectory {
     @Override
     @Transactional(readOnly = true)
     public List<ShopCard> nearby(String type, java.math.BigDecimal latitude, java.math.BigDecimal longitude,
-                                 int radiusMetres, int limit, Cursor after, boolean skipPausedSalons) {
+                                 int radiusMetres, int limit, Cursor after, boolean skipPausedSalons,
+                                 Search search) {
         StringBuilder sql = new StringBuilder(NEARBY_SQL);
         List<Object> args = new ArrayList<>(List.of(longitude.doubleValue(), latitude.doubleValue(), type,
                 (double) radiusMetres));
@@ -125,6 +146,14 @@ public class ShopDirectoryService implements ShopDirectory {
                 sql.append(NOT_LAPSED);
                 args.add(Timestamp.from(Instant.now(clock)));
             }
+        }
+        if (search != null) {
+            sql.append(" AND (").append(search.textMatches("lower(s.name)"));
+            args.addAll(search.textArgs());
+            sql.append(SERVICE_MATCHES).append(search.textMatches("lower(v.name)"));
+            args.addAll(search.textArgs());
+            sql.append(SERVICE_DONE);
+            args.add(String.join(",", search.serviceIcons()));
         }
         if (after != null) {
             sql.append(AFTER);
