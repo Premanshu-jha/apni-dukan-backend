@@ -74,7 +74,7 @@ class SalonVisitsIntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        TestContainers.register(registry);
+        TestContainers.register(registry, true); // has kirana cases: kirana on
         // Batches of two: the job's batch loop is gone through
         registry.add("app.jobs.follow-up-batch", () -> "2");
     }

@@ -121,7 +121,7 @@ class KiranaOrdersIntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        TestContainers.register(registry);
+        TestContainers.register(registry, true); // has kirana cases: kirana on
         String fake = "http://127.0.0.1:" + RAZORPAY.getAddress().getPort();
         registry.add("app.razorpay.endpoint", () -> fake);
         registry.add("app.razorpay.key-id", () -> "rzp_test_kirana");

@@ -143,7 +143,7 @@ class Gs1IntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        TestContainers.register(registry);
+        TestContainers.register(registry, true); // has kirana cases: kirana on
         registry.add("app.kirana.ai-url", () -> "http://127.0.0.1:" + AI.getAddress().getPort() + "/v1/messages");
         registry.add("app.kirana.ai-key", () -> "test-key");
         registry.add("app.kirana.gs1.url", Gs1IntegrationTest::gs1Url);

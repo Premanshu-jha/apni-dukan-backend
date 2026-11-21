@@ -112,7 +112,7 @@ class FilesIntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        TestContainers.register(registry);
+        TestContainers.register(registry, true); // uploads BILL (kirana) files: kirana on
     }
 
     @Autowired Environment environment;

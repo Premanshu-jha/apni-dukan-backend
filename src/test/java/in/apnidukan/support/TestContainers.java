@@ -109,11 +109,12 @@ public final class TestContainers {
     }
 
     /**
-     * Points the app at the test containers, using the same names application.properties reads. Kirana is switched on
-     * (app.kirana.enabled; the server's default is off): the kirana tests need it, and salons work the same either way.
+     * Points the app at the test containers, using the same names application.properties reads. Kirana is off, as on
+     * the server (app.kirana.enabled defaults to false), so every salon test runs the way salons run in production. A
+     * class with kirana cases calls register(registry, true).
      */
     public static void register(org.springframework.test.context.DynamicPropertyRegistry registry) {
-        register(registry, true);
+        register(registry, false);
     }
 
     /** Like {@link #register(org.springframework.test.context.DynamicPropertyRegistry)}, kirana on or off. */
