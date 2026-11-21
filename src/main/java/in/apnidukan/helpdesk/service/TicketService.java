@@ -569,7 +569,7 @@ public class TicketService {
     /** "My requests" in the apps: this person's tickets, newest activity first (at most 30). */
     @Transactional(readOnly = true)
     public List<MyTicket> mine(UUID userId) {
-        return store.ofRequester(userId, MINE).stream().map(MyTicket::of).toList();
+        return store.ofRequester(userId, MINE).stream().map(m -> MyTicket.of(m.ticket(), m.lastReplyAt())).toList();
     }
 
     /** One of this person's own tickets with its messages (no internal history). 404 when it isn't theirs. */
@@ -588,7 +588,10 @@ public class TicketService {
         });
         Map<UUID, List<TicketStore.MessageFile>> attached = store.files(t.id());
         FileLinks links = links(attached);
-        return new MyDetail(MyTicket.of(t), messages.stream()
+        // Support's newest message (the list's lastReplyAt), from the messages already read
+        Instant lastReplyAt = messages.stream().filter(m -> m.direction().equals("OUT"))
+                .map(TicketMessage::createdAt).max(Instant::compareTo).orElse(null);
+        return new MyDetail(MyTicket.of(t, lastReplyAt), messages.stream()
                 .filter(m -> m.direction().equals("OUT") || userId.equals(m.authorId()))
                 .map(m -> new MyMessage(m.seq(), m.direction().equals("OUT"),
                         m.direction().equals("OUT") ? firstName(names.get(m.authorId())) : null, m.body(),
@@ -1138,12 +1141,16 @@ public class TicketService {
 
     /**
      * A ticket as the person who asked sees it.
-     * @param status OPEN (with us), WAITING (we answered), RESOLVED
+     * @param status      OPEN (with us), WAITING (we answered), RESOLVED
+     * @param lastReplyAt when support last wrote on it (null: not yet). A reply that also resolved the ticket counts:
+     *                    the apps mark a request answered when this is newer than what the person has read, as the
+     *                    status alone (WAITING) misses a reply-and-resolve. The person's own messages never change it.
      */
     public record MyTicket(UUID id, String number, String subject, TicketStatus status, Instant createdAt,
-                           Instant lastMessageAt) {
-        static MyTicket of(Ticket t) {
-            return new MyTicket(t.id(), t.label(), t.subject(), t.status(), t.createdAt(), t.lastMessageAt());
+                           Instant lastMessageAt, Instant lastReplyAt) {
+        static MyTicket of(Ticket t, Instant lastReplyAt) {
+            return new MyTicket(t.id(), t.label(), t.subject(), t.status(), t.createdAt(), t.lastMessageAt(),
+                    lastReplyAt);
         }
     }
 
