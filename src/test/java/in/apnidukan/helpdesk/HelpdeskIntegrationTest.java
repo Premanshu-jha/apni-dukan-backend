@@ -30,6 +30,7 @@ import org.springframework.web.client.RestClient;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -699,6 +700,46 @@ class HelpdeskIntegrationTest {
                 .isEqualTo(404);
         assertThat(post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "x"), customer).status())
                 .isEqualTo(400);
+    }
+
+    @Test
+    void aReplyThatAlsoResolvesSetsLastReplyAtAndTheirOwnMessagesNeverChangeIt() {
+        UUID neha = support("9800000001", "Neha");
+        String id = ask(customer, "Question about my booking");
+        Map<?, ?> asked = (Map<?, ?>) ((List<?>) get("/helpdesk/tickets", customer).body()).get(0);
+        assertThat(asked.containsKey("lastReplyAt")).isTrue();
+        assertThat(asked.get("lastReplyAt")).isNull();   // nobody answered yet
+        assertThat(field(field(get("/helpdesk/tickets/" + id, customer).body(), "ticket"), "lastReplyAt")).isNull();
+
+        CLOCK.advance(Duration.ofMinutes(10));
+        Instant repliedAt = CLOCK.instant();
+        long seen = ((Number) field(get("/admin/tickets/" + id, neha).body(), "lastIncomingSeq")).longValue();
+        post("/admin/tickets/" + id + "/reply", Map.of("seenSeq", seen, "body", "Fixed it.", "resolve", true), neha);
+
+        // Resolved in the same step (so never WAITING), and still the reply shows
+        Object item = ((List<?>) get("/helpdesk/tickets", customer).body()).get(0);
+        assertThat(field(item, "status")).isEqualTo("RESOLVED");
+        assertThat(Instant.parse((String) field(item, "lastReplyAt"))).isEqualTo(repliedAt);
+        assertThat(Instant.parse((String) field(field(get("/helpdesk/tickets/" + id, customer).body(), "ticket"),
+                "lastReplyAt"))).isEqualTo(repliedAt);
+
+        // Their own message moves lastMessageAt on, never lastReplyAt
+        CLOCK.advance(Duration.ofMinutes(5));
+        Reply added = post("/helpdesk/tickets/" + id + "/messages", Map.of("message", "Thank you, works now"),
+                customer);
+        assertThat(added.status()).as(added.text()).isEqualTo(200);
+        assertThat(Instant.parse((String) field(field(added.body(), "ticket"), "lastReplyAt"))).isEqualTo(repliedAt);
+        Object after = ((List<?>) get("/helpdesk/tickets", customer).body()).get(0);
+        assertThat(Instant.parse((String) field(after, "lastReplyAt"))).isEqualTo(repliedAt);
+        assertThat(Instant.parse((String) field(after, "lastMessageAt"))).isEqualTo(CLOCK.instant());
+
+        // A second ticket of theirs without a reply keeps null: each ticket its own
+        CLOCK.advance(Duration.ofMinutes(1));
+        ask(customer, "Another question about a payout");
+        List<?> both = (List<?>) get("/helpdesk/tickets", customer).body();
+        assertThat(both).hasSize(2);
+        assertThat(field(both.get(0), "lastReplyAt")).isNull();
+        assertThat(Instant.parse((String) field(both.get(1), "lastReplyAt"))).isEqualTo(repliedAt);
     }
 
     @Test
