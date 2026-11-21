@@ -68,7 +68,7 @@ class FieldAgentIntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        TestContainers.register(registry);
+        TestContainers.register(registry, true); // has kirana cases: kirana on
         registry.add("app.assignments.slice", () -> 2);   // every list goes through several slices
     }
 

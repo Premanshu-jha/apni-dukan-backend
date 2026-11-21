@@ -53,7 +53,7 @@ class SalonVideoIntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        TestContainers.register(registry);
+        TestContainers.register(registry, true); // has kirana cases: kirana on
     }
 
     @Autowired Environment environment;

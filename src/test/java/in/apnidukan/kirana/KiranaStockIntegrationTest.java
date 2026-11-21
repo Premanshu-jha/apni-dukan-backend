@@ -113,7 +113,7 @@ class KiranaStockIntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        TestContainers.register(registry);
+        TestContainers.register(registry, true); // has kirana cases: kirana on
         registry.add("app.kirana.ai-url", () -> "http://127.0.0.1:" + AI.getAddress().getPort() + "/v1/messages");
         registry.add("app.kirana.ai-key", () -> "test-key");
         registry.add("app.kirana.jobs-delay-ms", () -> "3600000");   // the tests run the jobs themselves

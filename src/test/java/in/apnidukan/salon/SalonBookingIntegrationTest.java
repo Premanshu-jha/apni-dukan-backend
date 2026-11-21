@@ -117,7 +117,7 @@ class SalonBookingIntegrationTest {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
-        TestContainers.register(registry);
+        TestContainers.register(registry, true); // has kirana cases: kirana on
         // Only this type has an SMS template in the tests: it goes out as SMS too, the others don't
         registry.add("app.sms.template.booking-cancelled-by-salon", () -> "tpl-salon-cancel");
         // Batches of one: every automatic-end round in these tests goes through the batch loop
