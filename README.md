@@ -1503,7 +1503,7 @@ sequenceDiagram
 
 **Customer (any signed-in person):** `GET /salons?lat=&lng=` (approved, not paused, within 2 km, nearest first, 30
 a page; the next page with the last salon's `distanceMetres` and `id` as `afterDistance` and `afterId`; see "Built for
-scale"),
+scale"; `&q=` searches them by name or service, see "Salon search"),
 `GET /salons/{id}`, `/services`, `/availability?services=a,b&date=YYYY-MM-DD` (these three together at most 60 a
 minute per person: then 429 `TOO_MANY_REQUESTS` with `Retry-After`), `POST /bookings` (header
 `Idempotency-Key`: a new UUID per attempt, the same one on retry), `GET /me/bookings?when=upcoming|past` (past: 30 a
@@ -1535,6 +1535,44 @@ The customer picks services and a time; the backend picks the barber. Another pe
 
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
+
+### Salon search (V85; customer app 0.27.0)
+
+`GET /salons?lat&lng[&afterDistance&afterId]&q=` (`BookingController` → `BookingService.salonsNear` → `SalonSearch` →
+`ShopDirectoryService.nearby`): the same list (2 km, nearest first, 30 a page, same cards), only salons whose name, or
+an active service that an active barber with weekly hours does, matches `q`.
+- **What matches:** part of the words in any case ("raju", "acia"); a service's picture by its name or a common word
+  ("facial" finds "Face clean-up" drawn with the facial picture; "color", "mehndi", "mustache", "eyebrow", "dulhan"…);
+  small spelling slips (letters and spaces only), **word by word**: every word of `q` must match on its own, in
+  any order: a word that is part of the name ("aju"), or, from 4 letters, a near spelling of one of the name's words
+  (as long within 1 letter, 2 from 7 letters, and pg_trgm `similarity` of the two words ≥ 0.35: "facal" → Facial,
+  "threding" → Threading, "rajoo" → Raju, "mehndi" → Mehendi). One common word shared is never enough: "haircut"
+  doesn't find "Raju Hair Salon", "lakme salon" not "Style Salon", "raju hair salon" not "Ravi Hair Salon", "head
+  massage" not "Body Massage", "shave" not "Shampoo". `%`, `_` and `\` are taken literally. A switched-off service,
+  one no working barber with weekly hours does, a paused or lapsed salon or one outside 2 km is never found.
+- **Cleaning:** `q` is tidied as saved names are (`TextCleaner.tidy`: NFKC, any kind of space made one) before the
+  length check and lower case, so full-width "Ｒａｊｕ", the one-character "फ़" (U+095E) and a no-break space match.
+- **The card:** with `q`, `topServices` names the services the search matched first (same field), then the others
+  in the salon's order, so a salon found by its sixth service shows why.
+- **Indian scripts and the database locale:** pg_trgm counts letters of other scripts as parts of words only when
+  the database's character type (`datctype`) is UTF-8 (`en_US.utf8`, `C.UTF-8`, …); under `C` a Hindi or Telugu
+  word has no trigrams, so it is still found in part, but a slip in it is not forgiven. The tests' postgis image
+  (`postgis/postgis:16-3.4-alpine`) initialises with `en_US.utf8`; check the live database with `SELECT datctype
+  FROM pg_database WHERE datname = current_database()`, and create a new one with a UTF-8 `LC_CTYPE` if it says `C`.
+- **Validation:** tidied as above, then 2 to 60 characters (counted as letters, not bytes): else 400
+  `VALIDATION_FAILED` with `details.q`. No `q`, or a blank one, is exactly the list as before.
+- **Built for many at once:** one statement per page. The map index finds the salons within 2 km first (a few hundred
+  at most); each one's services are checked in the same statement through V85's `ix_salon_services_search`
+  (`salon_services (shop_id) INCLUDE (name, icon, id) WHERE active`, built `CONCURRENTLY`), an index-only scan (its barbers' hours by `ix_staff_hours_staff`). On 20,000
+  salons × 15 services: about 200 candidates, 10–25 ms cold. A trigram index on service names would be slower here
+  (common words like "haircut" are in nearly every salon), so there is none; `shops.name` keeps its V13 one. No
+  server cache.
+- **Limit:** a request with `q` counts towards the person's searches: 30 a minute (`SALON_SEARCHES_PER_MINUTE`,
+  `app.salon.searches-per-minute`), then 429 `TOO_MANY_REQUESTS` with `Retry-After` (seconds), as the salon pages'
+  60, but counted apart (searching never uses up the salon pages). The app searches when typing pauses: 30 is one
+  every 2 seconds for a whole minute, more than anyone types, while a stuck key or a script can't load the
+  database. Without `q` (or a blank one, or a refused one) the list is never counted; Redis down: let through.
+- **Deploy:** the backend first, then the customer app 0.27.0 (an older app never sends `q`; an older backend ignores it).
 
 ### Messages in the reader's language; the field team's fixed reasons (V83–V84; partner app 0.29.0, customer app 0.26.0, admin app 0.19.0)
 
@@ -2003,13 +2041,18 @@ Deploy the backend first (an old partner app that sends a Udyam or Shops and Est
   support, it goes to the support person with fewest (or Unassigned). 409 `TICKET_CHANGED`. For someone who came
   back by phone. A support person's "other tickets from them" count is of their own only (what their search shows).
 - **My requests** in the customer and partner apps: `GET /api/v1/helpdesk/tickets` (the latest 30 of my own,
-  newest activity first: id, number, subject, status, createdAt, lastMessageAt), `GET /api/v1/helpdesk/tickets/{id}`
-  (`{ticket, messages}`: each with `fromSupport`, the support person's first name, body, attachments count, time;
+  newest activity first: id, number, subject, status, createdAt, lastMessageAt, `lastReplyAt`), `GET
+  /api/v1/helpdesk/tickets/{id}` (`{ticket, messages}`, the `ticket` with the same fields; messages: each with `fromSupport`, the support person's first name, body, attachments count, time;
   never the internal history, and never an email from an address we couldn't prove; 404 when it isn't mine), `POST
   /api/v1/helpdesk/tickets/{id}/messages {message}` (2–5,000 characters; it goes back to support, reopened if
   resolved; 429 `TOO_MANY_MESSAGES` past 20 messages of theirs an hour, new questions and emails included; the same
   words sent again within two minutes, after a lost answer, are kept once). Support's replies are still emailed as
   before. Migration V47 indexes messages by author for that count.
+  `lastReplyAt` (ISO time, or `null`) is when support last wrote on the ticket: a reply that also resolves it counts
+  (that ticket is `RESOLVED`, never `WAITING`, so the apps' "answered" dot reads `lastReplyAt` newer than what the
+  person last read, not the status); the person's own messages never change it. The list reads it in the same
+  statement (each ticket's newest `OUT` message, backwards through `ix_ticket_messages_ticket (ticket_id, seq)`),
+  the single ticket from the messages it already reads: no new index or migration.
 - Attachments stay in the support Gmail copy (decided): the apps and the admin website show how many there were.
 
 ### Support tickets (V46; admin app 0.10.0, customer app 0.15.0, partner app 0.16.0)

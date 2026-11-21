@@ -86,3 +86,42 @@ Tests: `LIT` = `LanguagesIntegrationTest`, `NTT` = `NoticeTextsTest`, `RLT` = `R
 | 2.46 | A language missing one of the email's texts | The whole email in English, never half | — | TET noLanguageIsEnglish (every language has every text) | OK-tested |
 | 2.47 | Many at once: a message to lakhs of people | One `SELECT … WHERE id = ANY (?)` for the batch's languages; each reminder rewrite one statement per salon; the admin lists read owners' languages in the same query as their phones | — | LIT aBatchIsWritten…WithOneLookup; MessagesAtScaleIntegrationTest (runs through the languages lookup) | OK-tested |
 | 2.48 | Two phones change the same person's language at the same moment | The person's row is locked; the last one wins, and his waiting reminders follow it | — | — | OK-untested |
+
+## 3. Salon search (`GET /salons?q=`, V85; customer app 0.27.0)
+
+Tests: `SSI` = `SalonSearchIntegrationTest` (real Postgres), `SST` = `SalonSearchTest`, `SDN` = `ShopDirectoryNearbyTest`. The customer app's rows are in its own `docs/scenarios.md`.
+
+| # | Scenario | API answer | Screen | Test | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 3.1 | No q / q blank or only spaces | Exactly today's list (no extra SQL) | All salons near | SSI `qIsTwoToSixty…` (page("") equals page(null)), SDN `withoutASearch…` | OK-tested |
+| 3.2 | Salon name in part, any case ("RAJU", "aju h") | That salon only | Its card | SSI `aSalonIsFoundByItsNameInPartAndInAnyCase` | OK-tested |
+| 3.3 | Service name ("facial" → "Gold Facial") | Salons whose active service a working barber does matches | Matching cards, nearest first | SSI `aSalonIsFoundByAServiceItsBarbersDo…` | OK-tested |
+| 3.4 | Service picture ("facial" → "Face clean-up" with FACIAL icon; "color" → HAIR_COLOUR; "mehndi" → MEHENDI) | Matched by the icon's name or an alias word (word start only) | Card | SSI same test, SST `aPictureIsNamed…` | OK-tested |
+| 3.5 | Small spelling slip from 4 letters ("facal", "mehndi", "threding", "rajoo") | Word by word: each word of 4+ letters is in the name or near one of its words (pg_trgm `similarity` ≥ 0.35 of the two words, and 1 letter more or fewer, 2 from 7 letters); each shorter word must be in the name | Card | SSI `smallSpellingSlipsAreForgiven…` ("mehndi", "threding", "rajoo"), SSI `everyWordMustMatch…` ("facal", "rajoo saloon"); SST `theNameIsMatchedWordByWord…` | OK-tested |
+| 3.5a | One common word shared is not a match: "haircut" vs "Raju Hair Salon" / "Hair Spa", "lakme salon" vs "Style Salon", "raju hair salon" vs "Ravi Hair Salon", "head massage" vs "Body Massage", "shave" vs "Shampoo", "face" vs "Gold Facial" | Not found (each word must match on its own) | Not shown | SSI `everyWordMustMatchOnItsOwn…`, SSI `aSalonIsFoundByAService…` ("HAIRCUT", "face") | OK-tested |
+| 3.5b | Words in another order ("salon raju") | Found (every word matches) | Card | SSI `everyWordMustMatchOnItsOwn…` | OK-tested |
+| 3.5f | A name with a word joined to punctuation ("Raju's Salon", "Eyebrow Threading/Shaping", "Facial/Cleanup") | The name is split at spaces and punctuation, so "rajoo", "threding", "facal" still find them; Indian vowel signs stay in their word | Card | SSI `aNameIsSplitIntoWordsAtPunctuation…` | OK-tested |
+| 3.5c | q typed as full-width letters ("Ｒａｊｕ"), the one-character "फ़" (U+095E), a no-break space between words | Tidied as saved names are (`TextCleaner.tidy`: NFKC, any space → one space) before the length check and lower case: matches | Card | SST `theTextIsTidied…`, SSI `whatWasTypedIsTidied…` | OK-tested |
+| 3.5d | Hindi: name in part ("राजू", "हेयर सैलून"), a vowel-sign slip ("राजु"), a service typed with "फ़" | Found; the slip needs a UTF-8 character type in the database (pg_trgm sees no Hindi words under `C`) | Card | SSI `whatWasTypedIsTidied…` (postgis image: en_US.utf8); checked on local PG 16 under `C.utf8` (found) and `C` (slip not found) | OK-tested |
+| 3.5e | The card of a salon found by a service: which services it names | The matched services first in `topServices` (same field), then the others in the salon's order; found by its name: the salon's order | The card says why it was found | SSI `theServicesASearchMatchedComeFirst…` | OK-tested |
+| 3.6 | Same cards as without search | Identical SalonSummary per salon | Same card | SSI compares card maps | OK-tested |
+| 3.7 | Switched-off service, service no working barber does, barber switched off, paused salon, salon > 2 km, a kirana | Never matched | — | SSI `aSwitchedOffService…NeverFound` | OK-tested |
+| 3.7a | The only barber who does the service has no weekly hours | Not found by that service (nobody can be booked); still found by its name | — | SSI `aServiceOnlyABarberWithoutWeeklyHours…`, SDN (staff_hours in the statement) | OK-tested |
+| 3.7b | Subscription lapsed (SUBSCRIPTIONS_ENFORCED on) | Not found by name or service; a paying salon is | — | SSI `aSalonWhoseSubscriptionLapsedIsNeverFound` | OK-tested |
+| 3.8 | Nothing matches | 200 `[]` | Empty state (see app) | IT, app e2e | OK-tested |
+| 3.9 | Paging with q (35 matches + 5 nearer non-matches, two of them at the same distance across the page break) | 30 then 5, same `afterDistance/afterId`, sorted, none lost or twice (the id breaks the tie); non-matches never cut a page short | "Show more salons" | SSI `searchResultsCome30APage…` | OK-tested |
+| 3.10 | q of 1 char, "  f  ", "\", 61 chars | 400 `VALIDATION_FAILED` `details: {q: …}` | App never sends these | IT, SST `oneCharacterOrMoreThanSixty…` | OK-tested |
+| 3.11 | 60 chars, or 60 Hindi letters (code points, not bytes) | 200 | — | IT, unit | OK-tested |
+| 3.12 | `%`, `_`, `\` in q ("0%", "a_b", "a\b", "%%", "__") | Taken literally (LIKE escaped, no typo matching for non-letters) | — | SSI `percentUnderscoreAndBackslash…`, unit; verified on local PG 16 | OK-tested |
+| 3.13 | Many customers searching at once (thousands of salons) | One statement per page: PostGIS radius index first (≤ a few hundred salons within 2 km), each checked via index-only scan on V85 `ix_salon_services_search`; no per-salon reads from Java; cards still 1 query/page | — | A manual EXPLAIN on 20k salons × 15 services locally (~10–25 ms cold, services read index-only), not a test that runs; SDN checks it stays one statement | OK-untested |
+| 3.14 | One person searching very often (a stuck key, a script) | With q: 30 searches a minute per person (`app.salon.searches-per-minute`), then 429 `TOO_MANY_REQUESTS` with `Retry-After` (seconds), counted apart from the salon pages' 60; without q never counted; Redis down: let through. No server cache; the app caches per (lat, lng, q) | The app's "wait a few seconds" (see app) | SSI `thirtySearchesAMinuteThenA429…` | OK-tested |
+
+## 4. Support's reply in the apps' "My requests" (`lastReplyAt`)
+
+Tests: `HIT` = `HelpdeskIntegrationTest`. The apps' rows (the "answered" dot) are in their own `docs/scenarios.md`.
+
+| # | Scenario | API answer | Screen | Test | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 4.1 | Support replies and resolves in one step (`POST /admin/tickets/{id}/reply`, `resolve: true`) | The ticket is RESOLVED (never WAITING); `GET /helpdesk/tickets` items and `GET /helpdesk/tickets/{id}`'s `ticket` carry `lastReplyAt` = the time of support's newest message | The apps light "answered" from `lastReplyAt` newer than what was read | HIT `aReplyThatAlsoResolvesSetsLastReplyAt…` | OK-tested |
+| 4.2 | No reply yet / the person writes again | `lastReplyAt` null until support writes; the person's own message moves `lastMessageAt`, never `lastReplyAt`; each ticket its own | No false dot | HIT same test | OK-tested |
+| 4.3 | Many tickets, many people | One statement for the list (each ticket's newest reply read backwards through `ix_ticket_messages_ticket (ticket_id, seq)`, at most 30 tickets); the single read takes it from the messages it already reads; no new index or migration | — | HIT; plan reasoning | OK-untested (load) |
