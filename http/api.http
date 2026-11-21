@@ -385,6 +385,11 @@ Authorization: Bearer {{accessToken}}
     }
 %}
 
+### 13a. Customer: search the salons near a point by the salon's name or a service ("facial", "raju"; 2-60 characters,
+# small spelling slips forgiven from 4 letters: "facal"). The same pages: send the same q with afterDistance and afterId
+GET {{baseUrl}}/salons?lat=17.466&lng=78.365&q=haircut
+Authorization: Bearer {{accessToken}}
+
 ### 13b. Customer: free times for the haircut (6e) on a date (India date)
 GET {{baseUrl}}/salons/{{salonId}}/availability?services={{serviceId}}&date={{bookingDate}}
 Authorization: Bearer {{accessToken}}
