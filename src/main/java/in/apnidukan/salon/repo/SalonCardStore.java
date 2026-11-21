@@ -1,5 +1,6 @@
 package in.apnidukan.salon.repo;
 
+import in.apnidukan.common.context.ShopDirectory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -31,7 +32,7 @@ public class SalonCardStore {
      * @param closeMin   today's closing; null if no hours today
      * @param closedDay  today is one of its closed days (holidays)
      * @param services   its active services that an active barber does
-     * @param top        the first TOP_SERVICES of them in the salon's order
+     * @param top        the first TOP_SERVICES of them in the salon's order (with a search: those it matched first)
      * @param registered the salon's trade licence (optional) passed the automatic check and is valid that day
      * @param worksToday a working barber has hours on today's weekday (none: the salon is closed today, whatever its
      *                   opening hours say)
@@ -54,7 +55,7 @@ public class SalonCardStore {
     public record Offer(int percentOff, LocalDate startsOn, LocalDate endsOn) {
     }
 
-    private static final String SQL = """
+    private static final String SQL_START = """
             SELECT u.id, COALESCE(t.ratings, 0) AS ratings, COALESCE(t.stars_sum, 0) AS stars_sum,
                 EXISTS (SELECT 1 FROM salon_hours x WHERE x.shop_id = u.id) AS has_hours,
                 h.open_min, h.close_min,
@@ -70,13 +71,25 @@ public class SalonCardStore {
             LEFT JOIN salon_hours h ON h.shop_id = u.id AND h.weekday = ?
             LEFT JOIN LATERAL (
                 SELECT count(*) AS n,
-                    (array_agg(o.name ORDER BY o.sort_order, o.name))[1:3] AS names,
-                    (array_agg(o.price_paise ORDER BY o.sort_order, o.name))[1:3] AS prices,
-                    (array_agg(o.price_is_from ORDER BY o.sort_order, o.name))[1:3] AS froms
-                FROM salon_services o
-                WHERE o.shop_id = u.id AND o.active AND o.id IN (
-                    SELECT k.service_id FROM salon_staff st JOIN staff_services k ON k.staff_id = st.id
-                    WHERE st.shop_id = u.id AND st.active)) sv ON true
+                    (array_agg(o.name ORDER BY o.hit DESC, o.sort_order, o.name))[1:3] AS names,
+                    (array_agg(o.price_paise ORDER BY o.hit DESC, o.sort_order, o.name))[1:3] AS prices,
+                    (array_agg(o.price_is_from ORDER BY o.hit DESC, o.sort_order, o.name))[1:3] AS froms
+                FROM (SELECT o.name, o.price_paise, o.price_is_from, o.sort_order, """;
+
+    /**
+     * Whether a service is one the customer's search matched (its name, as ShopDirectory.Search.textMatches, or its
+     * picture): those come first on the card, so a salon found by its sixth service shows it. Without a search:
+     * false for all, the salon's own order. COALESCE: a service with no picture (icon NULL) would make it NULL, and
+     * NULL sorts first in a DESC order, ahead of the matches.
+     */
+    private static final String HIT = "COALESCE(%s OR o.icon = ANY (string_to_array(?, ',')), false)";
+
+    private static final String SQL_END = """
+                     AS hit
+                    FROM salon_services o
+                    WHERE o.shop_id = u.id AND o.active AND o.id IN (
+                        SELECT k.service_id FROM salon_staff st JOIN staff_services k ON k.staff_id = st.id
+                        WHERE st.shop_id = u.id AND st.active)) o) sv ON true
             LEFT JOIN LATERAL (
                 SELECT o.percent_off, o.starts_on, o.ends_on FROM salon_offers o
                 WHERE o.shop_id = u.id AND o.ended_at IS NULL AND o.ends_on >= ?
@@ -105,20 +118,32 @@ public class SalonCardStore {
      * @param dayStart that day's first moment
      * @param dayEnd   the next day's first moment
      * @param today    that day's date (offers lasting until it or later)
+     * @param search   the customer's search the salons were found by (their matched services named first); null
      */
     public Map<UUID, Facts> facts(Collection<UUID> shopIds, int weekday, Instant dayStart, Instant dayEnd,
-                                  LocalDate today) {
+                                  LocalDate today, ShopDirectory.Search search) {
         Map<UUID, Facts> out = new HashMap<>();
         if (shopIds.isEmpty()) {
             return out;
         }
-        jdbc.query(SQL, ps -> {
-            ps.setObject(1, AppointmentStore.at(dayStart));
-            ps.setObject(2, AppointmentStore.at(dayEnd));
-            ps.setObject(3, today);
-            ps.setArray(4, ps.getConnection().createArrayOf("uuid", shopIds.toArray()));
-            ps.setInt(5, weekday);
-            ps.setObject(6, today);
+        List<Object> hitArgs = new ArrayList<>();
+        String hit = "false";
+        if (search != null) {
+            hit = HIT.formatted(search.textMatches("lower(o.name)"));
+            hitArgs.addAll(search.textArgs());
+            hitArgs.add(String.join(",", search.serviceIcons()));
+        }
+        jdbc.query(SQL_START + hit + SQL_END, ps -> {
+            int i = 0;
+            ps.setObject(++i, AppointmentStore.at(dayStart));
+            ps.setObject(++i, AppointmentStore.at(dayEnd));
+            ps.setObject(++i, today);
+            ps.setArray(++i, ps.getConnection().createArrayOf("uuid", shopIds.toArray()));
+            ps.setInt(++i, weekday);
+            for (Object a : hitArgs) {
+                ps.setString(++i, (String) a);
+            }
+            ps.setObject(++i, today);
         }, rs -> {
             List<Top> top = new ArrayList<>();
             Object[] names = array(rs.getArray("names"));
