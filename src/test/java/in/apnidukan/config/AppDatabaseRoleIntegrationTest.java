@@ -106,17 +106,19 @@ class AppDatabaseRoleIntegrationTest {
         JdbcTemplate app = app();
         // Rights on every table and sequence there is
         List<String> missing = app.queryForList("""
-                SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname <> 'flyway_schema_history'
-                  AND NOT (has_table_privilege('clozest_app', c.oid, 'SELECT')
-                       AND has_table_privilege('clozest_app', c.oid, 'INSERT')
-                       AND has_table_privilege('clozest_app', c.oid, 'UPDATE')
-                       AND has_table_privilege('clozest_app', c.oid, 'DELETE'))""", String.class);
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name <> 'flyway_schema_history'
+                  AND NOT (has_table_privilege('clozest_app', format('public.%I', table_name), 'SELECT')
+                       AND has_table_privilege('clozest_app', format('public.%I', table_name), 'INSERT')
+                       AND has_table_privilege('clozest_app', format('public.%I', table_name), 'UPDATE')
+                       AND has_table_privilege('clozest_app', format('public.%I', table_name), 'DELETE'))""",
+                String.class);
         assertThat(missing).isEmpty();
         List<String> sequences = app.queryForList("""
-                SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relkind = 'S'
-                  AND NOT has_sequence_privilege('clozest_app', c.oid, 'USAGE')""", String.class);
+                SELECT sequence_name FROM information_schema.sequences
+                WHERE sequence_schema = 'public'
+                  AND NOT has_sequence_privilege('clozest_app', format('public.%I', sequence_name), 'USAGE')""",
+                String.class);
         assertThat(sequences).isEmpty();
 
         // No table changes of any kind
