@@ -131,13 +131,15 @@ class AppDatabaseRoleIntegrationTest {
         // No table changes of any kind
         for (String ddl : List.of("CREATE TABLE sneaky (id int)", "DROP TABLE users", "ALTER TABLE users ADD COLUMN x int",
                 "TRUNCATE users", "CREATE INDEX ix_sneaky ON users (phone)", "ALTER TABLE users DISABLE TRIGGER ALL")) {
-            assertThatThrownBy(() -> app.execute(ddl)).as(ddl)
+            // Spring wraps Postgres' answer; its own words are the root cause's
+            assertThatThrownBy(() -> app.execute(ddl)).as(ddl).rootCause()
                     .satisfiesAnyOf(e -> assertThat(e).hasMessageContaining("permission denied"),
                             e -> assertThat(e).hasMessageContaining("must be owner"));
         }
         // Flyway's history: read, never change
         assertThat(app.queryForObject("SELECT count(*) FROM flyway_schema_history", Integer.class)).isPositive();
-        assertThatThrownBy(() -> app.update("DELETE FROM flyway_schema_history")).hasMessageContaining("permission denied");
+        assertThatThrownBy(() -> app.update("DELETE FROM flyway_schema_history")).rootCause()
+                .hasMessageContaining("permission denied");
 
         // A table a later migration makes (as the owner) gets the same rights by itself
         owner(url).execute("CREATE TABLE later_table (id int PRIMARY KEY)");
