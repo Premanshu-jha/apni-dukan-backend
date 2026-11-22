@@ -72,6 +72,7 @@ class AppDatabaseRoleIntegrationTest {
     }
 
     @Autowired Environment environment;
+    @Autowired org.springframework.data.redis.core.StringRedisTemplate redis;
 
     @Test
     void migrateOnlyRanEveryMigrationAndRefusesNeonsPooledAddress() {
@@ -89,6 +90,11 @@ class AppDatabaseRoleIntegrationTest {
                 .baseUrl("http://localhost:" + environment.getProperty("local.server.port") + "/api/v1").build();
         String phone = "9848011111";
         LAST_SMS.clear();
+        // Redis is shared with the other test classes: start this person's and this network's counts afresh
+        redis.execute((org.springframework.data.redis.core.RedisCallback<Object>) connection -> {
+            connection.serverCommands().flushAll();
+            return null;
+        });
         http.post().uri("/auth/otp/send").contentType(MediaType.APPLICATION_JSON).body(Map.of("phone", phone))
                 .retrieve().toBodilessEntity();
         Map<?, ?> tokens = http.post().uri("/auth/otp/verify").contentType(MediaType.APPLICATION_JSON)
@@ -104,22 +110,23 @@ class AppDatabaseRoleIntegrationTest {
     @Test
     void clozestAppChangesRowsButNeverTables() {
         JdbcTemplate app = app();
-        // Rights on every table and sequence there is
-        List<String> missing = app.queryForList("""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name <> 'flyway_schema_history'
-                  AND NOT (has_table_privilege('clozest_app', format('public.%I', table_name), 'SELECT')
-                       AND has_table_privilege('clozest_app', format('public.%I', table_name), 'INSERT')
-                       AND has_table_privilege('clozest_app', format('public.%I', table_name), 'UPDATE')
-                       AND has_table_privilege('clozest_app', format('public.%I', table_name), 'DELETE'))""",
+        // Rights on every table and sequence there is (listed as the owner, who sees them all; checked one by one)
+        JdbcTemplate owner = owner(url);
+        List<String> tables = owner.queryForList("SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                + "AND tablename <> 'flyway_schema_history' AND tablename <> 'spatial_ref_sys'", String.class);
+        assertThat(tables).hasSizeGreaterThan(50);
+        for (String table : tables) {
+            for (String right : List.of("SELECT", "INSERT", "UPDATE", "DELETE")) {
+                assertThat(owner.queryForObject("SELECT has_table_privilege('clozest_app', ?, ?)", Boolean.class,
+                        "public.\"" + table + "\"", right)).as(table + " " + right).isTrue();
+            }
+        }
+        List<String> sequences = owner.queryForList("SELECT sequencename FROM pg_sequences WHERE schemaname = 'public'",
                 String.class);
-        assertThat(missing).isEmpty();
-        List<String> sequences = app.queryForList("""
-                SELECT sequence_name FROM information_schema.sequences
-                WHERE sequence_schema = 'public'
-                  AND NOT has_sequence_privilege('clozest_app', format('public.%I', sequence_name), 'USAGE')""",
-                String.class);
-        assertThat(sequences).isEmpty();
+        for (String sequence : sequences) {
+            assertThat(owner.queryForObject("SELECT has_sequence_privilege('clozest_app', ?, 'USAGE')", Boolean.class,
+                    "public.\"" + sequence + "\"")).as(sequence).isTrue();
+        }
 
         // No table changes of any kind
         for (String ddl : List.of("CREATE TABLE sneaky (id int)", "DROP TABLE users", "ALTER TABLE users ADD COLUMN x int",

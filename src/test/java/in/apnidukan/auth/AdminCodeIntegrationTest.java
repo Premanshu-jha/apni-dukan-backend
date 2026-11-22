@@ -172,6 +172,44 @@ class AdminCodeIntegrationTest {
         assertThat(post("/auth/admin-code/send", Map.of(), null).status()).isEqualTo(401);
     }
 
+    @Test
+    void aSimThiefCantMoveTheEmailToTheirInboxNorReuseAnOldPassAfterRejoiningOrSigningOut() {
+        UUID boss = superAdminWithEmail();
+        Map<?, ?> thief = signIn("Thief's phone");
+        String access = (String) thief.get("accessToken");
+        // The phone's code to change a verified email reaches the thief's SIM, but an admin's email is the team's
+        assertThat(post("/auth/email/change-phone-code", Map.of(), access).status()).isEqualTo(202);
+        Reply moved = post("/auth/email/send-code", Map.of("email", "thief@example.com",
+                "phoneCode", codeSentTo(LAST_SMS, PHONE)), access);
+        assertThat(moved.status()).isEqualTo(403);
+        assertThat(moved.body().get("code")).isEqualTo("ADMIN_EMAIL");
+        assertThat(post("/auth/email/verify", Map.of("email", "thief@example.com", "code", "123456"), access)
+                .body().get("code")).isEqualTo("ADMIN_EMAIL");
+        assertThat(LAST_EMAIL).doesNotContainKey("thief@example.com");
+        assertThat(jdbc.queryForObject("SELECT email FROM users WHERE id = ?", String.class, boss)).isEqualTo(EMAIL);
+
+        // This device passes the step, then the person is taken off the team and added back: the old pass no longer
+        // counts
+        Map<?, ?> laptop = thief;
+        post("/auth/admin-code/send", Map.of(), (String) laptop.get("accessToken"));
+        post("/auth/admin-code/verify", Map.of("code", codeSentTo(LAST_EMAIL, EMAIL)), (String) laptop.get("accessToken"));
+        jdbc.update("UPDATE users SET admin_role = 'NONE', admin_since = NULL WHERE id = ?", boss);
+        jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN', admin_since = now() + interval '1 second' "
+                + "WHERE id = ?", boss);
+        Reply rejoined = post("/auth/refresh", Map.of("refreshToken", laptop.get("refreshToken")), null);
+        assertThat(user(rejoined.body()).get("adminCodeNeeded")).isEqualTo(true);
+
+        // A device that signed out can't turn a leftover access token into admin access
+        String leftover = (String) rejoined.body().get("accessToken");
+        post("/auth/admin-code/send", Map.of(), leftover);
+        String code = codeSentTo(LAST_EMAIL, EMAIL);
+        assertThat(post("/auth/logout", Map.of("refreshToken", rejoined.body().get("refreshToken")), null).status())
+                .isEqualTo(204);
+        Reply after = post("/auth/admin-code/verify", Map.of("code", code), leftover);
+        assertThat(after.status()).isEqualTo(401);
+        assertThat(after.body().get("code")).isEqualTo("SIGN_IN_AGAIN");
+    }
+
     // ---------------- helpers ----------------
 
     /** The person who signs in with PHONE, made a super admin with a verified email. */
