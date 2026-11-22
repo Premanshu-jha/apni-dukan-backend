@@ -37,7 +37,7 @@ public final class TestData {
                 "staff_hours_aud", "staff_services_aud", "salon_staff_aud",
                 "salon_services_aud", "salon_settings_aud", "shop_members_aud", "shops_aud", "revinfo", "staff_hours",
                 "staff_services", "salon_staff", "salon_services", "salon_settings", "shop_members", "shops",
-                "refresh_tokens", "users", "salon_versions"}) {
+                "admin_sessions", "refresh_tokens", "users", "salon_versions"}) {
             jdbc.update("DELETE FROM " + table);
         }
     }
