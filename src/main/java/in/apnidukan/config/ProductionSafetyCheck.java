@@ -33,11 +33,28 @@ public class ProductionSafetyCheck {
                                  @Value("${app.sms.account-moved.enabled:false}") boolean accountMovedSms,
                                  PushSender push, ClientAddress client, HumanCheck humans,
                                  @Value("${spring.flyway.url:}") String migrationUrl,
-                                 @Value("${spring.datasource.url:}") String appUrl, AddressLocator addresses) {
+                                 @Value("${spring.datasource.url:}") String appUrl, AddressLocator addresses,
+                                 @Value("${spring.flyway.enabled:true}") boolean migrateOnStart) {
         check(production, sms, email, corsOrigins, accountMovedSms, push);
         noteAddressSearch(production, addresses.enabled());
         checkSignInAbuse(production, client.configured(), humans.enabled());
-        checkMigrationUrl(production, migrationUrl, appUrl);
+        checkMigrationUrl(production, migrateOnStart, migrationUrl, appUrl);
+        noteMigrationUser(production, migrateOnStart);
+    }
+
+    /**
+     * Not refused (the switch-over is a few owner steps, see "Database users" in the README), only noted: while the
+     * server runs the migrations itself, it holds a database user that can change and drop tables, so a leak of its
+     * variables would hand that over too.
+     */
+    static boolean noteMigrationUser(boolean production, boolean migrateOnStart) {
+        if (production && migrateOnStart) {
+            log.warn("The server runs the database migrations itself (MIGRATE_ON_START is not false), so its database "
+                    + "user can change and drop tables. Recommended: the backend's own user clozest_app and "
+                    + "GitHub's Migrate job (README, \"Database users\").");
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -52,13 +69,13 @@ public class ProductionSafetyCheck {
     }
 
     /**
-     * Migrations need Neon's direct connection (DB_URL_DIRECT): through the pooler (PgBouncer) the "no statement
+     * When the server runs the migrations itself (MIGRATE_ON_START): they need Neon's direct connection (DB_URL_DIRECT): through the pooler (PgBouncer) the "no statement
      * limit" Flyway sets for itself may not stay with its connection, so the role's 5 s default (see the checklist)
      * could cut a migration halfway, and a migration's locks would be held through a pooled connection.
      */
-    static void checkMigrationUrl(boolean production, String migrationUrl, String appUrl) {
-        if (!production) {
-            return;
+    static void checkMigrationUrl(boolean production, boolean migrateOnStart, String migrationUrl, String appUrl) {
+        if (!production || !migrateOnStart) {
+            return;   // migrations run elsewhere (GitHub's Migrate job, which makes the same check: MigrateOnly)
         }
         if (migrationUrl == null || migrationUrl.isBlank() || migrationUrl.equals(appUrl)
                 || migrationUrl.contains("-pooler")) {
