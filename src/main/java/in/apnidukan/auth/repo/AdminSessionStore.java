@@ -21,13 +21,30 @@ public class AdminSessionStore {
         this.jdbc = jdbc;
     }
 
-    /** True when this person's device sign-in passed the email-code step within the last {@code window}. */
+    /**
+     * True when this person's device sign-in passed the email-code step within the last {@code window}, and after they
+     * last joined the team (users.admin_since): someone removed and added again passes the step again.
+     */
     public boolean verifiedWithin(UUID sessionId, UUID userId, Duration window) {
         Boolean ok = jdbc.queryForObject("""
-                SELECT EXISTS (SELECT 1 FROM admin_sessions
-                               WHERE session_id = ? AND user_id = ?
-                                 AND verified_at > clock_timestamp() - make_interval(secs => ?))""",
+                SELECT EXISTS (SELECT 1 FROM admin_sessions a JOIN users u ON u.id = a.user_id
+                               WHERE a.session_id = ? AND a.user_id = ?
+                                 AND a.verified_at > clock_timestamp() - make_interval(secs => ?)
+                                 AND (u.admin_since IS NULL OR a.verified_at >= u.admin_since))""",
                 Boolean.class, sessionId, userId, window.toSeconds());
+        return Boolean.TRUE.equals(ok);
+    }
+
+    /**
+     * True while this device sign-in is still on: one of its refresh tokens not ended and not expired (a device that
+     * signed out can't turn a leftover access token into admin access).
+     */
+    public boolean sessionLive(UUID sessionId, UUID userId) {
+        Boolean ok = jdbc.queryForObject("""
+                SELECT EXISTS (SELECT 1 FROM refresh_tokens
+                               WHERE user_id = ? AND COALESCE(session_id, id) = ?
+                                 AND revoked_at IS NULL AND expires_at > clock_timestamp())""",
+                Boolean.class, userId, sessionId);
         return Boolean.TRUE.equals(ok);
     }
 

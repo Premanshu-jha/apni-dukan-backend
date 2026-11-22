@@ -387,6 +387,7 @@ public class AuthService {
     public void sendEmailCode(UUID userId, String emailInput, String phoneCode, String ip) {
         String address = Emails.normalize(emailInput);
         User user = me(userId);
+        requireAdminsOwnEmail(user, address);
         limitSends(ip);
         // The daily email limit is checked before the phone code is used up (a refused send keeps the code)
         if (limits.current("email-send-user:" + userId) >= EMAIL_SENDS_PER_ACCOUNT_PER_DAY) {
@@ -423,6 +424,7 @@ public class AuthService {
 
     public User verifyEmail(UUID userId, String emailInput, String code, String ip) {
         String address = Emails.normalize(emailInput);
+        requireAdminsOwnEmail(me(userId), address);   // before any code is tried (again under the lock below)
         limitVerifies(ip);
         boolean testCode = code != null && code.trim().matches("\\d{6}") && testEmail(userId, address);
         if (testCode && !limits.tryHit("email-test-verify-user:" + userId, TEST_EMAIL_VERIFIES_PER_ACCOUNT_PER_HOUR,
@@ -440,6 +442,7 @@ public class AuthService {
         User saved = tx.execute(status -> {
             User user = users.lockById(userId).filter(u -> !u.isDeleted())   // never onto a deleted account
                     .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+            requireAdminsOwnEmail(user, address);   // read under the lock: made an admin meanwhile counts too
             if (testCode && (user.isAdmin() || !user.isTestAccount()
                     || !testMode.acceptsAnyEmailCodeHeld(userId, address))) {
                 // Changed between the check and now (test mode off, number or email removed, made an admin, or
@@ -834,6 +837,10 @@ public class AuthService {
         otp.verify(OtpPurpose.ADMIN_SIGN_IN, userId + ":" + sessionId, code, ip);
         User user = me(userId);   // read again after the code: removed from the team meanwhile → nothing recorded
         requireAdminSession(user, sessionId);
+        if (!adminSessions.sessionLive(sessionId, userId)) {
+            // This device signed out (or its sign-in ended) while an access token of it was still valid
+            throw unauthorized("SIGN_IN_AGAIN", "Sign in again.");
+        }
         adminSessions.record(sessionId, userId, adminCodeWindow);
         JwtService.IssuedToken access = accessToken(user, sessionId, true);
         return new AdminAccess(access.token(), access.expiresAt(), user);
@@ -841,6 +848,18 @@ public class AuthService {
 
     /** A new access token with admin access, and who it is for. */
     public record AdminAccess(String accessToken, Instant accessExpiresAt, User user) {
+    }
+
+    /**
+     * An admin's email is the one a super admin put on the Team page: they can confirm it, never swap in another
+     * themselves. Otherwise a stolen SIM alone would pass the admin email step (change the email with a phone code,
+     * then receive the admin code there). 403 ADMIN_EMAIL; the super admin changes it on the Team page.
+     */
+    private static void requireAdminsOwnEmail(User user, String address) {
+        if (user.isAdmin() && (user.getEmail() == null || !address.equalsIgnoreCase(user.getEmail()))) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "ADMIN_EMAIL",
+                    "Your email is set by the super admin on the Team page. Ask them to change it.");
+        }
     }
 
     private static void requireAdminSession(User user, UUID sessionId) {
