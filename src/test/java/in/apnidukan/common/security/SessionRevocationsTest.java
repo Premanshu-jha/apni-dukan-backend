@@ -18,8 +18,10 @@ class SessionRevocationsTest {
     @SuppressWarnings("unchecked")
     private final ValueOperations<String, String> values = mock(ValueOperations.class);
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
-    private final SessionRevocations revocations = new SessionRevocations(redis,
-            new JwtProperties("test-only-secret-0123456789-abcdefghijklmnopqrstuvwxyz", 15, 30));
+    private static final JwtProperties JWT =
+            new JwtProperties("test-only-secret-0123456789-abcdefghijklmnopqrstuvwxyz", 15, 30);
+    /** Without the memory (0 seconds): every check reads Redis, as these tests expect */
+    private final SessionRevocations revocations = new SessionRevocations(redis, JWT, 0, 1);
 
     @Test
     void theSessionNumberOutlivesEveryRefreshToken() {
@@ -46,5 +48,43 @@ class SessionRevocationsTest {
         when(redis.opsForValue()).thenReturn(values);
         when(values.get(anyString())).thenThrow(new RedisConnectionFailureException("down"));
         assertThat(revocations.isRevoked(UUID.randomUUID(), 0)).isFalse();
+    }
+
+    @Test
+    void theCheckIsRememberedForAFewSecondsAndOnlyEverRaised() {
+        SessionRevocations remembering = new SessionRevocations(redis, JWT, 5, 1000);
+        UUID who = UUID.randomUUID();
+        when(redis.opsForValue()).thenReturn(values);
+        when(values.get(anyString())).thenReturn("2");
+        assertThat(remembering.isRevoked(who, 1)).isTrue();
+        assertThat(remembering.isRevoked(who, 2)).isFalse();
+        // One Redis read for both checks: the second came from memory
+        org.mockito.Mockito.verify(values, org.mockito.Mockito.times(1)).get(anyString());
+
+        // A slower read answering an older number never lowers what this copy knows
+        when(values.get(anyString())).thenReturn("1");
+        assertThat(remembering.currentGeneration(who)).isEqualTo(2);
+        assertThat(remembering.isRevoked(who, 1)).isTrue();
+    }
+
+    @Test
+    void endingAllSessionsHereIsKnownHereAtOnce() {
+        SessionRevocations remembering = new SessionRevocations(redis, JWT, 5, 1000);
+        UUID who = UUID.randomUUID();
+        when(redis.opsForValue()).thenReturn(values);
+        when(values.get(anyString())).thenReturn("2");
+        assertThat(remembering.isRevoked(who, 2)).isFalse();   // remembered: 2
+        when(redis.execute(org.mockito.ArgumentMatchers.<org.springframework.data.redis.core.script.RedisScript<Long>>any(),
+                org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.<Object>any())).thenReturn(99L);
+        remembering.revokeAll(who);
+        assertThat(remembering.isRevoked(who, 2)).isTrue();    // without waiting for the memory to expire
+    }
+
+    @Test
+    void theMemoryMayLastAtMostAMinute() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new SessionRevocations(redis, JWT, 61, 1000))
+                .isInstanceOf(IllegalStateException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new SessionRevocations(redis, JWT, -1, 1000))
+                .isInstanceOf(IllegalStateException.class);
     }
 }
