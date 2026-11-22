@@ -2,6 +2,7 @@ package in.apnidukan.auth.api;
 
 import in.apnidukan.common.web.ClientAddress;
 
+import in.apnidukan.auth.api.AuthRequests.AdminCode;
 import in.apnidukan.auth.api.AuthRequests.ChangePhone;
 import in.apnidukan.auth.api.AuthRequests.CompleteRecovery;
 import in.apnidukan.auth.api.AuthRequests.DeleteAccount;
@@ -14,11 +15,14 @@ import in.apnidukan.auth.api.AuthRequests.StartRecovery;
 import in.apnidukan.auth.api.AuthRequests.UpdateMe;
 import in.apnidukan.auth.api.AuthRequests.VerifyEmail;
 import in.apnidukan.auth.api.AuthRequests.VerifyOtp;
+import in.apnidukan.auth.api.AuthResponses.AdminAccessResponse;
 import in.apnidukan.auth.api.AuthResponses.TokenResponse;
 import in.apnidukan.auth.api.AuthResponses.UserResponse;
 import in.apnidukan.auth.service.AuthService;
 import in.apnidukan.auth.service.EditUnlockStore;
 import in.apnidukan.auth.service.AuthService.PhoneChangeSent;
+import in.apnidukan.auth.domain.User;
+import in.apnidukan.common.context.CurrentUser;
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.common.error.ApiException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -91,7 +95,7 @@ public class AuthController {
 
     @GetMapping("/me")
     public UserResponse me() {
-        return UserResponse.from(auth.me(currentUser.get().userId()));
+        return userResponse(auth.me(currentUser.get().userId()));
     }
 
     /**
@@ -113,7 +117,7 @@ public class AuthController {
         if (body.getName() != null) {
             auth.rename(me, body.getName());
         }
-        return UserResponse.from(body.languageSent() ? auth.setLanguage(me, body.getLanguage()) : auth.me(me));
+        return userResponse(body.languageSent() ? auth.setLanguage(me, body.getLanguage()) : auth.me(me));
     }
 
     /**
@@ -220,8 +224,37 @@ public class AuthController {
 
     @PostMapping("/email/verify")
     public UserResponse verifyEmail(@Valid @RequestBody VerifyEmail body, HttpServletRequest request) {
-        return UserResponse.from(auth.verifyEmail(currentUser.get().userId(), body.email(), body.code(),
+        return userResponse(auth.verifyEmail(currentUser.get().userId(), body.email(), body.code(),
                 client.of(request)));
+    }
+
+    /**
+     * The admin website's second step, 1 of 2: a 6-digit code to your verified email, for this device's sign-in.
+     * 202; 403 NOT_AN_ADMIN; 409 EMAIL_REQUIRED (no verified email yet); 401 SIGN_IN_AGAIN; 429 past 20 a day;
+     * 503 EMAIL_FAILED.
+     */
+    @PostMapping("/admin-code/send")
+    public ResponseEntity<Void> sendAdminCode(HttpServletRequest request) {
+        CurrentUser me = currentUser.get();
+        auth.sendAdminCode(me.userId(), me.sessionId(), client.of(request));
+        return ResponseEntity.accepted().build();
+    }
+
+    /**
+     * 2 of 2: with the emailed code, this device's sign-in gets admin access for 12 hours (every refresh keeps it
+     * until then). Returns a new access token that has it; keep the refresh token you have. 400 WRONG_CODE /
+     * CODE_EXPIRED, 429, 403 NOT_AN_ADMIN, 401 SIGN_IN_AGAIN.
+     */
+    @PostMapping("/admin-code/verify")
+    public AdminAccessResponse verifyAdminCode(@Valid @RequestBody AdminCode body, HttpServletRequest request) {
+        CurrentUser me = currentUser.get();
+        return AdminAccessResponse.from(auth.verifyAdminCode(me.userId(), me.sessionId(), body.code(),
+                client.of(request)));
+    }
+
+    /** The person, with whether this device's sign-in still needs the admin email step. */
+    private UserResponse userResponse(User user) {
+        return UserResponse.from(user, auth.adminCodeNeeded(user, currentUser.get().sessionId()));
     }
 
     /** Lost your phone number: codes go to your verified email and to the new phone. Always 202, account or not. */

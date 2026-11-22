@@ -153,6 +153,8 @@ class Gs1IntegrationTest {
 
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
+    @Autowired in.apnidukan.common.security.JwtService jwt;
+    @Autowired in.apnidukan.common.security.SessionRevocations sessions;
     @Autowired StringRedisTemplate redis;
     @Autowired Gs1Job job;
 
@@ -599,10 +601,16 @@ class Gs1IntegrationTest {
                 .body(body).exchange((rq, res) -> reply(res));
     }
 
+    /**
+     * A super admin's token, as after the admin website's email step on their device (the phone code alone gives no
+     * admin access since V86; AdminCodeIntegrationTest covers the step itself).
+     */
     private String superAdmin() {
         token("9848066099");
         jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE phone = ?", "9848066099");
-        return token("9848066099");
+        java.util.UUID id = jdbc.queryForObject("SELECT id FROM users WHERE phone = ?", java.util.UUID.class, "9848066099");
+        return jwt.issue(new in.apnidukan.common.security.AuthPrincipal(id, null, null, true),
+                sessions.currentGeneration(id)).token();
     }
 
     private Reply get(String path, String token) {

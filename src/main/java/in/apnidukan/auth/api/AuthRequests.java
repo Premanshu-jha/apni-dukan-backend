@@ -24,6 +24,10 @@ public final class AuthRequests {
     public record Logout(@NotBlank @Size(max = 100) String refreshToken) {
     }
 
+    /** The code from the admin sign-in email (the admin website's second step). */
+    public record AdminCode(@NotBlank @Size(max = 10) String code) {
+    }
+
     /** @param phoneCode only when replacing an already verified email: the code from /email/change-phone-code */
     public record SendEmailCode(@NotBlank @Size(max = 254) String email, @Size(max = 10) String phoneCode) {
     }

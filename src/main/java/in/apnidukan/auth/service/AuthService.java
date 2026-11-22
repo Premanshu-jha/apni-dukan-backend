@@ -5,6 +5,7 @@ import in.apnidukan.auth.domain.RevokeReason;
 import in.apnidukan.auth.domain.User;
 import in.apnidukan.auth.notify.EmailSender;
 import in.apnidukan.auth.notify.SmsSender;
+import in.apnidukan.auth.repo.AdminSessionStore;
 import in.apnidukan.auth.repo.RefreshTokenRepository;
 import in.apnidukan.auth.repo.RefreshTokenStore;
 import in.apnidukan.auth.repo.UserRepository;
@@ -64,6 +65,8 @@ public class AuthService {
     static final int EMAIL_SENDS_PER_ACCOUNT_PER_DAY = 10;
     /** OTP test mode: tries at verifying a test email with any code, per account (TestModeService). */
     static final int TEST_EMAIL_VERIFIES_PER_ACCOUNT_PER_HOUR = 10;
+    /** Admin sign-in codes (the email step of the admin website) one admin may request per day. */
+    static final int ADMIN_CODES_PER_ACCOUNT_PER_DAY = 20;
     /**
      * A swapped refresh token coming back within this time is treated as the app retrying (a reply lost on a weak
      * mobile network, or two calls at once), not as a copy: it gets a new pair under the refresh grace (see
@@ -102,6 +105,8 @@ public class AuthService {
     private final AdminTeamService team;
     private final EditUnlockStore editUnlocks;
     private final List<LanguageChangeListener> languageListeners;
+    private final AdminSessionStore adminSessions;
+    private final Duration adminCodeWindow;
     private final SecureRandom random = new SecureRandom();
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, OtpService otp,
@@ -114,13 +119,20 @@ public class AuthService {
                        List<PersonDetailsListener> detailsListeners, SmsBudget smsBudget,
                        RefreshTokenStore tokenStore, TestAccountShops testAccountShops, AdminTeamService team,
                        List<PhoneChangeListener> phoneListeners, EditUnlockStore editUnlocks,
-                       List<LanguageChangeListener> languageListeners,
-                       @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds) {
+                       List<LanguageChangeListener> languageListeners, AdminSessionStore adminSessions,
+                       @Value("${app.auth.refresh-grace-seconds:30}") long refreshGraceSeconds,
+                       @Value("${app.auth.admin-code-hours:12}") long adminCodeHours) {
         if (refreshGraceSeconds < 0 || refreshGraceSeconds > RETRY_GRACE.toSeconds()) {
             // Longer than the retry time would let an old token get new pairs after it should raise the alarm
             throw new IllegalStateException("app.auth.refresh-grace-seconds must be 0 to " + RETRY_GRACE.toSeconds());
         }
         this.refreshGrace = Duration.ofSeconds(refreshGraceSeconds);
+        if (adminCodeHours < 1 || adminCodeHours > 24) {
+            // Longer than a day would let a stolen phone's session keep admin access for days after one code
+            throw new IllegalStateException("app.auth.admin-code-hours must be 1 to 24");
+        }
+        this.adminSessions = adminSessions;
+        this.adminCodeWindow = Duration.ofHours(adminCodeHours);
         this.phoneListeners = phoneListeners;
         this.editUnlocks = editUnlocks;
         this.languageListeners = languageListeners == null ? List.of() : languageListeners;
@@ -375,6 +387,7 @@ public class AuthService {
     public void sendEmailCode(UUID userId, String emailInput, String phoneCode, String ip) {
         String address = Emails.normalize(emailInput);
         User user = me(userId);
+        requireAdminsOwnEmail(user, address);
         limitSends(ip);
         // The daily email limit is checked before the phone code is used up (a refused send keeps the code)
         if (limits.current("email-send-user:" + userId) >= EMAIL_SENDS_PER_ACCOUNT_PER_DAY) {
@@ -411,6 +424,7 @@ public class AuthService {
 
     public User verifyEmail(UUID userId, String emailInput, String code, String ip) {
         String address = Emails.normalize(emailInput);
+        requireAdminsOwnEmail(me(userId), address);   // before any code is tried (again under the lock below)
         limitVerifies(ip);
         boolean testCode = code != null && code.trim().matches("\\d{6}") && testEmail(userId, address);
         if (testCode && !limits.tryHit("email-test-verify-user:" + userId, TEST_EMAIL_VERIFIES_PER_ACCOUNT_PER_HOUR,
@@ -428,6 +442,7 @@ public class AuthService {
         User saved = tx.execute(status -> {
             User user = users.lockById(userId).filter(u -> !u.isDeleted())   // never onto a deleted account
                     .orElseThrow(() -> unauthorized("NOT_SIGNED_IN", "Sign in first."));
+            requireAdminsOwnEmail(user, address);   // read under the lock: made an admin meanwhile counts too
             if (testCode && (user.isAdmin() || !user.isTestAccount()
                     || !testMode.acceptsAnyEmailCodeHeld(userId, address))) {
                 // Changed between the check and now (test mode off, number or email removed, made an admin, or
@@ -781,6 +796,81 @@ public class AuthService {
         return editUnlocks.unlock(userId);
     }
 
+    // ---------------- the admin website's email step ----------------
+
+    /**
+     * The admin website's second step, step 1: a 6-digit code to the admin's verified email, for this device's
+     * sign-in only (the code is tied to the session in the token). A stolen SIM alone can sign in to the person's
+     * account, but not open the admin pages. 403 NOT_AN_ADMIN for anyone else; 409 EMAIL_REQUIRED without a verified
+     * email (the website asks for it first); 401 SIGN_IN_AGAIN for a token without a device session (from before
+     * sessions were named); 429 past 20 codes a day; 503 EMAIL_FAILED if the email didn't go out.
+     */
+    public void sendAdminCode(UUID userId, UUID sessionId, String ip) {
+        User user = me(userId);
+        requireAdminSession(user, sessionId);
+        if (!user.isEmailVerified() || user.getEmail() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "EMAIL_REQUIRED",
+                    "Add and confirm your email first: the admin sign-in code goes there.");
+        }
+        limitSends(ip);
+        String key = "admin-code-user:" + userId;
+        if (!limits.tryHit(key, ADMIN_CODES_PER_ACCOUNT_PER_DAY, Duration.ofHours(24))) {
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS",
+                    "Too many codes today. Try again later.").retryAfter(limits.secondsLeft(key));
+        }
+        String code = otp.issue(OtpPurpose.ADMIN_SIGN_IN, userId + ":" + sessionId, ip);
+        email.send(user.getEmail(), "Your Clozest admin sign-in code",
+                "Your Clozest admin sign-in code is " + code + ".\n\nIt works for 10 minutes, on the device "
+                        + "that asked for it. If you didn't just sign in to the Clozest admin website, someone may "
+                        + "have your phone's sign-in codes: don't share this code, and tell the super admin.");
+    }
+
+    /**
+     * Step 2: the code from the email. This device's sign-in then has admin access for app.auth.admin-code-hours
+     * (12), across every refresh; returns a new access token that has it. 400 WRONG_CODE / CODE_EXPIRED and 429 as
+     * for other codes; 403 NOT_AN_ADMIN; 401 SIGN_IN_AGAIN without a device session.
+     */
+    public AdminAccess verifyAdminCode(UUID userId, UUID sessionId, String code, String ip) {
+        User before = me(userId);
+        requireAdminSession(before, sessionId);
+        limitVerifies(ip);
+        otp.verify(OtpPurpose.ADMIN_SIGN_IN, userId + ":" + sessionId, code, ip);
+        User user = me(userId);   // read again after the code: removed from the team meanwhile → nothing recorded
+        requireAdminSession(user, sessionId);
+        if (!adminSessions.sessionLive(sessionId, userId)) {
+            // This device signed out (or its sign-in ended) while an access token of it was still valid
+            throw unauthorized("SIGN_IN_AGAIN", "Sign in again.");
+        }
+        adminSessions.record(sessionId, userId, adminCodeWindow);
+        JwtService.IssuedToken access = accessToken(user, sessionId, true);
+        return new AdminAccess(access.token(), access.expiresAt(), user);
+    }
+
+    /** A new access token with admin access, and who it is for. */
+    public record AdminAccess(String accessToken, Instant accessExpiresAt, User user) {
+    }
+
+    /**
+     * An admin's email is the one a super admin put on the Team page: they can confirm it, never swap in another
+     * themselves. Otherwise a stolen SIM alone would pass the admin email step (change the email with a phone code,
+     * then receive the admin code there). 403 ADMIN_EMAIL; the super admin changes it on the Team page.
+     */
+    private static void requireAdminsOwnEmail(User user, String address) {
+        if (user.isAdmin() && (user.getEmail() == null || !address.equalsIgnoreCase(user.getEmail()))) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "ADMIN_EMAIL",
+                    "Your email is set by the super admin on the Team page. Ask them to change it.");
+        }
+    }
+
+    private static void requireAdminSession(User user, UUID sessionId) {
+        if (!user.isAdmin()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "NOT_AN_ADMIN", "This is only for the Clozest team.");
+        }
+        if (sessionId == null) {
+            throw unauthorized("SIGN_IN_AGAIN", "Sign in again.");
+        }
+    }
+
     // ---------------- deleting the account ----------------
 
     /**
@@ -929,19 +1019,41 @@ public class AuthService {
      */
     private AuthTokens issueTokens(User user, String device, boolean newUser, UUID refreshId, UUID sessionId) {
         Instant now = Instant.now(clock);
-        // The shop the person works in, and their role there, go into the token (looked up fresh every time)
-        ShopMemberships.Membership membership = memberships.find(user.getId()).orElse(null);
-        JwtService.IssuedToken access = jwt.issue(new AuthPrincipal(user.getId(),
-                        membership == null ? null : membership.shopId(),
-                        membership == null ? null : membership.role(), user.isAdmin(), sessionId),
-                revocations.generationForNewToken(user.getId()));
+        boolean adminNow = adminVerified(user, sessionId);
+        JwtService.IssuedToken access = accessToken(user, sessionId, adminNow);
         byte[] raw = new byte[32];
         random.nextBytes(raw);
         String refresh = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
         Instant refreshExpires = now.plus(refreshValidity);
         tokenStore.insert(refreshId, user.getId(), Hashing.sha256Hex(refresh), trimDevice(device), now,
                 refreshExpires, sessionId);
-        return new AuthTokens(access.token(), access.expiresAt(), refresh, refreshExpires, user, newUser);
+        return new AuthTokens(access.token(), access.expiresAt(), refresh, refreshExpires, user, newUser,
+                user.isAdmin() && !adminNow);
+    }
+
+    /**
+     * The access token for this device's sign-in. Admin access ("adm", the /api/v1/admin pages) only when the person
+     * is an admin now (the database's role) AND this sign-in passed the email-code step within the last
+     * app.auth.admin-code-hours; otherwise the token works everywhere else (their own account, a shop they work in).
+     */
+    private JwtService.IssuedToken accessToken(User user, UUID sessionId, boolean adminNow) {
+        // The shop the person works in, and their role there, go into the token (looked up fresh every time)
+        ShopMemberships.Membership membership = memberships.find(user.getId()).orElse(null);
+        return jwt.issue(new AuthPrincipal(user.getId(),
+                        membership == null ? null : membership.shopId(),
+                        membership == null ? null : membership.role(), adminNow, sessionId),
+                revocations.generationForNewToken(user.getId()));
+    }
+
+    /** An admin whose device sign-in passed the email step recently enough. One short query, for admins only. */
+    private boolean adminVerified(User user, UUID sessionId) {
+        return user.isAdmin() && sessionId != null
+                && adminSessions.verifiedWithin(sessionId, user.getId(), adminCodeWindow);
+    }
+
+    /** For the apps' "who am I": an admin whose device sign-in still has to pass (again) the email step. */
+    public boolean adminCodeNeeded(User user, UUID sessionId) {
+        return user.isAdmin() && !adminVerified(user, sessionId);
     }
 
     private void limitSends(String ip) {

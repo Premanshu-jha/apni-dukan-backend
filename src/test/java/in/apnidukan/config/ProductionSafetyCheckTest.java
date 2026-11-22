@@ -8,6 +8,7 @@ import in.apnidukan.notifications.service.LoggingPushSender;
 import in.apnidukan.notifications.service.PushSender;
 import org.junit.jupiter.api.Test;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -103,12 +104,21 @@ class ProductionSafetyCheckTest {
         String pooled = "jdbc:postgresql://ep-x-pooler.ap-southeast-1.aws.neon.tech/db";
         String direct = "jdbc:postgresql://ep-x.ap-southeast-1.aws.neon.tech/db";
         for (String bad : new String[] {"", pooled}) {
-            assertThatThrownBy(() -> ProductionSafetyCheck.checkMigrationUrl(true, bad, pooled))
+            assertThatThrownBy(() -> ProductionSafetyCheck.checkMigrationUrl(true, true, bad, pooled))
                     .isInstanceOf(IllegalStateException.class).hasMessageContaining("DB_URL_DIRECT");
         }
-        assertThatThrownBy(() -> ProductionSafetyCheck.checkMigrationUrl(true, direct, direct))
+        assertThatThrownBy(() -> ProductionSafetyCheck.checkMigrationUrl(true, true, direct, direct))
                 .isInstanceOf(IllegalStateException.class);   // DB_URL_DIRECT not set: Flyway fell back to DB_URL
-        assertThatCode(() -> ProductionSafetyCheck.checkMigrationUrl(true, direct, pooled)).doesNotThrowAnyException();
-        assertThatCode(() -> ProductionSafetyCheck.checkMigrationUrl(false, "", pooled)).doesNotThrowAnyException();
+        assertThatCode(() -> ProductionSafetyCheck.checkMigrationUrl(true, true, direct, pooled)).doesNotThrowAnyException();
+        assertThatCode(() -> ProductionSafetyCheck.checkMigrationUrl(false, true, "", pooled)).doesNotThrowAnyException();
+        // Migrations run by GitHub's job instead (MIGRATE_ON_START=false): the server needs no direct URL at all
+        assertThatCode(() -> ProductionSafetyCheck.checkMigrationUrl(true, false, "", pooled)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void aServerThatStillMigratesItselfIsNotedNotRefused() {
+        assertThat(ProductionSafetyCheck.noteMigrationUser(true, true)).isTrue();
+        assertThat(ProductionSafetyCheck.noteMigrationUser(true, false)).isFalse();
+        assertThat(ProductionSafetyCheck.noteMigrationUser(false, true)).isFalse();
     }
 }

@@ -9,7 +9,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | Module | Status |
 | --- | --- |
 | `common` | Error format, security (JWT check, CORS), current user/shop, clock |
-| `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery; admin roles (one super admin, admins) and OTP test mode |
+| `auth` | Sign-in with phone OTP, tokens (refresh, sign-out), email verification, account recovery; admin roles (one super admin, admins), the admin website's email step, and OTP test mode |
 | `files` | Upload photos and PDFs to R2, duplicate detection, 5-minute signed links, delete (Neon + R2) |
 | `shops` | Registration (details, GPS pin, a kirana's GSTIN/Udyam, kirana or salon, owner and shop photos, a salon's video and trade licence (checked automatically with AI), Submit for visit), field-team pages (dashboard, lists, what changed since approval, decisions with a checklist and notes, timeline), My shop, owner/helper/barber roles, closing a shop for good or handing it over to someone else, history of every change |
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
@@ -303,8 +303,48 @@ coming back counts as copied; an old device retrying a signed-out token just get
 | `POST /email/verify` `{email, code}` | Marks the email verified |
 | `POST /recover/start` `{email, newPhone, captchaToken}` | Lost phone: a code to the verified email and one to the new phone |
 | `POST /recover/complete` | Both codes right: moves the account to the new phone and ends every old session |
+| `POST /admin-code/send` | Admins only (the admin website's second step): a 6-digit code to your verified email, for this device's sign-in (10 min). 202; 403 `NOT_AN_ADMIN`; 409 `EMAIL_REQUIRED`; 401 `SIGN_IN_AGAIN`; 429 past 20 a day; 503 `EMAIL_FAILED`. See "The admin website's email step" |
+| `POST /admin-code/verify` `{code}` | That code right: this device's sign-in gets admin access for 12 hours, across refreshes. 200 `{accessToken, accessExpiresAt, user}` (keep your refresh token). 400 `WRONG_CODE` / `CODE_EXPIRED`, 429, 403 `NOT_AN_ADMIN` |
 | `POST /me/phone/send-code` `{newPhone}` | Signed in, changing the number: a code to the new number and a second code, to the verified email or (without one) to the number the account has now. 200 `{secondCodeTo: EMAIL\|PHONE, sentTo}` (masked). 400 `INVALID_PHONE`, `SAME_PHONE`; 403 `ADMIN_PHONE`; 409 `PHONE_IN_USE`, `TEST_ACCOUNT`, `TEST_PHONE`; 429 `TOO_MANY_CODES` after 5 tries a day per account |
 | `POST /me/phone` `{newPhone, phoneCode, secondCode, device}` | Both codes right: the same account moves to the new number, every other device is signed out, this one gets new tokens (200 as `otp/verify`). 400 `SEND_CODES_AGAIN` (the account's email changed since), the code errors, 409 `PHONE_IN_USE` (taken meanwhile) |
+
+### The admin website's email step
+
+An admin's phone number alone used to open the admin website: whoever got their SIM (a SIM swap, a stolen phone) got
+everything a field agent or super admin can do. Now an admin who signs in with the phone code is signed in to their
+own account as usual, but **has no admin access** (`/api/v1/admin/**` answers 403) until they also type a code sent to
+their **verified email**, on that device:
+
+```mermaid
+sequenceDiagram
+    participant W as Admin website
+    participant B as Backend
+    participant E as Admin's email
+    W->>B: POST /auth/otp/verify (phone code)
+    B-->>W: tokens, user.adminCodeNeeded = true (no admin access yet)
+    W->>B: POST /auth/admin-code/send
+    B->>E: "Your Clozest admin sign-in code is 123456"
+    W->>B: POST /auth/admin-code/verify {code}
+    B-->>W: new access token with admin access, adminCodeNeeded = false
+    Note over W,B: every refresh on this device keeps it for 12 hours (ADMIN_CODE_HOURS), then the step is asked again
+```
+
+- **Per device:** the code is tied to the device's sign-in (the session in the token, `sid`), and admin access is kept
+  per sign-in in `admin_sessions` (V86). A code asked for on the owner's laptop doesn't work on a thief's phone, and
+  passing the step on one device gives nothing to another.
+- **12 hours** (`app.auth.admin-code-hours`, `ADMIN_CODE_HOURS`, 1 to 24): from the moment the code was typed. After
+  that, the next refresh gives a token without admin access and `adminCodeNeeded: true`, and the website asks again.
+- **Who:** only admins (`admin_role` ADMIN or SUPER_ADMIN, read from the database at every sign-in and refresh).
+  Removed from the team: no admin access at the next refresh, as before. Customers, salon owners and staff never see it.
+- **No verified email:** 409 `EMAIL_REQUIRED` (the admin website already asks for the email at the first sign-in).
+- **An admin's email is the team's:** an admin can confirm the email a super admin put on the Team page, never swap in
+  another themselves (`/auth/email/send-code` and `/verify` answer 403 `ADMIN_EMAIL`). Otherwise a stolen SIM alone
+  would pass the step: change the email with a code sent to the phone, then receive the admin code there. A super
+  admin changes an admin's email on the Team page (which signs them out everywhere, as before).
+- **Taken off the team and added back:** a pass from before they rejoined (`users.admin_since`) no longer counts.
+- **A device that signed out** can't use a leftover access token to pass the step (401 `SIGN_IN_AGAIN`).
+- **Limits:** 20 codes a day per admin, the usual per-network limits, 5 tries per code.
+- `adminCodeNeeded` is in `user` of every token answer and in `GET /auth/me`. The partner and customer apps ignore it.
 
 ### Changing the phone number (signed in)
 
@@ -2665,6 +2705,8 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
   don't need it.
 - **Alerts:** on the log lines "80% of the daily SMS limit used", "SMS for new numbers paused", "Daily SMS limit",
   "80% of the daily booking-SMS limit used", "Daily booking-SMS limit" and "A transaction has been open for".
+- **Database users:** the backend as `clozest_app`, migrations by GitHub's Migrate job as the owner (see "Database
+  users"). Until then:
 - **Migrations through the direct URL:** set `DB_URL_DIRECT` to Neon's direct connection string (no `-pooler` in
   the host). The real server refuses to start without it (missing, the same as `DB_URL`, or a `-pooler` address):
   through the pooler, Flyway's own settings may not stay with its connection.
@@ -2964,6 +3006,9 @@ All optional (environment variables on Railway; defaults in `application.propert
 | `NOTIFY_RECORD_EVERY` | 50 | Outcomes written per statement (at least every 0.25 s anyway) |
 | `SMS_MESSAGES_KEEP_DAYS` | 7 | Finished SMS rows kept |
 | `REFRESH_GRACE_SECONDS` | 30 | A swapped refresh token still gets a new pair this long, while its successor is unused (0 = off) |
+| `ADMIN_CODE_HOURS` | 12 | How long an admin's device keeps admin access after the email step (1 to 24) |
+| `MIGRATE_ON_START` | true | The server runs the migrations when it starts; `false` once GitHub's Migrate job does (see "Database users") |
+| `DB_MIGRATION_USER` / `DB_MIGRATION_PASSWORD` | (`DB_USER` / `DB_PASSWORD`) | Who runs the migrations when the server does them itself (GitHub's job has its own secrets) |
 | `DB_STATEMENT_TIMEOUT` | `5s` | Longest a request's statement may run (Postgres `statement_timeout`, set on each connection); then 503 `SERVICE_BUSY` |
 | `DB_JOB_STATEMENT_TIMEOUT` | `60s` | The same for the background jobs' slices (`SET LOCAL` in their own transactions) |
 | `R2_ATTEMPT_TIMEOUT` / `R2_CALL_TIMEOUT` | `5s` / `15s` | One try of an R2 call / the whole call with retries (links are signed locally; deletes) |
@@ -2975,9 +3020,48 @@ All optional (environment variables on Railway; defaults in `application.propert
 | `PHOTO_LINK_MINUTES` | 60 | Minutes a photo link stays valid after the hour it was signed in ends |
 | `OLD_TRANSACTION_WARN` | `10m` | A transaction open longer than this (holding back the oldest snapshot) is logged as a WARN, checked every minute |
 
+## Database users
+
+The backend has **two** database users, so a leak of the server's variables (Railway's October 2026 breach) can't
+change or drop tables:
+
+| User | Who uses it | May |
+| --- | --- | --- |
+| The owner (`neondb_owner` on Neon) | GitHub's **Migrate** job only (`.github/workflows/migrate.yml` → `MigrateOnly`), its password in GitHub's secrets | everything: migrations |
+| `clozest_app` (V87) | the backend on Railway (`DB_USER`) | read, add, change and delete rows; use sequences. **Not** create, change, drop or empty tables, nor change Flyway's history |
+
+V87 makes `clozest_app` (without a password), gives it those rights on every table, and makes every table a later
+migration creates get them by itself (`ALTER DEFAULT PRIVILEGES`), so no migration has to remember a `GRANT`. It also
+sets its 5 s statement limit as the user's own default (it holds on Neon's pooled URL too). A test
+(`AppDatabaseRoleIntegrationTest`) migrates a new database as GitHub's job does, starts the whole app as
+`clozest_app`, signs in, and checks it can't change a table.
+
+How it runs on every merge to main: the **Migrate** job runs the migrations as the owner, and Railway's **Wait for CI**
+holds the deploy until it (and CI) finished, so the new version starts on a database that already has its tables.
+Until the three secrets below are set, the job only says so and passes, and the server keeps migrating itself
+(`MIGRATE_ON_START`, default true): nothing changes until you switch over.
+
+**Switching over (owner steps, once):**
+1. Merge and deploy this version (V86–V87 run as today, as the owner).
+2. Neon → SQL editor, as `neondb_owner`: `ALTER ROLE clozest_app WITH LOGIN PASSWORD '<a new long random password>';`
+   (in SQL, not Neon's Roles page: a role made there joins `neon_superuser` and could change tables).
+3. GitHub → apni-dukan-backend → Settings → Secrets and variables → Actions → New repository secret, three times:
+   `DB_MIGRATION_URL` (Neon's **direct** connection string, jdbc form, no `-pooler`), `DB_MIGRATION_USER`
+   (`neondb_owner`: the same user that ran V87 on deploy, since V87's default rights cover the tables *that user*
+   makes; on Neon it is the only owner, so this holds), `DB_MIGRATION_PASSWORD` (the owner's password: reset it in Neon first, the old one may have
+   leaked). Then Actions → Migrate → Run workflow: it should say "Database at version 87".
+4. Railway → backend → Settings → Source: turn on **Wait for CI**.
+5. Railway → backend → Variables: `DB_USER=clozest_app`, `DB_PASSWORD=<step 2's password>`, `DB_URL` = Neon's pooled
+   URL for `clozest_app`, `MIGRATE_ON_START=false`; **delete** `DB_URL_DIRECT` (only migrations used it). Deploy.
+6. Check: the backend starts (Hibernate checks the tables as `clozest_app`), sign-in works.
+
+From then on `ALTER ROLE neondb_owner SET statement_timeout` is no longer needed (the app doesn't use that user).
+`OldSnapshotWatch` sees only `clozest_app`'s own transactions (Postgres shows other users' only to privileged users);
+a long migration of the owner isn't reported, which is fine.
+
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V85__...`; V66–V82 are
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V88__...`; V66–V82 are
 kirana's, merged into `main` with it, so a salon change after them takes the next number too, as V83–V84 did). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't

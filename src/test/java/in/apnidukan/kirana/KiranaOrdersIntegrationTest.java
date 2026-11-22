@@ -137,6 +137,8 @@ class KiranaOrdersIntegrationTest {
 
     @Autowired Environment environment;
     @Autowired JdbcTemplate jdbc;
+    @Autowired in.apnidukan.common.security.JwtService jwt;
+    @Autowired in.apnidukan.common.security.SessionRevocations sessions;
     @Autowired StringRedisTemplate redis;
     @Autowired OrderJobs jobs;
 
@@ -853,10 +855,16 @@ class KiranaOrdersIntegrationTest {
         return file.toString();
     }
 
+    /**
+     * A super admin's token, as after the admin website's email step on their device (the phone code alone gives no
+     * admin access since V86; AdminCodeIntegrationTest covers the step itself).
+     */
     private String superAdmin() {
         token(ADMIN);
         jdbc.update("UPDATE users SET admin_role = 'SUPER_ADMIN' WHERE phone = ?", ADMIN);
-        return token(ADMIN);
+        UUID id = jdbc.queryForObject("SELECT id FROM users WHERE phone = ?", UUID.class, ADMIN);
+        return jwt.issue(new in.apnidukan.common.security.AuthPrincipal(id, null, null, true),
+                sessions.currentGeneration(id)).token();
     }
 
     private String helperOf(String ownerToken, String phone) {
