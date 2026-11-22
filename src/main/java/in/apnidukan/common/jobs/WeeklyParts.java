@@ -25,6 +25,8 @@ public class WeeklyParts {
     static final int WEEKS_AHEAD = 4;
     /** A week still IN_USE this long after it could first have gone is worth a look (a message stuck waiting?). */
     static final int STUCK_AFTER_DAYS = 60;
+    /** Weeks dropped in one night at most (a backlog after months without the job goes over a few nights). */
+    static final int MAX_DROPS = 20;
 
     /** The tables that have weekly parts. */
     public enum Table {
@@ -72,14 +74,24 @@ public class WeeklyParts {
         } catch (RuntimeException e) {
             log.warn("Could not make the coming weeks' parts of {}: {}", table.sql(), e.getMessage());
         }
-        List<Old> old;
-        try {
-            old = statements.run(() -> jdbc.query("SELECT part, week, outcome FROM partitions_drop_old(?, ?)",
-                    (rs, i) -> new Old(rs.getString(1), rs.getObject(2, LocalDate.class), rs.getString(3)),
-                    table.sql(), keepDays));
-        } catch (RuntimeException e) {
-            log.warn("Could not drop the old weeks of {}: {}", table.sql(), e.getMessage());
-            return 0;
+        // One drop per call, each in its own transaction (the table's lock ends with it): again while one went
+        List<Old> old = new java.util.ArrayList<>();
+        for (int call = 0; call < MAX_DROPS; call++) {
+            List<Old> seen;
+            try {
+                seen = statements.run(() -> jdbc.query("SELECT part, week, outcome FROM partitions_drop_old(?, ?)",
+                        (rs, i) -> new Old(rs.getString(1), rs.getObject(2, LocalDate.class), rs.getString(3)),
+                        table.sql(), keepDays));
+            } catch (RuntimeException e) {
+                log.warn("Could not drop the old weeks of {}: {}", table.sql(), e.getMessage());
+                break;
+            }
+            boolean dropped = !seen.isEmpty() && "DROPPED".equals(seen.get(seen.size() - 1).outcome());
+            if (!dropped) {
+                old.addAll(seen);   // IN_USE and BUSY weeks: reported once, below
+                break;
+            }
+            old.add(seen.get(seen.size() - 1));
         }
         LocalDate today = LocalDate.now(clock.withZone(ZoneOffset.UTC));
         LocalDate stuckBefore = today.minusDays(keepDays + STUCK_AFTER_DAYS);

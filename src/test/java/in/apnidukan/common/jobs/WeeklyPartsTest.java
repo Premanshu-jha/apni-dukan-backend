@@ -39,12 +39,29 @@ class WeeklyPartsTest {
     @SuppressWarnings("unchecked")
     void makesTheComingWeeksThenCountsTheWeeksDropped() {
         when(jdbc.queryForObject("SELECT partitions_prepare(?, ?)", Integer.class, "refresh_tokens", 4)).thenReturn(1);
-        when(jdbc.query(anyString(), any(RowMapper.class), eq("refresh_tokens"), eq(30))).thenReturn(List.of(
-                new WeeklyParts.Old("refresh_tokens_w20260907", LocalDate.parse("2026-09-07"), "DROPPED"),
-                new WeeklyParts.Old("refresh_tokens_w20260914", LocalDate.parse("2026-09-14"), "BUSY"),
-                new WeeklyParts.Old("refresh_tokens_w20260921", LocalDate.parse("2026-09-21"), "IN_USE")));
-        assertThat(parts.maintain(WeeklyParts.Table.REFRESH_TOKENS, 30)).isEqualTo(1);
+        // One drop per call: called again after each drop, until a call drops nothing. The stuck week (June) is the
+        // WARN path.
+        WeeklyParts.Old stuck = new WeeklyParts.Old("refresh_tokens_w20260601", LocalDate.parse("2026-06-01"),
+                "IN_USE");
+        when(jdbc.query(anyString(), any(RowMapper.class), eq("refresh_tokens"), eq(30))).thenReturn(
+                List.of(stuck, new WeeklyParts.Old("refresh_tokens_w20260907", LocalDate.parse("2026-09-07"),
+                        "DROPPED")),
+                List.of(stuck, new WeeklyParts.Old("refresh_tokens_w20260914", LocalDate.parse("2026-09-14"),
+                        "DROPPED")),
+                List.of(stuck, new WeeklyParts.Old("refresh_tokens_w20260921", LocalDate.parse("2026-09-21"),
+                        "BUSY")));
+        assertThat(parts.maintain(WeeklyParts.Table.REFRESH_TOKENS, 30)).isEqualTo(2);
+        verify(jdbc, org.mockito.Mockito.times(3)).query(anyString(), any(RowMapper.class), eq("refresh_tokens"),
+                eq(30));
         verify(jdbc).queryForObject("SELECT partitions_prepare(?, ?)", Integer.class, "refresh_tokens", 4);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aBacklogGoesAtMost20WeeksANight() {
+        when(jdbc.query(anyString(), any(RowMapper.class), eq("refresh_tokens"), eq(30))).thenReturn(List.of(
+                new WeeklyParts.Old("refresh_tokens_w20250106", LocalDate.parse("2025-01-06"), "DROPPED")));
+        assertThat(parts.maintain(WeeklyParts.Table.REFRESH_TOKENS, 30)).isEqualTo(WeeklyParts.MAX_DROPS);
     }
 
     @Test
@@ -54,7 +71,7 @@ class WeeklyPartsTest {
                 .thenThrow(new QueryTimeoutException("busy"));
         when(jdbc.query(anyString(), any(RowMapper.class), eq("notification_jobs"), eq(90)))
                 .thenReturn(List.of(new WeeklyParts.Old("notification_jobs_w20260105", LocalDate.parse("2026-01-05"),
-                        "DROPPED")));
+                        "DROPPED")), List.of());
         assertThat(parts.maintain(WeeklyParts.Table.NOTIFICATION_JOBS, 90)).isEqualTo(1);   // the drop still ran
 
         when(jdbc.query(anyString(), any(RowMapper.class), eq("notification_jobs"), eq(90)))

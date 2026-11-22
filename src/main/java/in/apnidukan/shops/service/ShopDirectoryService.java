@@ -75,7 +75,7 @@ public class ShopDirectoryService implements ShopDirectory {
     private final ShopRepository shops;
     private final JdbcTemplate jdbc;
     /** The salon list's reads (nearby): the read copy when READ_DB_URL is set, else the main database. */
-    private final JdbcTemplate listReads;
+    private final ReadCopy listReads;
     private final Clock clock;
     private final boolean subscriptionsEnforced;
 
@@ -83,7 +83,7 @@ public class ShopDirectoryService implements ShopDirectory {
                                 @Value("${app.subscriptions.enforce:false}") boolean subscriptionsEnforced) {
         this.shops = shops;
         this.jdbc = jdbc;
-        this.listReads = readCopy.jdbc();
+        this.listReads = readCopy;
         this.clock = clock;
         this.subscriptionsEnforced = subscriptionsEnforced;
     }
@@ -166,14 +166,14 @@ public class ShopDirectoryService implements ShopDirectory {
         }
         sql.append(" ORDER BY metres, s.id LIMIT ?");
         args.add(limit);
-        return listReads.query(sql.toString(), (rs, i) -> {
+        return listReads.read(read -> read.query(sql.toString(), (rs, i) -> {
             double metres = rs.getDouble("metres");
             return new ShopCard(rs.getObject("id", UUID.class), rs.getString("name"), rs.getString("address_line"),
                     rs.getString("area"), rs.getString("city"), rs.getString("pincode"),
                     rs.getBigDecimal("latitude"), rs.getBigDecimal("longitude"), rs.getString("status"),
                     rs.getString("type"), rs.getObject("shop_photo_file_id", UUID.class),
                     Math.round(metres / 100.0) / 10.0, metres);
-        }, args.toArray());
+        }, args.toArray()));
     }
 
     private static ShopCard card(Shop s) {

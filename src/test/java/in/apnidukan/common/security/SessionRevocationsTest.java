@@ -87,4 +87,43 @@ class SessionRevocationsTest {
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> new SessionRevocations(redis, JWT, -1, 1000))
                 .isInstanceOf(IllegalStateException.class);
     }
+
+    @Test
+    void anotherCopyRefusesTheOldTokenOnceItsMemoryRunsOut() {
+        java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+        SessionRevocations copyB = new SessionRevocations(redis, JWT, 5, 1000, nanos::get);
+        UUID who = UUID.randomUUID();
+        when(redis.opsForValue()).thenReturn(values);
+        when(values.get(anyString())).thenReturn("2");
+        assertThat(copyB.isRevoked(who, 2)).isFalse();   // remembered: 2
+        when(values.get(anyString())).thenReturn("99");  // copy A signed them out everywhere
+        nanos.addAndGet(java.time.Duration.ofSeconds(4).toNanos());
+        assertThat(copyB.isRevoked(who, 2)).isFalse();   // still within the 5 s
+        nanos.addAndGet(java.time.Duration.ofSeconds(2).toNanos());
+        assertThat(copyB.isRevoked(who, 2)).isTrue();    // read again: refused
+    }
+
+    @Test
+    void zeroSecondsAsksRedisEveryTime() {
+        UUID who = UUID.randomUUID();
+        when(redis.opsForValue()).thenReturn(values);
+        when(values.get(anyString())).thenReturn("2");
+        revocations.isRevoked(who, 2);
+        revocations.isRevoked(who, 2);
+        org.mockito.Mockito.verify(values, org.mockito.Mockito.times(2)).get(anyString());
+    }
+
+    @Test
+    void withTheMemoryOnRedisDownStillLetsRequestsThroughAndRemembersNothing() {
+        SessionRevocations remembering = new SessionRevocations(redis, JWT, 5, 1000);
+        UUID who = UUID.randomUUID();
+        when(redis.opsForValue()).thenReturn(values);
+        when(values.get(anyString())).thenThrow(new org.springframework.data.redis.RedisConnectionFailureException(
+                "down"));
+        assertThat(remembering.isRevoked(who, 1)).isFalse();
+        // Back up: the real number is read, nothing wrong was remembered meanwhile
+        org.mockito.Mockito.reset(values);
+        when(values.get(anyString())).thenReturn("2");
+        assertThat(remembering.isRevoked(who, 1)).isTrue();
+    }
 }

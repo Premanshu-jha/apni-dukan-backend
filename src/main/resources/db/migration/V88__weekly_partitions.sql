@@ -112,14 +112,18 @@ CREATE TABLE notification_jobs_default PARTITION OF notification_jobs DEFAULT;
 -- Only the owner (who runs migrations) may create or drop tables; the backend's user, clozest_app, can't (V87). These
 -- two functions run as the owner (SECURITY DEFINER) and do exactly one thing each, for these two tables only, so the
 -- backend's nightly job can call them and still can't change any table itself. Neither takes a table name it hasn't
--- listed, nor runs any text it was given.
+-- listed, nor runs any text it was given. Their search_path names pg_temp last, so a temporary table of the caller's
+-- can never stand in for a real one.
 
 -- Makes sure this week and the next p_weeks (1 to 12) weeks have a part. Returns how many it made. A part that can't
--- be made right now (the table is busy for over a second) is left for the next night.
+-- be made right now (the table is busy for over a second) is left for the next night. A week whose rows are already
+-- in the default part (the job missed a month) can't get a part any more (Postgres refuses: those rows would be in
+-- the wrong part); it is skipped, its rows stay in the default part and are deleted one by one, and the weeks after
+-- it still get theirs, so the parts carry on from the next week.
 CREATE FUNCTION partitions_prepare(p_table TEXT, p_weeks INTEGER) RETURNS INTEGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     SET lock_timeout = '1s'
 AS $$
 DECLARE
@@ -142,8 +146,12 @@ BEGIN
             EXECUTE format('CREATE TABLE public.%I PARTITION OF public.%I FOR VALUES FROM (%L) TO (%L)', part,
                 p_table, week::TEXT || ' 00:00:00+00', (week + 7)::TEXT || ' 00:00:00+00');
             made := made + 1;
-        EXCEPTION WHEN lock_not_available THEN
-            RAISE WARNING 'partitions_prepare: % is busy, % is left for next time', p_table, part;
+        EXCEPTION
+            WHEN lock_not_available THEN
+                RAISE WARNING 'partitions_prepare: % is busy, % is left for next time', p_table, part;
+            WHEN check_violation THEN
+                RAISE WARNING 'partitions_prepare: % has rows of % in its default part already; that week stays there',
+                    p_table, part;
         END;
     END LOOP;
     RETURN made;
@@ -156,12 +164,14 @@ $$;
 --   notification_jobs: still waiting (PENDING), or finished less than p_keep_days ago (or with no finish time).
 -- Each check goes through the part's indexes, so it is quick however big the week is. Then the table is locked
 -- (waiting at most a second, else the week is left for the next night), checked once more, and the week dropped.
--- Returns one row per old week: DROPPED, IN_USE (some row is still kept) or BUSY.
+-- At most one week is dropped (or tried) per call, oldest first: the lock lasts until the caller's transaction ends,
+-- so the caller calls again in a new transaction for the next one (WeeklyParts), and requests wait behind it only
+-- for that one drop. Returns one row per old week looked at: DROPPED, IN_USE (some row is still kept) or BUSY.
 CREATE FUNCTION partitions_drop_old(p_table TEXT, p_keep_days INTEGER)
     RETURNS TABLE (part TEXT, week DATE, outcome TEXT)
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     SET lock_timeout = '1s'
 AS $$
 DECLARE
@@ -183,8 +193,8 @@ BEGIN
     END IF;
     FOR part, week IN
         SELECT c.relname::TEXT, to_date(substring(c.relname FROM '_w([0-9]{8})$'), 'YYYYMMDD')
-        FROM pg_inherits i
-        JOIN pg_class c ON c.oid = i.inhrelid
+        FROM pg_catalog.pg_inherits i
+        JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
         WHERE i.inhparent = ('public.' || p_table)::regclass
           AND c.relname ~ ('^' || p_table || '_w[0-9]{8}$')
         ORDER BY 2
@@ -209,6 +219,7 @@ BEGIN
             outcome := 'BUSY';
         END;
         RETURN NEXT;
+        RETURN;   -- one drop per call (see above)
     END LOOP;
 END
 $$;

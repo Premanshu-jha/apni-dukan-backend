@@ -19,10 +19,14 @@ class ReadCopyIntegrationTest {
         ReadCopy copy = new ReadCopy(mock(JdbcTemplate.class), TestContainers.jdbcUrl(), TestContainers.DB_USER,
                 TestContainers.DB_PASSWORD, 2, "5s");
         try {
-            assertThat(copy.jdbc().queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
-            assertThat(copy.jdbc().queryForObject("SHOW statement_timeout", String.class)).isEqualTo("5s");
-            assertThatThrownBy(() -> copy.jdbc().execute("CREATE TABLE should_fail (id int)"))
-                    .rootCause().hasMessageContaining("read-only");
+            assertThat(copy.read(jdbc -> jdbc.queryForObject("SELECT 1", Integer.class))).isEqualTo(1);
+            assertThat(copy.read(jdbc -> jdbc.queryForObject("SHOW statement_timeout", String.class)))
+                    .isEqualTo("5s");
+            // A write by mistake fails (and isn't done again on the main database: the mock would answer null)
+            assertThatThrownBy(() -> copy.read(jdbc -> {
+                jdbc.execute("CREATE TABLE should_fail (id int)");
+                return null;
+            })).rootCause().hasMessageContaining("read-only");
         } finally {
             copy.destroy();
         }

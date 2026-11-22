@@ -186,9 +186,11 @@ class AppDatabaseRoleIntegrationTest {
                 + "revoke_reason) VALUES (?, ?, 'h2', '2025-01-14', now() + interval '1 day', "
                 + "now() - interval '10 days', 'SIGNED_OUT')", UUID.randomUUID(), person);
 
-        List<String> outcomes = app.query("SELECT part, outcome FROM partitions_drop_old('refresh_tokens', 30)",
-                (rs, i) -> rs.getString(1) + " " + rs.getString(2));
-        assertThat(outcomes).containsExactly("refresh_tokens_w20250106 DROPPED", "refresh_tokens_w20250113 IN_USE");
+        // One drop per call (its lock ends with the call's transaction), oldest first
+        List<String> outcomes = drop(app, "refresh_tokens", 30);
+        assertThat(outcomes).containsExactly("refresh_tokens_w20250106 DROPPED");
+        outcomes = drop(app, "refresh_tokens", 30);
+        assertThat(outcomes).containsExactly("refresh_tokens_w20250113 IN_USE");
         assertThat(owner.queryForObject("SELECT to_regclass('public.refresh_tokens_w20250106') IS NULL",
                 Boolean.class)).isTrue();
         assertThat(owner.queryForObject("SELECT count(*) FROM refresh_tokens WHERE token_hash = 'h2'",
@@ -203,18 +205,34 @@ class AppDatabaseRoleIntegrationTest {
                 + "FOR VALUES FROM ('2025-01-13 00:00:00+00') TO ('2025-01-20 00:00:00+00')");
         message(owner, person, "2025-01-07", "SENT", "'2025-01-07'");
         message(owner, person, "2025-01-14", "PENDING", "NULL");
-        assertThat(app.query("SELECT part, outcome FROM partitions_drop_old('notification_jobs', 90)",
-                (rs, i) -> rs.getString(1) + " " + rs.getString(2)))
-                .containsExactly("notification_jobs_w20250106 DROPPED", "notification_jobs_w20250113 IN_USE");
+        assertThat(drop(app, "notification_jobs", 90)).containsExactly("notification_jobs_w20250106 DROPPED");
+        assertThat(drop(app, "notification_jobs", 90)).containsExactly("notification_jobs_w20250113 IN_USE");
 
         // Once that message has finished, long enough ago, its week goes too
         owner.update("UPDATE notification_jobs SET status = 'SENT', finished_at = now() - interval '91 days' "
                 + "WHERE user_id = ?", person);
-        assertThat(app.query("SELECT part, outcome FROM partitions_drop_old('notification_jobs', 90)",
-                (rs, i) -> rs.getString(1) + " " + rs.getString(2)))
-                .containsExactly("notification_jobs_w20250113 DROPPED");
+        assertThat(drop(app, "notification_jobs", 90)).containsExactly("notification_jobs_w20250113 DROPPED");
+
+        // A week whose rows already went to the default part (the job missed a month) is skipped, the weeks after it
+        // still made: here the 7th week ahead (parts reach the 6th) is given a row before its part exists
+        String late = owner.queryForObject("SELECT to_char(date_trunc('week', now() AT TIME ZONE 'UTC') + "
+                + "interval '49 days', 'YYYYMMDD')", String.class);
+        owner.update("INSERT INTO refresh_tokens (id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, "
+                + "'h3', to_date(?, 'YYYYMMDD') + interval '1 day', now())", UUID.randomUUID(), person, late);
+        assertThat(app.queryForObject("SELECT partitions_prepare('refresh_tokens', 8)", Integer.class))
+                .isEqualTo(1);   // the 8th week; the 7th stays in the default part
+        assertThat(owner.queryForObject("SELECT tableoid::regclass::text FROM refresh_tokens WHERE token_hash = 'h3'",
+                String.class)).isEqualTo("refresh_tokens_default");
+        assertThat(owner.queryForObject("SELECT to_regclass('public.refresh_tokens_w' || ?) IS NULL", Boolean.class,
+                late)).isTrue();
+        owner.update("DELETE FROM refresh_tokens WHERE token_hash = 'h3'");
         owner.update("DELETE FROM refresh_tokens WHERE user_id = ?", person);
         owner.execute("DROP TABLE refresh_tokens_w20250113");
+    }
+
+    private static List<String> drop(JdbcTemplate app, String table, int keepDays) {
+        return app.query("SELECT part, outcome FROM partitions_drop_old(?, ?)",
+                (rs, i) -> rs.getString(1) + " " + rs.getString(2), table, keepDays);
     }
 
     private static void message(JdbcTemplate owner, UUID person, String createdAt, String status, String finishedAt) {

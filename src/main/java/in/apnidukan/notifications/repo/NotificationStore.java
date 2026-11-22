@@ -29,8 +29,14 @@ public class NotificationStore {
 
     private final JdbcTemplate jdbc;
 
-    public NotificationStore(JdbcTemplate jdbc) {
+    /** How long the lists show a message (app.notifications.keep-days, 90). */
+    private final java.time.Duration shown;
+
+    public NotificationStore(JdbcTemplate jdbc,
+                             @org.springframework.beans.factory.annotation.Value("${app.notifications.keep-days:90}")
+                             int keepDays) {
         this.jdbc = jdbc;
+        this.shown = java.time.Duration.ofDays(keepDays);
     }
 
     public void insert(Notice n, Channel channel, Instant now) {
@@ -92,7 +98,7 @@ public class NotificationStore {
      * the app's type groups go in as one comma-separated parameter.
      */
     private static final String INBOX = " FROM notification_jobs WHERE user_id = ? AND channel = 'PUSH'"
-            + " AND (status <> 'CANCELLED' OR finished_at >= send_at) AND send_at <= ? AND title <> ''"
+            + " AND (status <> 'CANCELLED' OR finished_at >= send_at) AND send_at <= ? AND send_at > ? AND title <> ''"
             + " AND split_part(type, '_', 1) = ANY (string_to_array(?, ','))"
             // Salon messages of a salon the person left are hidden at once, before SalonMessagePurgeJob deletes them
             // (the person's purge row is read once per query, not per message)
@@ -119,10 +125,11 @@ public class NotificationStore {
                                  int limit) {
         if (beforeAt == null || beforeId == null) {
             return jdbc.query(INBOX_COLUMNS + INBOX + " ORDER BY send_at DESC, id DESC LIMIT ?",
-                    (rs, i) -> inboxItem(rs), userId, at(now), groups(audience), userId, limit);
+                    (rs, i) -> inboxItem(rs), userId, at(now), oldest(now), groups(audience), userId, limit);
         }
         return jdbc.query(INBOX_COLUMNS + INBOX + " AND (send_at, id) < (?, ?) ORDER BY send_at DESC, id DESC LIMIT ?",
-                (rs, i) -> inboxItem(rs), userId, at(now), groups(audience), userId, at(beforeAt), beforeId, limit);
+                (rs, i) -> inboxItem(rs), userId, at(now), oldest(now), groups(audience), userId, at(beforeAt), beforeId,
+                limit);
     }
 
     /**
@@ -154,7 +161,7 @@ public class NotificationStore {
                 (rs, i) -> {
                     OffsetDateTime next = rs.getObject(2, OffsetDateTime.class);
                     return new Unread(rs.getLong(1), next == null ? null : next.toInstant());
-                }, userId, at(now), groups(audience), userId, UNREAD_CAP, userId, at(now));
+                }, userId, at(now), oldest(now), groups(audience), userId, UNREAD_CAP, userId, at(now));
     }
 
     /** Marks these of the person's messages read (only theirs, only once); returns how many changed. */
@@ -175,7 +182,15 @@ public class NotificationStore {
     public int markAllReadSlice(UUID userId, Audience audience, Instant now, int max) {
         return jdbc.update("WITH pick AS MATERIALIZED (SELECT id" + INBOX + " AND read_at IS NULL LIMIT ?) "
                 + "UPDATE notification_jobs SET read_at = ? WHERE id IN (SELECT id FROM pick) AND read_at IS NULL",
-                userId, at(now), groups(audience), userId, max, at(now));
+                userId, at(now), oldest(now), groups(audience), userId, max, at(now));
+    }
+
+    /**
+     * The oldest a listed message may be: the lists show 90 days. A message's week is dropped only once all of it
+     * finished that long ago (WeeklyParts), so an older row may still be there for a while; it just isn't shown.
+     */
+    private OffsetDateTime oldest(Instant now) {
+        return at(now.minus(shown));
     }
 
     /**

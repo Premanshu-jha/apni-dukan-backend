@@ -2752,18 +2752,21 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
     purpose: if a thief copied a token and keeps refreshing (r1 → r2 → r3), only the owner's phone presenting r1,
     maybe days later, reveals it and ends every session.
   - 03:40, messages: SMS rows 7 days after they finished (`SMS_MESSAGES_KEEP_DAYS`, one by one), every other row
-    90 days after: its week once every message in it finished that long ago (so the app's list may show one up to
-    about a week longer than 90 days).
+    once its week goes: when every message of that week finished 90 days ago. A reminder for a booking a month
+    ahead keeps its week about a month longer (four months in all); the apps' lists and the bell show only the last
+    90 days anyway (`NotificationStore`'s list reads hide older ones).
 - **Weekly parts (V88)** of `refresh_tokens` and `notification_jobs`, the two tables that grow fastest: one part per
   week of `created_at` (weeks start Monday 00:00 UTC, named `refresh_tokens_w20261123` after their first day), plus
   a default part (`refresh_tokens_default`). Dropping a week is instant and leaves Postgres nothing to clean up,
   where deleting millions of rows a night would. The nightly cleanups (`WeeklyParts`) make this week and the next 4,
-  and drop old weeks with no row they would still keep. The database does both through two functions that run as
-  the owner (`partitions_prepare`, `partitions_drop_old`): the backend's user (`clozest_app`) can call them but
-  still can't create or drop any table itself, and they take no table but these two. A week that is busy (a lock
-  not got within 1 s) is left for the next night (a WARN). Rows of before V88 are in the default part, and new
-  rows go there only if the job missed a month; the cleanup deletes the default part's old rows one by one, so
-  nothing piles up either way. A week still holding a kept row 60 days after it could have gone is a WARN (a
+  and drop old weeks with no row they would still keep, one week per transaction (the table is locked only for that
+  drop; at most 20 a night). The database does both through two functions that run as the owner
+  (`partitions_prepare`, `partitions_drop_old`): the backend's user (`clozest_app`) can call them but still can't
+  create or drop any table itself, and they take no table but these two. A week that is busy (a lock not got within
+  1 s) is left for the next night (a WARN). Rows of before V88 are in the default part. If the job ever missed a
+  month, that week's rows went to the default part too and the week can't get a part any more (Postgres refuses):
+  it is skipped with a WARN and the following weeks get theirs, so the parts carry on. The cleanup deletes the
+  default part's old rows one by one, so nothing piles up either way. A week still holding a kept row 60 days after it could have gone is a WARN (a
   message stuck waiting?). Keys are `(id, created_at)` (a partitioned table's key must hold `created_at`); ids are
   random UUIDs and `token_hash` a SHA-256 of 32 random bytes, so both stay unique in practice, `token_hash` through
   a plain index.
@@ -3053,11 +3056,15 @@ cards' ratings, services, hours and offers) are read from that address, through 
 and `DB_PASSWORD`). Everything else, every booking and change included, stays on `DB_URL`. A copy is usually under a
 second behind, so a salon that just paused or was renamed may show the old way in the list that long, never in a
 booking (a booking reads the main database). The list holds no connection of the main database meanwhile.
+If the copy can't answer (down, no connection within 2 s, or a query cancelled by the copy's replay), that read is
+done again on the main database, with a WARN at most once a minute: the list keeps working. A statement that ran
+out of its 5 s is not repeated (that would double the load when things are slow). The cards' photo links are
+still read from the main database.
 
 To turn it on, on Neon: the project's branch, **Add a read replica** (a compute of its own, billed by the hour it
 runs, like the main one), then set `READ_DB_URL` on Railway to its **pooled** connection string (host with
-`-pooler`), in JDBC form like `DB_URL`. A copy that is down when the backend starts doesn't stop it; the salon list
-then answers errors until the copy is back (or `READ_DB_URL` is removed). Worth it once the main database's CPU is
+`-pooler`), in JDBC form like `DB_URL`. A copy that is down when the backend starts doesn't stop it (the main
+database answers the list meanwhile). Worth it once the main database's CPU is
 mostly the salon list (Neon's Monitoring page).
 
 ## Database users

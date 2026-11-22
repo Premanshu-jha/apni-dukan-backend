@@ -2,6 +2,7 @@ package in.apnidukan.common.security;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Ticker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -61,9 +62,16 @@ public class SessionRevocations {
     /** Person → their session number as last read or set here; null when the cache is off (0 seconds). */
     private final Cache<UUID, Long> recent;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public SessionRevocations(StringRedisTemplate redis, JwtProperties jwt,
                               @Value("${app.auth.sign-out-check-cache-seconds:5}") int cacheSeconds,
                               @Value("${app.auth.sign-out-check-cache-size:100000}") int cacheSize) {
+        this(redis, jwt, cacheSeconds, cacheSize, Ticker.systemTicker());
+    }
+
+    /** As above, with the clock the memory's seconds are counted by (tests move it). */
+    SessionRevocations(StringRedisTemplate redis, JwtProperties jwt, int cacheSeconds, int cacheSize,
+                       Ticker ticker) {
         if (cacheSeconds < 0 || cacheSeconds > 60 || cacheSize < 1) {
             // Longer than a minute would make "signed out everywhere" (a stolen phone) feel broken
             throw new IllegalStateException("app.auth.sign-out-check-cache-seconds must be 0 to 60, and "
@@ -72,7 +80,17 @@ public class SessionRevocations {
         this.redis = redis;
         this.ttl = Duration.ofDays(jwt.refreshDays() + 1L);
         this.recent = cacheSeconds == 0 ? null : Caffeine.newBuilder()
-                .expireAfterWrite(Duration.ofSeconds(cacheSeconds)).maximumSize(cacheSize).build();
+                .expireAfterWrite(Duration.ofSeconds(cacheSeconds)).maximumSize(cacheSize).ticker(ticker).build();
+    }
+
+    /**
+     * Forgets everything remembered on this copy, as a restart does. For tests that make a Redis key expire at once
+     * (in real life it expires 31 days after its last change, long after any copy forgot it).
+     */
+    public void forgetRemembered() {
+        if (recent != null) {
+            recent.invalidateAll();
+        }
     }
 
     /** The number in Redis now (never the remembered one), remembered for the next checks. */
