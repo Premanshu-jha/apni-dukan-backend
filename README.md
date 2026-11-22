@@ -3057,7 +3057,8 @@ and `DB_PASSWORD`). Everything else, every booking and change included, stays on
 second behind, so a salon that just paused or was renamed may show the old way in the list that long, never in a
 booking (a booking reads the main database). The list holds no connection of the main database meanwhile.
 If the copy can't answer (down, no connection within 2 s, or a query cancelled by the copy's replay), that read is
-done again on the main database, with a WARN at most once a minute: the list keeps working. A statement that ran
+done again on the main database, with a WARN at most once a minute: the list keeps working (after a failed
+connection, the next 30 s skip the copy, so lists don't each wait its 2 s). A statement that ran
 out of its 5 s is not repeated (that would double the load when things are slow). The cards' photo links are
 still read from the main database.
 

@@ -13,14 +13,15 @@ import org.springframework.stereotype.Component;
  * An optional read-only copy of the database (README: "Read copy"), for the busiest read that may be a moment
  * behind: the customer's salon list and its search (ShopDirectory.nearby). Off unless READ_DB_URL is set (a Neon
  * read replica's pooled address); then that list is read there, so a flood of people browsing doesn't slow
- * bookings on the main database. Without it, {@link #jdbc()} is the main database's own JdbcTemplate.
+ * bookings on the main database. Without it, {@link #read} runs on the main database.
  *
  * Nothing that books, changes or must see its own change reads here: a copy is usually under a second behind, so
  * a salon that just paused or changed its name may show the old way for that long in the list, never in a booking.
  *
  * If the copy can't answer (down, no connection within 2 s, or a query cancelled because the copy was replaying a
  * change it conflicted with), the read is done again on the main database: the list keeps working, a WARN at most
- * once a minute says so.
+ * once a minute says so. After the copy couldn't connect, the next 30 s go straight to the main database, so a copy
+ * that is down doesn't make every list wait its 2 s.
  *
  * Not a DataSource bean on purpose: one would make Spring Boot stop making the main one.
  */
@@ -33,6 +34,8 @@ public class ReadCopy implements DisposableBean {
     private final JdbcTemplate jdbc;
     private final JdbcTemplate main;
     private final java.util.concurrent.atomic.AtomicLong lastWarned = new java.util.concurrent.atomic.AtomicLong();
+    /** Until when (System.currentTimeMillis) the copy is skipped: it couldn't give a connection. */
+    private volatile long skipUntil;
 
     public ReadCopy(JdbcTemplate main, @Value("${app.db.read-url:}") String url,
                     @Value("${spring.datasource.username:}") String user,
@@ -73,7 +76,7 @@ public class ReadCopy implements DisposableBean {
      * the copy can't answer (see the class comment). The read must only read.
      */
     public <T> T read(java.util.function.Function<JdbcTemplate, T> read) {
-        if (copy == null) {
+        if (copy == null || System.currentTimeMillis() < skipUntil) {
             return read.apply(main);
         }
         try {
@@ -86,6 +89,9 @@ public class ReadCopy implements DisposableBean {
                 throw e;
             }
             long now = System.currentTimeMillis();
+            if (e instanceof org.springframework.jdbc.CannotGetJdbcConnectionException) {
+                skipUntil = now + 30_000;
+            }
             long last = lastWarned.get();
             if (now - last > 60_000 && lastWarned.compareAndSet(last, now)) {
                 log.warn("The read copy didn't answer ({}): reading the salon list from the main database",

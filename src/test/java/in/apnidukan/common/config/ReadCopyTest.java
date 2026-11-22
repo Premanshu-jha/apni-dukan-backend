@@ -27,6 +27,11 @@ class ReadCopyTest {
         assertThat(on.enabled()).isTrue();
         String answered = on.read(jdbc -> jdbc == main ? "main" : jdbc.queryForObject("SELECT 'copy'", String.class));
         assertThat(answered).isEqualTo("main");
+        // ...and the next reads skip the copy for 30 s, without waiting for it again
+        long started = System.nanoTime();
+        String again = on.read(jdbc -> jdbc == main ? "main" : "copy");
+        assertThat(again).isEqualTo("main");
+        assertThat(System.nanoTime() - started).isLessThan(java.time.Duration.ofMillis(500).toNanos());
         on.destroy();
     }
 
