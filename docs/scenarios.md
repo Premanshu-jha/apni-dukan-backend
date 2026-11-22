@@ -145,6 +145,9 @@ app's `docs/scenarios.md`.
 | 5.10 | Not signed in / empty code | 401 / 400 `VALIDATION_FAILED` | — | ACI same test | OK-tested |
 | 5.11 | `ADMIN_CODE_HOURS` set outside 1 to 24 | The server refuses to start | — | RGS `theAdminEmailStepLasts1To24Hours` | OK-tested |
 | 5.12 | Many admins and devices | One row per device sign-in that passed the step; an admin's old rows deleted when they pass it again; one primary-key read per admin sign-in or refresh, none for anyone else | — | plan reasoning | OK-untested (load) |
+| 5.14 | A SIM thief changes the admin's email to their own inbox with a phone code, then asks for the admin code | `/auth/email/send-code` and `/verify` 403 `ADMIN_EMAIL` (an admin's email is set on the Team page); the code only ever goes to the team's address | — | ACI `aSimThiefCantMoveTheEmail…` | OK-tested |
+| 5.15 | Taken off the team and added back within 12 hours | The old pass doesn't count (`verified_at` before `admin_since`): the step again | The website asks for a code | ACI same test | OK-tested |
+| 5.16 | A device signed out, its access token still valid for minutes | `/admin-code/verify` 401 `SIGN_IN_AGAIN` | — | ACI same test | OK-tested |
 | 5.13 | Email down | `/admin-code/send` 503 `EMAIL_FAILED` (as every email code) | "Try again" | existing email tests | OK-untested |
 
 ## 6. Database users (V87, `MigrateOnly`, GitHub's Migrate job)

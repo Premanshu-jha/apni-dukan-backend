@@ -337,6 +337,12 @@ sequenceDiagram
 - **Who:** only admins (`admin_role` ADMIN or SUPER_ADMIN, read from the database at every sign-in and refresh).
   Removed from the team: no admin access at the next refresh, as before. Customers, salon owners and staff never see it.
 - **No verified email:** 409 `EMAIL_REQUIRED` (the admin website already asks for the email at the first sign-in).
+- **An admin's email is the team's:** an admin can confirm the email a super admin put on the Team page, never swap in
+  another themselves (`/auth/email/send-code` and `/verify` answer 403 `ADMIN_EMAIL`). Otherwise a stolen SIM alone
+  would pass the step: change the email with a code sent to the phone, then receive the admin code there. A super
+  admin changes an admin's email on the Team page (which signs them out everywhere, as before).
+- **Taken off the team and added back:** a pass from before they rejoined (`users.admin_since`) no longer counts.
+- **A device that signed out** can't use a leftover access token to pass the step (401 `SIGN_IN_AGAIN`).
 - **Limits:** 20 codes a day per admin, the usual per-network limits, 5 tries per code.
 - `adminCodeNeeded` is in `user` of every token answer and in `GET /auth/me`. The partner and customer apps ignore it.
 
@@ -3041,7 +3047,8 @@ Until the three secrets below are set, the job only says so and passes, and the 
    (in SQL, not Neon's Roles page: a role made there joins `neon_superuser` and could change tables).
 3. GitHub → apni-dukan-backend → Settings → Secrets and variables → Actions → New repository secret, three times:
    `DB_MIGRATION_URL` (Neon's **direct** connection string, jdbc form, no `-pooler`), `DB_MIGRATION_USER`
-   (`neondb_owner`), `DB_MIGRATION_PASSWORD` (the owner's password: reset it in Neon first, the old one may have
+   (`neondb_owner`: the same user that ran V87 on deploy, since V87's default rights cover the tables *that user*
+   makes; on Neon it is the only owner, so this holds), `DB_MIGRATION_PASSWORD` (the owner's password: reset it in Neon first, the old one may have
    leaked). Then Actions → Migrate → Run workflow: it should say "Database at version 87".
 4. Railway → backend → Settings → Source: turn on **Wait for CI**.
 5. Railway → backend → Variables: `DB_USER=clozest_app`, `DB_PASSWORD=<step 2's password>`, `DB_URL` = Neon's pooled
