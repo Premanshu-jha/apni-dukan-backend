@@ -125,3 +125,39 @@ Tests: `HIT` = `HelpdeskIntegrationTest`. The apps' rows (the "answered" dot) ar
 | 4.1 | Support replies and resolves in one step (`POST /admin/tickets/{id}/reply`, `resolve: true`) | The ticket is RESOLVED (never WAITING); `GET /helpdesk/tickets` items and `GET /helpdesk/tickets/{id}`'s `ticket` carry `lastReplyAt` = the time of support's newest message | The apps light "answered" from `lastReplyAt` newer than what was read | HIT `aReplyThatAlsoResolvesSetsLastReplyAt…` | OK-tested |
 | 4.2 | No reply yet / the person writes again | `lastReplyAt` null until support writes; the person's own message moves `lastMessageAt`, never `lastReplyAt`; each ticket its own | No false dot | HIT same test | OK-tested |
 | 4.3 | Many tickets, many people | One statement for the list (each ticket's newest reply read backwards through `ix_ticket_messages_ticket (ticket_id, seq)`, at most 30 tickets); the single read takes it from the messages it already reads; no new index or migration | — | HIT; plan reasoning | OK-untested (load) |
+
+## 5. The admin website's email step (V86)
+
+Tests: `ACI` = `AdminCodeIntegrationTest`, `RGS` = `RefreshGraceSettingTest`. The website's rows are in the admin
+app's `docs/scenarios.md`.
+
+| # | Scenario | API answer | Screen | Test | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 5.1 | An admin signs in with the phone code | Tokens as usual; `user.adminCodeNeeded: true`; the token has no admin access: `/api/v1/admin/**` 403 `FORBIDDEN`; their own account (`/auth/me`) works | Admin website: "Check your email" step | ACI `aPhoneCodeAloneGivesAnAdminNoAdminPages…` | OK-tested |
+| 5.2 | They ask for the code, type a wrong one, then the right one | 202; 400 `WRONG_CODE` (nothing recorded); 200 with a new access token that has admin access, `adminCodeNeeded: false` | Into the website | ACI same test | OK-tested |
+| 5.3 | The same code again | 400 `CODE_EXPIRED` (works once) | — | ACI same test | OK-tested |
+| 5.4 | Refreshes on that device | Each new token keeps admin access, `adminCodeNeeded: false` | No step again | ACI same test | OK-tested |
+| 5.5 | A SIM thief signs in on their own phone and tries the code the owner's laptop asked for | 400 `CODE_EXPIRED` (the code is for the laptop's sign-in only); the thief's refreshes stay without admin access | — | ACI `theCodeIsForTheDeviceThatAsked…` | OK-tested |
+| 5.6 | 12 hours after the step | The next refresh: no admin access, `adminCodeNeeded: true` | The website asks for a new code | ACI `after12HoursTheStepIsAskedAgain…` | OK-tested |
+| 5.7 | Removed from the team after passing the step | Next refresh: `admin: false`, no admin access; `/admin-code/send` 403 `NOT_AN_ADMIN` | "This is for the Clozest team" | ACI same test | OK-tested |
+| 5.8 | A customer, salon owner or barber | `adminCodeNeeded: false` always; `/admin-code/*` 403 `NOT_AN_ADMIN` | Apps unchanged | ACI `customersNeverSeeTheStep…` | OK-tested |
+| 5.9 | An admin with no verified email | `/admin-code/send` 409 `EMAIL_REQUIRED`, no email sent | The email step first | ACI same test | OK-tested |
+| 5.10 | Not signed in / empty code | 401 / 400 `VALIDATION_FAILED` | — | ACI same test | OK-tested |
+| 5.11 | `ADMIN_CODE_HOURS` set outside 1 to 24 | The server refuses to start | — | RGS `theAdminEmailStepLasts1To24Hours` | OK-tested |
+| 5.12 | Many admins and devices | One row per device sign-in that passed the step; an admin's old rows deleted when they pass it again; one primary-key read per admin sign-in or refresh, none for anyone else | — | plan reasoning | OK-untested (load) |
+| 5.13 | Email down | `/admin-code/send` 503 `EMAIL_FAILED` (as every email code) | "Try again" | existing email tests | OK-untested |
+
+## 6. Database users (V87, `MigrateOnly`, GitHub's Migrate job)
+
+Tests: `ADR` = `AppDatabaseRoleIntegrationTest`, `PSC` = `ProductionSafetyCheckTest`.
+
+| # | Scenario | Answer | Test | Verdict |
+| --- | --- | --- | --- | --- |
+| 6.1 | GitHub's job migrates a database as the owner | Every migration runs, as the app runs them (mixed, no lock transaction, no statement limit) | ADR `migrateOnlyRanEveryMigration…` | OK-tested |
+| 6.2 | The job is given Neon's pooled address | Refused before anything runs | ADR same test | OK-tested |
+| 6.3 | The app runs as `clozest_app` with `MIGRATE_ON_START=false` | Starts (Hibernate's table check), sign-in and the account work; 5 s statement limit is the user's default | ADR `theAppStartsAsClozestApp…` | OK-tested |
+| 6.4 | Someone with `clozest_app`'s password tries to create, drop, change, empty or re-trigger a table, or edit Flyway's history | `permission denied` / `must be owner` | ADR `clozestAppChangesRowsButNeverTables` | OK-tested |
+| 6.5 | A later migration adds a table | `clozest_app` can use it at once (default privileges) | ADR same test | OK-tested |
+| 6.6 | The secrets aren't set yet | The job passes with a notice; the server migrates itself as before | workflow | OK-untested |
+| 6.7 | Production still migrating itself | Starts, with a WARN pointing to "Database users" | PSC `aServerThatStillMigratesItselfIsNotedNotRefused` | OK-tested |
+| 6.8 | Production with `MIGRATE_ON_START=false` and no `DB_URL_DIRECT` | Starts (the direct URL is only for migrations) | PSC `productionMigratesOnlyThroughNeonsDirectUrl` | OK-tested |
