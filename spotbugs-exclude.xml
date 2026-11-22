@@ -25,6 +25,11 @@
         <Bug pattern="EI_EXPOSE_REP"/>
         <Class name="in.apnidukan.auth.service.AuthTokens"/>
     </Match>
+    <!-- The same for the admin email step's answer: the signed-in person, read for this one reply only. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+        <Class name="in.apnidukan.auth.service.AuthService$AdminAccess"/>
+    </Match>
     <!-- We turn off CSRF on purpose: there are no cookies or server sessions, every call carries a bearer token
          (see SecurityConfig). CSRF only matters for cookie-based sign-in. -->
     <Match>
