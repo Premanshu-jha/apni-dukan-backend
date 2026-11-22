@@ -2,6 +2,7 @@ package in.apnidukan.notifications.service;
 
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.common.jobs.LongStatements;
+import in.apnidukan.common.jobs.WeeklyParts;
 import in.apnidukan.notifications.repo.NotificationStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,13 +19,16 @@ import java.time.Instant;
  * <ul>
  *   <li>SMS rows {@code smsKeepDays} (7) after they finished: they only exist to be sent, the app's list shows the
  *       Web Push row of the same message;</li>
- *   <li>every other row {@code keepDays} (90) after: the app's list shows them that long.</li>
+ *   <li>every other row {@code keepDays} (90) after, at least: the app's list shows them that long.</li>
  * </ul>
  * Bookings and their history (appointment_events) are kept; a message is only a copy of what was said about them.
  *
- * At about 10 million rows a day, one DELETE of a whole day would hold a huge transaction and lock for minutes; so
- * rows go in slices of {@code batch} (10,000), each its own short statement, until a slice comes back short.
- * The round runs under a job lease (JobLeases), so only one copy of the backend does it.
+ * The table has one part per week (V88). The 90 days are kept by dropping a week whole (WeeklyParts) once every
+ * message in it finished over 90 days ago (so the app's list may show one up to about a week longer); the coming
+ * weeks' parts are made too. Rows deleted one by one are the SMS rows (a small share) and any row in the default
+ * part. At about 10 million rows a day, one DELETE of a whole day would hold a huge transaction and lock for
+ * minutes; so those go in slices of {@code batch} (10,000), each its own short statement, until a slice comes back
+ * short. The round runs under a job lease (JobLeases), so only one copy of the backend does it.
  */
 @Component
 public class MessageCleanupJob {
@@ -37,13 +41,15 @@ public class MessageCleanupJob {
     private final NotificationStore jobs;
     private final JobLeases leases;
     private final LongStatements statements;
+    private final WeeklyParts weeks;
     private final Clock clock;
     private final Duration keep;
     private final Duration smsKeep;
     private final int batch;
     private final boolean enabled;
 
-    public MessageCleanupJob(NotificationStore jobs, JobLeases leases, LongStatements statements, Clock clock,
+    public MessageCleanupJob(NotificationStore jobs, JobLeases leases, LongStatements statements, WeeklyParts weeks,
+                             Clock clock,
                              @Value("${app.notifications.keep-days:90}") int keepDays,
                              @Value("${app.notifications.sms-keep-days:7}") int smsKeepDays,
                              @Value("${app.cleanup.batch:10000}") int batch,
@@ -55,6 +61,7 @@ public class MessageCleanupJob {
         this.jobs = jobs;
         this.leases = leases;
         this.statements = statements;
+        this.weeks = weeks;
         this.clock = clock;
         this.keep = Duration.ofDays(keepDays);
         this.smsKeep = Duration.ofDays(smsKeepDays);
@@ -74,8 +81,9 @@ public class MessageCleanupJob {
         return leases.runExclusively(JOB, MAX_RUN, this::runOnce);
     }
 
-    /** Called by tests too; returns how many rows went. */
+    /** Called by tests too; returns how many rows were deleted one by one (weeks dropped are logged). */
     public int runOnce() {
+        weeks.maintain(WeeklyParts.Table.NOTIFICATION_JOBS, (int) keep.toDays());
         Instant now = Instant.now(clock);
         int sms = 0;
         int n;
@@ -85,10 +93,11 @@ public class MessageCleanupJob {
         } while (n == batch);
         int other = 0;
         do {
-            n = statements.run(() -> jobs.deleteFinishedBefore(now.minus(keep), batch));
+            n = statements.run(() -> jobs.deleteFinishedOutsideWeeksBefore(now.minus(keep), batch));
             other += n;
         } while (n == batch);
-        log.info("Deleted {} SMS rows finished more than {} days ago and {} messages finished more than {} days ago",
+        log.info("Deleted {} SMS rows finished more than {} days ago and {} messages finished more than {} days ago "
+                + "outside the weekly parts",
                 sms, smsKeep.toDays(), other, keep.toDays());
         return sms + other;
     }

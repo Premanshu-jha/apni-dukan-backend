@@ -388,6 +388,74 @@ class MigrationUpgradeIntegrationTest {
         }
     }
 
+    @Test
+    void signInsAndMessagesMoveIntoWeeklyPartsKeepingEveryRowAndColumn() {
+        String name = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
+        JdbcTemplate admin = new JdbcTemplate(new DriverManagerDataSource(TestContainers.jdbcUrl(),
+                TestContainers.DB_USER, TestContainers.DB_PASSWORD));
+        admin.execute("CREATE DATABASE " + name);
+        String url = TestContainers.jdbcUrl().replaceAll("/[^/]+$", "/" + name);
+        DriverManagerDataSource ds = new DriverManagerDataSource(url, TestContainers.DB_USER,
+                TestContainers.DB_PASSWORD);
+        try {
+            flyway(ds, MigrationVersion.fromVersion("87")).migrate();
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+            UUID person = UUID.randomUUID();
+            jdbc.update("INSERT INTO users (id, phone, name, admin, created_at, updated_at) VALUES (?, '9000000001', "
+                    + "'P', false, now(), now())", person);
+            UUID session = UUID.randomUUID();
+            UUID next = UUID.randomUUID();
+            // One sign-in from today (this week), one from two months ago (no week of its own)
+            jdbc.update("INSERT INTO refresh_tokens (id, user_id, token_hash, device, created_at, expires_at, "
+                    + "revoked_at, revoke_reason, replaced_by, session_id) VALUES (?, ?, 'now', 'Pixel', now(), "
+                    + "now() + interval '30 days', now(), 'ROTATED', ?, ?)", UUID.randomUUID(), person, next, session);
+            jdbc.update("INSERT INTO refresh_tokens (id, user_id, token_hash, created_at, expires_at) VALUES "
+                    + "(?, ?, 'old', now() - interval '60 days', now() - interval '30 days')", UUID.randomUUID(),
+                    person);
+            jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, ref_id, title, body, url, "
+                    + "sms_variables, send_at, status, attempts, next_try_at, created_at, finished_at, read_at, "
+                    + "about_user_id) VALUES (?, ?, 'PUSH', 'BOOKING_CONFIRMED', ?, 'T', 'B', '/b', NULL, now(), "
+                    + "'SENT', 1, now(), now(), now(), now(), ?)", UUID.randomUUID(), person, session, person);
+            jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, title, body, sms_variables, "
+                    + "send_at, status, attempts, next_try_at, created_at) VALUES (?, ?, 'SMS', 'BOOKING_REMINDER', "
+                    + "'', '', 'A=1', now(), 'PENDING', 0, now(), now() - interval '60 days')", UUID.randomUUID(),
+                    person);
+
+            flyway(ds, MigrationVersion.LATEST).migrate();
+
+            // Today's rows are in this week's part, the old ones in the default part; nothing lost on the way
+            String week = jdbc.queryForObject("SELECT to_char(date_trunc('week', now() AT TIME ZONE 'UTC'), "
+                    + "'YYYYMMDD')", String.class);
+            assertThat(jdbc.queryForList("SELECT token_hash || ' ' || tableoid::regclass FROM refresh_tokens "
+                    + "ORDER BY 1", String.class)).containsExactly("now refresh_tokens_w" + week,
+                    "old refresh_tokens_default");
+            assertThat(jdbc.queryForList("SELECT channel || ' ' || tableoid::regclass FROM notification_jobs "
+                    + "ORDER BY 1", String.class)).containsExactly("PUSH notification_jobs_w" + week,
+                    "SMS notification_jobs_default");
+            Map<String, Object> token = jdbc.queryForMap("SELECT device, revoke_reason, replaced_by, session_id "
+                    + "FROM refresh_tokens WHERE token_hash = 'now'");
+            assertThat(token).containsEntry("device", "Pixel").containsEntry("revoke_reason", "ROTATED")
+                    .containsEntry("replaced_by", next).containsEntry("session_id", session);
+            Map<String, Object> message = jdbc.queryForMap("SELECT url, ref_id, about_user_id, read_at IS NOT NULL "
+                    + "AS read FROM notification_jobs WHERE channel = 'PUSH'");
+            assertThat(message).containsEntry("url", "/b").containsEntry("ref_id", session)
+                    .containsEntry("about_user_id", person).containsEntry("read", true);
+            // This week and the next 4 have parts
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_inherits WHERE inhparent = "
+                    + "'refresh_tokens'::regclass", Integer.class)).isEqualTo(1 + 5);
+            // The rules still hold: a reason must come with an end, and the user must exist
+            assertThatThrownBy(() -> jdbc.update("INSERT INTO refresh_tokens (id, user_id, token_hash, created_at, "
+                    + "expires_at, revoke_reason) VALUES (?, ?, 'x', now(), now(), 'ROTATED')", UUID.randomUUID(),
+                    person)).hasMessageContaining("refresh_tokens");
+            assertThatThrownBy(() -> jdbc.update("INSERT INTO notification_jobs (id, user_id, channel, type, title, "
+                    + "body, send_at, status, attempts, next_try_at, created_at) VALUES (?, ?, 'PUSH', 'X', '', '', "
+                    + "now(), 'PENDING', 0, now(), now())", UUID.randomUUID(), UUID.randomUUID()))
+                    .hasMessageContaining("notification_jobs");
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
+        }
+    }
+
     /** As the app runs Flyway (application.properties): mixed files, no transactional lock, no statement limit. */
     private static Flyway flyway(DriverManagerDataSource ds, MigrationVersion target) {
         return Flyway.configure().dataSource(ds).locations("classpath:db/migration").target(target).mixed(true)

@@ -179,18 +179,22 @@ public class NotificationStore {
     }
 
     /**
-     * Deletes up to {@code max} messages that finished (sent, failed, cancelled, no device) before this moment;
-     * returns how many. One short statement (Postgres has no DELETE … LIMIT, hence the MATERIALIZED CTE: picked
+     * Deletes up to {@code max} messages in the default part (notification_jobs_default: rows of before V88, or of a
+     * week whose part wasn't made in time) that finished (sent, failed, cancelled, no device) before this moment;
+     * returns how many. The weekly parts go a whole week at once instead (WeeklyParts). One short statement (Postgres has no DELETE … LIMIT, hence the MATERIALIZED CTE: picked
      * once, so never more than {@code max} rows), found through ix_notification_jobs_finished; the caller repeats it
      * while slices come back full.
      */
-    public int deleteFinishedBefore(Instant before, int max) {
-        return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs "
+    public int deleteFinishedOutsideWeeksBefore(Instant before, int max) {
+        return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs_default "
                 + "WHERE status <> 'PENDING' AND finished_at < ? LIMIT ?) "
-                + "DELETE FROM notification_jobs WHERE id IN (SELECT id FROM slice)", at(before), max);
+                + "DELETE FROM notification_jobs_default WHERE id IN (SELECT id FROM slice)", at(before), max);
     }
 
-    /** Like deleteFinishedBefore, SMS rows only (ix_notification_jobs_sms_finished): they are kept a shorter time. */
+    /**
+     * Like deleteFinishedOutsideWeeksBefore, SMS rows only (ix_notification_jobs_sms_finished), in every part: they
+     * are kept a shorter time than a week lasts.
+     */
     public int deleteFinishedSmsBefore(Instant before, int max) {
         return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs "
                 + "WHERE status <> 'PENDING' AND channel = 'SMS' AND finished_at < ? LIMIT ?) "

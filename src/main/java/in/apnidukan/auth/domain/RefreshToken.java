@@ -15,13 +15,15 @@ import java.util.UUID;
 @Table(name = "refresh_tokens")
 public class RefreshToken {
 
+    /** The table's key is (id, created_at) since the weekly parts (V88); the id alone is still unique (random). */
     @Id
     private UUID id;
 
     @Column(name = "user_id", nullable = false)
     private UUID userId;
 
-    @Column(name = "token_hash", nullable = false, length = 64, unique = true)
+    /** Not a unique constraint since the weekly parts (V88), but unique in practice: a hash of 32 random bytes. */
+    @Column(name = "token_hash", nullable = false, length = 64)
     private String tokenHash;
 
     @Column(length = 100)

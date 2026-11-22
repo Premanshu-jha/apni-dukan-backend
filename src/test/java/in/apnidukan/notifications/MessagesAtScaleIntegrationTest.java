@@ -524,7 +524,7 @@ class MessagesAtScaleIntegrationTest {
         // A slice is never more than asked for, though more are due
         assertThat(store.deleteFinishedSmsBefore(NOW.minus(Duration.ofDays(7)), 1)).isEqualTo(1);
         assertThat(store.deleteFinishedSmsBefore(NOW.minus(Duration.ofDays(7)), 3)).isEqualTo(3);
-        assertThat(store.deleteFinishedBefore(NOW.minus(Duration.ofDays(90)), 1)).isEqualTo(1);
+        assertThat(store.deleteFinishedOutsideWeeksBefore(NOW.minus(Duration.ofDays(90)), 1)).isEqualTo(1);
         // The job (slices of 3) deletes the rest
         assertThat(cleanup.runOnce()).isEqualTo(3 + 3);
         assertThat(jdbc.queryForList("SELECT channel || ':' || status FROM notification_jobs ORDER BY 1",

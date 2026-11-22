@@ -1022,7 +1022,10 @@ class AuthIntegrationTest {
     void endedSignInsAreDeletedAfter30DaysAndTheHealthCheckIsOpen() {
         signIn(PHONE);
         signIn(PHONE);
-        jdbc.update("UPDATE refresh_tokens SET revoked_at = now() - interval '31 days', revoke_reason = 'SIGNED_OUT' "
+        // Signed in 32 days ago, a week that has no part here: the row is in the default part (deleted one by one;
+        // whole weeks are dropped instead, WeeklyPartsIntegrationTest)
+        jdbc.update("UPDATE refresh_tokens SET created_at = now() - interval '32 days', "
+                + "revoked_at = now() - interval '31 days', revoke_reason = 'SIGNED_OUT' "
                 + "WHERE id = (SELECT id FROM refresh_tokens ORDER BY created_at LIMIT 1)");
         assertThat(signInCleanup.runOnce()).isEqualTo(1);
         Integer left = jdbc.queryForObject("SELECT count(*) FROM refresh_tokens", Integer.class);

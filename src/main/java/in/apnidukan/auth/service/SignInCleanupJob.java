@@ -3,6 +3,7 @@ package in.apnidukan.auth.service;
 import in.apnidukan.auth.repo.SignInCleanupStore;
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.common.jobs.LongStatements;
+import in.apnidukan.common.jobs.WeeklyParts;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,8 +24,10 @@ import java.time.Instant;
  * refreshing along a chain of tokens (r1 → r2 → r3 …); the owner's phone then presents r1, possibly days later, and
  * only finding r1 raises the alarm. 30 days covers every chain a phone can still present (its token expires then).
  *
- * Deleted in slices of {@code batch} rows (SignInCleanupStore), each its own transaction, under a job lease
- * (JobLeases) so only one copy of the backend runs it.
+ * The table has one part per week (V88): a week whose sign-ins have all ended over 30 days ago is dropped whole
+ * (WeeklyParts), about 60 days after it (30 days' lifetime, then 30 kept), and the coming weeks' parts are made.
+ * Rows that are in the default part instead are deleted in slices of {@code batch} rows (SignInCleanupStore), each
+ * its own transaction. All under a job lease (JobLeases), so only one copy of the backend runs it.
  */
 @Component
 public class SignInCleanupJob {
@@ -37,12 +40,14 @@ public class SignInCleanupJob {
     private final SignInCleanupStore store;
     private final JobLeases leases;
     private final LongStatements statements;
+    private final WeeklyParts weeks;
     private final Clock clock;
     private final Duration keep;
     private final int batch;
     private final boolean enabled;
 
-    public SignInCleanupJob(SignInCleanupStore store, JobLeases leases, LongStatements statements, Clock clock,
+    public SignInCleanupJob(SignInCleanupStore store, JobLeases leases, LongStatements statements, WeeklyParts weeks,
+                            Clock clock,
                             @Value("${app.auth.ended-sign-ins-keep-days:30}") int keepDays,
                             @Value("${app.cleanup.batch:10000}") int batch,
                             @Value("${app.jobs.enabled:true}") boolean enabled) {
@@ -53,6 +58,7 @@ public class SignInCleanupJob {
         this.store = store;
         this.leases = leases;
         this.statements = statements;
+        this.weeks = weeks;
         this.clock = clock;
         this.keep = Duration.ofDays(keepDays);
         this.batch = batch;
@@ -71,8 +77,9 @@ public class SignInCleanupJob {
         return leases.runExclusively(JOB, MAX_RUN, this::runOnce);
     }
 
-    /** Called by tests too; returns how many rows went. */
+    /** Called by tests too; returns how many rows of the default part went (weeks dropped are logged). */
     public int runOnce() {
+        weeks.maintain(WeeklyParts.Table.REFRESH_TOKENS, (int) keep.toDays());
         Instant before = Instant.now(clock).minus(keep);
         int expired = 0;
         int n;
@@ -85,7 +92,7 @@ public class SignInCleanupJob {
             n = statements.run(() -> store.deleteRevoked(before, batch));
             revoked += n;
         } while (n == batch);
-        log.info("Deleted {} expired and {} ended sign-ins (more than {} days ago)", expired, revoked, keep.toDays());
+        log.info("Deleted {} expired and {} ended sign-ins (more than {} days ago) outside the weekly parts", expired, revoked, keep.toDays());
         return expired + revoked;
     }
 }
