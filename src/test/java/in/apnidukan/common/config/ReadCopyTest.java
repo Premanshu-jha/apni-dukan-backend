@@ -15,7 +15,8 @@ class ReadCopyTest {
     void withoutReadDbUrlTheListIsReadFromTheMainDatabase() {
         ReadCopy off = new ReadCopy(main, "", "u", "p", 10, "5s");
         assertThat(off.enabled()).isFalse();
-        assertThat(off.read(jdbc -> jdbc)).isSameAs(main);
+        JdbcTemplate used = off.read(jdbc -> jdbc);
+        assertThat(used).isSameAs(main);
         off.destroy();   // nothing to close
     }
 
@@ -24,8 +25,8 @@ class ReadCopyTest {
         // Nothing listens there: made anyway, and each read falls back to the main database
         ReadCopy on = new ReadCopy(main, "jdbc:postgresql://127.0.0.1:1/neondb", "u", "p", 4, "5s");
         assertThat(on.enabled()).isTrue();
-        assertThat(on.read(jdbc -> jdbc == main ? "main" : jdbc.queryForObject("SELECT 'copy'", String.class)))
-                .isEqualTo("main");
+        String answered = on.read(jdbc -> jdbc == main ? "main" : jdbc.queryForObject("SELECT 'copy'", String.class));
+        assertThat(answered).isEqualTo("main");
         on.destroy();
     }
 
