@@ -70,6 +70,13 @@ class ConfigurationDefaultsTest {
         assertThat(r.getProperty("spring.flyway.init-sqls")).isEqualTo("SET statement_timeout = 0");
         // A second copy waits for the first one's migrations (15 minutes) instead of giving up and crash-looping
         assertThat(number(r, "spring.flyway.lock-retry-count")).isEqualTo(900);
+        // The app migrates at start unless told not to (MIGRATE_ON_START=false: GitHub's Migrate job does it), as the
+        // migration user if one is set, else as its own
+        assertThat(r.getProperty("spring.flyway.enabled")).isEqualTo("true");
+        // (no environment here: the placeholders stay as written)
+        assertThat(r.getProperty("spring.flyway.user")).isIn("${DB_USER}", "${DB_MIGRATION_USER:${DB_USER}}");
+        assertThat(r.getProperty("spring.flyway.password")).isIn("${DB_PASSWORD}",
+                "${DB_MIGRATION_PASSWORD:${DB_PASSWORD}}");
     }
 
     @Test
