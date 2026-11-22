@@ -80,8 +80,11 @@ public class ReadCopy implements DisposableBean {
             return read.apply(jdbc);
         } catch (org.springframework.dao.DataAccessResourceFailureException
                  | org.springframework.dao.ConcurrencyFailureException e) {
-            // Not a statement that ran out of time (QueryTimeoutException): running it again on the main database
-            // would only double the load when things are slow
+            // Not a statement that ran out of its time (57014, which Spring files as a resource failure too):
+            // running it again on the main database would only double the load when things are slow
+            if (ranOutOfTime(e)) {
+                throw e;
+            }
             long now = System.currentTimeMillis();
             long last = lastWarned.get();
             if (now - last > 60_000 && lastWarned.compareAndSet(last, now)) {
@@ -90,6 +93,16 @@ public class ReadCopy implements DisposableBean {
             }
             return read.apply(main);
         }
+    }
+
+    /** Whether Postgres stopped the statement at its time limit (SQLSTATE 57014) somewhere in the causes. */
+    static boolean ranOutOfTime(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof java.sql.SQLException sql && "57014".equals(sql.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Whether a separate copy is in use. */

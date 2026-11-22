@@ -76,6 +76,7 @@ public class WeeklyParts {
         }
         // One drop per call, each in its own transaction (the table's lock ends with it): again while one went
         List<Old> old = new java.util.ArrayList<>();
+        List<Old> lastSeen = List.of();
         for (int call = 0; call < MAX_DROPS; call++) {
             List<Old> seen;
             try {
@@ -86,12 +87,18 @@ public class WeeklyParts {
                 log.warn("Could not drop the old weeks of {}: {}", table.sql(), e.getMessage());
                 break;
             }
+            lastSeen = seen;
             boolean dropped = !seen.isEmpty() && "DROPPED".equals(seen.get(seen.size() - 1).outcome());
             if (!dropped) {
-                old.addAll(seen);   // IN_USE and BUSY weeks: reported once, below
                 break;
             }
             old.add(seen.get(seen.size() - 1));
+        }
+        // Each call lists the weeks still IN_USE again (and a BUSY one last): reported once, from the last call
+        for (Old week : lastSeen) {
+            if (!"DROPPED".equals(week.outcome())) {
+                old.add(week);
+            }
         }
         LocalDate today = LocalDate.now(clock.withZone(ZoneOffset.UTC));
         LocalDate stuckBefore = today.minusDays(keepDays + STUCK_AFTER_DAYS);

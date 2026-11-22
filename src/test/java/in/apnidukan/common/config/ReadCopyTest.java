@@ -35,4 +35,14 @@ class ReadCopyTest {
         assertThatThrownBy(() -> new ReadCopy(main, "jdbc:postgresql://127.0.0.1:1/neondb", "u", "p", 0, "5s"))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("READ_DB_POOL_SIZE");
     }
+
+    @Test
+    void aStatementThatRanOutOfTimeIsNotRunAgainOnTheMainDatabase() {
+        java.sql.SQLException cancelled = new java.sql.SQLException("canceling statement due to statement timeout",
+                "57014");
+        assertThat(ReadCopy.ranOutOfTime(new org.springframework.dao.DataAccessResourceFailureException("x",
+                cancelled))).isTrue();
+        assertThat(ReadCopy.ranOutOfTime(new org.springframework.dao.DataAccessResourceFailureException("x",
+                new java.sql.SQLException("connection refused", "08001")))).isFalse();
+    }
 }
