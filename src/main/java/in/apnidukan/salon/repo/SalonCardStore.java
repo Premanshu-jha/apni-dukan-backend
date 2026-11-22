@@ -1,6 +1,7 @@
 package in.apnidukan.salon.repo;
 
 import in.apnidukan.common.context.ShopDirectory;
+import in.apnidukan.common.config.ReadCopy;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -98,9 +99,12 @@ public class SalonCardStore {
                 ORDER BY o.starts_on, o.percent_off DESC LIMIT 1) f ON true""";
 
     private final JdbcTemplate jdbc;
+    /** The salon list's card facts: the read copy when READ_DB_URL is set (ReadCopy), else the main database. */
+    private final JdbcTemplate listReads;
 
-    public SalonCardStore(JdbcTemplate jdbc) {
+    public SalonCardStore(JdbcTemplate jdbc, ReadCopy readCopy) {
         this.jdbc = jdbc;
+        this.listReads = readCopy.jdbc();
     }
 
     /**
@@ -133,7 +137,7 @@ public class SalonCardStore {
             hitArgs.addAll(search.textArgs());
             hitArgs.add(String.join(",", search.serviceIcons()));
         }
-        jdbc.query(SQL_START + hit + SQL_END, ps -> {
+        listReads.query(SQL_START + hit + SQL_END, ps -> {
             int i = 0;
             ps.setObject(++i, AppointmentStore.at(dayStart));
             ps.setObject(++i, AppointmentStore.at(dayEnd));

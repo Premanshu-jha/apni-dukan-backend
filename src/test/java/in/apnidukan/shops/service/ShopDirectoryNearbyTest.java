@@ -1,5 +1,6 @@
 package in.apnidukan.shops.service;
 
+import in.apnidukan.common.config.ReadCopy;
 import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.shops.repo.ShopRepository;
 import org.junit.jupiter.api.Test;
@@ -40,7 +41,7 @@ class ShopDirectoryNearbyTest {
 
     private final Recording jdbc = new Recording();
     private final ShopDirectoryService directory = new ShopDirectoryService(mock(ShopRepository.class), jdbc,
-            Clock.fixed(Instant.parse("2026-11-10T04:30:00Z"), ZoneOffset.UTC), false);
+            new ReadCopy(jdbc, "", "", "", 10, "5s"), Clock.fixed(Instant.parse("2026-11-10T04:30:00Z"), ZoneOffset.UTC), false);
 
     private String nearby(ShopDirectory.Search search, ShopDirectory.Cursor after) {
         directory.nearby("SALON", new BigDecimal("17.466"), new BigDecimal("78.365"), 2000, 30, after, true, search);
