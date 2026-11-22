@@ -1,0 +1,58 @@
+# Runs the database migrations on Neon whenever something lands on main, with the database OWNER's login, which only
+# GitHub has (repository Settings → Secrets and variables → Actions). Railway waits for this job ("Wait for CI" in
+# the backend's Settings) before deploying, so the new version starts on a database that already has its tables.
+# The server itself then runs as clozest_app, which can't change tables (README: "Database users").
+#
+# Until the three secrets are set, this job only says so and succeeds: the server keeps migrating itself
+# (MIGRATE_ON_START unset = true), as before.
+
+name: Migrate
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:             # "Run workflow" by hand on the Actions tab, e.g. after setting the secrets
+
+permissions:
+  contents: read
+
+# One migration at a time; a newer push waits for the one running (never cancels a migration halfway)
+concurrency:
+  group: migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    env:
+      DB_MIGRATION_URL: ${{ secrets.DB_MIGRATION_URL }}
+      DB_MIGRATION_USER: ${{ secrets.DB_MIGRATION_USER }}
+      DB_MIGRATION_PASSWORD: ${{ secrets.DB_MIGRATION_PASSWORD }}
+    steps:
+      - name: Secrets set?
+        id: ready
+        run: |
+          if [ -z "$DB_MIGRATION_URL" ] || [ -z "$DB_MIGRATION_USER" ] || [ -z "$DB_MIGRATION_PASSWORD" ]; then
+            echo "::notice title=Migrate::DB_MIGRATION_URL / DB_MIGRATION_USER / DB_MIGRATION_PASSWORD not set: the server migrates itself (MIGRATE_ON_START)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: steps.ready.outputs.run == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad  # v6.1.0
+        if: steps.ready.outputs.run == 'true'
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Run the migrations (MigrateOnly)
+        if: steps.ready.outputs.run == 'true'
+        run: |
+          mvn -B -q -DskipTests compile dependency:build-classpath -Dmdep.outputFile=cp.txt -Dmdep.includeScope=runtime
+          java -cp "target/classes:$(cat cp.txt)" in.apnidukan.config.MigrateOnly
