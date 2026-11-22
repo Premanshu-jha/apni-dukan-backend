@@ -85,4 +85,21 @@
         <Class name="in.apnidukan.common.security.SessionRevocations"/>
         <Method name="revokeAllOrWarn"/>
     </Match>
+    <!-- The salon search (GET /salons?q=): the nearby statement and the cards' statement add the search's conditions,
+         which ShopDirectory.Search.textMatches builds only from constants (a fixed column from a short list it checks,
+         fixed SQL, the TYPO_SIMILARITY number). What the customer typed is never in the SQL: it is cleaned, escaped
+         and always sent as a parameter (textArgs). -->
+    <Match>
+        <Bug pattern="SQL_INJECTION_SPRING_JDBC"/>
+        <Or>
+            <And>
+                <Class name="in.apnidukan.shops.service.ShopDirectoryService"/>
+                <Method name="nearby"/>
+            </And>
+            <And>
+                <Class name="in.apnidukan.salon.repo.SalonCardStore"/>
+                <Method name="facts"/>
+            </And>
+        </Or>
+    </Match>
 </FindBugsFilter>

@@ -306,10 +306,22 @@ public class TicketStore {
     private static final String BY_EMAIL_OR_ACCOUNT = "SELECT " + COLUMNS + " FROM tickets WHERE "
             + "(lower(requester_email) = lower(?) OR requester_id = ?)" + ONLY_THEIRS;
 
-    /** This account's own tickets, newest activity first, at most {@code limit} (the apps' "My requests"). */
-    public List<Ticket> ofRequester(UUID requesterId, int limit) {
-        return jdbc.query("SELECT " + COLUMNS + " FROM tickets WHERE requester_id = ? "
-                + "ORDER BY last_message_at DESC, id LIMIT ?", TICKET, requesterId, limit);
+    /** One of the person's own tickets with when support last wrote on it (null: never). */
+    public record Mine(Ticket ticket, Instant lastReplyAt) {
+    }
+
+    /**
+     * This account's own tickets, newest activity first, at most {@code limit} (the apps' "My requests"), each with
+     * when support last wrote on it. One statement for the whole list: each ticket's newest reply is read backwards
+     * through ix_ticket_messages_ticket (ticket_id, seq) and stops at the first one from us (a ticket has a few
+     * messages; the apps add at most 20 an hour), so no index of its own is needed.
+     */
+    public List<Mine> ofRequester(UUID requesterId, int limit) {
+        return jdbc.query("SELECT " + COLUMNS + ", (SELECT m.created_at FROM ticket_messages m WHERE m.ticket_id = "
+                + "tickets.id AND m.direction = 'OUT' ORDER BY m.seq DESC LIMIT 1) AS last_reply_at FROM tickets "
+                + "WHERE requester_id = ? ORDER BY last_message_at DESC, id LIMIT ?", (rs, i) -> new Mine(
+                        TICKET.mapRow(rs, i), rs.getTimestamp("last_reply_at") == null ? null
+                                : rs.getTimestamp("last_reply_at").toInstant()), requesterId, limit);
     }
 
     /**

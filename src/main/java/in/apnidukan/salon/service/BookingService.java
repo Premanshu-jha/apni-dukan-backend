@@ -153,6 +153,7 @@ public class BookingService {
     private final ShopMemberships memberships;
     private final SalonOfferStore offers;
     private final int readsPerMinute;
+    private final int searchesPerMinute;
 
     private static final Logger log = LoggerFactory.getLogger(BookingService.class);
 
@@ -163,7 +164,8 @@ public class BookingService {
                           EarlierSlotAlertStore alerts, EarlierSlotAlerts earlierSlots, RatingStore ratings,
                           SalonCardStore cards, SalonOpenDayRepository openDays, VisitFollowUpStore followUps,
                           Notifications notifications, ShopMemberships memberships, SalonOfferStore offers,
-                          @Value("${app.salon.reads-per-minute:60}") int readsPerMinute) {
+                          @Value("${app.salon.reads-per-minute:60}") int readsPerMinute,
+                          @Value("${app.salon.searches-per-minute:30}") int searchesPerMinute) {
         this.memberships = memberships;
         this.offers = offers;
         this.ratings = ratings;
@@ -177,6 +179,7 @@ public class BookingService {
         this.setups = setups;
         this.numbers = numbers;
         this.readsPerMinute = readsPerMinute;
+        this.searchesPerMinute = searchesPerMinute;
         this.shops = shops;
         this.calendar = calendar;
         this.appointments = appointments;
@@ -195,21 +198,31 @@ public class BookingService {
      * Approved salons within 2 km, nearest first, leaving out those that paused online bookings, one page at a time:
      * `after` is the last salon of the previous page (null for the first). Three database reads per page however
      * many salons there are: the page (PostGIS), the photos' links, and the cards' ratings, services and hours.
+     * With `q` (what the customer typed in the search box; null or blank for all), only the salons whose name or one
+     * of whose services matches it (see SalonSearch): the same radius, order, pages and cards, in the same reads,
+     * the services it matched named first on each card. A search counts towards the person's searches (429
+     * TOO_MANY_REQUESTS with Retry-After past app.salon.searches-per-minute); the list without one never does.
      */
     @Transactional(readOnly = true)
-    public List<SalonSummary> salonsNear(BigDecimal latitude, BigDecimal longitude, ShopDirectory.Cursor after) {
+    public List<SalonSummary> salonsNear(UUID customerId, BigDecimal latitude, BigDecimal longitude,
+                                         ShopDirectory.Cursor after, String q) {
         if (latitude.doubleValue() < 6 || latitude.doubleValue() > 37.6
                 || longitude.doubleValue() < 68 || longitude.doubleValue() > 97.5) {
             throw SalonCalendar.invalid("lat", "the point must be in India");
         }
-        List<ShopCard> page = shops.nearby("SALON", latitude, longitude, RADIUS_METRES, SALONS_PAGE, after, true);
+        ShopDirectory.Search search = SalonSearch.parse(q);
+        if (search != null) {
+            requireSearchesLeft(customerId);
+        }
+        List<ShopCard> page = shops.nearby("SALON", latitude, longitude, RADIUS_METRES, SALONS_PAGE, after, true,
+                search);
         Map<UUID, String> photos = files.links(page.stream().map(ShopCard::shopPhotoFileId)
                 .filter(java.util.Objects::nonNull).toList());
         Instant now = now();
         LocalDate today = LocalDate.ofInstant(now, SalonTime.ZONE);
         Map<UUID, SalonCardStore.Facts> facts = cards.facts(page.stream().map(ShopCard::id).toList(),
                 today.getDayOfWeek().getValue(), Availability.dayStart(today), Availability.dayStart(today.plusDays(1)),
-                today);
+                today, search);
         int minuteNow = LocalTime.ofInstant(now, SalonTime.ZONE).toSecondOfDay() / 60;
         return page.stream()
                 .map(card -> SalonSummary.from(card, card.shopPhotoFileId() == null ? null
@@ -382,6 +395,26 @@ public class BookingService {
             }
         } catch (DataAccessException redisDown) {
             log.warn("Redis didn't answer the salon-read count ({}); letting it through",
+                    redisDown.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * 429 TOO_MANY_REQUESTS (with Retry-After) after app.salon.searches-per-minute searches of the salon list by one
+     * person in a minute, as for the salon pages (requireReadsLeft) but counted apart, so searching never uses up
+     * the salon pages. The app searches when typing pauses; each search checks every salon within 2 km by its
+     * services, so a script or a stuck key can't load the database. If Redis doesn't answer, the search goes ahead.
+     */
+    private void requireSearchesLeft(UUID customerId) {
+        String key = "salon-searches:" + customerId;
+        try {
+            if (!limits.tryHit(key, searchesPerMinute, Duration.ofMinutes(1))) {
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS",
+                        "Too many searches at once. Wait a few seconds and try again.")
+                        .retryAfter(limits.secondsLeft(key));
+            }
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer the salon-search count ({}); letting it through",
                     redisDown.getClass().getSimpleName());
         }
     }
