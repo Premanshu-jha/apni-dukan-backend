@@ -37,7 +37,8 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Sends the messages that are due, as Web Push or SMS (each its own row), every couple of seconds.
+ * Sends the messages that are due, as push (Web Push to browsers, FCM to the Android apps) or SMS (each its own
+ * row), every couple of seconds.
  *
  * <p>One round <b>drains</b> the queue: it claims a batch (app.notifications.batch-size, 500), sends it, and claims
  * the next while batches come back full, so a burst (every 6 PM reminder at once) goes out in one round instead of
@@ -97,6 +98,8 @@ public class NotificationSendJob {
     private final NotificationStore jobs;
     private final PushSubscriptionStore devices;
     private final PushSender sender;
+    /** The Android apps' devices (kind APP) go through this one (FCM); browsers through {@link #sender}. */
+    private final AppPushSender appSender;
     private final TextMessages sms;
     private final SmsTemplates smsTemplates;
     private final UserDirectory users;
@@ -122,7 +125,7 @@ public class NotificationSendJob {
     private final boolean enabled;
 
     public NotificationSendJob(NotificationStore jobs, PushSubscriptionStore devices, PushSender sender,
-                               TextMessages sms, SmsTemplates smsTemplates, UserDirectory users, RateLimiter limits,
+                               AppPushSender appSender, TextMessages sms, SmsTemplates smsTemplates, UserDirectory users, RateLimiter limits,
                                @Value("${app.sms.booking-daily-limit:100000}") int smsBookingDailyLimit,
                                @Value("${app.sms.staff-per-person-daily-limit:1000}") int staffSmsPerPerson,
                                @Value("${app.notifications.batch-size:500}") int batchSize,
@@ -140,6 +143,7 @@ public class NotificationSendJob {
         this.jobs = jobs;
         this.devices = devices;
         this.sender = sender;
+        this.appSender = appSender;
         this.sms = sms;
         this.smsTemplates = smsTemplates;
         this.users = users;
@@ -456,6 +460,9 @@ public class NotificationSendJob {
         }
     }
 
+    /** The per-host limit's name for Firebase's v1 API (the apps' messages), apart from the browsers' FCM host. */
+    static final String APP_HOST = "fcm-app";
+
     /** The push service a device's address points at (its host), for the per-host limit. */
     static String hostOf(String endpoint) {
         try {
@@ -469,27 +476,38 @@ public class NotificationSendJob {
     private Sent deliverPush(NotificationJob job, Instant lease, List<PushSubscription> targets) {
         String payload = payload(job);
         long giveUpAt = System.nanoTime() + MESSAGE_BUDGET.toNanos();
-        int sent = 0;
         int failed = 0;
         List<UUID> gone = new ArrayList<>();
-        for (PushSubscription device : targets.subList(0, Math.min(targets.size(), MAX_DEVICES))) {
+        // Devices an earlier try reached (a browser, while the app's Firebase was down) are not sent to again
+        List<UUID> reached = new ArrayList<>(job.sentDevices());
+        List<PushSubscription> left = targets.stream().filter(d -> !job.sentDevices().contains(d.id())).toList();
+        for (PushSubscription device : left.subList(0, Math.min(left.size(), MAX_DEVICES))) {
             if (System.nanoTime() - giveUpAt > 0) {
                 failed++;   // out of time for this message: the remaining devices are tried on the next try
                 break;
             }
-            switch (atHost(hostOf(device.endpoint()), () -> sender.send(device, payload))) {
-                case SENT -> sent++;
+            PushSender.Result result = device.app()
+                    ? atHost(APP_HOST, () -> appSender.send(device, job))
+                    : atHost(hostOf(device.endpoint()), () -> sender.send(device, payload));
+            switch (result) {
+                case SENT -> reached.add(device.id());
                 case GONE -> gone.add(device.id());
                 case FAILED -> failed++;
             }
         }
         Instant now = now();
+        boolean anyReached = !reached.isEmpty();
         Outcome outcome;
-        if (sent > 0) {
-            outcome = Outcome.finished(job.id(), JobStatus.SENT, now, lease);
-        } else if (failed == 0) {
-            // no devices, or every one had unsubscribed
-            outcome = Outcome.finished(job.id(), JobStatus.NO_DEVICE, now, lease);
+        if (failed == 0) {
+            // every device reached now or before; or none at all, or every one had unsubscribed
+            outcome = Outcome.finished(job.id(), anyReached ? JobStatus.SENT : JobStatus.NO_DEVICE, now, lease);
+        } else if (job.attempts() > BACKOFF.size()) {
+            // out of tries: sent if it reached any device at all
+            outcome = Outcome.finished(job.id(), anyReached ? JobStatus.SENT : JobStatus.FAILED, now, lease);
+        } else if (anyReached) {
+            // some reached (a browser), others failed (the app, Firebase down): again later for those only
+            outcome = Outcome.retryOthers(job.id(), now.plus(BACKOFF.get(job.attempts() - 1)), lease,
+                    List.copyOf(reached));
         } else {
             outcome = failedTry(job, now, lease);
         }

@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/** The push_subscriptions table: one row per device that allowed notifications. */
+/** The push_subscriptions table: one row per device that allowed notifications (a browser or an installed app). */
 @Repository
 public class PushSubscriptionStore {
 
@@ -34,11 +34,25 @@ public class PushSubscriptionStore {
                         VALUES (?, ?, ?, ?, ?, ?)
                         ON CONFLICT (endpoint) DO UPDATE
                         SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
-                            created_at = EXCLUDED.created_at""",
+                            kind = 'WEB', created_at = EXCLUDED.created_at""",
                 UUID.randomUUID(), userId, endpoint, p256dh, auth, OffsetDateTime.ofInstant(now, ZoneOffset.UTC));
     }
 
-    /** Keeps only the person's newest {@code keep} devices. */
+    /**
+     * Saves this installed app (its FCM token) for this person. Like a browser's address, a token is unique: if
+     * someone else signed in on the same phone before, the token now belongs to this person.
+     */
+    public void saveApp(UUID userId, String token, Instant now) {
+        jdbc.update("""
+                        INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, kind, created_at)
+                        VALUES (?, ?, ?, NULL, NULL, 'APP', ?)
+                        ON CONFLICT (endpoint) DO UPDATE
+                        SET user_id = EXCLUDED.user_id, p256dh = NULL, auth = NULL, kind = 'APP',
+                            created_at = EXCLUDED.created_at""",
+                UUID.randomUUID(), userId, token, OffsetDateTime.ofInstant(now, ZoneOffset.UTC));
+    }
+
+    /** Keeps only the person's newest {@code keep} devices (browsers and apps together). */
     public void trim(UUID userId, int keep) {
         jdbc.update("""
                 DELETE FROM push_subscriptions WHERE user_id = ? AND id NOT IN (
@@ -56,12 +70,12 @@ public class PushSubscriptionStore {
             return out;
         }
         Object[] ids = userIds.toArray();
-        jdbc.query("SELECT id, user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ANY (?)",
+        jdbc.query("SELECT id, user_id, endpoint, p256dh, auth, kind FROM push_subscriptions WHERE user_id = ANY (?)",
                 ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", ids)),
                 (java.sql.ResultSet rs) -> {
                     PushSubscription device = new PushSubscription(rs.getObject("id", UUID.class),
                             rs.getObject("user_id", UUID.class), rs.getString("endpoint"), rs.getString("p256dh"),
-                            rs.getString("auth"));
+                            rs.getString("auth"), PushSubscription.Kind.valueOf(rs.getString("kind")));
                     out.computeIfAbsent(device.userId(), u -> new ArrayList<>()).add(device);
                 });
         return out;

@@ -406,11 +406,12 @@ public class NotificationStore {
                             ORDER BY next_try_at LIMIT ? FOR UPDATE SKIP LOCKED)
                         UPDATE notification_jobs SET next_try_at = ?, attempts = attempts + 1
                         WHERE id IN (SELECT id FROM due)
-                        RETURNING id, user_id, channel, type, title, body, url, sms_variables, attempts""",
+                        RETURNING id, user_id, channel, type, title, body, url, sms_variables, attempts,
+                            sent_devices""",
                 (rs, i) -> new NotificationJob(rs.getObject("id", UUID.class), rs.getObject("user_id", UUID.class),
                         Channel.valueOf(rs.getString("channel")), rs.getString("type"), rs.getString("title"),
                         rs.getString("body"), rs.getString("url"), decode(rs.getString("sms_variables")),
-                        rs.getInt("attempts")),
+                        rs.getInt("attempts"), uuids(rs.getArray("sent_devices"))),
                 at(now), maxAttempts, max, at(now.plus(lease)));
     }
 
@@ -470,24 +471,30 @@ public class NotificationStore {
         Object[] statuses = new Object[outcomes.size()];
         Object[] ats = new Object[outcomes.size()];
         Object[] leases = new Object[outcomes.size()];
+        Object[] sent = new Object[outcomes.size()];
         for (int i = 0; i < outcomes.size(); i++) {
             Outcome o = outcomes.get(i);
             ids[i] = o.id();
             statuses[i] = o.status() == null ? null : o.status().name();
             ats[i] = at(o.at()).toString();
             leases[i] = at(o.lease()).toString();
+            // A Postgres array literal ({id,id}); null: unchanged
+            sent[i] = o.sentDevices() == null ? null : o.sentDevices().stream().map(UUID::toString)
+                    .collect(java.util.stream.Collectors.joining(",", "{", "}"));
         }
         jdbc.update("""
                 UPDATE notification_jobs j SET
                     status = COALESCE(o.status, j.status),
                     finished_at = CASE WHEN o.status IS NULL THEN j.finished_at ELSE o.at::timestamptz END,
-                    next_try_at = CASE WHEN o.status IS NULL THEN o.at::timestamptz ELSE j.next_try_at END
-                FROM unnest(?::uuid[], ?::text[], ?::text[], ?::text[]) AS o(id, status, at, lease)
+                    next_try_at = CASE WHEN o.status IS NULL THEN o.at::timestamptz ELSE j.next_try_at END,
+                    sent_devices = COALESCE(o.sent::uuid[], j.sent_devices)
+                FROM unnest(?::uuid[], ?::text[], ?::text[], ?::text[], ?::text[]) AS o(id, status, at, lease, sent)
                 WHERE j.id = o.id AND j.status = 'PENDING' AND j.next_try_at = o.lease::timestamptz""", ps -> {
             ps.setArray(1, ps.getConnection().createArrayOf("uuid", ids));
             ps.setArray(2, ps.getConnection().createArrayOf("text", statuses));
             ps.setArray(3, ps.getConnection().createArrayOf("text", ats));
             ps.setArray(4, ps.getConnection().createArrayOf("text", leases));
+            ps.setArray(5, ps.getConnection().createArrayOf("text", sent));
         });
     }
 
@@ -528,16 +535,38 @@ public class NotificationStore {
      * @param status the final status, or null to try again at {@code at}
      * @param at     when it finished, or (status null) when to try again
      * @param lease  the lease it was sent under (it must still be ours)
+     * @param sentDevices push to several devices: those reached so far (kept for the next try), or null (unchanged)
      */
-    public record Outcome(UUID id, JobStatus status, Instant at, Instant lease) {
+    public record Outcome(UUID id, JobStatus status, Instant at, Instant lease, List<UUID> sentDevices) {
+
+        public Outcome {
+            sentDevices = sentDevices == null ? null : List.copyOf(sentDevices);
+        }
 
         public static Outcome finished(UUID id, JobStatus status, Instant at, Instant lease) {
-            return new Outcome(id, status, at, lease);
+            return new Outcome(id, status, at, lease, null);
         }
 
         public static Outcome retry(UUID id, Instant at, Instant lease) {
-            return new Outcome(id, null, at, lease);
+            return new Outcome(id, null, at, lease, null);
         }
+
+        /** Try again for the devices not reached yet; {@code sentDevices} were reached. */
+        public static Outcome retryOthers(UUID id, Instant at, Instant lease, List<UUID> sentDevices) {
+            return new Outcome(id, null, at, lease, sentDevices);
+        }
+    }
+
+    private static List<UUID> uuids(java.sql.Array array) throws java.sql.SQLException {
+        if (array == null) {
+            return List.of();
+        }
+        Object[] values = (Object[]) array.getArray();
+        List<UUID> out = new java.util.ArrayList<>(values.length);
+        for (Object v : values) {
+            out.add(v instanceof UUID u ? u : UUID.fromString(v.toString()));
+        }
+        return List.copyOf(out);
     }
 
     /** SMS variables as a query string (SALON=Sharma+Hair&TIME=6%3A30+PM), kept in one text column (MessageText). */

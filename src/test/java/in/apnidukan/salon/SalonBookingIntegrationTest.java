@@ -6,6 +6,8 @@ import in.apnidukan.common.security.SessionRevocations;
 import in.apnidukan.notifications.domain.NotificationJob;
 import in.apnidukan.notifications.domain.PushSubscription;
 import in.apnidukan.notifications.service.NotificationSendJob;
+import in.apnidukan.notifications.domain.NotificationJob;
+import in.apnidukan.notifications.service.AppPushSender;
 import in.apnidukan.notifications.service.PushSender;
 import in.apnidukan.salon.service.AutoEndJob;
 import in.apnidukan.support.CapturingSenders;
@@ -65,11 +67,18 @@ class SalonBookingIntegrationTest {
     static final TestClock CLOCK = new TestClock(TUESDAY_10_00);
     static final List<String> PUSHED = new CopyOnWriteArrayList<>();
     static volatile PushSender.Result pushResult = PushSender.Result.SENT;
+    /** What the Android apps got (FCM): "token type url title". */
+    static final List<String> APP_PUSHED = new CopyOnWriteArrayList<>();
+    static volatile PushSender.Result appPushResult = PushSender.Result.SENT;
+    /** Whether Firebase is set up on the server, as the fake app sender says. */
+    static volatile boolean appPushOn = true;
     static final List<String> TEXTED = new CopyOnWriteArrayList<>();
     /** Booking numbers to hand out before random ones (to make two bookings clash on one). */
     static final java.util.Deque<String> NEXT_NUMBERS = new java.util.concurrent.ConcurrentLinkedDeque<>();
 
     private static final String FCM = "https://fcm.googleapis.com/fcm/send/device-1";
+    /** An Android app's FCM registration token (the shape Firebase gives: letters, digits, ':', '_', '-'). */
+    private static final String APP_TOKEN = "fQw3Ab-Z9_x:APA91bH" + "k".repeat(140);
     private static final String P256DH =
             "BFFcPW6545a5BNP-yn9U_c0MwemXvzddylFa0KbDtANfRTa-OlDzGPv5pUdZAqIhUCvvDVfgjFOyzApW8X2fk1Q";
     /** The device's 16-byte auth value: bytes 100..115, base64url. */
@@ -101,6 +110,24 @@ class SalonBookingIntegrationTest {
                 public String next() {
                     String forced = NEXT_NUMBERS.poll();
                     return forced != null ? forced : super.next();
+                }
+            };
+        }
+
+        @Bean
+        @Primary
+        AppPushSender recordingAppPushSender() {
+            return new AppPushSender() {
+                @Override
+                public boolean configured() {
+                    return appPushOn;
+                }
+
+                @Override
+                public PushSender.Result send(PushSubscription device, NotificationJob message) {
+                    APP_PUSHED.add(device.endpoint() + " " + message.type() + " " + message.url() + " "
+                            + message.title());
+                    return appPushResult;
                 }
             };
         }
@@ -166,6 +193,9 @@ class SalonBookingIntegrationTest {
         });
         CLOCK.set(TUESDAY_10_00);
         PUSHED.clear();
+        APP_PUSHED.clear();
+        appPushResult = PushSender.Result.SENT;
+        appPushOn = true;
         TEXTED.clear();
         NEXT_NUMBERS.clear();
         pushResult = PushSender.Result.SENT;
@@ -1253,6 +1283,101 @@ class SalonBookingIntegrationTest {
         assertThat(count("push_subscriptions")).isZero();
         assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE ref_id = ? "
                 + "AND type = 'BOOKING_REMINDER'", String.class, b)).isEqualTo("NO_DEVICE");
+    }
+
+    @Test
+    void theAndroidAppSavesItsTokenAndGetsTheMessagesThroughFirebaseBesideTheBrowsers() {
+        // The app asks first whether it can turn notifications on
+        assertThat(field(get("/push/public-key", customer).body(), "appPush")).isEqualTo(true);
+        // Not a token: refused; a browser's address isn't a token either
+        Reply notAToken = post("/me/push-devices", Map.of("token", "short"), customer);
+        assertThat(notAToken.status()).isEqualTo(400);
+        assertThat(notAToken.text()).contains("VALIDATION_FAILED").contains("token");
+        assertThat(post("/me/push-devices", Map.of("token", FCM), customer).status()).isEqualTo(400);
+        assertThat(post("/me/push-devices", Map.of("token", APP_TOKEN), customer).status()).isEqualTo(204);
+        // Saved twice (every sign-in sends it again): still one row
+        assertThat(post("/me/push-devices", Map.of("token", APP_TOKEN), customer).status()).isEqualTo(204);
+        assertThat(post("/me/push-subscriptions", subscription(FCM), customer).status()).isEqualTo(204);
+        assertThat(jdbc.queryForList("SELECT kind FROM push_subscriptions ORDER BY kind", String.class))
+                .containsExactly("APP", "WEB");
+
+        UUID b = id(book(customer, at("12:00"), List.of(haircut), UUID.randomUUID()));
+        sender.runOnce();
+        // The same confirmation to both: the browser by Web Push, the app by FCM with its screen
+        assertThat(PUSHED).hasSize(1);
+        assertThat(APP_PUSHED).singleElement().asString()
+                .startsWith(APP_TOKEN + " BOOKING_CONFIRMED /bookings/" + b + " ");
+        assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE type = 'BOOKING_CONFIRMED' "
+                + "AND user_id = ?", String.class, customer)).isEqualTo("SENT");
+
+        // The app was uninstalled: FCM says so, the row goes; the browser stays
+        CLOCK.set(at("11:00"));
+        appPushResult = PushSender.Result.GONE;
+        sender.runOnce();
+        assertThat(jdbc.queryForList("SELECT kind FROM push_subscriptions", String.class)).containsExactly("WEB");
+    }
+
+    @Test
+    void firebaseDownWhileTheBrowserGotItTriesTheAppAgainAndNeverSendsTheBrowserTwice() {
+        assertThat(post("/me/push-devices", Map.of("token", APP_TOKEN), customer).status()).isEqualTo(204);
+        assertThat(post("/me/push-subscriptions", subscription(FCM), customer).status()).isEqualTo(204);
+        appPushResult = PushSender.Result.FAILED;
+        book(customer, at("12:00"), List.of(haircut), UUID.randomUUID());
+        sender.runOnce();
+        assertThat(PUSHED).hasSize(1);
+        assertThat(APP_PUSHED).hasSize(1);
+        // The browser has it; the app doesn't yet: tried again, for the app only
+        assertThat(jdbc.queryForObject("SELECT status || ' ' || cardinality(sent_devices) FROM notification_jobs "
+                + "WHERE type = 'BOOKING_CONFIRMED' AND user_id = ?", String.class, customer)).isEqualTo("PENDING 1");
+        appPushResult = PushSender.Result.SENT;
+        CLOCK.advance(Duration.ofMinutes(2));
+        sender.runOnce();
+        assertThat(PUSHED).hasSize(1);
+        assertThat(APP_PUSHED).hasSize(2);
+        assertThat(jdbc.queryForObject("SELECT status FROM notification_jobs WHERE type = 'BOOKING_CONFIRMED' "
+                + "AND user_id = ?", String.class, customer)).isEqualTo("SENT");
+    }
+
+    @Test
+    void theAppsTokenMovesToWhoeverSignsInOnThePhoneAndSignOutRemovesIt() {
+        assertThat(post("/me/push-devices", Map.of("token", APP_TOKEN), customer).status()).isEqualTo(204);
+        // Someone else signs in on the same phone: the token is theirs now, the first person gets nothing there
+        assertThat(post("/me/push-devices", Map.of("token", APP_TOKEN), customer2).status()).isEqualTo(204);
+        assertThat(jdbc.queryForObject("SELECT user_id FROM push_subscriptions", UUID.class)).isEqualTo(customer2);
+        // Removing someone else's token does nothing; one's own: gone
+        assertThat(call(HttpMethod.DELETE, "/me/push-devices", Map.of("token", APP_TOKEN), customer, null).status())
+                .isEqualTo(204);
+        assertThat(count("push_subscriptions")).isOne();
+        assertThat(call(HttpMethod.DELETE, "/me/push-devices", Map.of("token", APP_TOKEN), customer2, null).status())
+                .isEqualTo(204);
+        assertThat(count("push_subscriptions")).isZero();
+        // Signed out: not allowed at all
+        assertThat(post("/me/push-devices", Map.of("token", APP_TOKEN), null).status()).isEqualTo(401);
+    }
+
+    @Test
+    void withoutFirebaseOnTheServerTheAppIsToldNotificationsArentAvailable() {
+        appPushOn = false;
+        assertThat(field(get("/push/public-key", customer).body(), "appPush")).isEqualTo(false);
+        Reply refused = post("/me/push-devices", Map.of("token", APP_TOKEN), customer);
+        assertThat(refused.status()).isEqualTo(409);
+        assertThat(refused.text()).contains("APP_PUSH_OFF");
+        assertThat(count("push_subscriptions")).isZero();
+    }
+
+    @Test
+    void anAppAndBrowsersShareTheTenDevicesLimit() {
+        for (int i = 0; i < 10; i++) {
+            assertThat(post("/me/push-subscriptions", subscription(FCM + "-" + i), customer).status()).isEqualTo(204);
+            CLOCK.advance(Duration.ofSeconds(1));
+        }
+        assertThat(post("/me/push-devices", Map.of("token", APP_TOKEN), customer).status()).isEqualTo(204);
+        assertThat(count("push_subscriptions")).isEqualTo(10);
+        // The newest (the app) stays; the oldest browser went
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM push_subscriptions WHERE kind = 'APP'", Integer.class))
+                .isOne();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM push_subscriptions WHERE endpoint = ?", Integer.class,
+                FCM + "-0")).isZero();
     }
 
     @Test
