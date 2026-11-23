@@ -203,3 +203,84 @@ Tests: `SR` = `SessionRevocationsTest`, `ADR` = `AppDatabaseRoleIntegrationTest`
 | 7.22a | The copy cancels a query (conflict with its replay) | Read again on the main database, never a 409 | ReadCopy catch (same path as 7.22) | OK-tested (path) |
 | 7.23 | A write through the read copy by mistake | Refused (read-only, also outside a transaction) | RCI | OK-tested |
 | 7.24 | The read copy a moment behind | The list may show a just-paused or renamed salon the old way for under a second; bookings read the main database | design | OK-untested |
+
+## 8. The Android apps' notifications (FCM, V89, V91)
+
+Tests: `SB` = `SalonBookingIntegrationTest`, `FS` = `FcmSenderTest`, `MU` = `MigrationUpgradeIntegrationTest`.
+
+| # | Scenario | Answer | Test | Verdict |
+| --- | --- | --- | --- | --- |
+| 8.1 | The app asks whether notifications can be turned on | `GET /push/public-key` → `appPush: true` (Firebase set up) or `false` | SB `theAndroidAppSavesItsToken…`, `withoutFirebaseOnTheServer…` | OK-tested |
+| 8.2 | The app saves its token | 204; one `APP` row; saving again (every sign-in) keeps one row | SB `theAndroidAppSavesItsToken…` | OK-tested |
+| 8.3 | Something that isn't a token (short, a browser's https address) | 400 `VALIDATION_FAILED` on `token` | SB same (asserts the code and the field) | OK-tested |
+| 8.4 | Firebase not set up on the server | 409 `APP_PUSH_OFF`, nothing saved; the app shows "not available yet" | SB `withoutFirebaseOnTheServer…` | OK-tested |
+| 8.5 | Signed out (no token) | 401 | SB `theAppsTokenMovesToWhoever…` | OK-tested |
+| 8.6 | Someone else signs in and turns notifications on, on the same phone | The token moves to them; the first person gets nothing on that phone | SB same | OK-tested |
+| 8.7 | Sign-out removes the token; removing someone else's token | Own: deleted (204); someone else's: nothing deleted (204) | SB same | OK-tested |
+| 8.8 | A person with the website on one phone and the app on another | Each message goes to both: Web Push to the browser, FCM to the app (title, text, type, screen) | SB `theAndroidAppSavesItsToken…` | OK-tested |
+| 8.9 | The app was uninstalled: FCM 404 `UNREGISTERED`, 400 `INVALID_ARGUMENT` about the registration token, or 403 `SENDER_ID_MISMATCH` | The app's row deleted; the browser kept | SB same; FS `anUninstalledAppIsGone…` | OK-tested |
+| 8.9a | FCM refuses our message itself (400 `INVALID_ARGUMENT` about a field) | Never deletes the device: retried, WARN logged | FS same | OK-tested |
+| 8.10 | FCM busy or down (429, 5xx, no answer), the app the person's only device | FAILED: retried after 1, 5, 15 minutes like Web Push | FS same | OK-tested |
+| 8.10a | FCM down while the person's browser got the message | Retried for the app only (`sent_devices` keeps the browser): the browser never gets it twice; SENT once the app has it, or after the last try | SB `firebaseDownWhileTheBrowserGotIt…` | OK-tested |
+| 8.11 | Many sends at once | One Google sign-in for ~55 minutes shared by all; renewed by one send 5 minutes before expiry; per-host limit `fcm-app` caps sends at once | FS `signsInOnceForManySends…`; the per-host limit as MS's per-host test | OK-tested (sign-in), OK-untested (`fcm-app` limit, same code as browsers') |
+| 8.12 | The access token is refused (401) | That send fails (retried); the token is dropped and the next send signs in again | FS `aRefusedAccessTokenIsDropped…` | OK-tested |
+| 8.13 | The service-account key is wrong or deleted | Every app send FAILED (retried, then FAILED; SENT where a browser got it), WARN "check FIREBASE_SERVICE_ACCOUNT"; devices kept | FS `aRefusedSignInFails…` | OK-tested |
+| 8.14 | `FIREBASE_SERVICE_ACCOUNT` isn't a key file | The server refuses to start (as a wrong VAPID pair) | FS `theKeyFileIsRead…` | OK-tested |
+| 8.15 | Firebase removed after apps registered | Their messages FAILED after the retries (SENT where a browser got them); rows kept for when it is set again | `AppPushSender.OFF` (by reading) | OK-untested |
+| 8.16 | 10 browsers saved, then the app | Still 10: the oldest browser goes, the app stays | SB `anAppAndBrowsersShareTheTenDevicesLimit` | OK-tested |
+| 8.17 | Sign out everywhere, change of phone number, delete the account | Every device goes, apps included (same table). A session that just expires leaves the row: the app drops its token (Firebase) when next opened | existing SB and AI tests of `deleteAll` | OK-tested |
+| 8.18 | V89 and V91 on a database with saved browsers | They become `WEB` with their keys; the check is validated (V91, its own transaction); a browser without keys, an app with keys, an unknown kind are refused | MU `savedBrowsersBecomeWebDevices…` | OK-tested |
+| 8.19 | The token in the logs | Never: only the device id and FCM's status and code | `FcmSender` (by reading) | OK-tested (review) |
+
+## 9. Paying the subscription in the Play Store app (user choice billing, V90)
+
+Tests: `IA` = `InAppSubscriptionIntegrationTest`, `MU` = `MigrationUpgradeIntegrationTest`, `PS` = `PincodeStatesTest`,
+`GP` = `GooglePlayTest` (the API client against a local fake).
+
+The app offers paying only once the salon's free or paid time is over (`inAppPayFrom`, 15 minutes before it): Google
+Play has no free trial (a trial at Google would repeat the salon's own, once per Google account), and Razorpay from
+the app charges at once too. The website is unchanged: an owner can still set up AutoPay there before the end.
+
+| # | Scenario | Answer | Test | Verdict |
+| --- | --- | --- | --- | --- |
+| 9.1 | The app asks whether and from when it may take payment | `inAppProductId` (null while Google Play isn't set up), `inAppPayFrom` (null then too), `googlePlay` false | IA `theAppSaysPayingInTheAppIsPossible…`; null: SubscriptionStateTest (no Google Play) | OK-tested |
+| 9.1a | The app's checkout during the free (or a paid) time | 409 `PAY_IN_APP_LATER` ("You can pay here from …"); the website's checkout still works | IA `duringTheTrialTheAppCantOpenAPayment…` | OK-tested |
+| 9.2 | Razorpay picked once the time is over: checkout with Google's token | 200; the token kept with the subscription offered, under the salon's lock | IA `razorpayFromTheApp…` | OK-tested |
+| 9.3 | AutoPay approved, then charged; the charge's webhook sent twice | Approving is no payment (nothing queued); the first charge is the first transaction (₹500, with the token), queued once; the salon's state from its PIN code | IA same | OK-tested |
+| 9.4 | Reporting | The first with the token, RECURRING; each later charge naming it; amounts in micros, INR | IA same | OK-tested |
+| 9.5 | A later charge while the first isn't with Google yet | Waits a minute and asks again (Google needs the first first) | PlayReports (by reading) | OK-untested |
+| 9.6 | Google down (5xx, 429, no answer) | Tried again after 1, 2, 4 … minutes (at most an hour apart); not sent before its time | IA `googleNotAnswering…` | OK-tested |
+| 9.7 | Google already has it (409) | DONE | IA same | OK-tested |
+| 9.8 | Google refuses the first (400) | REFUSED, ERROR logged (report by hand); its later charges REFUSED at once, Google not asked, no retry every minute | IA same | OK-tested |
+| 9.9 | A report still waiting after 20 hours | ERROR logged each round | PlayReports (by reading) | OK-untested |
+| 9.9a | Two servers send reports at the same moment | Each round claims its rows (next try moved in the same statement): one report sent once | IA `twoServersRunningTheReports…` | OK-tested |
+| 9.9b | A round that runs long (Google slow) | Stops after 3 minutes; its claimed rows come back after 10 minutes | PlayReports (by reading) | OK-untested |
+| 9.10 | The owner opens the app's checkout, then pays on the website within the hour | The website gets a new subscription of its own, the app's is cancelled: nothing of the website's is reported, and the app never reuses the website's | IA `theWebsiteNeverReusesTheAppsCheckout…` | OK-tested |
+| 9.11 | Something that isn't a token (spaces, too short) | 400 `VALIDATION_FAILED` (any printable token of 10 to 1000 characters is taken: Google documents no alphabet) | IA `notGooglesTokenIsRefused` | OK-tested |
+| 9.12 | Google Play not set up, app sends a token | 503 `IN_APP_PAYMENTS_OFF` | SubscriptionService (by reading) | OK-untested |
+| 9.13 | Google Play picked | Checked, paid until its end, AUTOPAY with `googlePlay`, then acknowledged | IA `aGooglePlayPurchaseIsChecked…` | OK-tested |
+| 9.13a | Google doesn't take the acknowledgement now (any failure other than "already acknowledged") | No error to the owner (paid shows); the recheck acknowledges it within minutes (Google refunds after 3 days otherwise) | IA `googleNotTakingTheAcknowledgement…` | OK-tested |
+| 9.14 | Then the website's checkout | 409 `ALREADY_SUBSCRIBED` (no double charge) | IA same | OK-tested |
+| 9.15 | The same purchase sent again | 200, nothing changes | IA same | OK-tested |
+| 9.16 | Another salon's purchase, another product, an unknown token, a licence tester's purchase in production | 400 `PLAY_PURCHASE_INVALID`, nothing saved | IA `aPurchaseForAnotherSalon…` | OK-tested |
+| 9.17 | A purchase the salon dropped (replaced, or the salon closed) sent again | 409 `PLAY_PURCHASE_TAKEN` | IA `aSecondPurchaseReplacesTheFirst…` | OK-tested |
+| 9.17a | A second purchase (another Google account on another phone) | The newest paid one is the salon's; the older one stops renewing (cancelled at Google, tried until done) and is never attached again | IA same | OK-tested |
+| 9.17b | An older purchase, cancelled in the Play Store, found later (sent by another phone's app, or by Google) | Never replaces the salon's renewing one, never acknowledged by us (Google refunds it); 200 with the salon's view | IA `anOldCancelledPurchaseFoundLater…` | OK-tested |
+| 9.18 | Google Play bought while a Razorpay subscription is live (approved, being retried, or a checkout that could still be approved) | That Razorpay subscription is cancelled | IA `buyingWithGooglePlayStopsAnyLiveRazorpay…` | OK-tested |
+| 9.18a | A Razorpay approval arriving while Google Play renews | That Razorpay subscription is cancelled; no "AutoPay is on" (nor "failed", "stopped") message about it | IA same | OK-tested |
+| 9.18b | A cancelled Google Play subscription restored in the Play Store after Razorpay AutoPay was set up | Google Play renews again: Razorpay's subscription is cancelled | PlaySubscriptions.apply (by reading; the same call as 9.18) | OK-untested |
+| 9.19 | Google's notification: wrong secret | 403 `BAD_SECRET` | IA `googlesNotifications…` | OK-tested |
+| 9.20 | Renewal notification | Paid end moves on | IA same | OK-tested |
+| 9.21 | Cancelled in the Play Store | Paid time stays; no longer AutoPay (state PAID, then reminders) | IA same | OK-tested |
+| 9.21a | A free trial at Google (should one be set up by mistake) or Google's grace period after a failed renewal | Never counted as paid, no "₹500 received"; in the grace period the page says Google Play couldn't take the payment and links to the Play Store | IA `aFreeTrialOrGooglesGracePeriod…` | OK-tested |
+| 9.21b | Refunded or revoked (a voided-purchase notification, or not acknowledged in time) | The paid time Google Play gave goes back (unless something paid for later since) | IA `aRefundTakesBack…` | OK-tested |
+| 9.21c | Two answers from Google crossing (a notification and the recheck) | The older answer never overwrites the newer one | IA `anOlderAnswerFromGoogle…` | OK-tested |
+| 9.22 | Bought but the app never confirmed (closed at the wrong moment) | Found through the salon id in Google's notification; acknowledged. The app also sends it again when the subscription page opens | IA `aPurchaseTheAppNeverConfirmed…` | OK-tested |
+| 9.22a | A new purchase after the old one ended, never confirmed by the app | Taken (the old one isn't renewing), acknowledged, paid | IA `aNewPurchaseAfterTheOldOneEnded…` | OK-tested |
+| 9.22b | Google's notification and the app's confirm at the same moment | Both end with the purchase once (the salon's row locked); "₹500 received" once | IA `googlesNoticeAndTheAppsConfirm…` | OK-tested |
+| 9.23 | A notification lost | Every 5 minutes, the recheck asks Google about purchases not yet acknowledged (after 5 minutes) and those near or past their end (after 6 hours), least recently asked first; an unknown one is not asked again for 6 hours | IA `googleNotTakingTheAcknowledgement…` (unacknowledged); near the end by reading | OK-tested / OK-untested |
+| 9.24 | The salon closes or changes hands | Its Google Play purchase stops renewing (tried again until Google takes it) and Google's later notices never bring it back | IA `closingTheSalonStops…` | OK-tested |
+| 9.25 | V90 on a database with rows | The salon's row as it was (no purchase, nothing to acknowledge, no token); one salon per purchase; a first report must carry the token | MU `savedBrowsersBecomeWebDevices…AndSalonsGetTheInAppColumns` | OK-tested |
+| 9.26 | A PIN code's state | Telangana, Delhi, Maharashtra, Goa, Puducherry…; areas crossing a state line by the full PIN (Moradabad/Kashipur, Saharanpur/Roorkee, Pilibhit/Khatima, Chandigarh/Mohali/Manimajra, Valsad/Daman, Diu; Puducherry's Karaikal, Mahe and Yanam); an unused range: none (ERROR, reported by hand) | PS | OK-tested |
+| 9.27 | Many salons at once | Reports in batches of 50 per minute, claimed per row; Google asked outside transactions; one access token shared; each webhook finds the app's subscription by an index | PlayReports, GoogleServiceAccount (by reading); IA `twoServersRunningTheReports…` | OK-tested / OK-untested |
+| 9.28 | A Razorpay refund of an in-app payment | Not reported (no refunds by policy) | — | N/A-v1 |
