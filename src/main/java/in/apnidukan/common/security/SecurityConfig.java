@@ -61,7 +61,10 @@ public class SecurityConfig {
                                 // Signed by Razorpay (HMAC), checked by SubscriptionService.webhook
                                 "/api/v1/payments/razorpay/webhook",
                                 // Signed by RazorpayX (HMAC), checked by KiranaPaymentEvents.payoutEvent
-                                "/api/v1/payments/razorpayx/webhook").permitAll()
+                                "/api/v1/payments/razorpayx/webhook",
+                                // Google Play's notifications (Pub/Sub push): the address's secret, checked by
+                                // PlaySubscriptions.notification
+                                "/api/v1/payments/google-play/notifications").permitAll()
                         .requestMatchers("/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
