@@ -1,7 +1,11 @@
 package in.apnidukan.common.security;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Ticker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -28,6 +32,13 @@ import java.util.UUID;
  * say, 5 just before would survive the next sign-out everywhere (which would only reach 1). With the clock, the
  * next number is always above anything issued before, while the key is missing a token carries 0 (older than
  * anything set later), and the servers' own clocks don't matter.
+ *
+ * <b>Remembered for a few seconds on each copy of the backend</b> (app.auth.sign-out-check-cache-seconds, 5): the
+ * check runs on every signed-in request, and reading Redis each time made Redis the hottest dependency. Redis stays
+ * the only place the number really lives, so this holds with any number of copies: the copy that ends the sessions
+ * knows the new number at once, every other copy reads it again within 5 seconds. So a signed-out device is refused
+ * within 5 seconds everywhere (before Redis it was 15 minutes). Numbers are only ever raised in the memory (never
+ * replaced by an older read), and new tokens always read Redis itself.
  */
 @Component
 public class SessionRevocations {
@@ -48,15 +59,53 @@ public class SessionRevocations {
 
     private final StringRedisTemplate redis;
     private final Duration ttl;
+    /** Person → their session number as last read or set here; null when the cache is off (0 seconds). */
+    private final Cache<UUID, Long> recent;
 
-    public SessionRevocations(StringRedisTemplate redis, JwtProperties jwt) {
-        this.redis = redis;
-        this.ttl = Duration.ofDays(jwt.refreshDays() + 1L);
+    @org.springframework.beans.factory.annotation.Autowired
+    public SessionRevocations(StringRedisTemplate redis, JwtProperties jwt,
+                              @Value("${app.auth.sign-out-check-cache-seconds:5}") int cacheSeconds,
+                              @Value("${app.auth.sign-out-check-cache-size:100000}") int cacheSize) {
+        this(redis, jwt, cacheSeconds, cacheSize, Ticker.systemTicker());
     }
 
+    /** As above, with the clock the memory's seconds are counted by (tests move it). */
+    SessionRevocations(StringRedisTemplate redis, JwtProperties jwt, int cacheSeconds, int cacheSize,
+                       Ticker ticker) {
+        if (cacheSeconds < 0 || cacheSeconds > 60 || cacheSize < 1) {
+            // Longer than a minute would make "signed out everywhere" (a stolen phone) feel broken
+            throw new IllegalStateException("app.auth.sign-out-check-cache-seconds must be 0 to 60, and "
+                    + "sign-out-check-cache-size at least 1");
+        }
+        this.redis = redis;
+        this.ttl = Duration.ofDays(jwt.refreshDays() + 1L);
+        this.recent = cacheSeconds == 0 ? null : Caffeine.newBuilder()
+                .expireAfterWrite(Duration.ofSeconds(cacheSeconds)).maximumSize(cacheSize).ticker(ticker).build();
+    }
+
+    /**
+     * Forgets everything remembered on this copy, as a restart does. For tests that make a Redis key expire at once
+     * (in real life it expires 31 days after its last change, long after any copy forgot it).
+     */
+    public void forgetRemembered() {
+        if (recent != null) {
+            recent.invalidateAll();
+        }
+    }
+
+    /** The number in Redis now (never the remembered one), remembered for the next checks. */
     public long currentGeneration(UUID userId) {
         String value = redis.opsForValue().get(key(userId));
-        return value == null ? 0 : Long.parseLong(value);
+        return remember(userId, value == null ? 0 : Long.parseLong(value));
+    }
+
+    /** Keeps the larger of what is remembered and {@code generation} (a slower, older read never lowers it). */
+    private long remember(UUID userId, long generation) {
+        if (recent == null) {
+            return generation;
+        }
+        Long kept = recent.asMap().merge(userId, generation, Math::max);
+        return kept == null ? generation : kept;
     }
 
     /**
@@ -75,7 +124,10 @@ public class SessionRevocations {
     }
 
     public void revokeAll(UUID userId) {
-        redis.execute(RAISE_AND_EXPIRE, List.of(key(userId)), Long.toString(ttl.toMillis()));
+        Long raised = redis.execute(RAISE_AND_EXPIRE, List.of(key(userId)), Long.toString(ttl.toMillis()));
+        if (raised != null) {
+            remember(userId, raised);   // this copy refuses the old tokens at once; the others within seconds
+        }
     }
 
     /**
@@ -118,11 +170,16 @@ public class SessionRevocations {
     }
 
     /**
-     * Checked on every signed-in request. If Redis doesn't answer (down, or slower than its short timeout), the
+     * Checked on every signed-in request: from this copy's memory when it read or set the number in the last few
+     * seconds, else from Redis. If Redis doesn't answer (down, or slower than its short timeout), the
      * token counts as not revoked: everything that only needs the database keeps working, and the worst case is
      * that a token signed out during the outage works until it expires (at most 15 minutes).
      */
     public boolean isRevoked(UUID userId, long tokenGeneration) {
+        Long known = recent == null ? null : recent.getIfPresent(userId);
+        if (known != null) {
+            return tokenGeneration < known;
+        }
         try {
             return tokenGeneration < currentGeneration(userId);
         } catch (DataAccessException redisDown) {

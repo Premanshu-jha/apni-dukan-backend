@@ -4,6 +4,7 @@ import in.apnidukan.common.context.ShopDirectory;
 import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopDetails;
 import in.apnidukan.shops.repo.ShopRepository;
+import in.apnidukan.common.config.ReadCopy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -73,13 +74,16 @@ public class ShopDirectoryService implements ShopDirectory {
 
     private final ShopRepository shops;
     private final JdbcTemplate jdbc;
+    /** The salon list's reads (nearby): the read copy when READ_DB_URL is set, else the main database. */
+    private final ReadCopy listReads;
     private final Clock clock;
     private final boolean subscriptionsEnforced;
 
-    public ShopDirectoryService(ShopRepository shops, JdbcTemplate jdbc, Clock clock,
+    public ShopDirectoryService(ShopRepository shops, JdbcTemplate jdbc, ReadCopy readCopy, Clock clock,
                                 @Value("${app.subscriptions.enforce:false}") boolean subscriptionsEnforced) {
         this.shops = shops;
         this.jdbc = jdbc;
+        this.listReads = readCopy;
         this.clock = clock;
         this.subscriptionsEnforced = subscriptionsEnforced;
     }
@@ -131,8 +135,8 @@ public class ShopDirectoryService implements ShopDirectory {
         shops.holdAgainstBookings(shopId);
     }
 
+    /** No transaction: one statement, read from the read copy when there is one (holding none of the main's). */
     @Override
-    @Transactional(readOnly = true)
     public List<ShopCard> nearby(String type, java.math.BigDecimal latitude, java.math.BigDecimal longitude,
                                  int radiusMetres, int limit, Cursor after, boolean skipPausedSalons,
                                  Search search) {
@@ -162,14 +166,14 @@ public class ShopDirectoryService implements ShopDirectory {
         }
         sql.append(" ORDER BY metres, s.id LIMIT ?");
         args.add(limit);
-        return jdbc.query(sql.toString(), (rs, i) -> {
+        return listReads.read(read -> read.query(sql.toString(), (rs, i) -> {
             double metres = rs.getDouble("metres");
             return new ShopCard(rs.getObject("id", UUID.class), rs.getString("name"), rs.getString("address_line"),
                     rs.getString("area"), rs.getString("city"), rs.getString("pincode"),
                     rs.getBigDecimal("latitude"), rs.getBigDecimal("longitude"), rs.getString("status"),
                     rs.getString("type"), rs.getObject("shop_photo_file_id", UUID.class),
                     Math.round(metres / 100.0) / 10.0, metres);
-        }, args.toArray());
+        }, args.toArray()));
     }
 
     private static ShopCard card(Shop s) {

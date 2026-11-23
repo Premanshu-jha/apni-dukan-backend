@@ -56,6 +56,7 @@ class AuthIntegrationTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired StringRedisTemplate redis;
     @Autowired in.apnidukan.auth.service.SignInCleanupJob signInCleanup;
+    @Autowired in.apnidukan.common.security.SessionRevocations revocations;
     @Autowired in.apnidukan.auth.service.AuthService authService;
     @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
     @Autowired in.apnidukan.common.security.JwtService jwt;
@@ -903,6 +904,7 @@ class AuthIntegrationTest {
         redis.opsForValue().set("session-gen:" + userId, "5");
         String issuedAt5 = (String) signIn(PHONE).body().get("accessToken");
         redis.delete("session-gen:" + userId);   // the key expired (31 days without a change)
+        revocations.forgetRemembered();          // ...so long ago that no copy of the backend still remembers it
 
         // A sign-out everywhere afterwards must still end the token issued at 5 (a counter restarting at 0
         // would only reach 1)
@@ -1022,7 +1024,10 @@ class AuthIntegrationTest {
     void endedSignInsAreDeletedAfter30DaysAndTheHealthCheckIsOpen() {
         signIn(PHONE);
         signIn(PHONE);
-        jdbc.update("UPDATE refresh_tokens SET revoked_at = now() - interval '31 days', revoke_reason = 'SIGNED_OUT' "
+        // Signed in 32 days ago, a week that has no part here: the row is in the default part (deleted one by one;
+        // whole weeks are dropped instead, AppDatabaseRoleIntegrationTest)
+        jdbc.update("UPDATE refresh_tokens SET created_at = now() - interval '32 days', "
+                + "revoked_at = now() - interval '31 days', revoke_reason = 'SIGNED_OUT' "
                 + "WHERE id = (SELECT id FROM refresh_tokens ORDER BY created_at LIMIT 1)");
         assertThat(signInCleanup.runOnce()).isEqualTo(1);
         Integer left = jdbc.queryForObject("SELECT count(*) FROM refresh_tokens", Integer.class);

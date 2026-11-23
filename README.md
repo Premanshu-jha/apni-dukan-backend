@@ -215,6 +215,12 @@ phone stops getting booking messages (with their start codes) too. If Redis is d
 (signing in and refreshing keep working), and a sign-out everywhere still answers 204 (done in the database;
 access tokens in use run out within 15 minutes).
 
+Every signed-in request checks whether its person signed out everywhere after the token was made (a number per
+person in Redis, `SessionRevocations`). Each copy of the backend remembers that number up to 5 s
+(`SIGN_OUT_CHECK_CACHE_SECONDS`, 0 to 60; 0 = ask Redis every time), for at most 100,000 people, so a busy person's
+requests don't each ask Redis. Redis keeps the real number, so with any number of copies: the copy that signed
+the person out refuses the old tokens at once, every other copy within those 5 s. A remembered number only rises.
+
 Codes: when SMS is paused (daily cap), asking for a new code is refused before anything changes, so the code
 already sent keeps working. Recovery checks both codes before using either up, so a typo in one keeps the other.
 
@@ -2738,12 +2744,32 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
 
 - **Health check:** `GET /actuator/health` answers `{"status":"UP"}` (no details; nothing else of the actuator is
   open). Set it as Railway's Healthcheck Path. It checks the database only: the app keeps serving while Redis is down.
-- **Cleanup, every night (India time)**, in slices of 10,000 rows (each its own short transaction, allowed 60 s per
-  statement instead of a request's 5 s), on one server at a time (`job_leases`):
-  - 03:30, sign-ins that ended (expired, signed out, swapped) more than 30 days ago. Swapped (rotated) tokens stay
-    the whole 30 days on purpose: if a thief copied a token and keeps refreshing (r1 → r2 → r3), only the owner's
-    phone presenting r1, maybe days later, reveals it and ends every session.
-  - 03:40, messages: SMS rows 7 days after they finished (`SMS_MESSAGES_KEEP_DAYS`), every other row after 90 days.
+- **Cleanup, every night (India time)**, on one server at a time (`job_leases`). Sign-ins and messages have weekly
+  parts (below): an old week goes whole; rows still deleted one by one go in slices of 10,000 (each its own short
+  transaction, allowed 60 s per statement instead of a request's 5 s):
+  - 03:30, sign-ins that ended (expired, signed out, swapped) more than 30 days ago: a week once all of its have
+    (about 60 days after it: 30 days' lifetime, then 30 kept). Swapped (rotated) tokens stay the whole 30 days on
+    purpose: if a thief copied a token and keeps refreshing (r1 → r2 → r3), only the owner's phone presenting r1,
+    maybe days later, reveals it and ends every session.
+  - 03:40, messages: SMS rows 7 days after they finished (`SMS_MESSAGES_KEEP_DAYS`, one by one), every other row
+    once its week goes: when every message of that week finished 90 days ago. A reminder for a booking a month
+    ahead keeps its week about a month longer (four months in all); the apps' lists and the bell show only the last
+    90 days anyway (`NotificationStore`'s list reads hide older ones).
+- **Weekly parts (V88)** of `refresh_tokens` and `notification_jobs`, the two tables that grow fastest: one part per
+  week of `created_at` (weeks start Monday 00:00 UTC, named `refresh_tokens_w20261123` after their first day), plus
+  a default part (`refresh_tokens_default`). Dropping a week is instant and leaves Postgres nothing to clean up,
+  where deleting millions of rows a night would. The nightly cleanups (`WeeklyParts`) make this week and the next 4,
+  and drop old weeks with no row they would still keep, one week per transaction (the table is locked only for that
+  drop; at most 20 a night). The database does both through two functions that run as the owner
+  (`partitions_prepare`, `partitions_drop_old`): the backend's user (`clozest_app`) can call them but still can't
+  create or drop any table itself, and they take no table but these two. A week that is busy (a lock not got within
+  1 s) is left for the next night (a WARN). Rows of before V88 are in the default part. If the job ever missed a
+  month, that week's rows went to the default part too and the week can't get a part any more (Postgres refuses):
+  it is skipped with a WARN and the following weeks get theirs, so the parts carry on. The cleanup deletes the
+  default part's old rows one by one, so nothing piles up either way. A week still holding a kept row 60 days after it could have gone is a WARN (a
+  message stuck waiting?). Keys are `(id, created_at)` (a partitioned table's key must hold `created_at`); ids are
+  random UUIDs and `token_hash` a SHA-256 of 32 random bytes, so both stay unique in practice, `token_hash` through
+  a plain index.
 - **Earlier-slot alert rows** (`earlier_slot_alerts`): deleted a day after their booking's start, by the every-minute
   automatic-end round (`AutoEndJob`), in batches.
 - **R2 objects of deleted files**: every 5 minutes, `FileDeletionJob` deletes the objects still queued in
@@ -3018,7 +3044,29 @@ All optional (environment variables on Railway; defaults in `application.propert
 | `SALON_BUSY_CACHE_ROWS` | 500000 | Rows of salons' busy time per day each server keeps (about 100 bytes a row) |
 | `OWNER_BOOKING_SMS` | false | The owner also gets an SMS per booking, move and cancel (barbers keep theirs) |
 | `PHOTO_LINK_MINUTES` | 60 | Minutes a photo link stays valid after the hour it was signed in ends |
+| `SIGN_OUT_CHECK_CACHE_SECONDS` | 5 | How long each server remembers a person's sign-out number (0 to 60; 0 = Redis every request) |
+| `READ_DB_URL` / `READ_DB_POOL_SIZE` | (empty: off) / 10 | A read copy for the salon list (see "Read copy") |
 | `OLD_TRANSACTION_WARN` | `10m` | A transaction open longer than this (holding back the oldest snapshot) is logged as a WARN, checked every minute |
+
+## Read copy
+
+Off unless `READ_DB_URL` is set. Then the customer's salon list and its search (the nearby page, PostGIS, and its
+cards' ratings, services, hours and offers) are read from that address, through a pool of its own
+(`READ_DB_POOL_SIZE`, 10; read-only: a write by mistake fails; the same 5 s limit per statement; the same `DB_USER`
+and `DB_PASSWORD`). Everything else, every booking and change included, stays on `DB_URL`. A copy is usually under a
+second behind, so a salon that just paused or was renamed may show the old way in the list that long, never in a
+booking (a booking reads the main database). The list holds no connection of the main database meanwhile.
+If the copy can't answer (down, no connection within 2 s, or a query cancelled by the copy's replay), that read is
+done again on the main database, with a WARN at most once a minute: the list keeps working (after a failed
+connection, the next 30 s skip the copy, so lists don't each wait its 2 s). A statement that ran
+out of its 5 s is not repeated (that would double the load when things are slow). The cards' photo links are
+still read from the main database.
+
+To turn it on, on Neon: the project's branch, **Add a read replica** (a compute of its own, billed by the hour it
+runs, like the main one), then set `READ_DB_URL` on Railway to its **pooled** connection string (host with
+`-pooler`), in JDBC form like `DB_URL`. A copy that is down when the backend starts doesn't stop it (the main
+database answers the list meanwhile). Worth it once the main database's CPU is
+mostly the salon list (Neon's Monitoring page).
 
 ## Database users
 
@@ -3061,7 +3109,7 @@ a long migration of the owner isn't reported, which is fine.
 
 ## Database changes
 
-Only through new Flyway files in `src/main/resources/db/migration` (next: `V88__...`; V66–V82 are
+Only through new Flyway files in `src/main/resources/db/migration` (next: `V89__...`; V66–V82 are
 kirana's, merged into `main` with it, so a salon change after them takes the next number too, as V83–V84 did). `users.admin` (replaced
 by `admin_role` in V9) is no longer read and can be dropped in a later migration.
 A table whose entity has `@Audited` also needs its `*_aud` history table in the same migration (Envers doesn't

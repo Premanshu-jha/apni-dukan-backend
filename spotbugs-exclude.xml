@@ -65,6 +65,9 @@
             <Class name="in.apnidukan.auth.notify.SupportEmailSender"/>
             <Class name="in.apnidukan.helpdesk.service.InboundSignature"/>
             <Class name="in.apnidukan.helpdesk.service.TicketService"/>
+            <!-- READ_DB_POOL_SIZE out of 1 to 100; the sign-out check's memory outside 0 to 60 s -->
+            <Class name="in.apnidukan.common.config.ReadCopy"/>
+            <Class name="in.apnidukan.common.security.SessionRevocations"/>
         </Or>
     </Match>
     <!-- SpotBugs 4.10 / FindSecBugs 1.14 (new findings in code that didn't change):
@@ -104,6 +107,15 @@
             <And>
                 <Class name="in.apnidukan.salon.repo.SalonCardStore"/>
                 <Method name="facts"/>
+            </And>
+            <!-- The same two statements, now run inside ReadCopy.read (the read copy or the main database) -->
+            <And>
+                <Class name="in.apnidukan.shops.service.ShopDirectoryService"/>
+                <Method name="~lambda\$nearby\$.*"/>
+            </And>
+            <And>
+                <Class name="in.apnidukan.salon.repo.SalonCardStore"/>
+                <Method name="~lambda\$facts\$.*"/>
             </And>
         </Or>
     </Match>

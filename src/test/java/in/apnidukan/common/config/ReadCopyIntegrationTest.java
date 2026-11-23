@@ -1,0 +1,35 @@
+package in.apnidukan.common.config;
+
+import in.apnidukan.support.TestContainers;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIf;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+
+/** The read copy's pool against a real Postgres (the tests' own, standing in for a Neon read replica). */
+@EnabledIf("in.apnidukan.support.TestContainers#dockerAvailable")
+class ReadCopyIntegrationTest {
+
+    @Test
+    void itReadsWithTheRequestLimitAndNeverWrites() {
+        TestContainers.postgres();
+        ReadCopy copy = new ReadCopy(mock(JdbcTemplate.class), TestContainers.jdbcUrl(), TestContainers.DB_USER,
+                TestContainers.DB_PASSWORD, 2, "5s");
+        try {
+            Integer one = copy.read(jdbc -> jdbc.queryForObject("SELECT 1", Integer.class));
+            assertThat(one).isEqualTo(1);
+            String limit = copy.read(jdbc -> jdbc.queryForObject("SHOW statement_timeout", String.class));
+            assertThat(limit).isEqualTo("5s");
+            // A write by mistake fails (and isn't done again on the main database: the mock would answer null)
+            assertThatThrownBy(() -> copy.read(jdbc -> {
+                jdbc.execute("CREATE TABLE should_fail (id int)");
+                return null;
+            })).rootCause().hasMessageContaining("read-only");
+        } finally {
+            copy.destroy();
+        }
+    }
+}

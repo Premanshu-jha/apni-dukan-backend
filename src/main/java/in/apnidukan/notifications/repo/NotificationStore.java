@@ -29,8 +29,14 @@ public class NotificationStore {
 
     private final JdbcTemplate jdbc;
 
-    public NotificationStore(JdbcTemplate jdbc) {
+    /** How long the lists show a message (app.notifications.keep-days, 90). */
+    private final java.time.Duration shown;
+
+    public NotificationStore(JdbcTemplate jdbc,
+                             @org.springframework.beans.factory.annotation.Value("${app.notifications.keep-days:90}")
+                             int keepDays) {
         this.jdbc = jdbc;
+        this.shown = java.time.Duration.ofDays(keepDays);
     }
 
     public void insert(Notice n, Channel channel, Instant now) {
@@ -92,7 +98,7 @@ public class NotificationStore {
      * the app's type groups go in as one comma-separated parameter.
      */
     private static final String INBOX = " FROM notification_jobs WHERE user_id = ? AND channel = 'PUSH'"
-            + " AND (status <> 'CANCELLED' OR finished_at >= send_at) AND send_at <= ? AND title <> ''"
+            + " AND (status <> 'CANCELLED' OR finished_at >= send_at) AND send_at <= ? AND send_at > ? AND title <> ''"
             + " AND split_part(type, '_', 1) = ANY (string_to_array(?, ','))"
             // Salon messages of a salon the person left are hidden at once, before SalonMessagePurgeJob deletes them
             // (the person's purge row is read once per query, not per message)
@@ -119,10 +125,11 @@ public class NotificationStore {
                                  int limit) {
         if (beforeAt == null || beforeId == null) {
             return jdbc.query(INBOX_COLUMNS + INBOX + " ORDER BY send_at DESC, id DESC LIMIT ?",
-                    (rs, i) -> inboxItem(rs), userId, at(now), groups(audience), userId, limit);
+                    (rs, i) -> inboxItem(rs), userId, at(now), oldest(now), groups(audience), userId, limit);
         }
         return jdbc.query(INBOX_COLUMNS + INBOX + " AND (send_at, id) < (?, ?) ORDER BY send_at DESC, id DESC LIMIT ?",
-                (rs, i) -> inboxItem(rs), userId, at(now), groups(audience), userId, at(beforeAt), beforeId, limit);
+                (rs, i) -> inboxItem(rs), userId, at(now), oldest(now), groups(audience), userId, at(beforeAt), beforeId,
+                limit);
     }
 
     /**
@@ -154,7 +161,7 @@ public class NotificationStore {
                 (rs, i) -> {
                     OffsetDateTime next = rs.getObject(2, OffsetDateTime.class);
                     return new Unread(rs.getLong(1), next == null ? null : next.toInstant());
-                }, userId, at(now), groups(audience), userId, UNREAD_CAP, userId, at(now));
+                }, userId, at(now), oldest(now), groups(audience), userId, UNREAD_CAP, userId, at(now));
     }
 
     /** Marks these of the person's messages read (only theirs, only once); returns how many changed. */
@@ -175,22 +182,34 @@ public class NotificationStore {
     public int markAllReadSlice(UUID userId, Audience audience, Instant now, int max) {
         return jdbc.update("WITH pick AS MATERIALIZED (SELECT id" + INBOX + " AND read_at IS NULL LIMIT ?) "
                 + "UPDATE notification_jobs SET read_at = ? WHERE id IN (SELECT id FROM pick) AND read_at IS NULL",
-                userId, at(now), groups(audience), userId, max, at(now));
+                userId, at(now), oldest(now), groups(audience), userId, max, at(now));
     }
 
     /**
-     * Deletes up to {@code max} messages that finished (sent, failed, cancelled, no device) before this moment;
-     * returns how many. One short statement (Postgres has no DELETE … LIMIT, hence the MATERIALIZED CTE: picked
+     * The oldest a listed message may be: the lists show 90 days. A message's week is dropped only once all of it
+     * finished that long ago (WeeklyParts), so an older row may still be there for a while; it just isn't shown.
+     */
+    private OffsetDateTime oldest(Instant now) {
+        return at(now.minus(shown));
+    }
+
+    /**
+     * Deletes up to {@code max} messages in the default part (notification_jobs_default: rows of before V88, or of a
+     * week whose part wasn't made in time) that finished (sent, failed, cancelled, no device) before this moment;
+     * returns how many. The weekly parts go a whole week at once instead (WeeklyParts). One short statement (Postgres has no DELETE … LIMIT, hence the MATERIALIZED CTE: picked
      * once, so never more than {@code max} rows), found through ix_notification_jobs_finished; the caller repeats it
      * while slices come back full.
      */
-    public int deleteFinishedBefore(Instant before, int max) {
-        return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs "
+    public int deleteFinishedOutsideWeeksBefore(Instant before, int max) {
+        return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs_default "
                 + "WHERE status <> 'PENDING' AND finished_at < ? LIMIT ?) "
-                + "DELETE FROM notification_jobs WHERE id IN (SELECT id FROM slice)", at(before), max);
+                + "DELETE FROM notification_jobs_default WHERE id IN (SELECT id FROM slice)", at(before), max);
     }
 
-    /** Like deleteFinishedBefore, SMS rows only (ix_notification_jobs_sms_finished): they are kept a shorter time. */
+    /**
+     * Like deleteFinishedOutsideWeeksBefore, SMS rows only (ix_notification_jobs_sms_finished), in every part: they
+     * are kept a shorter time than a week lasts.
+     */
     public int deleteFinishedSmsBefore(Instant before, int max) {
         return jdbc.update("WITH slice AS MATERIALIZED (SELECT id FROM notification_jobs "
                 + "WHERE status <> 'PENDING' AND channel = 'SMS' AND finished_at < ? LIMIT ?) "

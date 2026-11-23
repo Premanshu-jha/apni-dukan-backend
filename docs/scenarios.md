@@ -164,3 +164,42 @@ Tests: `ADR` = `AppDatabaseRoleIntegrationTest`, `PSC` = `ProductionSafetyCheckT
 | 6.6 | The secrets aren't set yet | The job passes with a notice; the server migrates itself as before | workflow | OK-untested |
 | 6.7 | Production still migrating itself | Starts, with a WARN pointing to "Database users" | PSC `aServerThatStillMigratesItselfIsNotedNotRefused` | OK-tested |
 | 6.8 | Production with `MIGRATE_ON_START=false` and no `DB_URL_DIRECT` | Starts (the direct URL is only for migrations) | PSC `productionMigratesOnlyThroughNeonsDirectUrl` | OK-tested |
+
+## 7. Scale round 1: sign-out check memory, weekly parts (V88), read copy
+
+Tests: `SR` = `SessionRevocationsTest`, `ADR` = `AppDatabaseRoleIntegrationTest`, `MU` =
+`MigrationUpgradeIntegrationTest`, `WP` = `WeeklyPartsTest`, `AI` = `AuthIntegrationTest`, `MS` =
+`MessagesAtScaleIntegrationTest`, `SB` = `SalonBookingIntegrationTest`, `RC` = `ReadCopyTest`, `RCI` =
+`ReadCopyIntegrationTest`, `SDN` = `ShopDirectoryNearbyTest`.
+
+| # | Scenario | Answer | Test | Verdict |
+| --- | --- | --- | --- | --- |
+| 7.1 | The same person makes many requests within 5 s | Redis is asked once; the number is remembered | SR `theCheckIsRememberedForAFewSecondsAndOnlyEverRaised` | OK-tested |
+| 7.2 | They sign out everywhere on copy A; old token used on A | Refused at once (A raised its own memory) | SR `endingAllSessionsHereIsKnownHereAtOnce` | OK-tested |
+| 7.3 | Same, old token used on copy B that remembered the old number | Refused within 5 s (B reads Redis again then) | SR `anotherCopyRefusesTheOldTokenOnceItsMemoryRunsOut` | OK-tested |
+| 7.4 | A late, lower number from Redis (a race) | Ignored: the memory only rises | SR remembered-test | OK-tested |
+| 7.5 | `SIGN_OUT_CHECK_CACHE_SECONDS=0` or above 60 | 0 asks Redis every time; above 60 or below 0 refuses to start | SR `zeroSecondsAsksRedisEveryTime`, `theMemoryMayLastAtMostAMinute` | OK-tested |
+| 7.6 | Redis down, memory on | As before: requests pass (tokens last 15 min), nothing remembered meanwhile | SR `withTheMemoryOnRedisDown…` | OK-tested |
+| 7.6a | A Redis key that expired (31 days without a change) | No copy still remembers it by then; the test forgets it as a restart does | AI `aSessionNumberThatExpired…` | OK-tested |
+| 7.7 | V88 on a database with rows | Today's rows in this week's part, older ones in the default part; every column kept; checks and the user link still enforced; this week + 4 made | MU `signInsAndMessagesMoveIntoWeeklyParts…` | OK-tested |
+| 7.8 | Hibernate's table check against a partitioned `refresh_tokens` | Passes (`PARTITIONED TABLE` counted) | every integration test starting | OK-tested |
+| 7.9 | Nightly: the coming weeks | Made once; asking again makes none | ADR `clozestAppKeepsTheWeeklyParts…` | OK-tested |
+| 7.10 | An old week whose sign-ins all ended over 30 days ago | Dropped, one week per call (its own transaction) | ADR same; WP `makesTheComingWeeks…` (called again after each drop) | OK-tested |
+| 7.10a | Months of weeks to drop after a long stop | At most 20 a night | WP `aBacklogGoesAtMost20WeeksANight` | OK-tested |
+| 7.10b | The job missed a month: a week's rows already in the default part | That week skipped (WARN), the next weeks made; its rows deleted one by one | ADR same | OK-tested |
+| 7.11 | An old week with one sign-in ended 10 days ago | Kept (IN_USE) | ADR same | OK-tested |
+| 7.12 | An old week of messages, one still waiting | Kept; dropped once it finished 90+ days ago | ADR same | OK-tested |
+| 7.13 | This week or a coming one | Never looked at by the drop | ADR same | OK-tested |
+| 7.14 | `clozest_app` drops a part itself, or calls the functions for another table, 0 keep days, 500 weeks | `must be owner` / refused | ADR same | OK-tested |
+| 7.15 | The table is busy when dropping or making a week | Waits at most 1 s, left for next night (WARN) | SQL `lock_not_available` handler | OK-untested (lock wait) |
+| 7.16 | A function call fails outright | Logged, `maintain` returns; the jobs' row cleanup comes after it in the same method | WP `neitherStepFailingStops…` (the jobs' order: by reading) | OK-tested (WP) |
+| 7.17 | Ended sign-ins in the default part (before V88, or a week made late) | Deleted one by one after 30 days, as before | AI `endedSignInsAreDeletedAfter30Days…`, `aCopiedTokenRefreshedAlongAChain…` | OK-tested |
+| 7.18 | A copied token chain after the nightly cleanup | Still caught (swapped tokens stay 30 days) | AI chain test | OK-tested |
+| 7.19 | Finished messages in the default part | SMS after 7 days, others after 90, waiting ones never | MS `cleanupDeletesInSlices…`, SB `finishedMessagesAreDeletedAfter90Days…` | OK-tested |
+| 7.20 | A week stuck in use 60 days after it could have gone | WARN naming the part | WP (June week runs the WARN path; the log line isn't asserted) | OK-tested (path) |
+| 7.20a | A booking reminder a month ahead keeps its week | The week stays ~4 months; the lists and the bell still show only 90 days | NotificationStore list reads (`send_at > now − 90 days`) | OK-untested |
+| 7.21 | No `READ_DB_URL` | The salon list reads the main database, as before | RC, SDN, SB | OK-tested |
+| 7.22 | `READ_DB_URL` set, copy down | Backend starts; the list is read from the main database (WARN once a minute) | RC `aCopyThatIsDown…` | OK-tested |
+| 7.22a | The copy cancels a query (conflict with its replay) | Read again on the main database, never a 409 | ReadCopy catch (same path as 7.22) | OK-tested (path) |
+| 7.23 | A write through the read copy by mistake | Refused (read-only, also outside a transaction) | RCI | OK-tested |
+| 7.24 | The read copy a moment behind | The list may show a just-paused or renamed salon the old way for under a second; bookings read the main database | design | OK-untested |

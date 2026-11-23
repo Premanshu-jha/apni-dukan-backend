@@ -1,6 +1,7 @@
 package in.apnidukan.salon.repo;
 
 import in.apnidukan.common.context.ShopDirectory;
+import in.apnidukan.common.config.ReadCopy;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -98,9 +99,12 @@ public class SalonCardStore {
                 ORDER BY o.starts_on, o.percent_off DESC LIMIT 1) f ON true""";
 
     private final JdbcTemplate jdbc;
+    /** The salon list's card facts: the read copy when READ_DB_URL is set (ReadCopy), else the main database. */
+    private final ReadCopy listReads;
 
-    public SalonCardStore(JdbcTemplate jdbc) {
+    public SalonCardStore(JdbcTemplate jdbc, ReadCopy readCopy) {
         this.jdbc = jdbc;
+        this.listReads = readCopy;
     }
 
     /**
@@ -133,31 +137,36 @@ public class SalonCardStore {
             hitArgs.addAll(search.textArgs());
             hitArgs.add(String.join(",", search.serviceIcons()));
         }
-        jdbc.query(SQL_START + hit + SQL_END, ps -> {
-            int i = 0;
-            ps.setObject(++i, AppointmentStore.at(dayStart));
-            ps.setObject(++i, AppointmentStore.at(dayEnd));
-            ps.setObject(++i, today);
-            ps.setArray(++i, ps.getConnection().createArrayOf("uuid", shopIds.toArray()));
-            ps.setInt(++i, weekday);
-            for (Object a : hitArgs) {
-                ps.setString(++i, (String) a);
-            }
-            ps.setObject(++i, today);
-        }, rs -> {
-            List<Top> top = new ArrayList<>();
-            Object[] names = array(rs.getArray("names"));
-            Object[] prices = array(rs.getArray("prices"));
-            Object[] froms = array(rs.getArray("froms"));
-            for (int i = 0; i < names.length; i++) {
-                top.add(new Top((String) names[i], ((Number) prices[i]).longValue(), (Boolean) froms[i]));
-            }
-            out.put(rs.getObject("id", UUID.class), new Facts(rs.getInt("ratings"), rs.getLong("stars_sum"),
-                    rs.getBoolean("has_hours"), (Integer) rs.getObject("open_min"), (Integer) rs.getObject("close_min"),
-                    rs.getBoolean("closed_day"), rs.getInt("n"), top, rs.getBoolean("registered"),
-                    rs.getBoolean("works_today"), rs.getObject("percent_off") == null ? null
-                            : new Offer(rs.getInt("percent_off"), rs.getObject("starts_on", LocalDate.class),
-                                    rs.getObject("ends_on", LocalDate.class))));
+        String sql = SQL_START + hit + SQL_END;
+        listReads.read(jdbcHere -> {
+            out.clear();   // read again on the main database if the copy failed midway
+            jdbcHere.query(sql, ps -> {
+                int i = 0;
+                ps.setObject(++i, AppointmentStore.at(dayStart));
+                ps.setObject(++i, AppointmentStore.at(dayEnd));
+                ps.setObject(++i, today);
+                ps.setArray(++i, ps.getConnection().createArrayOf("uuid", shopIds.toArray()));
+                ps.setInt(++i, weekday);
+                for (Object a : hitArgs) {
+                    ps.setString(++i, (String) a);
+                }
+                ps.setObject(++i, today);
+            }, rs -> {
+                List<Top> top = new ArrayList<>();
+                Object[] names = array(rs.getArray("names"));
+                Object[] prices = array(rs.getArray("prices"));
+                Object[] froms = array(rs.getArray("froms"));
+                for (int i = 0; i < names.length; i++) {
+                    top.add(new Top((String) names[i], ((Number) prices[i]).longValue(), (Boolean) froms[i]));
+                }
+                out.put(rs.getObject("id", UUID.class), new Facts(rs.getInt("ratings"), rs.getLong("stars_sum"),
+                        rs.getBoolean("has_hours"), (Integer) rs.getObject("open_min"), (Integer) rs.getObject("close_min"),
+                        rs.getBoolean("closed_day"), rs.getInt("n"), top, rs.getBoolean("registered"),
+                        rs.getBoolean("works_today"), rs.getObject("percent_off") == null ? null
+                                : new Offer(rs.getInt("percent_off"), rs.getObject("starts_on", LocalDate.class),
+                                        rs.getObject("ends_on", LocalDate.class))));
+            });
+            return null;
         });
         return out;
     }

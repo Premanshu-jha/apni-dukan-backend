@@ -202,8 +202,11 @@ public class BookingService {
      * of whose services matches it (see SalonSearch): the same radius, order, pages and cards, in the same reads,
      * the services it matched named first on each card. A search counts towards the person's searches (429
      * TOO_MANY_REQUESTS with Retry-After past app.salon.searches-per-minute); the list without one never does.
+     *
+     * No transaction around the three: each is one statement anyway (each saw its own moment before too), and the
+     * page and its cards' facts are read from the read copy when there is one (ReadCopy), so a busy list then holds
+     * none of the main database's connections.
      */
-    @Transactional(readOnly = true)
     public List<SalonSummary> salonsNear(UUID customerId, BigDecimal latitude, BigDecimal longitude,
                                          ShopDirectory.Cursor after, String q) {
         if (latitude.doubleValue() < 6 || latitude.doubleValue() > 37.6
