@@ -26,7 +26,7 @@ class SubscriptionStateTest {
     private final SubscriptionService service = new SubscriptionService(mock(SubscriptionStore.class),
             mock(ShopMemberRepository.class),
             new RazorpayGateway("rzp_test_1", "s", "h", "plan_1", URI.create("http://127.0.0.1:1")),
-            mock(Notifications.class), mock(PlatformTransactionManager.class), Clock.fixed(NOW, ZoneOffset.UTC),
+            mock(GooglePlay.class), mock(PlayReports.class), mock(Notifications.class), mock(PlatformTransactionManager.class), Clock.fixed(NOW, ZoneOffset.UTC),
             true, "https://partner.clozest.in/icon-512.png", java.util.List.of());
 
     private static Row row(Instant paidUntil, String status) {

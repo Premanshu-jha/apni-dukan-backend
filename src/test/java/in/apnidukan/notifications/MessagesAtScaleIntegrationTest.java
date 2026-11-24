@@ -12,6 +12,7 @@ import in.apnidukan.notifications.repo.NotificationStore;
 import in.apnidukan.notifications.repo.PushSubscriptionStore;
 import in.apnidukan.notifications.service.MessageCleanupJob;
 import in.apnidukan.notifications.service.NotificationSendJob;
+import in.apnidukan.notifications.service.AppPushSender;
 import in.apnidukan.notifications.service.PushSender;
 import in.apnidukan.support.CapturingSenders;
 import in.apnidukan.support.TestClock;
@@ -301,7 +302,7 @@ class MessagesAtScaleIntegrationTest {
 
     /** A sender of its own (writing outcomes only by time: 50 a statement), so stopping it leaves the others alone. */
     private NotificationSendJob ownSender() {
-        return new NotificationSendJob(store, deviceStore, pushSender, textMessages, smsTemplates, userDirectory,
+        return new NotificationSendJob(store, deviceStore, pushSender, AppPushSender.OFF, textMessages, smsTemplates, userDirectory,
                 rateLimiter, 100_000, 1000, 5, 4, 2, 50, 180_000, 50, CLOCK, false);
     }
 

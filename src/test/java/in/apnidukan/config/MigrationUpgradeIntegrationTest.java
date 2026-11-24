@@ -456,6 +456,79 @@ class MigrationUpgradeIntegrationTest {
         }
     }
 
+    @Test
+    void savedBrowsersBecomeWebDevicesOnlyAnAppMayHaveNoKeysAndSalonsGetTheInAppColumns() {
+        String name = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
+        JdbcTemplate admin = new JdbcTemplate(new DriverManagerDataSource(TestContainers.jdbcUrl(),
+                TestContainers.DB_USER, TestContainers.DB_PASSWORD));
+        admin.execute("CREATE DATABASE " + name);
+        String url = TestContainers.jdbcUrl().replaceAll("/[^/]+$", "/" + name);
+        DriverManagerDataSource ds = new DriverManagerDataSource(url, TestContainers.DB_USER,
+                TestContainers.DB_PASSWORD);
+        try {
+            flyway(ds, MigrationVersion.fromVersion("88")).migrate();
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+            UUID person = UUID.randomUUID();
+            jdbc.update("INSERT INTO users (id, phone, name, admin, created_at, updated_at) VALUES (?, '9000000001', "
+                    + "'P', false, now(), now())", person);
+            jdbc.update("INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, created_at) VALUES (?, "
+                    + "?, 'https://fcm.googleapis.com/fcm/send/a', 'key', 'secret', now())", UUID.randomUUID(), person);
+            // A salon paying on the website before the app (V90 adds the in-app columns beside its row)
+            UUID shop = UUID.randomUUID();
+            jdbc.update("INSERT INTO shops (id, name, owner_name, address_line, area, city, pincode, latitude, "
+                    + "longitude, status, type, version, created_at, updated_at) VALUES (?, 'Raju Hair', 'Owner', "
+                    + "'Shop 4', 'Kondapur', 'Hyderabad', '500084', 17.465, 78.364, 'APPROVED', 'SALON', 0, now(), "
+                    + "now())", shop);
+            jdbc.update("INSERT INTO salon_subscriptions (shop_id, trial_ends_at, paid_until, bookable_until, "
+                    + "razorpay_subscription_id, razorpay_status, created_at, updated_at) VALUES (?, now(), "
+                    + "now() + INTERVAL '30 days', now() + INTERVAL '34 days', 'sub_OLD', 'ACTIVE', now(), now())",
+                    shop);
+
+            flyway(ds, MigrationVersion.LATEST).migrate();
+
+            // The salon's row: as it was, with no Google Play purchase, nothing reported, nothing to acknowledge
+            assertThat(jdbc.queryForObject("SELECT razorpay_status || ' ' || play_auto_renewing || ' ' "
+                    + "|| play_acknowledged || ' ' || (play_purchase_token IS NULL) || ' ' "
+                    + "|| (app_billing_token IS NULL) FROM salon_subscriptions", String.class))
+                    .isEqualTo("ACTIVE false false true true");
+            // One salon per Google purchase; the first report of a subscription carries the token, the later ones don't
+            jdbc.update("UPDATE salon_subscriptions SET play_purchase_token = 'gp-1'");
+            UUID other = UUID.randomUUID();
+            jdbc.update("INSERT INTO shops (id, name, owner_name, address_line, area, city, pincode, latitude, "
+                    + "longitude, status, type, version, created_at, updated_at) VALUES (?, 'Other', 'Owner', "
+                    + "'Shop 5', 'Kondapur', 'Hyderabad', '500084', 17.465, 78.364, 'APPROVED', 'SALON', 0, now(), "
+                    + "now())", other);
+            jdbc.update("INSERT INTO salon_subscriptions (shop_id, trial_ends_at, bookable_until, created_at, "
+                    + "updated_at) VALUES (?, now(), now(), now(), now())", other);
+            assertThatThrownBy(() -> jdbc.update("UPDATE salon_subscriptions SET play_purchase_token = 'gp-1' "
+                    + "WHERE shop_id = ?", other)).hasMessageContaining("ux_salon_subscriptions_play_token");
+            assertThatThrownBy(() -> jdbc.update("INSERT INTO play_external_transactions (id, payment_id, shop_id, "
+                    + "razorpay_subscription_id, amount_paise, transaction_time, tax_state, next_try_at, created_at) "
+                    + "VALUES ('s-x', 'pay_x', ?, 'sub_x', 50000, now(), 'TELANGANA', now(), now())", shop))
+                    .hasMessageContaining("ck_play_external_first");
+
+            // The browser saved before is a WEB device with its keys, the check is validated
+            assertThat(jdbc.queryForObject("SELECT kind || ' ' || p256dh || ' ' || auth FROM push_subscriptions",
+                    String.class)).isEqualTo("WEB key secret");
+            assertThat(jdbc.queryForObject("SELECT convalidated FROM pg_constraint WHERE conname = "
+                    + "'ck_push_subscriptions_kind'", Boolean.class)).isTrue();
+            // An app without keys is fine; a browser without keys, or an app with them, is refused
+            jdbc.update("INSERT INTO push_subscriptions (id, user_id, endpoint, kind, created_at) VALUES (?, ?, "
+                    + "'app-token', 'APP', now())", UUID.randomUUID(), person);
+            assertThatThrownBy(() -> jdbc.update("INSERT INTO push_subscriptions (id, user_id, endpoint, created_at) "
+                    + "VALUES (?, ?, 'https://fcm.googleapis.com/fcm/send/b', now())", UUID.randomUUID(), person))
+                    .hasMessageContaining("ck_push_subscriptions_kind");
+            assertThatThrownBy(() -> jdbc.update("INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, "
+                    + "kind, created_at) VALUES (?, ?, 'other-token', 'k', 'a', 'APP', now())", UUID.randomUUID(),
+                    person)).hasMessageContaining("ck_push_subscriptions_kind");
+            assertThatThrownBy(() -> jdbc.update("INSERT INTO push_subscriptions (id, user_id, endpoint, kind, "
+                    + "created_at) VALUES (?, ?, 'third-token', 'IOS', now())", UUID.randomUUID(), person))
+                    .hasMessageContaining("ck_push_subscriptions_kind");
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
+        }
+    }
+
     /** As the app runs Flyway (application.properties): mixed files, no transactional lock, no statement limit. */
     private static Flyway flyway(DriverManagerDataSource ds, MigrationVersion target) {
         return Flyway.configure().dataSource(ds).locations("classpath:db/migration").target(target).mixed(true)

@@ -15,7 +15,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
 | `kirana` | The kirana's own counter (on `main` with the salons, switched off on the server until kirana launches: see "Kirana switch"): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit); stock from photos of distributors' bills and scans, unknown barcodes linked in one tap, counter suggestions and paper bills (round 3) |
 | `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
-| `notifications` | Messages queued with the change they report, written in each reader's language (`users.language`; English for none), sent by a job with retries as Web Push (browser notifications), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
+| `notifications` | Messages queued with the change they report, written in each reader's language (`users.language`; English for none), sent by a job with retries as Web Push (browser notifications) and Firebase Cloud Messaging (the Android apps), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
 ## How file handling works
 
@@ -1582,6 +1582,107 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### The Android apps' notifications (V89, V91; the partner and customer apps' Play Store round)
+
+The partner and customer apps are also published on the Play Store (the same code inside an Android app, see their
+READMEs). An Android app can't use Web Push, so the apps get notifications through **Firebase Cloud Messaging (FCM)**,
+next to the browsers' Web Push; the website keeps working exactly as before.
+- **Devices:** an installed app saves its FCM registration token with `POST /me/push-devices {token}` after the person
+  allows notifications (and after every sign-in), and removes it with `DELETE /me/push-devices {token}` on sign-out
+  (`PushController` → `AppDevices`). It is a row of `push_subscriptions` like a browser's, with `kind = 'APP'`, the
+  token in `endpoint` and no keys (V89 adds `kind`, default `WEB` for every existing row, and lets the keys be empty
+  for an app only; V91 checks the rows that were there, in its own transaction, so sign-ins go on meanwhile). So the
+  10-devices limit, a token moving to whoever signs in next on the phone, signing out
+  everywhere and deleting the account all work for both alike. A token must look like one (letters, digits, `:`, `_`,
+  `-`, 20 to 1000 characters): anything else is 400 `VALIDATION_FAILED` on `token`.
+- **Is it on?** `GET /push/public-key` answers `{publicKey, appPush}`: `appPush` is true when Firebase is set up on the
+  server (`FIREBASE_SERVICE_ACCOUNT`). Off, `POST /me/push-devices` answers 409 `APP_PUSH_OFF` and the app says
+  notifications aren't available yet; nothing else changes.
+- **Sending:** `NotificationSendJob` sends each message to every device of the person: browsers through `PushSender`
+  (Web Push, unchanged), apps through `AppPushSender` (`FcmSender`), the apps' sends limited like one more push service
+  (per-host limit, host `fcm-app`). `FcmSender` calls FCM's HTTP v1 API (`/v1/projects/{project}/messages:send`) with
+  a Google access token it makes from the service account's key (a JWT signed RS256, exchanged at Google's token
+  address) and keeps until 5 minutes before it expires: one sign-in serves every message for about 55 minutes, made by
+  one send while the others wait for it. The message: the title and text (Android shows them itself while the app is
+  in the background, on the app's "clozest" channel, with the app's small icon) and data `{type, url}` (the screen a
+  tap opens). FCM's 404 `UNREGISTERED`, 403 `SENDER_ID_MISMATCH`, or 400 `INVALID_ARGUMENT` saying the registration
+  token isn't valid (the app was uninstalled, or the token isn't this project's) delete the device; any other
+  `INVALID_ARGUMENT` is about our message itself and never deletes anything; anything else (429, 5xx, no answer, a
+  refused sign-in) is tried again like a Web Push failure. The token is never logged.
+- **Several devices:** a message that reached some devices (a browser) while others failed (the app, Firebase down)
+  is tried again for those only: `notification_jobs.sent_devices` (V89) keeps the ones it reached, so nobody gets it
+  twice. It is SENT once every device has it, or after the last try if any did.
+- **Setting it up:** in the Firebase console (free; Cloud Messaging costs nothing), Project settings → Service accounts
+  → Generate new private key, and put the whole JSON file (or its base64) in Railway's `FIREBASE_SERVICE_ACCOUNT`. A
+  file that can't be read stops the server at startup. Without it, the apps simply can't turn notifications on.
+
+### Paying the subscription in the Play Store app (V90; partner app, the Play Store round)
+
+Google Play lets an app take payment for its own service only through Google Play's billing; in India it may offer its
+own payment (Razorpay) next to it on Google's choice screen (**user choice billing**), and must report each such
+payment to Google, which charges a reduced fee on it. The website is not affected: it opens Razorpay as before, and
+its payments are never reported.
+- **Is it on, and from when?** `GET /shops/me/subscription` now has `inAppProductId` (the Google Play product the app
+  buys; null while `GOOGLE_PLAY_SERVICE_ACCOUNT` or `GOOGLE_PLAY_PRODUCT_ID` isn't set: the app then says paying from
+  the app isn't open yet), `inAppPayFrom` (15 minutes before the free or paid time ends: the app offers paying from
+  then, never earlier) and `googlePlay` (AutoPay runs through Google Play). Google Play has no free trial (one there
+  would repeat the salon's own, once per Google account) and charges at once, so the app's Razorpay checkout does too:
+  the same first payment whichever the owner picks. Before `inAppPayFrom` the app's checkout is 409 `PAY_IN_APP_LATER`;
+  the website still lets an owner set up AutoPay before the end.
+- **Razorpay picked:** the app sends Google's `externalTransactionToken` with the checkout
+  (`POST /shops/me/subscription/checkout {externalTransactionToken}`; 503 `IN_APP_PAYMENTS_OFF` while Google Play
+  isn't set up, 400 `VALIDATION_FAILED` for something that isn't a token: printable, no spaces, 10 to 1000 characters).
+  It is kept with the Razorpay subscription offered (`salon_subscriptions.app_billing_token`,
+  `app_billing_subscription_id`), under the salon's row lock. The app and the website never reuse each other's open
+  checkout: each gets its own subscription (the other one is cancelled), so a website payment is never reported and an
+  app payment always is. Razorpay's webhook then queues, in its own transaction, each charge
+  (`subscription.charged`) in `play_external_transactions` (`PlayReports.recordFromApp`; one row per payment, a replay
+  adds nothing): the first charge is the first transaction (`s-<subscription>`, its amount, the token), each later one
+  `p-<payment>` naming it. Approving AutoPay is not a payment and is not reported. `PlayReports.runOnce` (every minute)
+  claims the due rows (their next try moved in the same statement, so two servers never send one twice) and sends
+  them to Google (`externaltransactions.createexternaltransaction`): the first before the charges naming it; Google's
+  409 counts as done; a refusal that won't change is kept as `REFUSED` and logged as an ERROR (report it by hand in Play
+  Console), and so are the later charges naming a refused first; anything else is tried again after 1, 2, 4 ... minutes
+  (at most an hour apart), with an ERROR once one is 20 hours old (Google wants them within 24). A round stops after 3
+  minutes. The tax address is the salon's state, from its PIN code (`PincodeStates`; the areas that cross a state line
+  are split by the full PIN code).
+- **Google Play picked:** `POST /shops/me/subscription/google-play {purchaseToken}` (owner; the app also sends any
+  purchase on the phone not yet acknowledged when the subscription page opens) asks Google about it
+  (`purchases.subscriptionsv2.get`), checks it is our product, bought for this salon (the app sets the salon's id as
+  `obfuscatedAccountId`), and not a licence tester's (unless `GOOGLE_PLAY_ALLOW_TEST_PURCHASES`), keeps it
+  (`play_purchase_token`, state, end, auto-renewing), marks the salon paid until its end (only time Google has the money
+  for: not a free trial, not Google's grace period after a failed renewal; `play_paid_until` notes what Google Play
+  gave), cancels any Razorpay subscription still live (approved, retrying, or a checkout that could still be approved:
+  it would charge twice), and then acknowledges the purchase (else Google refunds it after 3 days; if Google doesn't
+  take it now the owner sees no error and the recheck tries again within minutes). 400 `PLAY_PURCHASE_INVALID`, 409
+  `PLAY_PURCHASE_TAKEN` (a purchase the salon dropped, or another salon's), 409 `SUBSCRIPTION_NOT_STARTED`. While it
+  renews by itself it counts as AutoPay (no reminders, the website's checkout says 409 `ALREADY_SUBSCRIBED`, and a
+  Razorpay approval arriving meanwhile is cancelled without any message about it). One purchase per salon: a newer paid
+  one that renews and runs later (another Google account), or any paid one once the salon's stops renewing, replaces
+  it, and the older one is dropped (`play_dropped_purchases`) and cancelled at Google; an old cancelled purchase found
+  later never replaces a renewing one and is not acknowledged (Google refunds it).
+- **Google's notifications:** Real-time developer notifications through Pub/Sub push to
+  `POST /api/v1/payments/google-play/notifications?secret=<GOOGLE_PLAY_NOTIFICATION_SECRET>` (403 `BAD_SECRET`
+  otherwise). Each one (a subscription's news, or a voided purchase) makes us ask Google again about that purchase (a
+  forged one can only make us read Google's own truth); a purchase the app never confirmed is found through the salon
+  id it carries; a refund or revoke takes back the paid time Google Play gave (unless something paid for later since);
+  a dropped purchase is never attached again. An older answer from Google never overwrites a newer one
+  (`play_checked_at`). `PlaySubscriptions.recheck` (every 5 minutes, one server) asks again about purchases not yet
+  acknowledged (after 5 minutes) and those near or past their end (after 6 hours), least recently asked first, and
+  cancels dropped purchases at Google until that is done.
+- **Closing or handing over a salon** drops its Google Play purchase: it stops renewing (`purchases.subscriptions.cancel`
+  right after the commit, then by the recheck until Google takes it), and Google's later notices never bring it back.
+- **Setting it up** (Railway): `GOOGLE_PLAY_SERVICE_ACCOUNT` (a Google Cloud service account's key file, JSON or its
+  base64, invited in Play Console › Users and permissions with "View financial data" and "Manage orders and
+  subscriptions"), `GOOGLE_PLAY_PRODUCT_ID` (the subscription product, with a ₹500 monthly base plan and **no**
+  free-trial offer), `GOOGLE_PLAY_NOTIFICATION_SECRET` (a long random string, also in the Pub/Sub push address), and
+  `GOOGLE_PLAY_PACKAGE_NAME` if not `com.clozest.partner`. `GOOGLE_PLAY_ALLOW_TEST_PURCHASES=true` only while testing
+  with licence testers (their purchases are free and renew every few minutes). In Play Console: enrol the app in
+  alternative billing for India (user choice billing).
+- **Not covered:** a refund given in Razorpay's dashboard for an in-app payment must be reported to Google by hand
+  (the subscription's policy is no refunds); a Google Play refund given in Play Console without revoking the purchase
+  leaves the paid time (revoke it, and the time goes back).
+
 ### Salon search (V85; customer app 0.27.0)
 
 `GET /salons?lat&lng[&afterDistance&afterId]&q=` (`BookingController` → `BookingService.salonsNear` → `SalonSearch` →
@@ -2564,8 +2665,9 @@ free-time check (see "Built for scale"); booking one is still refused 409 `OVERL
 so tapping twice can't pass these limits.
 
 **Messages:** written to `notification_jobs` in the same transaction as the change; a job every 2 s sends what is
-due (in batches, in parallel; see "Built for scale") as Web Push to each of the person's devices (`POST /me/push-subscriptions`, the key from
-`GET /push/public-key`), retrying after 1, 5 and 15 minutes. Confirmation now; reminder 60 minutes before (only for
+due (in batches, in parallel; see "Built for scale") to each of the person's devices: Web Push to browsers
+(`POST /me/push-subscriptions`, the key from `GET /push/public-key`) and FCM to the Android apps
+(`POST /me/push-devices`, see "The Android apps' notifications"), retrying after 1, 5 and 15 minutes. Confirmation now; reminder 60 minutes before (only for
 bookings made more than 75 minutes ahead) with the address, map link, start code and "held until"; rescheduled;
 cancelled. Moving or cancelling a booking cancels its pending messages. The salon is told too: when a customer
 books, moves or cancels online (or deletes their account), the owner, the helpers (in the app only, never SMS) and the
@@ -2730,6 +2832,12 @@ Repo, package (`in.apnidukan`), env var, database, Redis key and API path names 
 - **Web Push keys:** run `npx web-push generate-vapid-keys` once and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (and
   `VAPID_SUBJECT`, e.g. `mailto:` your support address) on Railway. The real server refuses to start without them.
   Keep the pair: a new one silences every saved device until it subscribes again.
+- **Google Play (paying in the Play Store app):** see "Paying the subscription in the Play Store app" for
+  `GOOGLE_PLAY_SERVICE_ACCOUNT`, `GOOGLE_PLAY_PRODUCT_ID` and `GOOGLE_PLAY_NOTIFICATION_SECRET`. Optional: without them
+  the app says paying from the app isn't open yet (the website is unaffected).
+- **Firebase (the Android apps' notifications):** set `FIREBASE_SERVICE_ACCOUNT` to the Firebase project's
+  service-account key file (Project settings → Service accounts → Generate new private key). Optional: without it the
+  website is unaffected and the apps can't turn notifications on.
 
 ## Uploads: limits and photos
 

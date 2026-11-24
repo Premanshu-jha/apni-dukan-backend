@@ -101,10 +101,17 @@ public class SubscriptionService implements SmartInitializingSingleton {
      * @param canPay        the caller is the owner and payments are set up
      * @param paymentsReady Razorpay's keys and plan are set (else the Pay button says "not available yet")
      * @param testMode      Razorpay test keys: nothing real is charged
+     * @param inAppProductId the Play Store app may take the payment itself (user choice billing: Google's choice
+     *                       screen, then Razorpay or Google Play), buying this Google Play product; null while Google
+     *                       Play isn't set up on the server (the app then shows the subscription without paying)
+     * @param googlePlay    AutoPay runs through Google Play (bought in the app): changed or stopped in the Play Store
+     * @param inAppPayFrom  from when the Play Store app offers paying (the free or paid time is then over: Google Play,
+     *                      and Razorpay from the app, charge at once); null when the app can't take payments
      */
     public record View(String state, Instant trialEndsAt, Instant paidUntil, Instant accessUntil, Instant hiddenFrom,
                        String razorpayStatus, int pricePerMonth, boolean enforced, boolean canPay,
-                       boolean paymentsReady, boolean testMode, boolean autoPayFailed, boolean testSalon) {
+                       boolean paymentsReady, boolean testMode, boolean autoPayFailed, boolean testSalon,
+                       String inAppProductId, boolean googlePlay, Instant inAppPayFrom) {
     }
 
     /** The owner's details, filled in on Razorpay's checkout. */
@@ -121,6 +128,8 @@ public class SubscriptionService implements SmartInitializingSingleton {
     private final java.util.List<RazorpayEvents> otherEvents;
     private final ShopMemberRepository members;
     private final RazorpayGateway razorpay;
+    private final GooglePlay googlePlay;
+    private final PlayReports reports;
     private final Notifications notifications;
     private final TransactionTemplate transactions;
     /** Its own transaction always: also usable right after another committed (afterCommit), where REQUIRED isn't. */
@@ -130,7 +139,8 @@ public class SubscriptionService implements SmartInitializingSingleton {
     private final String logoUrl;
 
     public SubscriptionService(SubscriptionStore store, ShopMemberRepository members, RazorpayGateway razorpay,
-                               Notifications notifications, PlatformTransactionManager transactions, Clock clock,
+                               GooglePlay googlePlay, PlayReports reports, Notifications notifications,
+                               PlatformTransactionManager transactions, Clock clock,
                                @Value("${app.subscriptions.enforce:false}") boolean enforced,
                                @Value("${app.subscriptions.logo-url:https://partner.clozest.in/icon-512.png}")
                                String logoUrl, java.util.List<RazorpayEvents> otherEvents) {
@@ -138,6 +148,8 @@ public class SubscriptionService implements SmartInitializingSingleton {
         this.store = store;
         this.members = members;
         this.razorpay = razorpay;
+        this.googlePlay = googlePlay;
+        this.reports = reports;
         this.notifications = notifications;
         this.transactions = new TransactionTemplate(transactions);
         this.ownTransaction = new TransactionTemplate(transactions);
@@ -200,20 +212,49 @@ public class SubscriptionService implements SmartInitializingSingleton {
      * or the owner coming back within the hour, gets the same one. Any other one still live at Razorpay (not approved
      * for an hour, a failed AutoPay being retried, an overdue one) is cancelled there first, so a salon is never
      * charged twice. Razorpay is asked outside any database transaction (the row only marks "asking" meanwhile).
+     *
+     * @param appBillingToken from the Play Store app after the owner picked Razorpay on Google's choice screen (user
+     *                        choice billing): Google's externalTransactionToken, kept with the subscription offered,
+     *                        so its payments are reported to Google. Null from the website (and the subscription
+     *                        offered then is the website's: none of its payments are reported).
      */
-    public Checkout checkout(UUID userId) {
+    public Checkout checkout(UUID userId, String appBillingToken) {
         ShopMember owner = owner(userId);
         UUID shopId = owner.getShopId();
         String keyId = razorpay.keyId();   // 503 SUBSCRIPTIONS_OFF before anything else
+        if (appBillingToken != null && !googlePlay.configured()) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "IN_APP_PAYMENTS_OFF",
+                    "Paying in the app isn't available yet.");
+        }
+        if (appBillingToken != null && !GooglePlay.externalToken(appBillingToken)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Some fields are not valid",
+                    Map.of("externalTransactionToken", "is not Google's token"));
+        }
         Instant now = now();
-        Row row = transactions.execute(s -> {
+        Picked picked = transactions.execute(s -> {
             Row r = store.lock(shopId).orElseThrow(SubscriptionService::notStarted);
             if (r.autoPayOn(now)) {
                 throw new ApiException(HttpStatus.CONFLICT, "ALREADY_SUBSCRIBED",
                         "AutoPay is already on for your salon. Nothing more to do.");
             }
-            if (reusable(r, now)) {
-                return r;
+            // Google Play renews the salon's subscription: nothing to pay here (a second subscription would charge
+            // twice)
+            if (r.playExpiresAt() != null && r.playExpiresAt().isAfter(now) && r.playAutoRenewing()) {
+                throw new ApiException(HttpStatus.CONFLICT, "ALREADY_SUBSCRIBED",
+                        "AutoPay is already on for your salon. Nothing more to do.");
+            }
+            boolean fromApp = appBillingToken != null;
+            // The Play Store app offers paying only once the free or paid time is over (Google Play charges at once,
+            // so a Razorpay payment from the app does too: the same first payment whichever the owner picks)
+            if (fromApp && firstCharge(r, now) != null) {
+                throw new ApiException(HttpStatus.CONFLICT, "PAY_IN_APP_LATER",
+                        "You can pay here from " + day(r.accessUntil().minus(MIN_START_AHEAD)) + ".");
+            }
+            if (reusable(r, now) && store.openedInApp(shopId, r.subscriptionId()) == fromApp) {
+                if (fromApp) {
+                    store.saveAppBillingToken(shopId, r.subscriptionId(), appBillingToken, now);
+                }
+                return new Picked(r, true);
             }
             if (r.creatingSince() != null && r.creatingSince().isAfter(now.minus(CREATING_FOR))) {
                 throw new ApiException(HttpStatus.CONFLICT, "PAYMENT_STARTING",
@@ -223,12 +264,13 @@ public class SubscriptionService implements SmartInitializingSingleton {
                 store.wantCancelled(r.subscriptionId(), shopId, now);
             }
             store.markCreating(shopId, now);
-            return r;
+            return new Picked(r, false);
         });
+        Row row = picked.row();
         Instant firstCharge = firstCharge(row, now);
         String subscriptionId;
-        if (reusable(row, now)) {
-            subscriptionId = row.subscriptionId();
+        if (picked.reuse()) {
+            subscriptionId = row.subscriptionId();   // the same one again (the token, for the app's, saved above)
         } else {
             RazorpayGateway.Created created;
             try {
@@ -244,6 +286,10 @@ public class SubscriptionService implements SmartInitializingSingleton {
             Boolean saved = transactions.execute(s -> {
                 store.lock(shopId);
                 if (store.saveCreated(shopId, created.id(), status, now, row.paidUntil(), now())) {
+                    // Whose it is: the app's (its payments are reported to Google) or the website's
+                    if (appBillingToken != null) {
+                        store.saveAppBillingToken(shopId, created.id(), appBillingToken, now);
+                    }
                     return true;
                 }
                 // Something changed meanwhile (a payment arrived, a later tap, the salon closed or changed owner): the
@@ -346,6 +392,19 @@ public class SubscriptionService implements SmartInitializingSingleton {
             }
             Row row = found.get();
             boolean kept = STATUSES.contains(status) && store.saveStatus(row.shopId(), status, at, now);
+            // Opened from the Play Store app after Razorpay was picked on Google's choice screen: every charge is
+            // reported to Google (queued here, in this transaction; sent by PlayReports)
+            if ("subscription.charged".equals(event)) {
+                JsonNode payment = root.path("payload").path("payment").path("entity");
+                reports.recordFromApp(row.shopId(), subscriptionId, payment.path("id").asString(""),
+                        payment.path("amount").asLong(PRICE_RUPEES * 100L), at, now);
+            }
+            // Google Play renews the salon's subscription already: a Razorpay one approved meanwhile (a checkout left
+            // open in another tab, say) would charge twice, so it is cancelled, and nothing is said about it
+            boolean play = row.playRenewing(now);
+            if (play && kept && ("subscription.authenticated".equals(event) || "subscription.activated".equals(event))) {
+                cancelAfterCommit(subscriptionId, row.shopId(), now);
+            }
             switch (event) {
                 case "subscription.charged" -> {
                     if (currentEnd > 0) {
@@ -353,7 +412,7 @@ public class SubscriptionService implements SmartInitializingSingleton {
                     }
                 }
                 case "subscription.authenticated" -> {
-                    if (kept) {
+                    if (kept && !play) {
                         tell(row.shopId(), "SUBSCRIPTION_AUTOPAY", "AutoPay is on",
                                 "₹" + PRICE_RUPEES + " will be paid each month by itself. You can stop it any time "
                                         + "in your UPI app.", now,
@@ -361,7 +420,7 @@ public class SubscriptionService implements SmartInitializingSingleton {
                     }
                 }
                 case "subscription.pending" -> {
-                    if (kept) {
+                    if (kept && !play) {
                         tell(row.shopId(), "SUBSCRIPTION_FAILED", "Payment didn't go through",
                                 "This month's ₹" + PRICE_RUPEES + " AutoPay failed. It will be tried again; check "
                                         + "your UPI app or bank has money and the AutoPay is on.", now,
@@ -369,7 +428,7 @@ public class SubscriptionService implements SmartInitializingSingleton {
                     }
                 }
                 case "subscription.halted", "subscription.cancelled" -> {
-                    if (kept) {
+                    if (kept && !play) {
                         Row after = store.find(row.shopId()).orElseThrow();
                         tell(row.shopId(), "SUBSCRIPTION_STOPPED", "AutoPay stopped",
                                 "AutoPay for your salon has stopped. It stays on until " + day(after.accessUntil())
@@ -387,13 +446,36 @@ public class SubscriptionService implements SmartInitializingSingleton {
     }
 
     /** A charge moved paid-until (never back): the owner is told, once (a replayed webhook changes nothing). */
-    private void paid(Row row, Instant paidUntil, Instant now) {
+    void paid(Row row, Instant paidUntil, Instant now) {
         if (store.paid(row, paidUntil, now)) {
-            tell(row.shopId(), "SUBSCRIPTION_PAID", "Payment received",
-                    "₹" + PRICE_RUPEES + " received for your salon. Paid up to " + day(paidUntil)
-                            + ". Customers can find and book it.", now,
-                    Notifications.Text.of("SUBSCRIPTION_PAID", Map.of("price", PRICE_RUPEES,
-                            "day", dayValue(paidUntil))));
+            tellPaid(row, paidUntil, now);
+        }
+    }
+
+    /** "₹500 received… Paid up to …" to the owner. */
+    private void tellPaid(Row row, Instant paidUntil, Instant now) {
+        tell(row.shopId(), "SUBSCRIPTION_PAID", "Payment received",
+                "₹" + PRICE_RUPEES + " received for your salon. Paid up to " + day(paidUntil)
+                        + ". Customers can find and book it.", now,
+                Notifications.Text.of("SUBSCRIPTION_PAID", Map.of("price", PRICE_RUPEES,
+                        "day", dayValue(paidUntil))));
+    }
+
+    /** Google Play paid the salon up to {@code paidUntil}: as {@link #paid}, noted as Google Play's (the row locked). */
+    void paidByPlay(Row row, Instant paidUntil, Instant now) {
+        if (store.paidByPlay(row, paidUntil, now)) {
+            tellPaid(row, paidUntil, now);
+        }
+    }
+
+    /**
+     * The salon's Google Play subscription renews by itself (the row locked): its Razorpay subscription, if still
+     * live at Razorpay (set up, being retried, or a checkout that could still be approved), is cancelled after the
+     * commit, so the salon is never charged twice.
+     */
+    void stopRazorpayForPlay(Row row, Instant now) {
+        if (live(row)) {
+            cancelAfterCommit(row.subscriptionId(), row.shopId(), now);
         }
     }
 
@@ -415,8 +497,18 @@ public class SubscriptionService implements SmartInitializingSingleton {
     public boolean stopAutoPay(UUID shopId) {
         Instant now = now();
         Optional<Row> row = store.lock(shopId);
-        if (row.isEmpty() || row.get().subscriptionId() == null) {
+        if (row.isEmpty()) {
             return false;
+        }
+        // Bought through Google Play in the app: it stops renewing (asked right after the commit)
+        boolean play = row.get().playRenewing(now);
+        String token = row.get().playToken();
+        if (token != null) {
+            store.dropPlay(shopId, token, now);
+            cancelPlayAfterCommit(token);
+        }
+        if (row.get().subscriptionId() == null) {
+            return play;
         }
         String subscriptionId = row.get().subscriptionId();
         boolean live = live(row.get());
@@ -424,14 +516,29 @@ public class SubscriptionService implements SmartInitializingSingleton {
             cancelAfterCommit(subscriptionId, shopId, now);
         }
         store.forgetSubscription(shopId, now);
-        return live && row.get().autoPaySetUp();
+        return live && row.get().autoPaySetUp() || play;
+    }
+
+    /**
+     * Right after the commit, Google Play is asked to stop the dropped purchase renewing; if Google doesn't answer,
+     * PlaySubscriptions.recheck tries again until it is done (play_dropped_purchases).
+     */
+    private void cancelPlayAfterCommit(String purchaseToken) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                if (googlePlay.cancel(purchaseToken)) {
+                    ownTransaction.executeWithoutResult(s -> store.dropCancelled(purchaseToken));
+                }
+            }
+        });
     }
 
     /**
      * Queues a Razorpay subscription for cancelling (razorpay_cancellations, in the current transaction) and tries it
      * right after the commit; SubscriptionNoticeJob tries again until Razorpay confirms.
      */
-    private void cancelAfterCommit(String subscriptionId, UUID shopId, Instant now) {
+    void cancelAfterCommit(String subscriptionId, UUID shopId, Instant now) {
         store.wantCancelled(subscriptionId, shopId, now);
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
@@ -475,7 +582,8 @@ public class SubscriptionService implements SmartInitializingSingleton {
 
     private static View withTestSalon(View v, boolean test) {
         return new View(v.state(), v.trialEndsAt(), v.paidUntil(), v.accessUntil(), v.hiddenFrom(), v.razorpayStatus(),
-                v.pricePerMonth(), v.enforced(), v.canPay(), v.paymentsReady(), v.testMode(), v.autoPayFailed(), test);
+                v.pricePerMonth(), v.enforced(), v.canPay(), v.paymentsReady(), v.testMode(), v.autoPayFailed(), test,
+                v.inAppProductId(), v.googlePlay(), v.inAppPayFrom());
     }
 
     /**
@@ -501,9 +609,10 @@ public class SubscriptionService implements SmartInitializingSingleton {
     View view(Row row, boolean owner, Instant now) {
         boolean ready = razorpay.configured();
         boolean test = ready && razorpay.testMode();
+        String inApp = googlePlay.configured() ? googlePlay.productId() : null;
         if (row == null) {
             return new View("NONE", null, null, null, null, null, PRICE_RUPEES, enforced, false, ready, test, false,
-                    false);
+                    false, inApp, false, null);
         }
         String state;
         boolean autoPay = row.autoPayOn(now);
@@ -518,7 +627,12 @@ public class SubscriptionService implements SmartInitializingSingleton {
         }
         return new View(state, row.trialEndsAt(), row.paidUntil(), row.accessUntil(), row.bookableUntil(),
                 row.razorpayStatus(), PRICE_RUPEES, enforced, owner && ready && !autoPay, ready, test,
-                row.autoPayFailed(now), false);
+                row.autoPayFailed(now), false, inApp, row.playRenewing(now),
+                inApp == null ? null : row.accessUntil().minus(MIN_START_AHEAD));
+    }
+
+    /** The salon's row as checkout found it (locked), and whether its open checkout is offered again. */
+    private record Picked(Row row, boolean reuse) {
     }
 
     /** The first charge: the trial's or paid month's end, or null (at once) when that is (nearly) here. */
@@ -563,7 +677,7 @@ public class SubscriptionService implements SmartInitializingSingleton {
                 "You haven't registered a shop yet."));
     }
 
-    private ShopMember owner(UUID userId) {
+    ShopMember owner(UUID userId) {
         ShopMember member = membership(userId);
         if (member.getRole() != ShopRole.OWNER) {
             throw new ApiException(HttpStatus.FORBIDDEN, "OWNER_ONLY", "Only the salon owner can pay.");

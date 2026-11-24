@@ -1,6 +1,7 @@
 package in.apnidukan.notifications.api;
 
 import in.apnidukan.common.context.CurrentUserProvider;
+import in.apnidukan.notifications.service.AppDevices;
 import in.apnidukan.notifications.service.NotificationService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -14,22 +15,44 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
-/** Notifications on this device (Web Push). */
+/** Notifications on this device: a browser (Web Push) or the Android app (Firebase Cloud Messaging). */
 @RestController
 public class PushController {
 
     private final NotificationService notifications;
+    private final AppDevices apps;
     private final CurrentUserProvider currentUser;
 
-    public PushController(NotificationService notifications, CurrentUserProvider currentUser) {
+    public PushController(NotificationService notifications, AppDevices apps, CurrentUserProvider currentUser) {
         this.notifications = notifications;
+        this.apps = apps;
         this.currentUser = currentUser;
     }
 
-    /** The key to pass to the browser's pushManager.subscribe (applicationServerKey). Empty if not set up. */
+    /**
+     * The key to pass to the browser's pushManager.subscribe (applicationServerKey), empty if Web Push isn't set up;
+     * and whether the Android app can turn notifications on (appPush: Firebase is set up).
+     */
     @GetMapping("/api/v1/push/public-key")
     public PublicKey publicKey() {
-        return new PublicKey(notifications.publicKey());
+        return new PublicKey(notifications.publicKey(), apps.available());
+    }
+
+    /**
+     * Save this Android app after the person allowed notifications: its FCM registration token. 204. 409
+     * APP_PUSH_OFF while Firebase isn't set up on the server.
+     */
+    @PostMapping("/api/v1/me/push-devices")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void registerApp(@Valid @RequestBody AppDevice body) {
+        apps.register(currentUser.get().userId(), body.token());
+    }
+
+    /** Stop notifications to this app (sign-out). 204, also if it wasn't saved. */
+    @DeleteMapping("/api/v1/me/push-devices")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void unregisterApp(@Valid @RequestBody AppDevice body) {
+        apps.unregister(currentUser.get().userId(), body.token());
     }
 
     /** Save this device after the person allowed notifications: the browser's PushSubscription as JSON. 204. */
@@ -47,7 +70,15 @@ public class PushController {
         notifications.unsubscribe(currentUser.get().userId(), body.endpoint());
     }
 
-    public record PublicKey(String publicKey) {
+    /**
+     * @param publicKey empty while Web Push isn't set up
+     * @param appPush   whether the Android app can turn notifications on
+     */
+    public record PublicKey(String publicKey, boolean appPush) {
+    }
+
+    /** The Android app's FCM registration token. */
+    public record AppDevice(@NotBlank @Size(max = 1000) String token) {
     }
 
     /**
