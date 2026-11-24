@@ -529,6 +529,54 @@ class MigrationUpgradeIntegrationTest {
         }
     }
 
+    @Test
+    void theTeamsLoggedChangesStayAndBothAppsStartWithNoUpdateRules() {
+        String name = "upgrade_" + UUID.randomUUID().toString().replace("-", "");
+        JdbcTemplate admin = new JdbcTemplate(new DriverManagerDataSource(TestContainers.jdbcUrl(),
+                TestContainers.DB_USER, TestContainers.DB_PASSWORD));
+        admin.execute("CREATE DATABASE " + name);
+        String url = TestContainers.jdbcUrl().replaceAll("/[^/]+$", "/" + name);
+        DriverManagerDataSource ds = new DriverManagerDataSource(url, TestContainers.DB_USER,
+                TestContainers.DB_PASSWORD);
+        try {
+            flyway(ds, MigrationVersion.fromVersion("91")).migrate();
+            JdbcTemplate jdbc = new JdbcTemplate(ds);
+            UUID boss = UUID.randomUUID();
+            jdbc.update("INSERT INTO users (id, phone, name, admin, created_at, updated_at) VALUES (?, '9000000001', "
+                    + "'Prem', true, now(), now())", boss);
+            for (String event : new String[] {"ADMIN_ADDED", "ADMIN_EDITED", "TEST_EMAIL_ADDED", "TEST_MODE_OFF"}) {
+                jdbc.update("INSERT INTO admin_events (id, at, by_user, event) VALUES (?, now(), ?, ?)",
+                        UUID.randomUUID(), boss, event);
+            }
+
+            flyway(ds, MigrationVersion.LATEST).migrate();
+
+            // Every logged change is still there; the App releases page's changes are logged too, nothing else is
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM admin_events", Integer.class)).isEqualTo(4);
+            jdbc.update("INSERT INTO admin_events (id, at, by_user, event) VALUES (?, now(), ?, 'APP_RELEASE_PULLED')",
+                    UUID.randomUUID(), boss);
+            assertThatThrownBy(() -> jdbc.update("INSERT INTO admin_events (id, at, by_user, event) VALUES (?, now(), "
+                    + "?, 'SOMETHING_ELSE')", UUID.randomUUID(), boss)).hasMessageContaining("admin_events_event_check");
+            // Both apps, nobody made to update, no version approved yet (no Play Store phone gets screen updates)
+            assertThat(jdbc.queryForList("SELECT app || ' ' || coalesce(min_version_code, 0) || ' ' "
+                    + "|| coalesce(store_version_code, 0) FROM app_update_settings ORDER BY app", String.class))
+                    .containsExactly("customer 0 0", "partner 0 0");
+            // A build once per app; another app may have the same number
+            jdbc.update("INSERT INTO app_releases (id, app, build, native_level, version_name, commit_sha, size_bytes, "
+                    + "checksum, session_key, storage_key, status, created_at) VALUES (?, 'partner', 5, 1, '1', 'abc1234', "
+                    + "10, 'c', 's', 'k1', 'LIVE', now())", UUID.randomUUID());
+            jdbc.update("INSERT INTO app_releases (id, app, build, native_level, version_name, commit_sha, size_bytes, "
+                    + "checksum, session_key, storage_key, status, created_at) VALUES (?, 'customer', 5, 1, '1', "
+                    + "'abc1234', 10, 'c', 's', 'k2', 'LIVE', now())", UUID.randomUUID());
+            assertThatThrownBy(() -> jdbc.update("INSERT INTO app_releases (id, app, build, native_level, version_name, "
+                    + "commit_sha, size_bytes, checksum, session_key, storage_key, status, created_at) VALUES (?, "
+                    + "'partner', 5, 1, '1', 'abc1234', 10, 'c', 's', 'k3', 'LIVE', now())", UUID.randomUUID()))
+                    .hasMessageContaining("app_releases_app_build_key");
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)");
+        }
+    }
+
     /** As the app runs Flyway (application.properties): mixed files, no transactional lock, no statement limit. */
     private static Flyway flyway(DriverManagerDataSource ds, MigrationVersion target) {
         return Flyway.configure().dataSource(ds).locations("classpath:db/migration").target(target).mixed(true)
