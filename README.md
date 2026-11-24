@@ -1582,6 +1582,61 @@ The customer picks services and a time; the backend picks the barber. Another pe
 On the salon's screens a booking shows the customer's name and, for the owner and helpers only (never barbers),
 `customerPhone`, to call someone who is running late.
 
+### App updates: screen updates and the update rules for the Play Store apps (V92; partner and customer apps, admin app)
+
+The Play Store apps carry the website built for the app inside them, so a fix to their screens would normally need a
+new Play Store release and Google's review. Instead, after every merge to `main` in the partner or customer repo, CI
+sends the screens it built to this backend as a **screen update** (a "live update"), and phones switch to it the next
+time the app is opened. Only the web part changes this way (Google Play allows that for code running in a web view);
+native code still goes through the Play Store. Code: the `appupdates` module (`AppUpdates`, `AppReleases`,
+`ReleaseStore`), storage through `AppBundleFiles` (files module, `AppBundleFileService`).
+- **Sending (CI):** `POST /api/v1/app-releases/{partner|customer}` with header `X-Release-Token` (the app's own token:
+  `APP_RELEASE_TOKEN_PARTNER` / `APP_RELEASE_TOKEN_CUSTOMER` on Railway, the same value as the repo's
+  `APP_RELEASE_TOKEN` secret on GitHub; at least 32 characters, else that app's releases are off: 503
+  `RELEASES_OFF`) and `{build, nativeLevel, versionName, commitSha, sizeBytes, checksum, sessionKey}` → `{build,
+  uploadUrl}`, a link (signed for that size and type, good for 15 minutes) to PUT the zip straight into storage (`app-releases/<app>/…`; the bytes
+  never pass through the backend). Then `POST …/{build}/publish` checks storage has exactly `sizeBytes` and makes it
+  `LIVE`. Both may be repeated (a retried CI step): a start of a build still `UPLOADING` takes the new details, a
+  publish of a `LIVE` build changes nothing. A retried start gets a new storage key, and publish makes the build live
+  only if the row still names the zip it checked: an earlier attempt's zip (signed with another session key) is never
+  published with a later attempt's checksum (409 `UPLOAD_MISSING`: send this attempt's zip). Storage not answering:
+  503 `SERVICE_BUSY` (CI tries again). A build already published is never replaced (409 `RELEASE_EXISTS`); a
+  pulled-back one isn't put back by CI (409 `RELEASE_PULLED`); 409 `UPLOAD_MISSING` when storage doesn't have the
+  whole zip; 401 `BAD_RELEASE_TOKEN`; 400 `VALIDATION_FAILED` naming the field. Two runs starting the same build at
+  once make one row (one `INSERT … ON CONFLICT`).
+- **Signed:** CI signs the zip with the app's private key (Capgo's encryption v2, offline; secret `CAPGO_PRIVATE_KEY`
+  on GitHub). The `checksum` and `sessionKey` it sends are made with that key; the app checks both with the public key
+  it was built with and refuses anything else. The backend never has the private key and never changes a bundle.
+- **Which screens a phone gets:** every app asks on every start, signed in or not: `GET
+  /api/v1/app-updates/{app}?nativeLevel=&versionCode=&debug=` → `{bundle: {build, url, checksum, sessionKey} | null,
+  updateRequired}`. `bundle` is the newest `LIVE` release newer than the screens the app came with (`build >
+  versionCode`: the APK and the bundle of the same CI run share the number) that needs no newer native part than the
+  app has (`native_level <= nativeLevel`); `null` means "use your own screens". So pulling a release back sends its
+  phones to the newest `LIVE` one before it, or back to their own screens. The link is signed for the start of the
+  hour, valid for two (the same for every phone in that hour). Answered from memory: each copy of the backend keeps the
+  20 newest `LIVE` releases of each native level and the settings of both apps (so an older app always finds the
+  newest release it can run), read when the copy starts, every 30 seconds and at once after a change on that copy
+  (one read at a time, so an older read never replaces a newer one): no database read per phone. Until the first read
+  has worked (the database down at start), every phone is told `bundle: null, updateRequired: false`. Wrong numbers:
+  400 (`VALIDATION_FAILED`, or `BAD_REQUEST` for a missing or non-numeric one).
+- **Google's review:** a Play Store app (`debug=false`) newer than `store_version_code` (the version Google has
+  approved, set on the admin website), or any Play Store app while none is set, gets `bundle: null`: a reviewer sees
+  exactly what was submitted. Test APKs (`debug=true`) always get the newest, so releases can be tried before the app
+  is on the Play Store.
+- **Must update:** `updateRequired` is true for a Play Store app older than `min_version_code`; the app then shows
+  only "Please update to continue" (Google Play's update). Never for a test APK.
+- **The super admin (admin website, App releases):** `GET /api/v1/admin/app-releases/{app}?before=` (20 a page,
+  newest first, with the settings), `POST …/{build}/pull-back` (`LIVE` → `PULLED`, 409 `RELEASE_NOT_LIVE`), `POST
+  …/{build}/restore` (`PULLED` → `LIVE`, 409 `RELEASE_NOT_PULLED`), `PUT …/settings {minVersionCode,
+  storeVersionCode, version}` (409 `SETTINGS_CHANGED` if another super admin saved since `version`; 400
+  `MIN_ABOVE_STORE`: the oldest allowed version can't be above the approved one, or phones would be told to update to
+  a version Google doesn't have). Each change is logged in `admin_events` (`APP_RELEASE_PULLED`,
+  `APP_RELEASE_RESTORED`, `APP_SETTINGS_CHANGED`). Anyone else on the team: 403 `SUPER_ADMIN_ONLY`. The page never sees
+  the storage key, checksum or session key.
+- **Kept:** bundles stay in storage (about 1 MB each), so any release can be put back.
+- **Setting it up:** see "App updates" in the partner and customer READMEs (one signing key pair per app, the release
+  token on both sides).
+
 ### The Android apps' notifications (V89, V91; the partner and customer apps' Play Store round)
 
 The partner and customer apps are also published on the Play Store (the same code inside an Android app, see their
