@@ -29,7 +29,7 @@ public final class TestData {
                 + "changed_at = NULL, changed_by = NULL");
         jdbc.update("UPDATE app_update_settings SET min_version_code = NULL, store_version_code = NULL, version = 0, "
                 + "changed_at = NULL, changed_by = NULL");
-        for (String table : new String[] {"kirana_khata_entries", "kirana_stock_moves", "kirana_unknown_scans", "kirana_purchase_scans", "kirana_purchase_lines",
+        for (String table : new String[] {"lead_events", "leads", "mapbox_usage", "kirana_khata_entries", "kirana_stock_moves", "kirana_unknown_scans", "kirana_purchase_scans", "kirana_purchase_lines",
                 "kirana_wordings", "kirana_purchases", "kirana_list_lines", "kirana_gs1_lookups", "kirana_reads", "kirana_shop_ai_calls", "kirana_scan_batches",
                 "kirana_scan_stats", "kirana_barcode_votes", "kirana_catalogue_reviews", "kirana_razorpay_events", "kirana_payout_accounts",
                 "kirana_earnings", "kirana_payouts", "kirana_refunds", "kirana_order_lines", "kirana_order_parts",
