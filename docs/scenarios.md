@@ -284,3 +284,46 @@ the app charges at once too. The website is unchanged: an owner can still set up
 | 9.26 | A PIN code's state | Telangana, Delhi, Maharashtra, Goa, Puducherry…; areas crossing a state line by the full PIN (Moradabad/Kashipur, Saharanpur/Roorkee, Pilibhit/Khatima, Chandigarh/Mohali/Manimajra, Valsad/Daman, Diu; Puducherry's Karaikal, Mahe and Yanam); an unused range: none (ERROR, reported by hand) | PS | OK-tested |
 | 9.27 | Many salons at once | Reports in batches of 50 per minute, claimed per row; Google asked outside transactions; one access token shared; each webhook finds the app's subscription by an index | PlayReports, GoogleServiceAccount (by reading); IA `twoServersRunningTheReports…` | OK-tested / OK-untested |
 | 9.28 | A Razorpay refund of an in-app payment | Not reported (no refunds by policy) | — | N/A-v1 |
+
+## 10. App updates: screen releases and the update rules (V92)
+
+Tests: `AR` = `AppReleasesIntegrationTest`, `MU` = `MigrationUpgradeIntegrationTest`.
+
+| # | Scenario | API answer | Screen | Test | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 10.1 | CI sends a release: start, PUT the zip, publish | 200 `{build, uploadUrl}`; storage has the exact bytes; publish → `LIVE`; the link a phone gets downloads them | Admin: "Live", "Phones get this one" | AR `ciSendsAReleaseAndItGoesLive` | OK-tested |
+| 10.2 | Publish before the zip is in storage (CI stopped, PUT failed) | 409 `UPLOAD_MISSING`; stays `UPLOADING` | Admin: "Not finished" | AR same; admin e2e | OK-tested |
+| 10.3 | A retried CI step: publish again, or start again before publishing | Publish: 200, nothing changes. Start: 200, the new details, one row | — | AR `ciSendsAReleaseAndItGoesLive`, `aRetriedStartBeforePublishing…` | OK-tested |
+| 10.4 | The same build started after it was published | 409 `RELEASE_EXISTS`; never replaced | — | AR `ciSendsAReleaseAndItGoesLive` | OK-tested |
+| 10.5 | No token, a wrong token, another app's name | 401 `BAD_RELEASE_TOKEN`; 404 | — | AR `ciNeedsTheAppsOwnToken…` | OK-tested |
+| 10.6 | The app's token isn't set on Railway, or is shorter than 32 characters | 503 `RELEASES_OFF` (CI's step fails, nothing stored); a short one (not an empty one) is also logged at startup | — | AR same (customer's short token); the log line by reading | OK-tested |
+| 10.7 | Wrong details (build 0, level 0, a version with spaces, a commit that isn't hex, over 50 MB, a short checksum, a session key without `:`) | 400 `VALIDATION_FAILED` naming the field; nothing written | — | AR same | OK-tested |
+| 10.8 | Many at once: 8 runs start the same build, then 8 publish it | Every one 200, one row, `LIVE` | — | AR `twoRunsSendingTheSameBuildAtOnceMakeOneRelease` | OK-tested |
+| 10.9 | A phone asks: the newest live release its native part can run | Level 1 skips a level-2 release and gets the one before; level 2 gets the level-2 one | App downloads it, switches at the next start | AR `phonesGetTheNewestReleaseTheirAppCanRun` | OK-tested |
+| 10.10 | The app came with screens as new as (or newer than) every live release | `bundle: null` (its own) | Nothing changes | AR same | OK-tested |
+| 10.11 | The other app's releases | Never offered | — | AR same | OK-tested |
+| 10.12 | A Play Store app while no version is marked approved | `bundle: null` | — | AR same | OK-tested |
+| 10.13 | A Play Store app newer than the approved version (in Google's review) | `bundle: null`: the reviewer sees what was submitted | — | AR same | OK-tested |
+| 10.14 | A test APK (debug) | Always the newest it can run; never `updateRequired` | — | AR same; `anAppOlderThan…` | OK-tested |
+| 10.15 | The super admin pulls back the newest release | 200 `PULLED`; phones get the live one before it (or `null`) at once from this copy (other copies: 10.27) | Admin asks first, naming where phones go; then "Pulled back" | AR `aPulledReleaseSendsPhonesBack…`; admin e2e | OK-tested |
+| 10.16 | Pull back twice, put back a live one, an unknown build (both ways) | 409 `RELEASE_NOT_LIVE` / `RELEASE_NOT_PULLED`; 404; two at the very same moment: one changes it (`UPDATE … WHERE status = ?`), the other 409 | Admin: the reason, and the list read again | AR same (one after the other); the same moment by reading; admin e2e | OK-tested |
+| 10.17 | CI publishes a build the super admin pulled back | 409 `RELEASE_PULLED`; stays pulled | — | AR same | OK-tested |
+| 10.18 | Pull-backs and setting changes are logged | `admin_events` APP_RELEASE_PULLED / RESTORED / APP_SETTINGS_CHANGED with who and what | Admin: "pulled back by Prem, <time>" | AR `aPulledReleaseSendsPhonesBack…`, `settingsAreChecked…` | OK-tested |
+| 10.19 | An app older than the oldest allowed version | `updateRequired: true` (only Play Store apps; each app its own numbers) | App: only "Please update to continue" | AR `anAppOlderThanTheOldestAllowedMustUpdate`; app unit tests | OK-tested |
+| 10.20 | The oldest allowed above the approved version, or set with no approved version | 400 `MIN_ABOVE_STORE` | Admin checks before sending | AR `settingsAreChecked…`; admin e2e | OK-tested |
+| 10.21 | Two super admins save the settings | The second: 409 `SETTINGS_CHANGED`; the first stays | Admin shows the other's numbers | AR same; admin e2e | OK-tested |
+| 10.22 | A field agent, a support person, a customer, nobody signed in | 403 `SUPER_ADMIN_ONLY`; 403; 401; nothing changes | Admin: no link, the address goes to the dashboard | AR `onlyASuperAdminSees…`; admin e2e | OK-tested |
+| 10.23 | The admin page's answers | Never the storage key, checksum or session key | — | AR same | OK-tested |
+| 10.24 | Wrong numbers in the check (level 0, versionCode 0, missing) or another app name | 400; 404 | The app keeps its screens | AR `theCheckRefusesWrongNumbers` | OK-tested |
+| 10.25 | Many phones at once: every start asks | From memory (no database read); the download link signed once an hour per bundle; the zip from storage, never through the backend | — | AppUpdates, AppBundleFileService (by reading) | OK-untested |
+| 10.25a | The database down when a copy starts (no first read yet) | Every phone: `bundle: null, updateRequired: false` (keep your screens), no database call per phone; read again every 30 s | — | AppUpdates.check (by reading) | OK-untested |
+| 10.26 | The database can't be read when refreshing | The copy keeps answering from what it had; tries again in 30 s | — | AppUpdates.refresh (by reading) | OK-untested |
+| 10.26a | A 30-second read and a pull-back's read at the same time | One at a time (synchronized): the read after the pull-back always lands last, so the pulled build is never offered again from this copy | — | AppUpdates.refresh (by reading) | OK-untested |
+| 10.27 | Two copies of the backend: a pull-back on one | The other follows within 30 s (its refresh) | — | (by reading) | OK-untested |
+| 10.28 | V92 on a database with rows | Logged team changes stay; both apps' rows with no rules; a build once per app | — | MU `theTeamsLoggedChangesStay…` | OK-tested |
+| 10.29 | Old bundles in storage | Kept, so any can be put back (about 1 MB each) | — | — | N/A-v1 |
+| 10.30 | A retried CI run: attempt 1's zip uploaded, attempt 2 starts (new checksum) before attempt 1 publishes; attempt 1's PUT lands late | Attempt 2 gets a new storage key; publishing without its zip: 409 `UPLOAD_MISSING`; once sent, LIVE with attempt 2's zip and checksum; attempt 1's late PUT changes nothing phones get | — | AR `aRetriedStartNeverPublishesTheEarlierAttemptsZip` | OK-tested |
+| 10.31 | 60 releases for a newer native part after the last one an older app can run | The older app still gets its newest release (20 kept per native level) | — | AR `anOlderAppStillGetsItsNewestReleaseAfterMany…` | OK-tested |
+| 10.32 | Storage (R2) down when CI publishes | 503 `SERVICE_BUSY` with Retry-After; CI tries again; stays `UPLOADING` | — | AppBundleFileService.size (by reading) | OK-untested |
+| 10.33 | CI re-run of a run that already published (same run number) | 409 `RELEASE_EXISTS`; CI says "already sent" and stays green | — | AR (the 409); the apps' `release-screens.mjs` | OK-tested |
+| 10.34 | A super admin forgets to fill in the Play Store version after Google approves | Play Store phones on that version keep their own screens | Admin: a warning while releases are live and no Play Store version is filled in | admin e2e | OK-tested |

@@ -64,9 +64,14 @@ public class SecurityConfig {
                                 "/api/v1/payments/razorpayx/webhook",
                                 // Google Play's notifications (Pub/Sub push): the address's secret, checked by
                                 // PlaySubscriptions.notification
-                                "/api/v1/payments/google-play/notifications").permitAll()
+                                "/api/v1/payments/google-play/notifications",
+                                // CI after a merge: the app's release token, checked by AppReleases
+                                "/api/v1/app-releases/*",
+                                "/api/v1/app-releases/*/*/publish").permitAll()
                         .requestMatchers("/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
+                        // The Play Store apps ask on every start, before anyone signs in (AppUpdatesController)
+                        .requestMatchers(HttpMethod.GET, "/api/v1/app-updates/*").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated())
                 .exceptionHandling(e -> e
