@@ -25,6 +25,8 @@ public final class TestData {
         jdbc.update("UPDATE licence_ai_alert SET problem = NULL, problem_since = NULL, emailed_at = NULL, announced = false, owed_problem = NULL, owed_since = NULL");
         jdbc.update("UPDATE otp_test_mode SET until = NULL, turned_on_by = NULL, turned_on_at = NULL");
         jdbc.update("DELETE FROM app_releases");
+        jdbc.update("UPDATE analytics_settings SET play_fee_bps = 1500, user_choice_fee_bps = 1100, version = 0, "
+                + "changed_at = NULL, changed_by = NULL");
         jdbc.update("UPDATE app_update_settings SET min_version_code = NULL, store_version_code = NULL, version = 0, "
                 + "changed_at = NULL, changed_by = NULL");
         for (String table : new String[] {"kirana_khata_entries", "kirana_stock_moves", "kirana_unknown_scans", "kirana_purchase_scans", "kirana_purchase_lines",
@@ -33,7 +35,7 @@ public final class TestData {
                 "kirana_earnings", "kirana_payouts", "kirana_refunds", "kirana_order_lines", "kirana_order_parts",
                 "kirana_orders", "kirana_checkouts", "kirana_ai_calls", "kirana_photo_ai_calls", "kirana_gs1_ai_calls", "kirana_online", "kirana_catalogue_barcodes",
                 "kirana_bill_return_lines",
-                "kirana_bill_returns", "kirana_bill_changes", "kirana_bill_lines", "kirana_bills", "kirana_barcodes", "kirana_khata_customers", "kirana_products", "kirana_catalogue_items", "kirana_settings", "play_external_transactions", "play_dropped_purchases", "salon_subscriptions", "razorpay_events", "razorpay_cancellations", "subscription_enforcement", "ticket_emails", "ticket_events", "ticket_messages", "tickets", "salon_ratings", "salon_rating_totals", "visit_follow_ups",
+                "kirana_bill_returns", "kirana_bill_changes", "kirana_bill_lines", "kirana_bills", "kirana_barcodes", "kirana_khata_customers", "kirana_products", "kirana_catalogue_items", "kirana_settings", "subscription_payments", "subscription_refunds_waiting", "salon_usage", "daily_activity", "app_version_daily", "analytics_daily", "analytics_jobs", "play_external_transactions", "play_dropped_purchases", "salon_subscriptions", "razorpay_events", "razorpay_cancellations", "subscription_enforcement", "ticket_emails", "ticket_events", "ticket_messages", "tickets", "salon_ratings", "salon_rating_totals", "visit_follow_ups",
                 "salon_customer_prefs", "customer_places", "salon_offer_mutes", "salon_hours_aud", "salon_hours", "salon_closed_days", "earlier_slot_alerts", "shop_assignments", "admin_pincodes", "video_uploads", "shop_invites", "salon_closings", "salon_message_purges", "shop_handovers", "job_leases", "account_wipes", "file_deletions", "shop_events", "admin_events", "test_emails", "test_phones", "files", "appointment_events", "customer_strikes", "appointment_services",
                 "salon_offer_services", "salon_offers",
                 "appointments", "walk_in_access", "salon_pauses", "notification_jobs", "push_subscriptions",
