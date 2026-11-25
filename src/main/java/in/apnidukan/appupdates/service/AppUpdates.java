@@ -4,11 +4,13 @@ import in.apnidukan.appupdates.domain.AppName;
 import in.apnidukan.appupdates.domain.Release;
 import in.apnidukan.appupdates.domain.UpdateSettings;
 import in.apnidukan.appupdates.repo.ReleaseStore;
+import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.files.AppBundleFiles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -59,7 +61,16 @@ public class AppUpdates {
     public record Bundle(int build, String url, String checksum, String sessionKey) {
     }
 
-    public record Answer(Bundle bundle, boolean updateRequired) {
+    /**
+     * urgentBuild: the newest urgent release among the screens on offer (at most the bundle's build, newer than the
+     * app's own); null when none is urgent. A phone whose screens are older than it shows "A fix is ready" once the
+     * bundle is downloaded; one that has it already shows nothing.
+     */
+    public record Answer(Bundle bundle, boolean updateRequired, Integer urgentBuild) {
+
+        public Answer(Bundle bundle, boolean updateRequired) {
+            this(bundle, updateRequired, null);
+        }
     }
 
     private record Known(List<Release> live, UpdateSettings settings) {
@@ -68,27 +79,62 @@ public class AppUpdates {
     public Answer check(AppName app, Device device) {
         Map<AppName, Known> all = known;
         if (all == null) {
-            return new Answer(null, false);
+            // Not read yet (just started, the database slow): "busy", so phones keep the screens they have. An answer
+            // without a bundle would send them back to the screens their app came with.
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_BUSY",
+                    "Please try again in a moment.").retryAfter(30);
         }
         Known k = all.get(app);
         boolean playStore = !device.debug();
         Integer store = k.settings().storeVersionCode();
         boolean inReview = playStore && (store == null || device.versionCode() > store);
         Bundle bundle = null;
+        Integer urgentBuild = null;
         if (!inReview) {
             for (Release r : k.live()) {
                 if (r.build() <= device.versionCode()) {
                     break;   // newest first: nothing after this is newer than the app's own screens
                 }
-                if (r.nativeLevel() <= device.nativeLevel()) {
+                if (r.nativeLevel() > device.nativeLevel()) {
+                    continue;
+                }
+                if (bundle == null) {
                     bundle = new Bundle(r.build(), files.downloadLink(r.storageKey()), r.checksum(), r.sessionKey());
+                }
+                // The newest urgent one the bundle includes (it or an older one this phone may not have yet)
+                if (r.urgent()) {
+                    urgentBuild = r.build();
                     break;
                 }
             }
         }
         Integer min = k.settings().minVersionCode();
-        return new Answer(bundle, playStore && min != null && device.versionCode() < min);
+        return new Answer(bundle, playStore && min != null && device.versionCode() < min, urgentBuild);
     }
+
+    /**
+     * Whether a version number could be a real app of ours: at most a little above the newest build we know of (a
+     * test APK of a run that sent no screens), so made-up numbers can't fill the App versions counts. Unknown until
+     * the first read: nothing is counted.
+     */
+    public boolean plausibleVersion(AppName app, int versionCode) {
+        Map<AppName, Known> all = known;
+        if (all == null || versionCode < 1) {
+            return false;
+        }
+        Known k = all.get(app);
+        int newest = k.live().isEmpty() ? 0 : k.live().get(0).build();
+        Integer store = k.settings().storeVersionCode();
+        if (store != null) {
+            newest = Math.max(newest, store);
+        }
+        return versionCode <= Math.max(newest, MIN_PLAUSIBLE) + PLAUSIBLE_AHEAD;
+    }
+
+    /** CI's run numbers: a build this far above the newest known is still an app of ours. */
+    static final int PLAUSIBLE_AHEAD = 200;
+    /** Before any release or Play Store version is known: the run numbers so far are below this. */
+    static final int MIN_PLAUSIBLE = 1_000;
 
     /** The first read, as soon as this copy is ready (before then, and if it fails, phones keep their screens). */
     @EventListener(ApplicationReadyEvent.class)

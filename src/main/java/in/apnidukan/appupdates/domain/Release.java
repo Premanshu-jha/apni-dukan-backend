@@ -17,7 +17,18 @@ public record Release(
         Instant createdAt,
         Instant publishedAt,
         Instant changedAt,
-        String changedByName) {
+        String changedByName,
+        /** What an urgent release fixes; set with urgentAt (CI's note is kept from the start, before it is live) */
+        String urgentNote,
+        /** When it became urgent; null: not urgent (phones get it silently) */
+        Instant urgentAt,
+        /** The super admin who marked it; null when CI did, or it isn't urgent */
+        String urgentByName) {
+
+    /** Phones that have it show "A fix is ready" with Restart. */
+    public boolean urgent() {
+        return urgentAt != null;
+    }
 
     public enum Status {
         /** CI was given the upload link and hasn't said it finished. */

@@ -227,6 +227,89 @@ class AppReleasesIntegrationTest {
     }
 
     @Test
+    void anUrgentReleaseIsMarkedByTheSuperAdminOrByCiAndPhonesAreToldWhichBuildHasIt() throws Exception {
+        live(400, 1);
+        live(410, 1);
+        live(420, 1);
+        Reply plain = check("partner", 1, 390, true);
+        assertThat(build(plain)).isEqualTo(420);
+        assertThat(field(plain.body(), "urgentBuild")).isNull();
+
+        // 410 fixed something serious: phones on older screens are told 410 is urgent (the bundle, 420, includes it)
+        assertThat(code(call(HttpMethod.POST, "/admin/app-releases/partner/410/urgent", Map.of("note", "  "), BOSS)))
+                .isEqualTo("VALIDATION_FAILED");
+        assertThat(code(call(HttpMethod.POST, "/admin/app-releases/partner/410/urgent", Map.of("note", "Fix it"),
+                AGENT))).isEqualTo("SUPER_ADMIN_ONLY");
+        Reply marked = call(HttpMethod.POST, "/admin/app-releases/partner/410/urgent",
+                Map.of("note", "  Fixed   the wrong bill total "), BOSS);
+        assertThat(marked.status()).isEqualTo(200);
+        assertThat(field(marked.body(), "urgent")).isEqualTo(true);
+        assertThat(field(marked.body(), "urgentNote")).isEqualTo("Fixed the wrong bill total");
+        assertThat(field(marked.body(), "urgentByName")).isEqualTo("Prem");
+        Reply told = check("partner", 1, 390, true);
+        assertThat(build(told)).isEqualTo(420);
+        assertThat(field(told.body(), "urgentBuild")).isEqualTo(410);
+        // An app installed with 410's screens already: nothing urgent to get
+        assertThat(field(check("partner", 1, 410, true).body(), "urgentBuild")).isNull();
+        // Marked again with the same note (a retry): fine. Another super admin's other note: told, theirs stays
+        assertThat(call(HttpMethod.POST, "/admin/app-releases/partner/410/urgent",
+                Map.of("note", "Fixed the wrong bill total"), BOSS).status()).isEqualTo(200);
+        assertThat(code(call(HttpMethod.POST, "/admin/app-releases/partner/410/urgent",
+                Map.of("note", "Another note"), BOSS))).isEqualTo("ALREADY_URGENT");
+        assertThat(field(get("/admin/app-releases/partner", BOSS).body(), "releases").toString())
+                .contains("Fixed the wrong bill total").doesNotContain("Another note");
+        assertThat(code(call(HttpMethod.POST, "/admin/app-releases/partner/410/urgent",
+                Map.of("note", "x".repeat(121)), BOSS))).isEqualTo("VALIDATION_FAILED");
+        // Back to silent
+        assertThat(post("/admin/app-releases/partner/410/not-urgent", BOSS).status()).isEqualTo(200);
+        assertThat(field(check("partner", 1, 390, true).body(), "urgentBuild")).isNull();
+        assertThat(jdbc.queryForList("SELECT event FROM admin_events ORDER BY at", String.class))
+                .containsExactly("APP_RELEASE_URGENT", "APP_RELEASE_NOT_URGENT");
+
+        // A pulled-back release can't be urgent
+        post("/admin/app-releases/partner/400/pull-back", BOSS);
+        assertThat(code(call(HttpMethod.POST, "/admin/app-releases/partner/400/urgent", Map.of("note", "Fix"), BOSS)))
+                .isEqualTo("RELEASE_NOT_LIVE");
+
+        // CI sends an [urgent] PR's title as the note: urgent from the moment it goes live, by nobody on the team
+        byte[] zip = bundle("build 430");
+        Map<String, Object> urgent = release(430, 1, zip.length);
+        urgent.put("urgentNote", "Fix payments failing on the subscription screen");
+        Reply started = start("partner", TOKEN, urgent);
+        assertThat(started.status()).isEqualTo(200);
+        assertThat(field(check("partner", 1, 390, true).body(), "urgentBuild")).isNull();   // not live yet
+        put((String) field(started.body(), "uploadUrl"), zip);
+        publish("partner", TOKEN, 430);
+        assertThat(field(check("partner", 1, 390, true).body(), "urgentBuild")).isEqualTo(430);
+        Map<?, ?> row = (Map<?, ?>) ((List<?>) field(get("/admin/app-releases/partner", BOSS).body(), "releases")).get(0);
+        assertThat(row.get("urgentNote")).isEqualTo("Fix payments failing on the subscription screen");
+        assertThat(row.get("urgentByName")).isNull();
+        // A note that is no note is refused before anything is uploaded
+        Map<String, Object> bad = release(440, 1, zip.length);
+        bad.put("urgentNote", "x".repeat(121));
+        assertThat(code(start("partner", TOKEN, bad))).isEqualTo("VALIDATION_FAILED");
+    }
+
+    @Test
+    void anUrgentReleaseANewerNativePartNeedsIsNeverAnnouncedToAnOlderApp() throws Exception {
+        live(500, 1);
+        live(510, 2);   // needs the native part of level 2
+        call(HttpMethod.POST, "/admin/app-releases/partner/510/urgent", Map.of("note", "Fix for level 2"), BOSS);
+        // A level-1 app gets 500, which doesn't have 510's fix: nothing urgent for it
+        Reply old = check("partner", 1, 490, true);
+        assertThat(build(old)).isEqualTo(500);
+        assertThat(field(old.body(), "urgentBuild")).isNull();
+        // A level-2 app gets 510 and is told it is urgent
+        assertThat(field(check("partner", 2, 490, true).body(), "urgentBuild")).isEqualTo(510);
+        // An older urgent release inside a newer bundle is still announced
+        call(HttpMethod.POST, "/admin/app-releases/partner/510/not-urgent", null, BOSS);
+        call(HttpMethod.POST, "/admin/app-releases/partner/500/urgent", Map.of("note", "Fix for all"), BOSS);
+        Reply both = check("partner", 2, 490, true);
+        assertThat(build(both)).isEqualTo(510);
+        assertThat(field(both.body(), "urgentBuild")).isEqualTo(500);
+    }
+
+    @Test
     void anAppOlderThanTheOldestAllowedMustUpdate() {
         settings(BOSS, 120, 150, 0);
         assertThat(field(check("partner", 1, 119, false).body(), "updateRequired")).isEqualTo(true);
