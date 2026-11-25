@@ -3,6 +3,7 @@ package in.apnidukan.shops.service;
 import in.apnidukan.common.error.ApiException;
 import in.apnidukan.common.jobs.JobLeases;
 import in.apnidukan.shops.domain.ShopMember;
+import in.apnidukan.shops.repo.PaymentLedger;
 import in.apnidukan.shops.repo.SubscriptionStore;
 import in.apnidukan.shops.repo.SubscriptionStore.Row;
 import org.slf4j.Logger;
@@ -71,12 +72,15 @@ public class PlaySubscriptions {
     private final boolean allowTests;
     private final boolean enabled;
 
+    private final PaymentLedger ledger;
+
     public PlaySubscriptions(SubscriptionService subscriptions, SubscriptionStore store, GooglePlay googlePlay,
                              JobLeases leases, PlatformTransactionManager transactions, Clock clock,
                              @Value("${app.google-play.notification-secret:}") String notificationSecret,
                              @Value("${app.google-play.allow-test-purchases:false}") boolean allowTests,
-                             @Value("${app.jobs.enabled:true}") boolean enabled) {
+                             @Value("${app.jobs.enabled:true}") boolean enabled, PaymentLedger ledger) {
         this.subscriptions = subscriptions;
+        this.ledger = ledger;
         this.store = store;
         this.googlePlay = googlePlay;
         this.leases = leases;
@@ -207,9 +211,22 @@ public class PlaySubscriptions {
         }
         if (play.paid()) {
             subscriptions.paidByPlay(salon, play.expiresAt(), now);
+            // The period's order in the payments ledger (analytics); each renewal is a new order
+            if (play.orderId() != null) {
+                ledger.charge(new PaymentLedger.Charge(salon.shopId(), PaymentLedger.Source.GOOGLE_PLAY,
+                        play.orderId(), play.pricePaise() != null ? play.pricePaise()
+                        : SubscriptionService.PRICE_RUPEES * 100L, null, paidAt(play.expiresAt(), asked),
+                        play.expiresAt(), play.test(), false), now);
+            }
         } else if (play.over() && play.expiresAt() != null) {
             if (store.takeBackPlay(salon, play.expiresAt(), now)) {
                 log.info("Google Play took back salon {}'s payment: its paid time goes back", salon.shopId());
+                // Refunded or revoked: the order's money goes back in the payments ledger (Google says no amount:
+                // all of it)
+                if (play.orderId() != null) {
+                    ledger.chargeAmount(play.orderId()).ifPresent(amount -> ledger.refund(play.orderId(),
+                            play.orderId() + ":refund", amount, asked, false, now));
+                }
             }
         }
         // Paying twice is never right: Google Play renews by itself, so the salon's Razorpay subscription stops
@@ -281,5 +298,18 @@ public class PlaySubscriptions {
 
     private Instant now() {
         return clock.instant().truncatedTo(ChronoUnit.MICROS);
+    }
+
+    /**
+     * When a Google Play period was paid: Google's answer names no time for its order, so the start of the monthly
+     * period it pays for (a month before its end), never later than when we asked. A purchase seen for the first time
+     * long after it was made (the first check after deploy, a late notice) counts in the month it was paid.
+     */
+    static Instant paidAt(Instant expiresAt, Instant asked) {
+        if (expiresAt == null) {
+            return asked;
+        }
+        Instant start = expiresAt.atZone(java.time.ZoneOffset.UTC).minusMonths(1).toInstant();
+        return start.isBefore(asked) ? start : asked;
     }
 }

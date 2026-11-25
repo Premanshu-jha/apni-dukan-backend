@@ -404,6 +404,83 @@ class SubscriptionIntegrationTest {
         assertThat(webhook(payment, sign(payment), "evt_7").body()).containsEntry("result", "IGNORED");
     }
 
+    // ---------- the payments ledger (analytics) ----------
+
+    @Test
+    void everyChargeAndRefundIsKeptOnceWithItsSourceAndFee() {
+        approve();
+        String sub = (String) post("/shops/me/subscription/checkout", null, owner).body().get("subscriptionId");
+        long t = TUESDAY_10_00.getEpochSecond();
+        long paidTo = TUESDAY_10_00.plus(Duration.ofDays(61)).getEpochSecond();
+
+        String charged = withPayment(event("subscription.charged", sub, "active", paidTo, t + 100),
+                "pay_FIRST", 50_000, 1_180, t + 90);
+        assertThat(webhook(charged, sign(charged), "evt_l1").body()).containsEntry("result", "UPDATED");
+        // The same charge again (Razorpay retrying under another event id): still one row
+        assertThat(webhook(charged, sign(charged), "evt_l2").status()).isEqualTo(200);
+        Map<String, Object> row = jdbc.queryForMap("SELECT shop_id, source, kind, amount_paise, fee_paise, paid_at, "
+                + "period_end, test, imported FROM subscription_payments WHERE external_id = 'pay_FIRST'");
+        assertThat(count("subscription_payments")).isEqualTo(1);
+        assertThat(row).containsEntry("shop_id", salon).containsEntry("source", "WEBSITE")
+                .containsEntry("kind", "CHARGE").containsEntry("amount_paise", 50_000L)
+                .containsEntry("fee_paise", 1_180L).containsEntry("imported", false)
+                // Razorpay's test keys here: kept, never counted as money
+                .containsEntry("test", true);
+        assertThat(((java.sql.Timestamp) row.get("paid_at")).toInstant()).isEqualTo(Instant.ofEpochSecond(t + 90));
+        assertThat(((java.sql.Timestamp) row.get("period_end")).toInstant()).isEqualTo(Instant.ofEpochSecond(paidTo));
+
+        // A charge without a payment (an old-style event): paid-until moves, the ledger skips it
+        String bare = event("subscription.charged", sub, "active", paidTo + 86_400L * 30, t + 200);
+        assertThat(webhook(bare, sign(bare), "evt_l3").body()).containsEntry("result", "UPDATED");
+        assertThat(count("subscription_payments")).isEqualTo(1);
+
+        // A refund of it: a minus row pointing at the charge; sent twice, kept once
+        String refund = refund("rfnd_ONE", "pay_FIRST", 50_000, t + 300);
+        assertThat(webhook(refund, sign(refund), "evt_l4").body()).containsEntry("result", "REFUND_RECORDED");
+        assertThat(webhook(refund, sign(refund), "evt_l5").body()).containsEntry("result", "REFUND_RECORDED");
+        assertThat(jdbc.queryForMap("SELECT kind, amount_paise, charge_id, test FROM subscription_payments "
+                + "WHERE external_id = 'rfnd_ONE'")).containsEntry("kind", "REFUND")
+                .containsEntry("amount_paise", -50_000L).containsEntry("charge_id", "pay_FIRST")
+                .containsEntry("test", true);
+        assertThat(count("subscription_payments")).isEqualTo(2);
+
+        // A refund of a payment that isn't a subscription's (a kirana order's): not ours, left to the rest
+        String other = refund("rfnd_TWO", "pay_KIRANA", 10_000, t + 400);
+        assertThat(webhook(other, sign(other), "evt_l6").body()).doesNotContainEntry("result", "REFUND_RECORDED");
+        assertThat(count("subscription_payments")).isEqualTo(2);
+    }
+
+    @Test
+    void aRefundThatArrivesBeforeItsChargeIsRecordedWithIt() {
+        approve();
+        String sub = (String) post("/shops/me/subscription/checkout", null, owner).body().get("subscriptionId");
+        long t = TUESDAY_10_00.getEpochSecond();
+        // The refund first (the charge's webhook still being retried by Razorpay)
+        String refund = refund("rfnd_EARLY", "pay_LATE", 20_000, t + 50);
+        assertThat(webhook(refund, sign(refund), "evt_r1").status()).isEqualTo(200);
+        assertThat(count("subscription_payments")).isZero();
+        String charged = withPayment(event("subscription.charged", sub, "active",
+                TUESDAY_10_00.plus(Duration.ofDays(61)).getEpochSecond(), t + 100), "pay_LATE", 50_000, 1_180, t + 40);
+        webhook(charged, sign(charged), "evt_r2");
+        assertThat(jdbc.queryForObject("SELECT amount_paise FROM subscription_payments WHERE external_id = "
+                + "'rfnd_EARLY'", Long.class)).isEqualTo(-20_000L);
+        assertThat(count("subscription_refunds_waiting")).isZero();
+    }
+
+    @Test
+    void aChargeOnTheAppsSubscriptionIsMarkedAsPaidInTheApp() {
+        approve();
+        String sub = (String) post("/shops/me/subscription/checkout", null, owner).body().get("subscriptionId");
+        // As the Play Store app's checkout leaves it: Razorpay picked in the app (Google's user choice billing)
+        jdbc.update("UPDATE salon_subscriptions SET app_billing_subscription_id = ? WHERE shop_id = ?", sub, salon);
+        long t = TUESDAY_10_00.getEpochSecond();
+        String charged = withPayment(event("subscription.charged", sub, "active",
+                TUESDAY_10_00.plus(Duration.ofDays(61)).getEpochSecond(), t + 100), "pay_APP", 50_000, 1_180, t + 90);
+        assertThat(webhook(charged, sign(charged), "evt_a1").status()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT source FROM subscription_payments WHERE external_id = 'pay_APP'",
+                String.class)).isEqualTo("APP_RAZORPAY");
+    }
+
     // ---------- lapsing ----------
 
     @Test
@@ -727,6 +804,21 @@ class SubscriptionIntegrationTest {
                 + "\"subscription\",\"plan_id\":\"plan_500\",\"status\":\"" + status + "\",\"current_end\":"
                 + (currentEnd == 0 ? "null" : Long.toString(currentEnd)) + ",\"notes\":{"
                 + (shop == null ? "" : "\"shop_id\":\"" + shop + "\"") + "}}}},\"created_at\":"
+                + createdAt + "}";
+    }
+
+    /** The event with Razorpay's payment entity (as subscription.charged carries it). */
+    private static String withPayment(String event, String paymentId, long amount, long fee, long createdAt) {
+        return event.replace("\"payload\":{", "\"payload\":{\"payment\":{\"entity\":{\"id\":\"" + paymentId
+                + "\",\"entity\":\"payment\",\"amount\":" + amount + ",\"currency\":\"INR\",\"status\":\"captured\","
+                + "\"fee\":" + fee + ",\"tax\":180,\"created_at\":" + createdAt + "}},");
+    }
+
+    private static String refund(String refundId, String paymentId, long amount, long createdAt) {
+        return "{\"entity\":\"event\",\"account_id\":\"acc_1\",\"event\":\"refund.processed\",\"contains\":"
+                + "[\"refund\",\"payment\"],\"payload\":{\"refund\":{\"entity\":{\"id\":\"" + refundId
+                + "\",\"entity\":\"refund\",\"amount\":" + amount + ",\"currency\":\"INR\",\"payment_id\":\""
+                + paymentId + "\",\"status\":\"processed\",\"created_at\":" + createdAt + "}}},\"created_at\":"
                 + createdAt + "}";
     }
 

@@ -22,9 +22,11 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -172,6 +174,129 @@ public class RazorpayGateway {
             throw unavailable();
         } catch (IOException e) {
             log.warn("Razorpay didn't answer a cancel: {}", e.getClass().getSimpleName());
+            throw unavailable();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw unavailable();
+        }
+    }
+
+    /** A paid invoice of a subscription: the payment that paid it and the end of the time it paid for. */
+    public record PaidInvoice(String paymentId, Instant periodEnd) {
+    }
+
+    /** A payment as Razorpay has it: amount, fee (with GST), when, and how much of it was refunded. */
+    public record Payment(String id, long amountPaise, Long feePaise, Instant createdAt, String status,
+                          long refundedPaise) {
+    }
+
+    /** A refund of a payment. */
+    public record Refund(String id, long amountPaise, Instant createdAt, String status) {
+    }
+
+    /**
+     * The paid invoices of a subscription, 100 at a time ({@code skip}: how many to pass over), for the one-time
+     * import of past payments (PaymentImport). 503 PAYMENTS_UNAVAILABLE when Razorpay doesn't answer.
+     */
+    public List<PaidInvoice> paidInvoices(String subscriptionId, int skip) {
+        if (!subscriptionId.matches("sub_[A-Za-z0-9]{1,36}")) {
+            throw new IllegalArgumentException("Not a Razorpay subscription id");
+        }
+        JsonNode answer = get("/v1/invoices?subscription_id=" + subscriptionId + "&count=100&skip=" + skip);
+        List<PaidInvoice> paid = new ArrayList<>();
+        for (JsonNode invoice : answer.path("items")) {
+            String paymentId = invoice.path("payment_id").asString("");
+            if ("paid".equals(invoice.path("status").asString("")) && paymentId.matches("pay_[A-Za-z0-9]{1,36}")) {
+                long end = invoice.path("billing_end").asLong(0);
+                paid.add(new PaidInvoice(paymentId, end > 0 ? Instant.ofEpochSecond(end) : null));
+            }
+        }
+        return paid;
+    }
+
+    /** A read about an id Razorpay doesn't have (HTTP 400 or 404): skip it, trying again won't help. */
+    public static final class UnknownToRazorpay extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        UnknownToRazorpay(String path) {
+            super("Razorpay doesn't know " + path.replaceAll("\\?.*", ""));
+        }
+    }
+
+    /** A subscription on our plan, as Razorpay lists it: the salon from its notes (null when it has none). */
+    public record PlanSubscription(String id, String shopId) {
+    }
+
+    /**
+     * Every subscription ever made on our plan, 100 at a time from {@code skip} (Razorpay keeps them all, replaced and
+     * cancelled ones too). 503 PAYMENTS_UNAVAILABLE when Razorpay doesn't answer.
+     */
+    public List<PlanSubscription> planSubscriptions(int skip) {
+        List<PlanSubscription> out = new ArrayList<>();
+        JsonNode answer = get("/v1/subscriptions?plan_id=" + java.net.URLEncoder.encode(planId,
+                StandardCharsets.UTF_8) + "&count=100&skip=" + skip);
+        for (JsonNode sub : answer.path("items")) {
+            String id = sub.path("id").asString("");
+            if (id.matches("sub_[A-Za-z0-9]{1,36}")) {
+                String shop = sub.path("notes").path("shop_id").asString("");
+                out.add(new PlanSubscription(id, shop.isBlank() ? null : shop));
+            }
+        }
+        return out;
+    }
+
+    /** One payment. 503 PAYMENTS_UNAVAILABLE when Razorpay doesn't answer. */
+    public Payment payment(String paymentId) {
+        if (!paymentId.matches("pay_[A-Za-z0-9]{1,36}")) {
+            throw new IllegalArgumentException("Not a Razorpay payment id");
+        }
+        JsonNode p = get("/v1/payments/" + paymentId);
+        JsonNode fee = p.path("fee");
+        return new Payment(paymentId, p.path("amount").asLong(0), fee.isNumber() ? fee.asLong() : null,
+                Instant.ofEpochSecond(p.path("created_at").asLong(0)), p.path("status").asString(""),
+                p.path("amount_refunded").asLong(0));
+    }
+
+    /** A payment's refunds. 503 PAYMENTS_UNAVAILABLE when Razorpay doesn't answer. */
+    public List<Refund> refunds(String paymentId) {
+        if (!paymentId.matches("pay_[A-Za-z0-9]{1,36}")) {
+            throw new IllegalArgumentException("Not a Razorpay payment id");
+        }
+        List<Refund> refunds = new ArrayList<>();
+        for (JsonNode r : get("/v1/payments/" + paymentId + "/refunds?count=100").path("items")) {
+            String id = r.path("id").asString("");
+            if (id.matches("rfnd_[A-Za-z0-9]{1,36}")) {
+                refunds.add(new Refund(id, r.path("amount").asLong(0),
+                        Instant.ofEpochSecond(r.path("created_at").asLong(0)), r.path("status").asString("")));
+            }
+        }
+        return refunds;
+    }
+
+    private JsonNode get(String path) {
+        requireConfigured();
+        try {
+            HttpRequest request = HttpRequest.newBuilder(endpoint.resolve(path))
+                    .timeout(ANSWER_TIMEOUT)
+                    .header("Authorization", authorization())
+                    .GET()
+                    .build();
+            HttpResponse<byte[]> response = http.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            int status = response.statusCode();
+            if (status == 400 || status == 404) {
+                // Not Razorpay being down: it doesn't know this id (one made with the test keys, say)
+                throw new UnknownToRazorpay(path);
+            }
+            if (status / 100 != 2) {
+                log.warn("Razorpay didn't answer a read: HTTP {}", status);
+                throw unavailable();
+            }
+            return JSON.readTree(response.body());
+        } catch (JacksonException e) {
+            log.warn("Razorpay's answer to a read wasn't readable");
+            throw unavailable();
+        } catch (IOException e) {
+            log.warn("Razorpay didn't answer a read: {}", e.getClass().getSimpleName());
             throw unavailable();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

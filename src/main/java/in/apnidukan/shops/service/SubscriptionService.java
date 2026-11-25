@@ -8,6 +8,7 @@ import in.apnidukan.shops.domain.Shop;
 import in.apnidukan.shops.domain.ShopMember;
 import in.apnidukan.shops.domain.ShopRole;
 import in.apnidukan.shops.domain.ShopType;
+import in.apnidukan.shops.repo.PaymentLedger;
 import in.apnidukan.shops.repo.ShopMemberRepository;
 import in.apnidukan.shops.repo.SubscriptionStore;
 import in.apnidukan.shops.repo.SubscriptionStore.Row;
@@ -126,6 +127,7 @@ public class SubscriptionService implements SmartInitializingSingleton {
     private final SubscriptionStore store;
     /** Handlers of Razorpay events that aren't about subscriptions (kirana online orders). */
     private final java.util.List<RazorpayEvents> otherEvents;
+    private final PaymentLedger ledger;
     private final ShopMemberRepository members;
     private final RazorpayGateway razorpay;
     private final GooglePlay googlePlay;
@@ -143,8 +145,9 @@ public class SubscriptionService implements SmartInitializingSingleton {
                                PlatformTransactionManager transactions, Clock clock,
                                @Value("${app.subscriptions.enforce:false}") boolean enforced,
                                @Value("${app.subscriptions.logo-url:https://partner.clozest.in/icon-512.png}")
-                               String logoUrl, java.util.List<RazorpayEvents> otherEvents) {
+                               String logoUrl, java.util.List<RazorpayEvents> otherEvents, PaymentLedger ledger) {
         this.otherEvents = java.util.List.copyOf(otherEvents);
+        this.ledger = ledger;
         this.store = store;
         this.members = members;
         this.razorpay = razorpay;
@@ -351,6 +354,9 @@ public class SubscriptionService implements SmartInitializingSingleton {
         String event = root.path("event").asString("");
         JsonNode sub = root.path("payload").path("subscription").path("entity");
         String subscriptionId = sub.path("id").asString("");
+        if ("refund.processed".equals(event) && refunded(root)) {
+            return "REFUND_RECORDED";
+        }
         if (!event.startsWith("subscription.") || subscriptionId.isEmpty()) {
             // Payments, orders and refunds of other modules (kirana online orders): theirs to handle
             for (RazorpayEvents handler : otherEvents) {
@@ -382,6 +388,7 @@ public class SubscriptionService implements SmartInitializingSingleton {
                 if ("subscription.charged".equals(event) && currentEnd > 0) {
                     Optional<Row> salon = shop.flatMap(store::lock);
                     if (salon.isPresent()) {
+                        record(salon.get().shopId(), subscriptionId, root, Instant.ofEpochSecond(currentEnd), at, now);
                         paid(salon.get(), Instant.ofEpochSecond(currentEnd), now);
                         return "CREDITED";
                     }
@@ -398,6 +405,8 @@ public class SubscriptionService implements SmartInitializingSingleton {
                 JsonNode payment = root.path("payload").path("payment").path("entity");
                 reports.recordFromApp(row.shopId(), subscriptionId, payment.path("id").asString(""),
                         payment.path("amount").asLong(PRICE_RUPEES * 100L), at, now);
+                record(row.shopId(), subscriptionId, root, currentEnd > 0 ? Instant.ofEpochSecond(currentEnd) : null,
+                        at, now);
             }
             // Google Play renews the salon's subscription already: a Razorpay one approved meanwhile (a checkout left
             // open in another tab, say) would charge twice, so it is cancelled, and nothing is said about it
@@ -443,6 +452,52 @@ public class SubscriptionService implements SmartInitializingSingleton {
             }
             return kept ? "UPDATED" : "OLD";
         });
+    }
+
+    /**
+     * The charge in the payments ledger (analytics): Razorpay's payment, its amount and fee (with GST), the time it
+     * paid for, website or app. In the webhook's transaction; a charge without a payment id is only logged.
+     */
+    private void record(UUID shopId, String subscriptionId, JsonNode root, Instant periodEnd, Instant at,
+                        Instant now) {
+        JsonNode payment = root.path("payload").path("payment").path("entity");
+        String paymentId = payment.path("id").asString("");
+        if (!paymentId.startsWith("pay_") || paymentId.length() > 100) {
+            log.warn("Razorpay charged subscription {} without a usable payment id: not in the payments list",
+                    subscriptionId);
+            return;
+        }
+        JsonNode fee = payment.path("fee");
+        Instant paidAt = payment.has("created_at") ? Instant.ofEpochSecond(payment.path("created_at").asLong()) : at;
+        ledger.charge(new PaymentLedger.Charge(shopId, ledger.razorpaySource(shopId, subscriptionId), paymentId,
+                payment.path("amount").asLong(PRICE_RUPEES * 100L), fee.isNumber() ? fee.asLong() : null, paidAt,
+                periodEnd, razorpay.testMode(), false), now);
+    }
+
+    /**
+     * refund.processed for a salon subscription's payment: a minus row in the payments ledger. False when the
+     * payment isn't a recorded subscription charge (a kirana order's, say: theirs to handle).
+     */
+    private boolean refunded(JsonNode root) {
+        JsonNode refund = root.path("payload").path("refund").path("entity");
+        String refundId = refund.path("id").asString("");
+        String paymentId = refund.path("payment_id").asString("");
+        if (!refundId.startsWith("rfnd_") || !paymentId.startsWith("pay_")) {
+            return false;
+        }
+        Instant at = Instant.ofEpochSecond(refund.path("created_at").asLong(clock.instant().getEpochSecond()));
+        Instant now = now();
+        return Boolean.TRUE.equals(transactions.execute(s -> {
+            ledger.lockPayment(paymentId);
+            if (ledger.chargeAmount(paymentId).isEmpty()) {
+                // Its charge may not be recorded yet (its webhook still being retried): kept, and recorded with it.
+                // Not ours to answer: the rest (kirana) handles it too
+                ledger.waitForCharge(paymentId, refundId, refund.path("amount").asLong(0), at, now);
+                return false;
+            }
+            ledger.refund(paymentId, refundId, refund.path("amount").asLong(0), at, false, now);
+            return true;
+        }));
     }
 
     /** A charge moved paid-until (never back): the owner is told, once (a replayed webhook changes nothing). */
