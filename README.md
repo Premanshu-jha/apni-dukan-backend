@@ -1637,6 +1637,77 @@ native code still goes through the Play Store. Code: the `appupdates` module (`A
 - **Setting it up:** see "App updates" in the partner and customer READMEs (one signing key pair per app, the release
   token on both sides).
 
+### Urgent screen updates (V95; partner and customer apps, admin app)
+
+A release that fixes something serious can be marked **urgent**; every other release still reaches phones silently.
+- **By the super admin:** `POST /api/v1/admin/app-releases/{app}/{build}/urgent` `{note}` (what it fixes, 3 to 120
+  characters after trimming, 400 `VALIDATION_FAILED` on `note`; 409 `RELEASE_NOT_LIVE` unless `LIVE`; already urgent:
+  the same note 200, another 409 `ALREADY_URGENT` and the first stays), and `…/not-urgent` to take it back. Logged as `APP_RELEASE_URGENT` /
+  `APP_RELEASE_NOT_URGENT`. Super admins only (403 `SUPER_ADMIN_ONLY`).
+- **By CI:** a PR titled `[urgent] …`: the app's CI sends the rest of the title as `urgentNote` with the start (same
+  check as above), and the release is urgent from the moment it is published (`urgent_by` null: "from an [urgent] PR").
+- **Phones:** the check's answer has `urgentBuild`: the newest urgent release among those the phone may get (at most
+  the bundle's build, newer than the app's own). A phone whose screens are older shows "A fix for the app is ready"
+  with Restart once the bundle is downloaded. Open apps ask every 10 minutes, so it reaches them within about that.
+  The answer still comes from memory (`AppUpdates`), refreshed every 30 seconds and at once after a change. Before the
+  first read has worked (just started, the database slow) the check answers 503 `SERVICE_BUSY`, so phones keep the
+  screens they have (an answer without a bundle would send them back to their app's own).
+
+### Analytics (V93, V94; the admin app's Analytics page)
+
+Super admins only (`/api/v1/admin/analytics/...`; 404 for anyone not on the team, 403 `SUPER_ADMIN_ONLY` for the rest
+of it). Only totals and per-salon figures: never a list of customers or what one person did. Days and months are
+India's. Code: the `analytics` module (`AnalyticsService`, `AnalyticsStore`, `DailyTotals`, `AnalyticsJob`,
+`ActivityMarks`, `ActivityFilter`), the payments ledger in `shops` (`PaymentLedger`, `PaymentImport`) and the version
+counts in `appupdates` (`AppVersionCounts`).
+- **The payments ledger** (`subscription_payments`): one row per subscription charge and refund, with its source:
+  `WEBSITE` (Razorpay on the website), `APP_RAZORPAY` (Razorpay picked in the Play Store app), `GOOGLE_PLAY`.
+  Razorpay rows come from `subscription.charged` (its payment: id, amount, fee with GST) and `refund.processed` (a
+  minus row pointing at the charge; a refund of another payment, a kirana order's, is left to the rest); Google Play
+  rows from its purchase and renewal notices (order id and price, `subscriptionsv2`; a revoked purchase is a refund of
+  it; its date is the start of the month it pays for, as Google names no time for its order). A webhook or notice that
+  comes twice adds nothing (unique on kind and payment id). A refund that arrives before its charge waits in
+  `subscription_refunds_waiting` and is recorded with the charge (a refund of anything else is deleted after 30
+  days). Test-mode payments are kept but never counted. Google Play refunds without a revoke aren't seen (Google's
+  voided-purchases list isn't read yet). **Past payments:** `PaymentImport`, once (live keys only): every subscription
+  on our plan as Razorpay lists it (replaced and cancelled ones too, the salon from its notes) and every one we still
+  store; for each, its invoices, payments and refunds (a quarter second between calls), an hour after start. Each
+  subscription done is marked (`analytics_jobs` "razorpay-import:sub_…"), so a round cut short (Razorpay busy, or 20
+  minutes up) goes on where it stopped; one Razorpay doesn't know (400/404, a test-key id) is skipped. Marked done
+  for good once every subscription is through.
+- **Google's fee** is not reported per payment (only the Play Console shows it): it is estimated at the rates in
+  `analytics_settings` (15% Play billing, 11% Razorpay in the app; `PUT /settings {playFeeBps, userChoiceFeeBps,
+  version}`, 0 to 3000, 409 `SETTINGS_CHANGED`, logged `ANALYTICS_SETTINGS_CHANGED`) and always labelled an estimate.
+  Razorpay's fee is exact.
+- **Active people:** every signed-in call carries `X-Clozest-Client` (`partner-app`, `partner-web`, `customer-app`,
+  `customer-web`, `admin-web`; an older app is judged by its Origin). `ActivityFilter` marks each person once a day per
+  side and channel in memory (`ActivityMarks`, at most 200,000 a day per copy: past that, nobody more is counted),
+  written every 30 seconds in batches of 2,000 to `daily_activity`, kept 35 days. Only someone on the team counts as
+  `admin-web`, only someone in a salon (their token names it) as `partner-…`. Nothing is read or written on the
+  request's way: a busy database never slows a call.
+- **App versions:** the apps' first update check of the day adds `first=true` (never the 2-second quick look before
+  switching); `AppVersionCounts` adds them up in memory and writes every minute into `app_version_daily` (day, app,
+  version, Play Store or test APK, phones); a failed write keeps the numbers for the next. Only a version that could
+  be ours is counted (at most 200 above the newest build or Play Store version known), so made-up numbers can't fill
+  the table.
+- **Daily totals** (`AnalyticsJob`, hourly, one copy at a time). Test accounts and their salons are never counted.
+  Signups by who the person is now, salons registered and approved (their first `APPROVED`), bookings made (and per pincode), visits by kind and outcome, completed per pincode, visits per hour,
+  people active that day / 7 days / 30 days, and, for today, accounts and salons by status; into `analytics_daily`.
+  The first run works out every day since the first account; after that, today and the two days before (late changes
+  such as a no-show); the counts of "now" (accounts, salons by status) are kept per day as they stood at its last
+  hour. Each day is its own transaction with the job statement limit. `salon_usage` (one row per salon):
+  last active day (never goes back), bookings, completed, walk-ins and no-shows over 30 days, services, barbers,
+  pictures.
+- **Reads** (from the read copy, small): `GET /money?months=1..36` (every month, per source: payments, salons, paid,
+  refunded, Razorpay's fee, Google's fee estimate, what is left; the monthly money now: each paid-up salon at what it
+  last paid, less any part refunded; refunded in full: not counted), `GET /money/{yyyy-MM}.csv` (that month's payments for the accountant, UTF-8 with a byte order mark; a cell
+  a spreadsheet would run as a formula starts with '; at most 50,000 rows, and a last line says so if cut), `GET|PUT /settings` (checked after the super admin check: the rest of the team always gets 403), `GET /subscriptions` (trial, paying by
+  source and renewing, 3 days to pay, hidden, payment problems; first payments and stops per month; trials ending in 7
+  days without AutoPay and payment problems, 50 each), `GET /people?from&to`, `GET /bookings?from&to[&pincode]`,
+  `GET /salons?sort=quiet|bookings[&pincode]&page` (50 a page), `GET /app-versions` (the last 7 days). Ranges: both
+  days included, at most 366 days, default the last 30; 400 `VALIDATION_FAILED` naming `from`, `to`, `pincode`,
+  `month`, `months`, `sort` or `page`.
+
 ### The Android apps' notifications (V89, V91; the partner and customer apps' Play Store round)
 
 The partner and customer apps are also published on the Play Store (the same code inside an Android app, see their

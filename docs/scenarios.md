@@ -327,3 +327,51 @@ Tests: `AR` = `AppReleasesIntegrationTest`, `MU` = `MigrationUpgradeIntegrationT
 | 10.32 | Storage (R2) down when CI publishes | 503 `SERVICE_BUSY` with Retry-After; CI tries again; stays `UPLOADING` | — | AppBundleFileService.size (by reading) | OK-untested |
 | 10.33 | CI re-run of a run that already published (same run number) | 409 `RELEASE_EXISTS`; CI says "already sent" and stays green | — | AR (the 409); the apps' `release-screens.mjs` | OK-tested |
 | 10.34 | A super admin forgets to fill in the Play Store version after Google approves | Play Store phones on that version keep their own screens | Admin: a warning while releases are live and no Play Store version is filled in | admin e2e | OK-tested |
+| 10.35 | The super admin marks a live release urgent | 200, `urgent`, the note trimmed; phones on older screens get `urgentBuild`; logged once | Admin: "Urgent" with the note; apps: "A fix for the app is ready" | AR `anUrgentRelease…` | OK-tested |
+| 10.36 | Marked again, or with a blank or too long note | Again: 200, the first note stays, not logged again. Blank / over 120: 400 `VALIDATION_FAILED` (`note`) | — | AR same | OK-tested |
+| 10.37 | Taken back (marked by mistake) | `not-urgent` 200; `urgentBuild` null again | Banner gone at the next check | AR same | OK-tested |
+| 10.38 | A pulled-back release marked urgent | 409 `RELEASE_NOT_LIVE` | — | AR same | OK-tested |
+| 10.39 | CI sends an `[urgent]` PR's release | `urgentNote` at start; urgent only once published, by nobody on the team | Admin: "from an [urgent] PR" | AR same | OK-tested |
+| 10.40 | A phone already on the urgent build's screens (or newer) | `urgentBuild` null (or not above its screens) | No banner | AR same; apps UD | OK-tested |
+| 10.41 | A field agent tries to mark urgent | 403 `SUPER_ADMIN_ONLY` | — | AR same | OK-tested |
+
+## 11. Analytics (V93–V95)
+
+Tests: `AN` = `AnalyticsIntegrationTest`, `AP` = `AnalyticsPartsTest`, `SI` = `SubscriptionIntegrationTest`, `IA` =
+`InAppSubscriptionIntegrationTest`.
+
+| # | Scenario | API answer | Screen | Test | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 11.1 | Anyone but a super admin opens analytics | a customer: 403 `FORBIDDEN` (admin paths); removed from the team with an old token: 404; field agent, support: 403 `SUPER_ADMIN_ONLY`; signed out: 401 | Admin: no link, page refused | AN `onlyASuperAdminSeesAnalytics` | OK-tested |
+| 11.2 | Razorpay charges a subscription (website) | one `CHARGE` row: payment id, amount, fee, paid time, period end, `WEBSITE`; test keys: `test` | Money counts it (not test ones) | SI `everyChargeAndRefundIsKept…` | OK-tested |
+| 11.3 | The same charge sent again (another event id) | still one row | — | SI same | OK-tested |
+| 11.4 | A charge without a payment in the event | paid-until moves; no ledger row (logged) | — | SI same | OK-tested |
+| 11.5 | A refund of a subscription payment, sent twice | one `REFUND` row, minus, pointing at the charge; `REFUND_RECORDED` | Money: refunded | SI same | OK-tested |
+| 11.6 | A refund of a payment that isn't a subscription's (a kirana order) | not recorded here; handled as before | — | SI same | OK-tested |
+| 11.7 | A charge on the subscription made in the Play Store app | `APP_RAZORPAY` | Money: "Razorpay (in the app)" | SI `aChargeOnTheAppsSubscription…` | OK-tested |
+| 11.8 | Google Play takes a payment, then revokes it | a `GOOGLE_PLAY` charge (order id, price), dated the start of the month it pays for; then its refund | Money: Google Play, fee estimated | `PaymentImportTest` (date); IA (by reading `PlaySubscriptions.apply`) | OK-tested |
+| 11.9 | Past payments before the ledger | imported once (live keys only): every subscription on our plan and every stored one; a test-key id (400/404) skipped; Razorpay busy: the next round goes on where it stopped | — | `PaymentImportTest` | OK-tested |
+| 11.10 | Each person counted once a day per app or website, many requests at once | one `daily_activity` row each; written every 30 s | People: active today / 7 / 30 days | AN `eachPersonIsCountedOnce…` | OK-tested |
+| 11.11 | A customer sends `admin-web` | not counted as the team | — | AN same | OK-tested |
+| 11.12 | A call without a sign-in, or from no Clozest page | not counted | — | AN same | OK-tested |
+| 11.13 | Activity older than 35 days | deleted by the hourly job; a salon's last active day stays | Salons: "Last opened …" | AN `oldActivityIsDeleted…` | OK-tested |
+| 11.14 | Phones per app version | the first check of the day counted (`first=true`), Play Store and test APK apart, many at once | App versions | AN `appVersionsAreCounted…` | OK-tested |
+| 11.15 | The hourly job twice in a row | the same rows (each day replaced whole) | — | AN `theJobWorksOut…` | OK-tested |
+| 11.16 | Bookings and visits per day, outcome, hour, pincode; blocks left out; test accounts' signups left out | `analytics_daily` rows | Bookings, People | AN same | OK-tested |
+| 11.17 | A range back to front, longer than 366 days, a bad date or pincode, a bad sort | 400 `VALIDATION_FAILED` naming the field | Admin: not sent; a warning | AN same; AP `daysFromTheQuery…` | OK-tested |
+| 11.18 | Money per month and source; Google's fee estimated, Razorpay's exact, test payments left out | `GET /money` | Money | AN `moneyIsCounted…`; AP `googlesFeeIsEstimated…` | OK-tested |
+| 11.19 | The monthly money now when the last charge was refunded in part, or in full | in part: counted at what it kept; in full: not counted | "Coming in each month now" | AN same | OK-tested |
+| 11.20 | Two super admins change Google's rates at once | the second: 409 `SETTINGS_CHANGED`; a rate over 30%: 400 | Admin: "Another super admin changed these…" | AN same | OK-tested |
+| 11.21 | A month's CSV with a salon name a spreadsheet would run | the cell starts with '; quoted | Downloaded file | AN same; AP `csvCells…` | OK-tested |
+| 11.22 | Where each salon stands: trial, paying by source and renewing, 3 days to pay, hidden, payment problems | `GET /subscriptions` | Subscriptions | AN `subscriptionsShowWhereEachSalonStands` | OK-tested |
+| 11.23 | A salon with no Razorpay status | "not renewing" (never unknown), so it shows in "trials ending" | — | AN same | OK-tested |
+| 11.24 | Many super admins open the page at once | small reads from the read copy (daily totals, one row per salon); never the users or appointments tables | Each section asks at most every 5 minutes | (by reading) | OK-untested |
+| 11.25 | The hourly job on a long history | each day its own transaction with the job statement limit; indexes on users, shops and appointments by time (V94, built without locking) | — | AN; MU | OK-tested |
+| 11.26 | A refund that arrives before its charge (the charge's webhook still being retried) | kept waiting; recorded the moment the charge is | Money: refunded | SI `aRefundThatArrivesBeforeItsCharge…` | OK-tested |
+| 11.27 | Every state a salon can be in: website / in-app Razorpay, 3 days to pay, hidden, AutoPay over a day late, Razorpay gave up; closed and test salons | counted as the salon's own screen says; late AutoPay and HALTED are payment problems; closed and test salons left out | Subscriptions | AN `everyStateASalonCanBeIn…` | OK-tested |
+| 11.28 | Made-up version numbers in update checks | not counted (more than 200 above the newest build known) | App versions | AN `madeUpVersionNumbersAreNeverCounted` | OK-tested |
+| 11.29 | A customer sends `partner-app` | not counted as a salon's activity | — | AN `eachPersonIsCountedOnce…` | OK-tested |
+| 11.30 | A salon whose Google Play subscription ran out, now paying on the website | counted as WEBSITE | — | (by reading STANDING) | OK-untested |
+| 10.42 | The backend just started and hasn't read the releases | 503 `SERVICE_BUSY`, Retry-After; nothing counted | Phones keep their screens | `AppUpdatesBeforeLoadTest` | OK-tested |
+| 10.43 | Two super admins mark the same release urgent with different notes | the second: 409 `ALREADY_URGENT`; the first note stays | Admin: says so | AR `anUrgentRelease…` | OK-tested |
+| 10.44 | The urgent release needs a newer native part than the phone has | `urgentBuild` null for that phone (its bundle doesn't have the fix); an older urgent release inside the bundle is still announced | — | AR `anUrgentReleaseANewerNativePartNeeds…` | OK-tested |
