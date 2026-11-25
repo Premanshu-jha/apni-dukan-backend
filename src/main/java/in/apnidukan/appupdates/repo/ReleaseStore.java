@@ -18,13 +18,15 @@ import java.util.UUID;
 public class ReleaseStore {
 
     private static final String COLUMNS = "r.app, r.build, r.native_level, r.version_name, r.commit_sha, r.size_bytes, "
-            + "r.checksum, r.session_key, r.storage_key, r.status, r.created_at, r.published_at, r.changed_at, u.name";
+            + "r.checksum, r.session_key, r.storage_key, r.status, r.created_at, r.published_at, r.changed_at, u.name, "
+            + "r.urgent_note, r.urgent_at, (SELECT x.name FROM users x WHERE x.id = r.urgent_by)";
 
     private static final RowMapper<Release> RELEASE = (rs, i) -> new Release(
             AppName.of(rs.getString(1)).orElseThrow(), rs.getInt(2), rs.getInt(3), rs.getString(4), rs.getString(5),
             rs.getLong(6), rs.getString(7), rs.getString(8), rs.getString(9),
             Release.Status.valueOf(rs.getString(10)), instant(rs.getTimestamp(11)), instant(rs.getTimestamp(12)),
-            instant(rs.getTimestamp(13)), rs.getString(14));
+            instant(rs.getTimestamp(13)), rs.getString(14), rs.getString(15), instant(rs.getTimestamp(16)),
+            rs.getString(17));
 
     private static final RowMapper<UpdateSettings> SETTINGS = (rs, i) -> new UpdateSettings(
             AppName.of(rs.getString(1)).orElseThrow(), (Integer) rs.getObject(2), (Integer) rs.getObject(3),
@@ -38,7 +40,7 @@ public class ReleaseStore {
 
     /** What CI sends when it starts sending a bundle. */
     public record NewRelease(AppName app, int build, int nativeLevel, String versionName, String commitSha,
-                             long sizeBytes, String checksum, String sessionKey) {
+                             long sizeBytes, String checksum, String sessionKey, String urgentNote) {
     }
 
     /**
@@ -52,16 +54,16 @@ public class ReleaseStore {
     public Optional<String> startUpload(NewRelease r, Instant now) {
         String key = "app-releases/" + r.app().value() + "/" + r.build() + "-" + UUID.randomUUID() + ".zip";
         List<String> keys = jdbc.queryForList("INSERT INTO app_releases (id, app, build, native_level, version_name, "
-                        + "commit_sha, size_bytes, checksum, session_key, storage_key, status, created_at) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPLOADING', ?) "
+                        + "commit_sha, size_bytes, checksum, session_key, storage_key, status, created_at, urgent_note) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPLOADING', ?, ?) "
                         + "ON CONFLICT (app, build) DO UPDATE SET native_level = EXCLUDED.native_level, "
                         + "version_name = EXCLUDED.version_name, commit_sha = EXCLUDED.commit_sha, "
                         + "size_bytes = EXCLUDED.size_bytes, checksum = EXCLUDED.checksum, "
                         + "session_key = EXCLUDED.session_key, storage_key = EXCLUDED.storage_key, "
-                        + "created_at = EXCLUDED.created_at "
+                        + "created_at = EXCLUDED.created_at, urgent_note = EXCLUDED.urgent_note "
                         + "WHERE app_releases.status = 'UPLOADING' RETURNING storage_key",
                 String.class, UUID.randomUUID(), r.app().value(), r.build(), r.nativeLevel(), r.versionName(),
-                r.commitSha(), r.sizeBytes(), r.checksum(), r.sessionKey(), key, Timestamp.from(now));
+                r.commitSha(), r.sizeBytes(), r.checksum(), r.sessionKey(), key, Timestamp.from(now), r.urgentNote());
         return keys.stream().findFirst();
     }
 
@@ -75,9 +77,27 @@ public class ReleaseStore {
      * call published it first, or a retried start gave it a new key (and new checksum) meanwhile.
      */
     public boolean publish(AppName app, int build, String storageKey, Instant now) {
-        return jdbc.update("UPDATE app_releases SET status = 'LIVE', published_at = ? WHERE app = ? AND build = ? "
-                + "AND status = 'UPLOADING' AND storage_key = ?", Timestamp.from(now), app.value(), build,
-                storageKey) == 1;
+        // CI's [urgent] release (a note sent at start) becomes urgent as it goes live
+        return jdbc.update("UPDATE app_releases SET status = 'LIVE', published_at = ?, "
+                + "urgent_at = CASE WHEN urgent_note IS NOT NULL THEN ?::timestamptz END WHERE app = ? AND build = ? "
+                + "AND status = 'UPLOADING' AND storage_key = ?", Timestamp.from(now), Timestamp.from(now),
+                app.value(), build, storageKey) == 1;
+    }
+
+    /**
+     * Marks a LIVE release urgent with the super admin's note. False if it isn't LIVE, or is urgent already (the
+     * first note stays).
+     */
+    public boolean markUrgent(AppName app, int build, String note, UUID by, Instant now) {
+        return jdbc.update("UPDATE app_releases SET urgent_note = ?, urgent_at = ?, urgent_by = ? WHERE app = ? "
+                + "AND build = ? AND status = 'LIVE' AND urgent_at IS NULL", note, Timestamp.from(now), by,
+                app.value(), build) == 1;
+    }
+
+    /** Back to silent (marked by mistake). False if it wasn't urgent. */
+    public boolean clearUrgent(AppName app, int build) {
+        return jdbc.update("UPDATE app_releases SET urgent_note = NULL, urgent_at = NULL, urgent_by = NULL "
+                + "WHERE app = ? AND build = ? AND urgent_at IS NOT NULL", app.value(), build) == 1;
     }
 
     /** from → to, by this super admin. False if it wasn't in {@code from} (any more). */

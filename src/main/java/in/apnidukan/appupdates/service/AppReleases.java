@@ -80,7 +80,13 @@ public class AppReleases {
 
     /** What CI tells about the bundle it is about to send. */
     public record Incoming(int build, int nativeLevel, String versionName, String commitSha, long sizeBytes,
-                           String checksum, String sessionKey) {
+                           String checksum, String sessionKey, String urgentNote) {
+
+        /** Without a note: an ordinary (silent) release. */
+        public Incoming(int build, int nativeLevel, String versionName, String commitSha, long sizeBytes,
+                        String checksum, String sessionKey) {
+            this(build, nativeLevel, versionName, commitSha, sizeBytes, checksum, sessionKey, null);
+        }
     }
 
     public record UploadTicket(int build, String uploadUrl) {
@@ -94,7 +100,7 @@ public class AppReleases {
         checkToken(app, token);
         validate(in);
         String key = store.startUpload(new NewRelease(app, in.build(), in.nativeLevel(), in.versionName(),
-                        in.commitSha(), in.sizeBytes(), in.checksum(), in.sessionKey()), now())
+                        in.commitSha(), in.sizeBytes(), in.checksum(), in.sessionKey(), note(in.urgentNote())), now())
                 .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "RELEASE_EXISTS",
                         "This build was already published."));
         return new UploadTicket(in.build(), files.uploadLink(key, in.sizeBytes()));
@@ -197,6 +203,62 @@ public class AppReleases {
         return store.find(app, build).orElseThrow();
     }
 
+    /**
+     * Marks a LIVE release urgent: phones that are open get it within about 10 minutes and show "A fix is ready" with
+     * Restart. {@code note}: what it fixes, 3 to 120 characters (400 VALIDATION_FAILED on note). 409 RELEASE_NOT_LIVE
+     * for one that isn't live; 409 ALREADY_URGENT when someone marked it with another note (the same note: 200).
+     */
+    @Transactional
+    public Release markUrgent(UUID caller, AppName app, int build, String note) {
+        requireSuperAdmin(caller);
+        String clean = note(note);
+        if (clean == null) {
+            throw invalid("note");
+        }
+        Release r = store.find(app, build).orElseThrow(() -> ApiException.notFound("Release"));
+        if (r.status() != Release.Status.LIVE) {
+            throw new ApiException(HttpStatus.CONFLICT, "RELEASE_NOT_LIVE", "This build isn't live (any more).");
+        }
+        if (store.markUrgent(app, build, clean, caller, now())) {
+            store.logEvent(caller, "APP_RELEASE_URGENT", app.value() + " build " + build + ": " + clean, now());
+            refreshAfterCommit();
+        } else {
+            // Someone marked it first (another super admin, or CI): theirs stays; a retry of the same note is fine
+            Release now = store.find(app, build).orElseThrow();
+            if (now.urgent() && !clean.equals(now.urgentNote())) {
+                throw new ApiException(HttpStatus.CONFLICT, "ALREADY_URGENT",
+                        "Someone marked this release urgent already: " + now.urgentNote());
+            }
+        }
+        return store.find(app, build).orElseThrow();
+    }
+
+    /** Back to silent (marked by mistake): phones that haven't restarted yet no longer see the banner. */
+    @Transactional
+    public Release notUrgent(UUID caller, AppName app, int build) {
+        requireSuperAdmin(caller);
+        if (store.find(app, build).isEmpty()) {
+            throw ApiException.notFound("Release");
+        }
+        if (store.clearUrgent(app, build)) {
+            store.logEvent(caller, "APP_RELEASE_NOT_URGENT", app.value() + " build " + build, now());
+            refreshAfterCommit();
+        }
+        return store.find(app, build).orElseThrow();
+    }
+
+    /** A one-line note: trimmed, inner spaces folded, 3 to 120 characters, no control characters; else null. */
+    static String note(String text) {
+        if (text == null) {
+            return null;
+        }
+        String t = text.strip().replaceAll("\\s+", " ");
+        if (t.length() < 3 || t.length() > 120 || t.chars().anyMatch(Character::isISOControl)) {
+            return null;
+        }
+        return t;
+    }
+
     // ---- Helpers -----------------------------------------------------------------------------------------------
 
     private void requireSuperAdmin(UUID caller) {
@@ -251,6 +313,9 @@ public class AppReleases {
         }
         if (in.sessionKey() == null || !SESSION_KEY.matcher(in.sessionKey()).matches()) {
             throw invalid("sessionKey");
+        }
+        if (in.urgentNote() != null && note(in.urgentNote()) == null) {
+            throw invalid("urgentNote");
         }
     }
 

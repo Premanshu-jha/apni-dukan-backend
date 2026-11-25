@@ -56,6 +56,24 @@ public class AdminAppReleasesController {
         return ReleaseView.of(releases.restore(caller(), name(app), build));
     }
 
+    /**
+     * Marks a live release urgent ({@code note}: what it fixes, 3 to 120 characters): open phones show "A fix is
+     * ready" with Restart once they have it. 409 RELEASE_NOT_LIVE; already urgent: 200, the first note stays.
+     */
+    @PostMapping("/{build}/urgent")
+    public ReleaseView urgent(@PathVariable String app, @PathVariable int build, @RequestBody UrgentBody body) {
+        return ReleaseView.of(releases.markUrgent(caller(), name(app), build, body == null ? null : body.note()));
+    }
+
+    /** Back to silent (marked by mistake). */
+    @PostMapping("/{build}/not-urgent")
+    public ReleaseView notUrgent(@PathVariable String app, @PathVariable int build) {
+        return ReleaseView.of(releases.notUrgent(caller(), name(app), build));
+    }
+
+    public record UrgentBody(String note) {
+    }
+
     /** Send the {@code version} the page showed. 400 MIN_ABOVE_STORE, 409 SETTINGS_CHANGED. */
     @PutMapping("/settings")
     public SettingsView settings(@PathVariable String app, @Valid @RequestBody SettingsBody body) {
@@ -80,12 +98,15 @@ public class AdminAppReleasesController {
     }
 
     /** Never the storage key, checksum or session key: the page doesn't need them. */
+    /** urgent: phones show "A fix is ready"; urgentByName null with urgentAt set: CI marked it ([urgent] PR). */
     public record ReleaseView(int build, int nativeLevel, String versionName, String commitSha, long sizeBytes,
                               String status, Instant createdAt, Instant publishedAt, Instant changedAt,
-                              String changedByName) {
+                              String changedByName, boolean urgent, String urgentNote, Instant urgentAt,
+                              String urgentByName) {
         static ReleaseView of(Release r) {
             return new ReleaseView(r.build(), r.nativeLevel(), r.versionName(), r.commitSha(), r.sizeBytes(),
-                    r.status().name(), r.createdAt(), r.publishedAt(), r.changedAt(), r.changedByName());
+                    r.status().name(), r.createdAt(), r.publishedAt(), r.changedAt(), r.changedByName(), r.urgent(),
+                    r.urgent() ? r.urgentNote() : null, r.urgentAt(), r.urgentByName());
         }
     }
 

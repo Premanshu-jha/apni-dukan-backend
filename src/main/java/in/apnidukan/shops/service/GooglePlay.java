@@ -63,7 +63,14 @@ public final class GooglePlay {
 
     /** A Google Play subscription as Google has it. */
     public record PlaySubscription(String state, String productId, Instant expiresAt, boolean autoRenewing,
-                                   String accountId, boolean acknowledged, boolean test, boolean freeTrial) {
+                                   String accountId, boolean acknowledged, boolean test, boolean freeTrial,
+                                   String orderId, Long pricePaise) {
+
+        /** Without the order and price (tests, and answers read before they were kept). */
+        public PlaySubscription(String state, String productId, Instant expiresAt, boolean autoRenewing,
+                                String accountId, boolean acknowledged, boolean test, boolean freeTrial) {
+            this(state, productId, expiresAt, autoRenewing, accountId, acknowledged, test, freeTrial, null, null);
+        }
 
         /** Paid for now (active, or in Google's grace period while it retries the payment). */
         public boolean entitled() {
@@ -156,10 +163,38 @@ public final class GooglePlay {
                     s.path("externalAccountIdentifiers").path("obfuscatedExternalAccountId").asString(""),
                     "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED".equals(s.path("acknowledgementState").asString("")),
                     s.has("testPurchase"),
-                    item.path("offerPhase").has("freeTrial")));
+                    item.path("offerPhase").has("freeTrial"),
+                    orderId(s, item),
+                    pricePaise(item.path("autoRenewingPlan").path("recurringPrice"))));
         } catch (JacksonException | java.time.format.DateTimeParseException e) {
             log.warn("Google Play's subscription wasn't readable");
             throw unavailable();
+        }
+    }
+
+    /**
+     * The order of the period paid now (each renewal is a new order: GPA.1234-…..0, ..1, …), for the payments ledger;
+     * null when Google gives none.
+     */
+    static String orderId(JsonNode subscription, JsonNode item) {
+        String id = item.path("latestSuccessfulOrderId").asString("");
+        if (id.isEmpty()) {
+            id = subscription.path("latestOrderId").asString("");
+        }
+        return id.matches("[A-Za-z0-9.\\-]{1,90}") ? id : null;
+    }
+
+    /** The plan's price in paise (Google's Money: units and nanos, rupees); null if not in rupees or not given. */
+    static Long pricePaise(JsonNode money) {
+        if (!"INR".equals(money.path("currencyCode").asString("")) || !money.has("units")) {
+            return null;
+        }
+        try {
+            long units = Long.parseLong(money.path("units").asString("0"));
+            long nanos = money.path("nanos").asLong(0);
+            return units * 100 + nanos / 10_000_000;
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
