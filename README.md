@@ -15,6 +15,7 @@ Design: see the "Apni Dukan – Low-Level Design (Shop App MVP)" doc.
 | `salon` | Salon setup (services from a catalog with a come-back reminder each, the salon's opening hours, barbers with optional sign-in and photo, weekly hours inside the salon's, booking settings), online booking, walk-ins, start code, no-show and strikes, earlier-slot alerts, breaks, leave, closed days, pause, the automatic end, ratings, the salon list's cards, the rating request and come-back reminder after a visit |
 | `kirana` | The kirana's own counter (on `main` with the salons, switched off on the server until kirana launches: see "Kirana switch"): products and stock with a reason for every change, walk-in bills paid in cash, to the shop's own UPI QR or on its khata, the khata book of regular customers, cancelling a bill, the day's totals, and the shop's UPI ID (needed before Submit for visit); stock from photos of distributors' bills and scans, unknown barcodes linked in one tap, counter suggestions and paper bills (round 3) |
 | `places` | A customer's saved places (Home, Work, others, up to 10) and their address search: where the customer app looks for salons besides the phone's GPS point |
+| `leads` | The admin website's Leads page: India's districts and pincodes (India Post's directory), a live search of an area's salon and beauty businesses on Mapbox, their match to Clozest salons, and the field team's work on each lead (status, notes, follow-ups, WhatsApp consent, who signed up whom) |
 | `notifications` | Messages queued with the change they report, written in each reader's language (`users.language`; English for none), sent by a job with retries as Web Push (browser notifications) and Firebase Cloud Messaging (the Android apps), and as SMS for each message type whose template id is set; an in-app message list per app with unread counts |
 
 ## How file handling works
@@ -1436,6 +1437,98 @@ empty `kirana_gs1_lookups` and `kirana_gs1_ai_calls`; V80 validates. Safe while 
 **Deploying V81–V82:** V81 adds `kirana_reads.recount` (NOT NULL DEFAULT false: no rewrite) and V82 the nullable
 `kirana_list_lines.auto_before`, each under a 3 s lock timeout and in its own migration (one table locked at a time).
 Safe while the old version runs. Next migration: V83.
+
+## Leads: salons found on the map (V96–V98)
+
+The admin website's **Leads** page (field agents and super admins; 404 for support and anyone else) finds every salon
+and beauty business in an area, so the team can contact them and sign them up. `AdminLeadsController` →
+`LeadService` (who may do what, saving leads) → `LeadScanner` (the live search) → `MapboxSearch` (Mapbox's API);
+`LeadStore` and `PincodeDirectory` read and write the database.
+
+**Districts and areas** come from India Post's pincode directory (`india_pincodes`, V96: 19,300 pincodes in 733
+districts, Government Open Data Licence – India; rebuilt with `docs/tools/pincodes.py`). An area is a pincode, shown
+with its post office names ("500072 · Kukatpally, Vivekanandanagar Colony"). `PincodeDirectory` reads the table once
+into memory; searching districts (`GET /admin/leads/districts?q=`) matches a district or state name, a post office
+name or a pincode ("kukat" finds Medchal Malkajgiri, "has Kukatpally (500072)"). `GET /admin/leads/areas` lists a
+district's pincodes with the leads contacted, interested and signed up there, the Clozest salons there, and whether
+the caller covers it as a field agent.
+
+**What Mapbox is.** Mapbox is a maps company (like Google Maps for developers). Its *Search Box API* answers "which
+businesses of this category are in this box on the map": name, address, point, pincode, often the phone and the
+opening hours. We call it from the backend with `MAPBOX_TOKEN`; the token never reaches a browser. Mapbox's terms let
+us use its results only while showing them, never store them, so a scan is made live each time and nothing of it is
+saved (see "What is stored").
+
+**A scan** (`POST /admin/leads/scan/{pincode}`) searches one area:
+
+1. Where the pincode is: Mapbox's own postcode box (India Post's office points are sometimes far off); a box over
+   0.27° (a whole rural district) becomes 8 km around its centre, a missing or flat one 2 km (or India Post's spread,
+   if wider) around Mapbox's point; else India Post's point and spread. 404 `AREA_NOT_ON_MAP` when neither knows it,
+   503 `MAPBOX_UNAVAILABLE` (Retry-After 60) when Mapbox didn't answer and India Post has no point.
+2. Seven Mapbox categories (`salon`, `hairdresser`, `spa`, `nail_salon`, `massage_shop`, `beauty_store`,
+   `tattoo_parlour`); a box that comes back full (25) is searched again as four quarters, up to 3 times, so busy
+   areas are covered.
+3. 25 searches by words, one for each service the salon section offers (beauty parlour, threading, waxing, bridal
+   makeup, mehendi artist, saree draping, keratin…), so a business not filed as a salon is found too.
+4. Businesses Mapbox puts in another pincode are left out (that area's scan has them); only beauty businesses are
+   kept (`PoiKinds.relevant`: a beauty category, or a beauty word in the name). Each gets a kind (ladies parlour,
+   unisex salon, men's salon and barber, bridal and makeup, mehendi, spa and massage, nail and lash, skin and hair
+   clinic, tattoo, cosmetics shop), whether it's a known chain, and a priority score (`PoiKinds.score`: our own
+   estimate, Mapbox has no ratings).
+5. Each is matched to a Clozest salon (`ClozestMatch`): the same phone as the salon's owner, or a similar name within
+   120 m; each salon at most once. Salons in the area no business matched are listed too (`clozestOnly`), so "On
+   Clozest" shows every salon. A field agent sees a salon's name and status; only super admins get its id (agents see
+   only their assigned salons' pages). An owner's phone is used for matching and never sent.
+6. The team's saved leads are joined in; contacted leads Mapbox no longer lists are shown from their saved details.
+
+A scan makes about 40 to 150 Mapbox requests. Limits, so many people scanning can't overload the server or run up
+the bill:
+
+- every request is counted in `mapbox_usage` *before* it is sent, in one statement that never passes the month's cap
+  (`MAPBOX_MONTHLY_CAP`, default 50,000), even with several servers; a scan cut short says `capReached`, one that
+  can't start answers 429 `MAPBOX_CAP_REACHED`;
+- at most 60 scans per person per hour (429 `TOO_MANY_REQUESTS`, Redis; if Redis is down the cap still holds); a
+  scan refused before searching (busy, cap, not set up, not on the map) doesn't count;
+- at most 4 scans at a time per server (503 `SCAN_BUSY`, Retry-After 5) and 8 Mapbox requests at a time; a request
+  is counted only once it has its turn, so waiting requests never use the month's cap up;
+- a scan stops 60 s after it started (the postcode lookup included) and answers what it has, marked `partial`; also
+  when Mapbox failed a request or a box was still full after 3 splits.
+
+Without `MAPBOX_TOKEN` a scan answers 503 `MAPBOX_OFF`; a token Mapbox refuses answers 503 `MAPBOX_REFUSED`.
+
+**What is stored** (`leads`, `lead_events`, V97): only the team's own work, keyed by Mapbox's id for the place:
+the pincode, status (`NEW`, `NO_ANSWER`, `CALLED`, `VISITED`, `INTERESTED`, `NOT_INTERESTED`), note, who it's given to, a
+call-back date, the owner's WhatsApp consent (when and who recorded it), and the Clozest salon it became. The
+business's name, phone and point (to 6 decimals) are kept only once someone tried to reach it (status past `NEW`,
+`contacted_at` set the first time): from then on it is the team's own contact record, and it can't go back to `NEW`
+(400 status). `NO_ANSWER` is kept but not counted as contacted. Every change is in `lead_events` (the lead's
+history: status, note, assignment, call-back, WhatsApp, phone, signed up).
+
+**Saving a lead** (`PUT /admin/leads/{mapboxId}`): the page sends the team's fields, the business's details from
+the scan, and the version it showed (null for a new lead); 409 `LEAD_CHANGED` (with the lead now) when someone saved
+it meanwhile. Anyone on the field team may change any lead's status, note, follow-up and consent; a field agent may
+take an unassigned lead (or one given to someone who has left the field team) or let go of their own, and only a
+super admin gives a lead to someone else (403 `ASSIGNED_TO_SOMEONE_ELSE`). WhatsApp consent needs a mobile number
+and someone who spoke to the owner (called, visited, interested or not interested); a new (or no) phone number
+ends it (logged), and it is ticked again once the owner is asked. A call-back date can't be in the past when it's set (an overdue one already saved can stay). A
+signed-up lead's status no longer changes (409 `LEAD_SIGNED_UP`); its note still can.
+
+**Signed up.** A contacted lead is tied to the salon it became (`shop_id`, once: one lead per salon, unique) when a
+scan matches it and by `LeadMatchJob` every 15 minutes (one server at a time, 500 leads per batch), only when the
+salon registered after the team first reached the business and isn't closed: a salon already on Clozest is shown as
+such but credits nobody. Saving a lead never ties it (a typed phone can't claim a salon). The person assigned, else
+the last to work on it, gets the credit (`credited_to`).
+
+**Follow-ups and the funnel.** `GET /admin/leads/due`: leads with a call-back date today or earlier, not signed up,
+the caller's own (a super admin can ask for everyone's). `GET /admin/leads/mine`: the leads given to the caller
+that were tried and haven't signed up, most recent first (300 at most), from their saved details, so no map search
+is needed (a super admin can ask for everyone's). `GET /admin/leads/funnel` (super admins): per area and per
+person, leads saved → contacted → interested → signed up. `GET /admin/leads/usage`: this month's Mapbox requests and
+the cap.
+
+Settings (`application.properties`): `MAPBOX_TOKEN` (console.mapbox.com › Tokens; the default public scopes),
+`MAPBOX_MONTHLY_CAP`, `app.leads.scans-per-hour`, `app.leads.scans-at-once`, `app.leads.requests-at-once`.
+V98 adds an index of salons by pincode (built without locking writes).
 
 ## Run it on your laptop
 

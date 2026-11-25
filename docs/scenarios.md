@@ -375,3 +375,52 @@ Tests: `AN` = `AnalyticsIntegrationTest`, `AP` = `AnalyticsPartsTest`, `SI` = `S
 | 10.42 | The backend just started and hasn't read the releases | 503 `SERVICE_BUSY`, Retry-After; nothing counted | Phones keep their screens | `AppUpdatesBeforeLoadTest` | OK-tested |
 | 10.43 | Two super admins mark the same release urgent with different notes | the second: 409 `ALREADY_URGENT`; the first note stays | Admin: says so | AR `anUrgentRelease…` | OK-tested |
 | 10.44 | The urgent release needs a newer native part than the phone has | `urgentBuild` null for that phone (its bundle doesn't have the fix); an older urgent release inside the bundle is still announced | — | AR `anUrgentReleaseANewerNativePartNeeds…` | OK-tested |
+
+## 12. Leads: salons found on the map (V96–V98)
+
+Tests: `LI` = `LeadsIntegrationTest` (real Postgres and Redis, a fake Mapbox), `LL` = `LeadsLogicTest`; admin: `LS` =
+`e2e/leads.spec.ts`, `LT` = `src/features/leads/logic.test.ts`.
+
+| # | Scenario | API answer | Screen | Test | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 12.1 | Anyone but the field team opens Leads | support: 404; a customer: 403 (admin paths); signed out: 401 | Admin: support is sent to Tickets | LI `onlyTheFieldTeamUsesLeads`; LS `support staff…` | OK-tested |
+| 12.2 | A field agent asks for the funnel or everyone's follow-ups | 403 `SUPER_ADMIN_ONLY` | No Funnel tab, no "Everyone's" switch | LI same | OK-tested |
+| 12.3 | Searching a district by its name, a post office name ("kukat") or a pincode | the district, with what matched ("Kukatpally (500072)") | Dropdown: "Has Kukatpally (500072)" | LI `districtsAreFound…`; LS first | OK-tested |
+| 12.4 | One letter, or more than 60 typed | empty list; 400 `VALIDATION_FAILED` (q) | Nothing asked under 2 letters | LI same | OK-tested |
+| 12.5 | A district that isn't in the list (renamed, typed by hand) | 404 `DISTRICT_NOT_FOUND` | Error with Try again | LI `areasShow…` | OK-tested |
+| 12.6 | A field agent's areas | `mine` true on the pincodes they cover | "Yours"; a "My areas" button | LI same; LS first | OK-tested |
+| 12.7 | A busy area (more than 25 of a category) | the box searched again as quarters, up to 3 times | All of them listed | LI `aScanFinds…` | OK-tested |
+| 12.8 | A mehendi artist, a threading place, a makeup studio not filed as a salon | found by the service words, kept by its name | Listed with its kind | LI same; LL `businessesNotFiled…` | OK-tested |
+| 12.9 | Words match a business that isn't a beauty one ("… artist" painter) | left out | — | LI same; LL same | OK-tested |
+| 12.10 | A business Mapbox puts in the next pincode | left out of this area (in that area's scan) | — | LI same | OK-tested |
+| 12.11 | A business with no pincode on Mapbox | kept, in the scanned area | — | LI same | OK-tested |
+| 12.12 | A business that is a Clozest salon (owner's phone, or similar name within 120 m) | `clozest`: name, status; `shopId` for super admins only | "Clozest: Live"; super admin: "Open on Clozest" | LI same; LS first, super admin | OK-tested |
+| 12.13 | A Clozest salon no business matched | in `clozestOnly` | Listed under "On Clozest" | LI `aSalonNoBusinessMatched…`; LS first | OK-tested |
+| 12.14 | A pincode not in India Post's list, or not a pincode | 404 `AREA_NOT_FOUND` | "This pincode isn't in India Post's list." | LI `aPincodeNobody…` | OK-tested |
+| 12.15 | A pincode neither Mapbox nor India Post can place | 404 `AREA_NOT_ON_MAP` | The area is marked; others go on | LS `a search that can't run…` | OK-tested |
+| 12.16 | No `MAPBOX_TOKEN` yet | 503 `MAPBOX_OFF` | "Searching the map isn't set up yet…"; search stops | LS same | OK-tested |
+| 12.17 | Mapbox refuses the token; Mapbox down and India Post has no point | 503 `MAPBOX_REFUSED`; 503 `MAPBOX_UNAVAILABLE` (Retry-After 60) | "Mapbox refused our key…", search stops; "The map isn't answering…", tried again later | (by reading) | OK-untested |
+| 12.18 | The month's cap is reached before or during a scan | before: 429 `MAPBOX_CAP_REACHED`, nothing sent; during: what came back, `capReached` | Search stops, says who raises the cap | LI `theMonthlyCap…` | OK-tested |
+| 12.19 | Four scans at once with only 40 requests left | never more than the cap counted or sent | — | LI same | OK-tested |
+| 12.20 | Over 60 scans by one person in an hour; a scan refused before searching | 429 `TOO_MANY_REQUESTS` with Retry-After, others unaffected; a refused scan isn't counted | "You have searched many areas this hour…" | LI `tooManyScans…`, `aScanRefusedBefore…` | OK-tested |
+| 12.21 | More than 4 scans at once on one server | 503 `SCAN_BUSY`, Retry-After 5 | The area is tried again after the wait | LS same | OK-tested |
+| 12.22 | Mapbox fails a request, a box is still full after 3 splits, or a scan passes 60 s (postcode lookup and waiting for a turn included) | what came back, `partial` | "The map didn't answer fully for … search again later" | (by reading `LeadScanner`) | OK-untested |
+| 12.23 | Every request counted for the month; the token never in an answer or a log | `mapbox_usage` = requests made | "Map searches this month: n of cap" | LI `aScanFinds…` | OK-tested |
+| 12.24 | Saving a lead not contacted yet (a note, a follow-up) | no name, phone or point kept | — | LI `aLeadIsSaved…` | OK-tested |
+| 12.25 | Marking it called, then back to not contacted; no answer | name, phone, point kept; back to `NEW` 400 (status); `NO_ANSWER` kept, not counted as contacted, no WhatsApp consent | "No answer" chip | LI same | OK-tested |
+| 12.26 | Saving the same thing twice | the lead as it is, no new version or history | — | LI same | OK-tested |
+| 12.27 | Someone saved it meanwhile (checked before anything else, so a lead they tried isn't refused as "back to not contacted") | 409 `LEAD_CHANGED` with the lead now | Shows what they saved, keeps your typing, Save again | LI `anOldVersion…`; LS `a lead someone else saved…` | OK-tested |
+| 12.28 | Six saves of a new lead at once; six of one version at once | one wins, the rest 409 | — | LI same | OK-tested |
+| 12.29 | A field agent takes someone else's lead, or gives one away; the assignee left the team | 403 `ASSIGNED_TO_SOMEONE_ELSE`; they can still change its status and note; a leaver's lead is free to take | "(only a super admin can give it to someone else)" | LI `agentsTakeFreeLeads…`, `aSignedUpLeadKeeps…`; LS `a lead given to someone else…` | OK-tested |
+| 12.30 | Assigning a lead to someone not on the field team | 400 `VALIDATION_FAILED` (assignedTo) | Picker lists only the field team | LI same | OK-tested |
+| 12.31 | Bad status, note over 500, a new past follow-up (an overdue one kept is fine: LI `anOverdueFollowUp…`), unknown pincode, contacted without a name, bad phone | 400 naming the field | The sheet says what to fix | LI `badFieldsAreNamed` | OK-tested |
+| 12.32 | WhatsApp consent before contacting, or without a mobile | 400 (whatsappOk) | Switch off with the reason | LI same; LS first | OK-tested |
+| 12.33 | Consent recorded, then the lead changed by someone else; then the phone changed | the first time and person kept; a new or removed phone ends the consent (history: phone, WhatsApp), ticked again on a later save | "Recorded … by Ravi" | LI `whatsappConsent…` | OK-tested |
+| 12.34 | A contacted business registers on Clozest later (same phone); one already on Clozest is called | the job ties it once, the assigned person credited, history "signed up", its status frozen (409 `LEAD_SIGNED_UP`); a salon registered before the first contact (or closed) is never credited | "Signed up from this lead"; funnel | LI `aContactedLead…Credit`, `aSalonAlreadyOnClozest…`, `aSignedUpLeadKeeps…` | OK-tested |
+| 12.35 | Two leads match one salon | only one is tied (unique) | — | (by reading `LeadStore.link`) | OK-untested |
+| 12.36 | Follow-ups due: mine, past ones first; a super admin sees everyone's | due today or earlier, not signed up | Follow-ups tab and the home card | LI `followUpsDue…`; LS first | OK-tested |
+| 12.37 | A contacted lead Mapbox no longer lists | shown from its saved details, `onMapbox` false | "saved by the team (not on the map now)" | LI `aContactedLeadMapbox…`; LS super admin | OK-tested |
+| 12.38 | Many people scanning and saving at once | scans bounded per server; Mapbox requests counted in one statement; leads saved under a row lock with versions | — | LI cap and saves | OK-tested |
+| 12.39 | INCONVENIENCE: results vanish on reload | Mapbox's terms: not stored | Kept while the tab stays open; the team's own work (status, notes) is always saved | — | N/A-v1 |
+| 12.41 | A field agent wants the leads they work on without searching areas | `GET /admin/leads/mine`: theirs, tried, not signed up | My leads in the Follow-ups tab | LI `myLeadsList…` | OK-tested |
+| 12.40 | INCONVENIENCE: a big city spans districts | — | Several districts can be picked; a hint says so for Greater Hyderabad | LS first | OK-tested |
