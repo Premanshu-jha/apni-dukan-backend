@@ -50,7 +50,9 @@ public final class ClozestMatch {
                 }
             }
         }
-        pairs.sort(Comparator.comparing((Pair p) -> !p.phone()).thenComparingDouble(Pair::metres));
+        // Ties go the same way whatever order the businesses come in (a scan's and a refresh's orders differ)
+        pairs.sort(Comparator.comparing((Pair p) -> !p.phone()).thenComparingDouble(Pair::metres)
+                .thenComparing(p -> p.c().id()).thenComparing(p -> p.s().shopId()));
         Map<String, Salon> out = new HashMap<>();
         Set<java.util.UUID> taken = new HashSet<>();
         for (Pair p : pairs) {

@@ -76,7 +76,6 @@ public class LeadMatchJob {
                     salonsByPin.computeIfAbsent(s.pincode(), k -> new ArrayList<>()).add(s);
                 }
             }
-            Instant now = clock.instant();
             for (Lead l : batch) {
                 List<Salon> salons = salonsByPin.getOrDefault(l.pincode(), List.of());
                 if (salons.isEmpty()) {
@@ -85,6 +84,8 @@ public class LeadMatchJob {
                 Salon s = ClozestMatch.match(List.of(new ClozestMatch.Candidate(l.mapboxId(), l.name(),
                         l.latitude() == null ? 0 : l.latitude(), l.longitude() == null ? 0 : l.longitude(),
                         l.phone())), salons).get(l.mapboxId());
+                // Each tie stamped when it is made (not at the batch's start), so a check for changes finds it
+                Instant now = clock.instant();
                 if (s != null && store.link(l.mapboxId(), s.shopId(), now)) {
                     store.event(l.mapboxId(), null, "SIGNED_UP", null, s.name(), now);
                     linked++;
