@@ -280,6 +280,37 @@ public class LeadStore {
                 ps -> ps.setArray(1, texts(ps.getConnection(), pincodes)), SALON);
     }
 
+    /**
+     * For each area, the time of the last change there after that area's own time: a lead saved or tied to a salon
+     * (leads.updated_at), or a Clozest salon registered or changed (shops.updated_at, which every status change sets).
+     * Areas with nothing newer aren't in the map. One query, one range of ix_leads_pincode and of
+     * ix_shops_salon_pincode per area; callers pass at most a few hundred areas.
+     */
+    public Map<String, Instant> changedSince(Map<String, Instant> since) {
+        Map<String, Instant> out = new LinkedHashMap<>();
+        if (since.isEmpty()) {
+            return out;
+        }
+        List<String> pins = List.copyOf(since.keySet());
+        Timestamp[] times = pins.stream().map(p -> ts(since.get(p))).toArray(Timestamp[]::new);
+        jdbc.query("SELECT a.pincode, GREATEST("
+                        + "(SELECT max(l.updated_at) FROM leads l WHERE l.pincode = a.pincode AND l.updated_at > a.since), "
+                        + "(SELECT max(s.updated_at) FROM shops s WHERE s.type = 'SALON' AND s.pincode = a.pincode "
+                        + "AND s.updated_at > a.since)) AS at "
+                        + "FROM unnest(?::varchar[], ?::timestamptz[]) AS a (pincode, since) ORDER BY a.pincode",
+                ps -> {
+                    ps.setArray(1, texts(ps.getConnection(), pins));
+                    ps.setArray(2, ps.getConnection().createArrayOf("timestamptz", times));
+                },
+                rs -> {
+                    Timestamp at = rs.getTimestamp("at");
+                    if (at != null) {
+                        out.put(rs.getString("pincode"), at.toInstant());
+                    }
+                });
+        return out;
+    }
+
     /** The pincodes this person covers as a field agent. */
     public List<String> coveredBy(UUID userId) {
         return jdbc.queryForList("SELECT pincode FROM admin_pincodes WHERE user_id = ? ORDER BY pincode", String.class,
