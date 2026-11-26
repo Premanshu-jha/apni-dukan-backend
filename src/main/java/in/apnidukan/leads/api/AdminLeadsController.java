@@ -2,12 +2,16 @@ package in.apnidukan.leads.api;
 
 import in.apnidukan.common.context.CurrentUserProvider;
 import in.apnidukan.leads.service.LeadService;
+import in.apnidukan.leads.service.LeadService.AreaStatusView;
 import in.apnidukan.leads.service.LeadService.AreasView;
+import in.apnidukan.leads.service.LeadService.ChangesRequest;
+import in.apnidukan.leads.service.LeadService.ChangesView;
 import in.apnidukan.leads.service.LeadService.DistrictView;
 import in.apnidukan.leads.service.LeadService.DueView;
 import in.apnidukan.leads.service.LeadService.EventView;
 import in.apnidukan.leads.service.LeadService.FunnelView;
 import in.apnidukan.leads.service.LeadService.LeadView;
+import in.apnidukan.leads.service.LeadService.RefreshRequest;
 import in.apnidukan.leads.service.LeadService.SaveLead;
 import in.apnidukan.leads.service.LeadService.ScanView;
 import in.apnidukan.leads.service.LeadService.UsageView;
@@ -67,6 +71,21 @@ public class AdminLeadsController {
     @PostMapping("/scan/{pincode}")
     public ScanView scan(@PathVariable String pincode) {
         return leads.scan(caller(), pincode);
+    }
+
+    /**
+     * Which of the page's searched areas changed since it last brought each up to date (no map requests): the page
+     * asks every 30 seconds while the Leads page is on screen.
+     */
+    @PostMapping("/changes")
+    public ChangesView changes(@RequestBody(required = false) ChangesRequest body) {
+        return leads.changes(caller(), body);
+    }
+
+    /** One searched area's leads and Clozest salons as they are now, for the businesses the page shows (no map requests). */
+    @PostMapping("/refresh/{pincode}")
+    public AreaStatusView refresh(@PathVariable String pincode, @RequestBody(required = false) RefreshRequest body) {
+        return leads.refresh(caller(), pincode, body);
     }
 
     /** Saves the team's work on a lead (Mapbox's id for the business), e.g. status, note, follow-up. */

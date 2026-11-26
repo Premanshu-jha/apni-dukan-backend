@@ -19,7 +19,8 @@ import java.io.IOException;
  * nobody can tie up the server's memory with a huge body. Only the file uploads (POST /api/v1/files and a support
  * ticket's photo or PDF, POST /api/v1/files/ticket; a distributor's product master, POST
  * /api/v1/admin/kirana/catalogue/import, 2 MB) may be larger; they have their own 10 MB limit. A support email from the Email Worker (POST /api/v1/helpdesk/inbound, the raw email)
- * may be up to 1 MB (the worker sends only the headers of a bigger one).
+ * may be up to 1 MB (the worker sends only the headers of a bigger one), and so may the Leads page's refresh of a
+ * searched area (POST /api/v1/admin/leads/refresh/{pincode}: up to 3,000 businesses of about 250 bytes each).
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -29,6 +30,8 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
     /** A raw support email (see the class comment). */
     static final long MAX_EMAIL_BYTES = 1024 * 1024;
     static final String INBOUND_EMAIL = "/api/v1/helpdesk/inbound";
+    /** A searched area's businesses sent back to bring it up to date (see the class comment). */
+    static final String LEADS_REFRESH = "/api/v1/admin/leads/refresh/";
     /** The multipart uploads (see the class comment). */
     static final java.util.Set<String> UPLOADS = java.util.Set.of("/api/v1/files", "/api/v1/files/ticket",
             "/api/v1/admin/kirana/catalogue/import");
@@ -43,8 +46,10 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
             chain.doFilter(request, response);
             return;
         }
-        long limit = "POST".equals(request.getMethod()) && INBOUND_EMAIL.equals(request.getRequestURI())
-                ? MAX_EMAIL_BYTES : MAX_JSON_BYTES;
+        String uri = request.getRequestURI();
+        boolean post = "POST".equals(request.getMethod());
+        long limit = post && (INBOUND_EMAIL.equals(uri) || (uri.startsWith(LEADS_REFRESH)
+                && uri.indexOf('/', LEADS_REFRESH.length()) < 0)) ? MAX_EMAIL_BYTES : MAX_JSON_BYTES;
         if (request.getContentLengthLong() > limit) {
             response.setStatus(413);
             response.setContentType("application/json");
