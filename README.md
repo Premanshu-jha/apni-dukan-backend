@@ -1438,20 +1438,46 @@ empty `kirana_gs1_lookups` and `kirana_gs1_ai_calls`; V80 validates. Safe while 
 `kirana_list_lines.auto_before`, each under a 3 s lock timeout and in its own migration (one table locked at a time).
 Safe while the old version runs. Next migration: V83.
 
-## Leads: salons found on the map (V96–V98)
+## Leads: salons found on the map (V96–V99, R__India_places)
 
 The admin website's **Leads** page (field agents and super admins; 404 for support and anyone else) finds every salon
 and beauty business in an area, so the team can contact them and sign them up. `AdminLeadsController` →
 `LeadService` (who may do what, saving leads) → `LeadScanner` (the live search) → `MapboxSearch` (Mapbox's API);
 `LeadStore` and `PincodeDirectory` read and write the database.
 
-**Districts and areas** come from India Post's pincode directory (`india_pincodes`, V96: 19,300 pincodes in 733
-districts, Government Open Data Licence – India; rebuilt with `docs/tools/pincodes.py`). An area is a pincode, shown
-with its post office names ("500072 · Kukatpally, Vivekanandanagar Colony"). `PincodeDirectory` reads the table once
-into memory; searching districts (`GET /admin/leads/districts?q=`) matches a district or state name, a post office
-name or a pincode ("kukat" finds Medchal Malkajgiri, "has Kukatpally (500072)"). `GET /admin/leads/areas` lists a
-district's pincodes with the leads contacted, interested and signed up there, the Clozest salons there, and whether
-the caller covers it as a field agent.
+**Cities, districts and areas.** An area is a pincode, shown with its post office names ("500072 · Kukatpally,
+Vivekanandanagar Colony"). The data lives in two CSV files, the only source of it:
+
+- `src/main/resources/db/data/india-pincodes.csv`: all 19,300 pincodes in 733 districts (pincode, district, state,
+  post offices, location, radius), built by `docs/tools/pincodes.py` from India Post's directory (Government Open Data
+  Licence – India). India Post's locations are often far off (Yapral 500087 is placed 54 km away), so the script marks
+  a location far from the rest of its district **doubtful** (1,171 of them; see `mark_doubtful_points`): a scan uses
+  such a point only when Mapbox doesn't know the pincode, and then keeps only businesses that give this pincode, so a
+  real far-off village can still be searched and a wrong point can't bring in another area's shops. Post office names
+  keep their initials ("JJ Nagar Colony", "A.I.E. R.C.Puram").
+- `src/main/resources/db/data/india-cities.csv` (kept by hand): about 70 cities, each with other names people use
+  (Bangalore, Bombay, Gurgaon, Vizag…) and its districts. A city covers all areas of its districts: India Post files
+  Hyderabad under Hyderabad, Medchal Malkajgiri, Ranga Reddy and (Patancheru, Ameenpur, Tellapur) Sangareddy, so
+  "Hyderabad" lists all four (169 areas).
+
+`R__India_places` (a repeatable **Java** migration in `src/main/java/db/migration`) loads both into `india_pincodes`,
+`india_cities` and `india_city_districts` (V99), and Flyway runs it again by itself whenever either CSV changes (its
+checksum is the files'): **updating the data is editing a CSV**, no new migration. Pincodes are updated in place;
+cities replaced; a broken file fails the migration and changes nothing. (V96 created `india_pincodes` with a first
+copy of the data and stays as it is: an applied migration is never changed.)
+
+`PincodeDirectory` reads the tables once into memory. **`GET /admin/leads/districts?q=`** (free) finds, best first: a
+city or district by its name or another name ("bangal" → Bengaluru, "Bangalore"); the districts of a state; pincodes
+starting with what was typed (a whole pincode: just that one) or post offices with a word starting with it ("alwal" is
+not Palwal), each offered as its place with that area to tick (`pincode`): areas in a city first, then elsewhere, in
+pincode order. The admin website sends `cities=true`; without it (the website from before cities, during a deploy)
+only districts come back. A pincode in a city's district is offered as the city ("500087 · JJ Nagar Colony"
+→ Hyderabad), else as its district ("852201" → Saharsa); every pincode in India is found. **`GET
+/admin/leads/places?q=`** looks up a name our list lacks on Mapbox ("Yapral": one map request, counted against the
+month's cap; `app.leads.lookups-per-hour`, 30 per person, not counted when the map couldn't answer; nothing kept) and offers each answer's pincode the same way.
+**`GET /admin/leads/areas?kind=CITY|DISTRICT&district=&state=`** lists a place's areas (a city's district by district,
+its own first, each saying its district) with the leads contacted, interested and signed up there, the Clozest salons
+there, and whether the caller covers it; `/funnel` takes the same place.
 
 **What Mapbox is.** Mapbox is a maps company (like Google Maps for developers). Its *Search Box API* answers "which
 businesses of this category are in this box on the map": name, address, point, pincode, often the phone and the
