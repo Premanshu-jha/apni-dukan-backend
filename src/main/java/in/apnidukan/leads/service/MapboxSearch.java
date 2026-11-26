@@ -132,6 +132,38 @@ public class MapboxSearch {
         return Optional.empty();
     }
 
+    /**
+     * A place people call it by ("Yapral", "HITEC City") and the pincode Mapbox gives it.
+     *
+     * @param name     Mapbox's name for it, e.g. "Yapral"
+     * @param pincode  the postcode Mapbox places it in
+     */
+    public record Locality(String name, String pincode) {
+    }
+
+    /**
+     * Up to 5 localities, neighbourhoods, towns or postcodes in India matching what was typed, each with its pincode
+     * (GET /forward?q=yapral&types=...). Used only when our own pincode list has no match; never stored.
+     */
+    public List<Locality> localities(String typed) {
+        return localities(ask("/forward", "q=" + encode(typed)
+                + "&types=neighborhood,locality,place,district,postcode&country=IN&limit=5&language=en"));
+    }
+
+    static List<Locality> localities(JsonNode answer) {
+        List<Locality> out = new ArrayList<>();
+        for (JsonNode f : answer.path("features")) {
+            JsonNode p = f.path("properties");
+            String name = text(p.path("name"));
+            String pin = "postcode".equals(p.path("feature_type").asString(""))
+                    ? name : text(p.path("context").path("postcode").path("name"));
+            if (name != null && pin != null && pin.matches("[1-9][0-9]{5}")) {
+                out.add(new Locality(clip(name, 80), pin));
+            }
+        }
+        return out;
+    }
+
     /** At most {@code limit} (1 to 25) businesses of this category inside the box, nearest its middle first. */
     public List<Poi> category(String category, Box box, int limit) {
         return pois(ask("/category/" + encode(category), "bbox=" + box.param()
