@@ -1545,6 +1545,29 @@ salon registered after the team first reached the business and isn't closed: a s
 such but credits nobody. Saving a lead never ties it (a typed phone can't claim a salon). The person assigned, else
 the last to work on it, gets the credit (`credited_to`).
 
+**Keeping a searched area up to date** (no map requests). While the Leads page is on screen it asks every 30 seconds
+which of its areas changed: **`POST /admin/leads/changes`** with `{areas: [{pincode, since}]}` (at most 300: the
+searched areas and the pincodes of the businesses shown in them; `since` is the `asOf` of the area's scan, refresh or
+last check). It answers the areas where a lead was saved or tied to a salon, or a Clozest salon registered or changed,
+after their `since` (`leads.updated_at`, `shops.updated_at`; one query, indexed per pincode), and `asOf` for the next
+check (30 s before now, so a change stamped a little before it was committed, by the matching job or a save waiting
+for a lock, is still found; such a change may be listed once more). A pincode no longer in the list is skipped (one old
+area never stops the others); a time in the future counts as now. For each changed area the page sends the businesses
+it shows there to **`POST /admin/leads/refresh/{pincode}`** (`{shops: [{mapboxId, name, latitude, longitude, phone,
+matchKey}]}`, at most 3,000; this path may send up to 1 MB, other JSON 64 KB) and gets each one's lead and Clozest
+salon now, matched as a scan matches them, plus contacted leads it doesn't show yet (`saved`) and the salons no
+business matched (`clozestOnly`). A phone counts for matching only as the lead's saved phone or with the `matchKey` the
+scan gave with it (an HMAC of the business's id and phone, `LeadMatchKeys`, keyed from `JWT_SECRET`), so made-up
+numbers can't reveal whose phone a salon's owner has (a phone typed on a saved lead counts, as it does for scans and
+the matching job: each such save is in the lead's history, with who made it). The details come from the page, so a refresh saves nothing:
+only a scan or `LeadMatchJob` ties a lead to a salon (the job stamps each tie when it is made, so the next check
+finds it). Limits per person: 6 checks and 60 refreshes a minute (`app.leads.checks-per-minute`,
+`app.leads.refreshes-per-minute`; 429 `TOO_MANY_REQUESTS`, which the page skips quietly). Both read only our own
+database and run outside a transaction, so if Redis is down or slow they go ahead without holding a connection. Not
+noticed until the area is searched again: a salon or lead moving to another pincode, a salon becoming a kirana, a new
+owner or an owner's new phone number. Matching ties go the same way whatever order the businesses come in. Scans now
+also answer `asOf`, and each business's `matchKey`.
+
 **Follow-ups and the funnel.** `GET /admin/leads/due`: leads with a call-back date today or earlier, not signed up,
 the caller's own (a super admin can ask for everyone's). `GET /admin/leads/mine`: the leads given to the caller
 that were tried and haven't signed up, most recent first (300 at most), from their saved details, so no map search
@@ -1553,7 +1576,8 @@ person, leads saved → contacted → interested → signed up. `GET /admin/lead
 the cap.
 
 Settings (`application.properties`): `MAPBOX_TOKEN` (console.mapbox.com › Tokens; the default public scopes),
-`MAPBOX_MONTHLY_CAP`, `app.leads.scans-per-hour`, `app.leads.scans-at-once`, `app.leads.requests-at-once`.
+`MAPBOX_MONTHLY_CAP`, `app.leads.scans-per-hour`, `app.leads.lookups-per-hour`, `app.leads.scans-at-once`,
+`app.leads.requests-at-once`, `app.leads.checks-per-minute`, `app.leads.refreshes-per-minute`.
 V98 adds an index of salons by pincode (built without locking writes).
 
 ## Run it on your laptop
