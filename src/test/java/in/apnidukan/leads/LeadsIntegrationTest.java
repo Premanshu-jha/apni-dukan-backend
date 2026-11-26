@@ -28,6 +28,7 @@ import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -228,6 +229,8 @@ class LeadsIntegrationTest {
         TestData.clean(jdbc);
         redis.delete(redis.keys("rl:lead-scans:*"));
         redis.delete(redis.keys("rl:lead-lookups:*"));
+        redis.delete(redis.keys("rl:lead-checks:*"));
+        redis.delete(redis.keys("rl:lead-refreshes:*"));
         TestData.user(jdbc, BOSS, "9000000401");
         TestData.user(jdbc, AGENT, "9000000402");
         TestData.user(jdbc, AGENT2, "9000000403");
@@ -825,7 +828,232 @@ class LeadsIntegrationTest {
         assertThat(scan(AGENT2).status()).isEqualTo(200);
     }
 
+
+    // ---- Keeping a searched area up to date (no map requests) ----------------------------------------------------
+
+    @Test
+    void aSearchedAreaHearsOfANewSignupWithoutSearchingTheMapAgain() {
+        jdbc.update("UPDATE shops SET updated_at = now() - interval '1 hour'");
+        Reply scanned = scan(AGENT);
+        String asOf = (String) map(scanned.body()).get("asOf");
+        assertThat(asOf).isNotNull();
+        CALLS.set(0);
+        // Nothing changed since the scan
+        Reply quiet = changes(AGENT, Map.of(PIN, asOf));
+        assertThat(quiet.status()).as(quiet.text()).isEqualTo(200);
+        assertThat(list(quiet.body(), "areas")).isEmpty();
+        assertThat(map(quiet.body()).get("asOf")).isNotNull();
+
+        // Lakme registers on Clozest where the map shows it, and another salon nobody on the map matches
+        UUID owner = UUID.fromString("c0000000-0000-0000-0000-000000000008");
+        TestData.user(jdbc, owner, "9848012345");
+        TestData.salon(jdbc, LATER, owner);
+        jdbc.update("UPDATE shops SET name = 'Lakme Salon', status = 'PENDING_VISIT', pincode = ?, latitude = 17.4930, "
+                + "longitude = 78.3990 WHERE id = ?", PIN, LATER);
+        List<Map<String, Object>> changed = list(changes(AGENT, Map.of(PIN, asOf)).body(), "areas");
+        assertThat(changed).singleElement().satisfies(c -> assertThat(c).containsEntry("pincode", PIN)
+                .containsKey("changedAt"));
+
+        Map<String, Map<String, Object>> fromScan = byId(list(scanned.body(), "shops"));
+        assertThat(fromScan.get("mb-tia")).containsKey("matchKey");
+        assertThat(fromScan.get("mb-tia").get("matchKey")).isNotNull();
+        assertThat(fromScan.get("mb-rich").get("matchKey")).isNull();
+        Reply r = refresh(AGENT, List.of(seen("mb-nopin", "Lakme Salon KPHB", 17.4930, 78.3990, null),
+                seenFrom(fromScan.get("mb-tia"))));
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        Map<String, Map<String, Object>> shops = byId(list(r.body(), "shops"));
+        assertThat(map(shops.get("mb-nopin"), "clozest")).containsEntry("name", "Lakme Salon")
+                .containsEntry("status", "PENDING_VISIT").containsEntry("shopId", null);
+        assertThat(map(shops.get("mb-tia"), "clozest")).containsEntry("name", "Tias Parlour");
+        // Rich Look wasn't sent this time: it shows as a Clozest salon no business matched
+        assertThat(list(r.body(), "clozestOnly")).extracting(s -> s.get("name")).containsExactly("Rich Look");
+        String refreshedAsOf = (String) map(r.body()).get("asOf");
+        assertThat(refreshedAsOf).isNotNull();
+
+        // Rich Look is approved later: its area is listed again
+        jdbc.update("UPDATE shops SET updated_at = now() - interval '1 hour'");
+        assertThat(list(changes(AGENT, Map.of(PIN, Instant.now().minusSeconds(5).toString())).body(), "areas"))
+                .isEmpty();
+        jdbc.update("UPDATE shops SET status = 'APPROVED', updated_at = now() WHERE id = ?", SALON2);
+        assertThat(list(changes(AGENT, Map.of(PIN, Instant.now().minusSeconds(5).toString())).body(), "areas"))
+                .extracting(c -> c.get("pincode")).containsExactly(PIN);
+        // No map requests at all
+        assertThat(CALLS.get()).isZero();
+    }
+
+    @Test
+    void aLeadSomeoneElseWorksShowsUpAndNothingIsTiedFromThePagesDetails() {
+        jdbc.update("UPDATE shops SET updated_at = now() - interval '1 hour'");
+        String asOf = (String) map(scan(AGENT).body()).get("asOf");
+        Map<String, Object> rich = body("CALLED", null);
+        rich.put("name", "Rich Look Unisex");
+        rich.put("phone", null);
+        rich.put("latitude", 17.4900);
+        rich.put("longitude", 78.4000);
+        assertThat(put("mb-rich", rich, AGENT2).status()).isEqualTo(200);
+        assertThat(put("mb-swathi", body("INTERESTED", null), AGENT2).status()).isEqualTo(200);
+        assertThat(list(changes(AGENT, Map.of(PIN, asOf)).body(), "areas")).extracting(c -> c.get("pincode"))
+                .containsExactly(PIN);
+
+        // A salon registers later with Swathi's saved phone
+        UUID owner = UUID.fromString("c0000000-0000-0000-0000-000000000008");
+        TestData.user(jdbc, owner, "9848012345");
+        TestData.salon(jdbc, LATER, owner);
+        jdbc.update("UPDATE shops SET pincode = ? WHERE id = ?", PIN, LATER);
+
+        Reply r = refresh(AGENT, List.of(seen("mb-rich", "Rich Look Unisex", 17.4900, 78.4000, null)));
+        Map<String, Object> richNow = byId(list(r.body(), "shops")).get("mb-rich");
+        assertThat(map(richNow, "lead")).containsEntry("status", "CALLED");
+        assertThat(map(richNow, "clozest")).containsEntry("name", "Rich Look");
+        // Swathi's lead isn't on the page yet: it comes as a saved lead, matched to the new salon by phone
+        assertThat(list(r.body(), "saved")).singleElement().satisfies(s -> {
+            assertThat(s).containsEntry("mapboxId", "mb-swathi").containsEntry("onMapbox", false);
+            assertThat(map(s, "lead")).containsEntry("status", "INTERESTED").containsEntry("signedUpAt", null);
+            assertThat(map(s, "clozest")).containsEntry("name", "Test Shop");
+        });
+        // Only a scan or the matching job ties a lead to a salon
+        assertThat(jdbc.queryForObject("SELECT shop_id FROM leads WHERE mapbox_id = 'mb-swathi'", UUID.class)).isNull();
+        jdbc.update("UPDATE leads SET updated_at = now() - interval '1 hour'");
+        jdbc.update("UPDATE shops SET updated_at = now() - interval '1 hour'");
+        String beforeJob = Instant.now().minusSeconds(5).toString();
+        assertThat(list(changes(AGENT, Map.of(PIN, beforeJob)).body(), "areas")).isEmpty();
+        assertThat(matchJob.runOnce()).isEqualTo(1);
+        // The job's tie is a change the next check finds
+        assertThat(list(changes(AGENT, Map.of(PIN, beforeJob)).body(), "areas")).extracting(c -> c.get("pincode"))
+                .containsExactly(PIN);
+        Reply after = refresh(AGENT, List.of(seen("mb-rich", "Rich Look Unisex", 17.4900, 78.4000, null)));
+        assertThat(map(byId(list(after.body(), "saved")).get("mb-swathi"), "lead").get("signedUpAt")).isNotNull();
+    }
+
+    @Test
+    void aSuperAdminGetsTheSalonsIdOnRefreshAndOthersCannotRefresh() {
+        Map<String, Object> tia = byId(list(scan(BOSS).body(), "shops")).get("mb-tia");
+        Reply r = refresh(BOSS, List.of(seenFrom(tia)));
+        assertThat(map(byId(list(r.body(), "shops")).get("mb-tia"), "clozest")).containsEntry("shopId",
+                SALON.toString());
+        assertThat(changes(SUPPORT, Map.of(PIN, "2026-01-01T00:00:00Z")).status()).isEqualTo(404);
+        assertThat(refresh(SUPPORT, List.of()).status()).isEqualTo(404);
+        // Someone not on the admin team is stopped before the page (403), as for the other Leads calls
+        assertThat(changes(CUSTOMER, Map.of(PIN, "2026-01-01T00:00:00Z")).status()).isIn(403, 404);
+        assertThat(refresh(CUSTOMER, List.of()).status()).isIn(403, 404);
+        assertThat(changes(null, Map.of(PIN, "2026-01-01T00:00:00Z")).status()).isEqualTo(401);
+    }
+
+    @Test
+    void badChecksAndRefreshesAreRefused() {
+        assertThat(field(call(HttpMethod.POST, "/admin/leads/changes", null, AGENT))).isEqualTo("areas");
+        // A pincode no longer in the list is skipped, not a reason to refuse the others; a time ahead counts as now
+        Map<String, String> withOld = new HashMap<>();
+        withOld.put("111111", "2026-01-01T00:00:00Z");
+        withOld.put(PIN, "2099-01-01T00:00:00Z");
+        Reply old = changes(AGENT, withOld);
+        assertThat(old.status()).as(old.text()).isEqualTo(200);
+        assertThat(list(old.body(), "areas")).isEmpty();
+        List<Object> withNull = new ArrayList<>();
+        withNull.add(null);
+        assertThat(field(call(HttpMethod.POST, "/admin/leads/changes", Map.of("areas", withNull), AGENT)))
+                .isEqualTo("areas");
+        assertThat(field(call(HttpMethod.POST, "/admin/leads/changes",
+                Map.of("areas", List.of(Map.of("pincode", PIN))), AGENT))).isEqualTo("areas");
+        List<Map<String, Object>> many = new ArrayList<>();
+        for (int i = 0; i < 301; i++) {
+            many.add(Map.of("pincode", PIN, "since", "2026-01-01T00:00:00Z"));
+        }
+        assertThat(field(call(HttpMethod.POST, "/admin/leads/changes", Map.of("areas", many), AGENT)))
+                .isEqualTo("areas");
+
+        assertThat(code(call(HttpMethod.POST, "/admin/leads/refresh/111111", Map.of("shops", List.of()), AGENT)))
+                .isEqualTo("AREA_NOT_FOUND");
+        assertThat(field(call(HttpMethod.POST, "/admin/leads/refresh/" + PIN, null, AGENT))).isEqualTo("shops");
+        assertThat(field(refresh(AGENT, List.of(seen("mb-x", "X", 51.5, -0.1, null))))).isEqualTo("shops");
+        assertThat(field(refresh(AGENT, List.of(seen(" ", "X", null, null, null))))).isEqualTo("shops");
+        assertThat(field(refresh(AGENT, List.of(seen("mb-x", "X", 17.49, null, null))))).isEqualTo("shops");
+        assertThat(field(refresh(AGENT, List.of(seen("mb-x", "X".repeat(301), null, null, null))))).isEqualTo("shops");
+        assertThat(field(refresh(AGENT, List.of(seen("m".repeat(201), "X", null, null, null))))).isEqualTo("shops");
+        List<Object> nullShop = new ArrayList<>();
+        nullShop.add(null);
+        assertThat(field(call(HttpMethod.POST, "/admin/leads/refresh/" + PIN, Map.of("shops", nullShop), AGENT)))
+                .isEqualTo("shops");
+        List<Map<String, Object>> tooMany = new ArrayList<>();
+        for (int i = 0; i < 3001; i++) {
+            tooMany.add(seen("mb-" + i, "S", null, null, null));
+        }
+        assertThat(field(refresh(AGENT, tooMany))).isEqualTo("shops");
+    }
+
+    @Test
+    void madeUpPhonesNeverMatchAndABusyAreaFitsInOneRefresh() {
+        // The owner's phone sent without the scan's key (or with another business's key): no match, so nobody can
+        // find out whose phone a salon's owner has
+        Map<String, Object> tia = byId(list(scan(AGENT).body(), "shops")).get("mb-tia");
+        Map<String, Object> forged = seen("mb-x", "Someone", null, null, "09133576278");
+        assertThat(map(byId(list(refresh(AGENT, List.of(forged)).body(), "shops")).get("mb-x"), "clozest")).isNull();
+        forged.put("matchKey", tia.get("matchKey"));
+        assertThat(map(byId(list(refresh(AGENT, List.of(forged)).body(), "shops")).get("mb-x"), "clozest")).isNull();
+        // The map's own phone with its key matches even without a point
+        Map<String, Object> real = seenFrom(tia);
+        real.put("latitude", null);
+        real.put("longitude", null);
+        assertThat(map(byId(list(refresh(AGENT, List.of(real)).body(), "shops")).get("mb-tia"), "clozest"))
+                .containsEntry("name", "Tias Parlour");
+
+        // 2,500 businesses (well over 64 KB) in one refresh
+        List<Map<String, Object>> busy = new ArrayList<>();
+        for (int i = 0; i < 2500; i++) {
+            busy.add(seen("dXJuOm1ieHBvaTpiYzQ5ZjA3Ni1hNmUzLTQ2MTgtOTNlYS1lY2M0ZGQ2ZDk3NDAt" + i,
+                    "Some Beauty Parlour and Spa " + i, 17.4901234567, 78.4001234567, "+91 98480 12345"));
+        }
+        Reply r = refresh(AGENT, busy);
+        assertThat(r.status()).as(r.text()).isEqualTo(200);
+        assertThat(list(r.body(), "shops")).hasSize(2500);
+    }
+
+    @Test
+    void checksAndRefreshesAreLimitedPerPersonEvenWhenTheyArriveTogether() throws Exception {
+        List<Integer> statuses = together(12, () -> changes(AGENT, Map.of(PIN, "2026-01-01T00:00:00Z")).status());
+        assertThat(statuses).filteredOn(s -> s == 200).hasSize(6);
+        assertThat(statuses).filteredOn(s -> s == 429).hasSize(6);
+        Reply slowed = changes(AGENT, Map.of(PIN, "2026-01-01T00:00:00Z"));
+        assertThat(code(slowed)).isEqualTo("TOO_MANY_REQUESTS");
+        // Someone else isn't slowed down
+        assertThat(changes(AGENT2, Map.of(PIN, "2026-01-01T00:00:00Z")).status()).isEqualTo(200);
+
+        redis.opsForValue().set("rl:lead-refreshes:" + AGENT, "60", java.time.Duration.ofSeconds(50));
+        assertThat(code(refresh(AGENT, List.of()))).isEqualTo("TOO_MANY_REQUESTS");
+        assertThat(refresh(AGENT2, List.of()).status()).isEqualTo(200);
+        assertThat(CALLS.get()).isZero();
+    }
+
     // ---- Helpers -------------------------------------------------------------------------------------------------
+
+    private Reply changes(UUID who, Map<String, String> since) {
+        List<Map<String, Object>> areas = new ArrayList<>();
+        since.forEach((pin, at) -> areas.add(Map.of("pincode", pin, "since", at)));
+        return call(HttpMethod.POST, "/admin/leads/changes", Map.of("areas", areas), who);
+    }
+
+    private Reply refresh(UUID who, List<Map<String, Object>> shops) {
+        return call(HttpMethod.POST, "/admin/leads/refresh/" + PIN, Map.of("shops", shops), who);
+    }
+
+    /** A business as the page sends it back from its scan (with the phone's key). */
+    private static Map<String, Object> seenFrom(Map<String, Object> shop) {
+        Map<String, Object> m = seen((String) shop.get("mapboxId"), (String) shop.get("name"),
+                ((Number) shop.get("latitude")).doubleValue(), ((Number) shop.get("longitude")).doubleValue(),
+                (String) shop.get("phone"));
+        m.put("matchKey", shop.get("matchKey"));
+        return m;
+    }
+
+    private static Map<String, Object> seen(String id, String name, Double lat, Double lng, String phone) {
+        Map<String, Object> m = new HashMap<>();
+        m.put("mapboxId", id);
+        m.put("name", name);
+        m.put("latitude", lat);
+        m.put("longitude", lng);
+        m.put("phone", phone);
+        return m;
+    }
 
     private Reply scan(UUID who) {
         return call(HttpMethod.POST, "/admin/leads/scan/" + PIN, null, who);
