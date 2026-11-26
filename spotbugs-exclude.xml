@@ -4,6 +4,12 @@
   SpotBugs reports Medium and High findings (threshold=Medium); any of those not listed here fails the build.
 -->
 <FindBugsFilter>
+    <!-- Flyway finds Java migrations by their class name (R__India_places: a repeatable migration), so the name has to
+         break Java's naming convention. -->
+    <Match>
+        <Package name="db.migration"/>
+        <Bug pattern="NM_CLASS_NAMING_CONVENTION"/>
+    </Match>
     <!-- Storing objects passed to a constructor is how Spring dependency injection works (a service keeps the
          repositories and clients it is given). Not a leak. -->
     <Match>

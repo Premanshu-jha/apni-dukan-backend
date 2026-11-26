@@ -171,4 +171,27 @@ class LeadsLogicTest {
         });
         assertThat(MapboxSearch.Box.around(17.0, 78.0, 1113).north()).isEqualTo(17.01, org.assertj.core.data.Offset.offset(1e-4));
     }
+
+    @Test
+    void mapboxLocalitiesKeepOnlyAnswersWithAnIndianPincode() {
+        tools.jackson.databind.JsonNode answer = JsonMapper.builder().build().readTree("""
+                {"features":[
+                  {"properties":{"name":"Yapral","feature_type":"neighborhood","context":{"postcode":{"name":"500087"}}}},
+                  {"properties":{"name":"500072","feature_type":"postcode"}},
+                  {"properties":{"name":"Somewhere","feature_type":"place","context":{}}},
+                  {"properties":{"name":"Bad","feature_type":"locality","context":{"postcode":{"name":"SW1A"}}}}
+                ]}""");
+        assertThat(MapboxSearch.localities(answer)).containsExactly(new MapboxSearch.Locality("Yapral", "500087"),
+                new MapboxSearch.Locality("500072", "500072"));
+    }
+
+    @Test
+    void theCsvReaderHandlesQuotesCommasAndLineBreaks() {
+        assertThat(db.migration.R__India_places.parse("a,b\n\"x, y\",\"say \"\"hi\"\"\"\r\n\"multi\nline\",z"))
+                .containsExactly(new String[] {"a", "b"}, new String[] {"x, y", "say \"hi\""},
+                        new String[] {"multi\nline", "z"});
+        // The real files: every row has its columns
+        assertThat(db.migration.R__India_places.rows(db.migration.R__India_places.PINCODES, 8)).hasSize(19300);
+        assertThat(db.migration.R__India_places.rows(db.migration.R__India_places.CITIES, 4)).hasSizeGreaterThan(60);
+    }
 }

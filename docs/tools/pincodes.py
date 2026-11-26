@@ -1,15 +1,20 @@
-"""Builds V96__india_pincodes.sql (the Leads page's districts and areas) from India Post's pincode directory.
+"""Builds db/data/india-pincodes.csv (the Leads page's districts and areas) from India Post's pincode directory.
+
+The CSV is the only source of the india_pincodes table: R__india_places (a repeatable Java migration) loads it, and
+loads it again whenever it changes. (V96 created the table with a first copy of this data; R__india_places replaces
+it.)
 
 Source: "All India Pincode Directory", Department of Posts, data.gov.in (Government Open Data Licence - India).
 A GitHub copy of the same file: https://raw.githubusercontent.com/dropdevrahul/pincodes-india/main/pincode.csv
 
-    python3 docs/tools/pincodes.py pincode.csv src/main/resources/db/migration/V96__india_pincodes.sql
+    python3 docs/tools/pincodes.py pincode.csv src/main/resources/db/data/india-pincodes.csv
 
 One row per pincode:
   district, state   the district most of its post offices are in (a few pincodes cross a district line)
   places            its post office names, delivery offices first, without "B.O"/"S.O"/"H.O" (at most 6, 160 chars)
   latitude/longitude the middle of its offices (median), after dropping offices more than 25 km from a first middle
-                    (the directory has some offices placed far off); null when no office has a usable point
+                    (the directory has some offices placed far off); empty when no office has a usable point, or
+                    (a point far from the rest of its district is marked doubtful: see mark_doubtful_points)
   radius_m          how far its offices spread from that middle (the 80th percentile), 1500 to 6000 m: the Leads scan
                     searches this far around the middle
 """
@@ -19,16 +24,26 @@ import re
 import sys
 from collections import Counter, defaultdict
 
+CITIES = "src/main/resources/db/data/india-cities.csv"
 SUFFIX = re.compile(r"\s*\b(B\.?O|S\.?O|H\.?O|P\.?O|GPO|MDG|NSH)\.?\s*$", re.I)
 
 
 def nice(s):
+    """
+    Title Case, keeping initials as people write them: a short all-capital word in a name that isn't all capitals
+    ("JJ Nagar Colony", "CCI Tandur") stays capitals, and letters before a dot are capitals ("A.I.E. R.C.Puram").
+    """
+    shouting = s.upper() == s
     out = []
     for w in re.split(r"(\s+|-|/|\()", s.strip()):
         if not w or w.isspace() or w in "-/(":
             out.append(w)
         elif w.lower() in ("and", "of"):
             out.append(w.lower())
+        elif not shouting and w.isalpha() and w.isupper() and len(w) <= 3:
+            out.append(w)
+        elif "." in w:
+            out.append(".".join(p[:1].upper() + p[1:].lower() for p in w.split(".")))
         else:
             out.append(w[0].upper() + w[1:].lower())
     return re.sub(r"\s+", " ", "".join(out)).strip()
@@ -94,31 +109,47 @@ def main(src, dst):
             lat, lng = round(mid[0], 6), round(mid[1], 6)
         rows.append((p, nice(district), nice(state), places or p, lat, lng, radius))
 
-    with open(dst, "w", encoding="utf-8") as out:
-        out.write("SET LOCAL lock_timeout = '3s';\n\n")
-        out.write("-- India's pincodes for the admin website's Leads page (districts and areas). Built by docs/tools/pincodes.py\n")
-        out.write("-- from India Post's All India Pincode Directory (Department of Posts, data.gov.in, Government Open Data\n")
-        out.write("-- Licence - India). Read-only reference data: the app never writes it.\n")
-        out.write("--   places: post office names, delivery offices first; latitude/longitude: the middle of its offices (null if\n")
-        out.write("--   none has a usable point: such a pincode can't be scanned); radius_m: how far the scan searches around it.\n")
-        out.write("CREATE TABLE india_pincodes (\n")
-        out.write("    pincode    VARCHAR(6)   PRIMARY KEY CHECK (pincode ~ '^[1-9][0-9]{5}$'),\n")
-        out.write("    district   VARCHAR(80)  NOT NULL,\n")
-        out.write("    state      VARCHAR(80)  NOT NULL,\n")
-        out.write("    places     VARCHAR(200) NOT NULL,\n")
-        out.write("    latitude   NUMERIC(9,6) CHECK (latitude BETWEEN 6 AND 37.6),\n")
-        out.write("    longitude  NUMERIC(9,6) CHECK (longitude BETWEEN 68 AND 97.5),\n")
-        out.write("    radius_m   INTEGER      NOT NULL CHECK (radius_m BETWEEN 500 AND 10000),\n")
-        out.write("    CHECK ((latitude IS NULL) = (longitude IS NULL))\n);\n\n")
-        for i in range(0, len(rows), 1000):
-            out.write("INSERT INTO india_pincodes (pincode, district, state, places, latitude, longitude, radius_m) VALUES\n")
-            chunk = rows[i:i + 1000]
-            out.write(",\n".join("(" + ", ".join([sql(p), sql(d), sql(s), sql(pl),
-                                                  "NULL" if la is None else repr(la),
-                                                  "NULL" if lo is None else repr(lo), str(r)]) + ")"
-                                 for p, d, s, pl, la, lo, r in chunk))
-            out.write(";\n\n")
-    print(f"{len(rows)} pincodes, {len({(r[1], r[2]) for r in rows})} districts -> {dst}")
+    rows = mark_doubtful_points(rows)
+    with open(dst, "w", encoding="utf-8", newline="") as out:
+        w = csv.writer(out)
+        w.writerow(["pincode", "district", "state", "places", "latitude", "longitude", "radius_m", "doubtful"])
+        for p, d, s, pl, la, lo, r, doubt in rows:
+            w.writerow([p, d, s, pl, "" if la is None else la, "" if lo is None else lo, r, "true" if doubt else "false"])
+    print(f"{len(rows)} pincodes written to {dst}")
+
+
+def mark_doubtful_points(rows):
+    """
+    India Post's office coordinates are often far off (Yapral 500087 is placed 54 km away, Manikonda 500089 265 km).
+    A wrong point sends a scan to the wrong place when Mapbox doesn't know the postcode, so it is marked doubtful
+    (the 8th column): the scan then keeps only businesses that give this pincode. A real far-off village keeps its
+    point, so it can still be searched. A point is doubtful when it is far from the middle of its district's other points:
+    anywhere, more than 60 km and 4 times the district's median distance; in a city's districts (india-cities.csv),
+    where areas are close together, more than 20 km and 2.5 times. Judged twice, the second time without the first
+    pass's wrong points (they pull the middle towards themselves).
+    """
+    city_districts = set()
+    with open(CITIES, encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            for ds in filter(None, r["districts"].split(";")):
+                city_districts.add(tuple(ds.split("/")))
+    by = defaultdict(list)
+    for row in rows:
+        if row[4] is not None:
+            by[(row[1], row[2])].append(row)
+    wrong = set()
+    for key, pins in by.items():
+        floor, times = (20, 2.5) if key in city_districts else (60, 4)
+        # Twice: the first pass's wrong points pull the middle and the spread; the second judges without them
+        for _ in range(2):
+            kept = [r for r in pins if r[0] not in wrong]
+            if len(kept) < 3:
+                break
+            middle = (median([r[4] for r in kept]), median([r[5] for r in kept]))
+            typical = median([km(middle, (r[4], r[5])) for r in kept])
+            wrong.update(r[0] for r in kept if km(middle, (r[4], r[5])) > max(floor, times * typical))
+    print(f"{len(wrong)} doubtful locations marked")
+    return [(p, d, s, pl, la, lo, r, p in wrong) for p, d, s, pl, la, lo, r in rows]
 
 
 if __name__ == "__main__":

@@ -102,6 +102,15 @@ class LeadsIntegrationTest {
                     ? "{\"features\":[{\"properties\":{\"name\":\"500072\",\"coordinates\":{\"latitude\":17.4939,"
                     + "\"longitude\":78.4015},\"bbox\":[78.38,17.47,78.42,17.51]}}]}"
                     : "{\"features\":[]}";
+        } else if (path.equals("/v1/forward") && q.getOrDefault("types", "").contains("locality")) {
+            // Place look-ups: Yapral is in 500087; a name with no pincode in India is skipped
+            body = switch (q.getOrDefault("q", "")) {
+                case "yapral" -> "{\"features\":[{\"properties\":{\"name\":\"Yapral\",\"feature_type\":\"neighborhood\","
+                        + "\"context\":{\"postcode\":{\"name\":\"500087\"}}}},{\"properties\":{\"name\":\"Yapral Road\","
+                        + "\"feature_type\":\"locality\",\"context\":{\"postcode\":{\"name\":\"500087\"}}}},"
+                        + "{\"properties\":{\"name\":\"Nowhere\",\"feature_type\":\"place\",\"context\":{}}}]}";
+                default -> "{\"features\":[]}";
+            };
         } else if (path.equals("/v1/forward")) {
             String words = q.getOrDefault("q", "");
             body = switch (words) {
@@ -206,6 +215,7 @@ class LeadsIntegrationTest {
     @Autowired JwtService jwt;
     @Autowired SessionRevocations sessions;
     @Autowired LeadMatchJob matchJob;
+    @Autowired in.apnidukan.leads.repo.PincodeDirectory directory;
 
     RestClient http;
 
@@ -217,6 +227,7 @@ class LeadsIntegrationTest {
                 .build();
         TestData.clean(jdbc);
         redis.delete(redis.keys("rl:lead-scans:*"));
+        redis.delete(redis.keys("rl:lead-lookups:*"));
         TestData.user(jdbc, BOSS, "9000000401");
         TestData.user(jdbc, AGENT, "9000000402");
         TestData.user(jdbc, AGENT2, "9000000403");
@@ -264,18 +275,134 @@ class LeadsIntegrationTest {
     // ---- Districts and areas -------------------------------------------------------------------------------------
 
     @Test
-    void districtsAreFoundByNameByAPlaceOrByAPincode() {
-        List<Map<String, Object>> byName = items(get("/admin/leads/districts?q=hyder", AGENT));
-        assertThat(byName.getFirst()).containsEntry("district", "Hyderabad").containsEntry("state", "Telangana")
-                .containsEntry("matched", null);
-        List<Map<String, Object>> byPlace = items(get("/admin/leads/districts?q=kukatpally", AGENT));
-        assertThat(byPlace).anySatisfy(d -> {
-            assertThat(d).containsEntry("district", "Medchal Malkajgiri");
-            assertThat((String) d.get("matched")).contains("Kukatpally").contains("500072");
+    void citiesAndDistrictsAreFoundByNameAnotherNameAPostOfficeOrAPincode() {
+        // "Hyderabad" is the city first (all three of India Post's districts), then the district alone
+        List<Map<String, Object>> byName = items(get("/admin/leads/districts?cities=true&q=hyder", AGENT));
+        assertThat(byName.getFirst()).containsEntry("kind", "CITY").containsEntry("district", "Hyderabad")
+                .containsEntry("state", "Telangana").containsEntry("matched", null).containsEntry("pincode", null)
+                .containsEntry("districts", List.of("Hyderabad", "Medchal Malkajgiri", "Ranga Reddy", "Sangareddy"))
+                .containsEntry("pincodes", 169);
+        assertThat(byName.get(1)).containsEntry("kind", "DISTRICT").containsEntry("district", "Hyderabad");
+        // Another name
+        assertThat(items(get("/admin/leads/districts?cities=true&q=bangal", AGENT)).getFirst()).containsEntry("kind", "CITY")
+                .containsEntry("district", "Bengaluru").containsEntry("matched", "Bangalore");
+        // A post office in a city's district: offered as the city, with that area to tick
+        assertThat(items(get("/admin/leads/districts?cities=true&q=kukatpally", AGENT))).anySatisfy(d -> {
+            assertThat(d).containsEntry("kind", "CITY").containsEntry("district", "Hyderabad")
+                    .containsEntry("pincode", PIN);
+            assertThat((String) d.get("matched")).contains("Kukatpally").contains(PIN);
         });
-        assertThat(items(get("/admin/leads/districts?q=50007", AGENT))).isNotEmpty();
-        assertThat(items(get("/admin/leads/districts?q=h", AGENT))).isEmpty();
-        assertThat(code(get("/admin/leads/districts?q=" + "x".repeat(61), AGENT))).isEqualTo("VALIDATION_FAILED");
+        // A whole pincode: just that area (Yapral's, filed by India Post under Medchal Malkajgiri)
+        List<Map<String, Object>> byPin = items(get("/admin/leads/districts?cities=true&q=500087", AGENT));
+        assertThat(byPin).singleElement().satisfies(d -> {
+            assertThat(d).containsEntry("kind", "CITY").containsEntry("district", "Hyderabad")
+                    .containsEntry("pincode", "500087");
+            assertThat((String) d.get("matched")).startsWith("500087 · ");
+        });
+        // A town outside any city: its district
+        assertThat(items(get("/admin/leads/districts?cities=true&q=saharsa", AGENT)).getFirst()).containsEntry("kind", "DISTRICT")
+                .containsEntry("district", "Saharsa").containsEntry("state", "Bihar");
+        assertThat(items(get("/admin/leads/districts?cities=true&q=852201", AGENT))).singleElement()
+                .satisfies(d -> assertThat(d).containsEntry("district", "Saharsa").containsEntry("pincode", "852201"));
+        assertThat(items(get("/admin/leads/districts?cities=true&q=50007", AGENT))).isNotEmpty();
+        assertThat(items(get("/admin/leads/districts?cities=true&q=h", AGENT))).isEmpty();
+        assertThat(code(get("/admin/leads/districts?cities=true&q=" + "x".repeat(61), AGENT))).isEqualTo("VALIDATION_FAILED");
+    }
+
+    @Test
+    void theAdminWebsiteFromBeforeCitiesStillGetsDistrictsOnly() {
+        // Deployed before the new admin website: without cities=true, no city hits, an area is offered as its district
+        assertThat(items(get("/admin/leads/districts?q=hyder", AGENT))).allSatisfy(d -> assertThat(d)
+                .containsEntry("kind", "DISTRICT"));
+        assertThat(items(get("/admin/leads/districts?q=500087", AGENT))).singleElement().satisfies(d -> assertThat(d)
+                .containsEntry("district", "Medchal Malkajgiri").containsEntry("pincode", "500087"));
+        // Area hits in pincode order, the same after every restart
+        List<Object> pins = items(get("/admin/leads/districts?cities=true&q=5000", AGENT)).stream()
+                .map(d -> d.get("pincode")).toList();
+        assertThat(pins).hasSize(15).isSortedAccordingTo(java.util.Comparator.comparing(Object::toString));
+        assertThat(pins.getFirst()).isEqualTo("500001");
+    }
+
+    @Test
+    void everyPincodeInIndiaIsFoundAndBelongsToAPlace() {
+        // The CSV loader filled the table (R__India_places), and each of its pincodes is offered as a city or district
+        List<String> all = jdbc.queryForList("SELECT pincode FROM india_pincodes", String.class);
+        assertThat(all).hasSizeGreaterThan(19000).contains("500087", "852201", "110001", "744101");
+        assertThat(all).allSatisfy(p -> assertThat(directory.pin(p).flatMap(directory::placeOf)).isPresent());
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM india_cities", Integer.class)).isGreaterThan(60);
+        // India Post's far-off points are marked doubtful (Yapral's is 54 km off); a real far village keeps its point
+        assertThat(jdbc.queryForObject("SELECT location_doubtful FROM india_pincodes WHERE pincode = '500087'",
+                Boolean.class)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT latitude IS NOT NULL FROM india_pincodes WHERE pincode = '743370'",
+                Boolean.class)).isTrue();
+    }
+
+    @Test
+    void aWordMatchesTheStartOfAPostOfficesWordAndAStateGivesItsDistricts() {
+        // "alwal" is Alwal in Hyderabad, not Palwal in Haryana; areas in a city come before villages elsewhere
+        List<Map<String, Object>> alwal = items(get("/admin/leads/districts?cities=true&q=alwal", AGENT));
+        assertThat(alwal).isNotEmpty().allSatisfy(d -> assertThat((String) d.get("matched")).doesNotContain("Palwal"));
+        assertThat(alwal.getFirst()).containsEntry("district", "Hyderabad");
+        // A state: its districts first
+        assertThat(items(get("/admin/leads/districts?cities=true&q=telangana", AGENT)).getFirst())
+                .containsEntry("kind", "DISTRICT").containsEntry("state", "Telangana").containsEntry("pincode", null);
+    }
+
+    @Test
+    void aLookUpTheMapCouldNotMakeDoesNotUseTheHourlyAllowance() {
+        String month = LocalDate.now(INDIA).format(DateTimeFormatter.ofPattern("yyyy-MM"));
+        jdbc.update("INSERT INTO mapbox_usage (month, requests) VALUES (?, 100000)", month);
+        assertThat(code(get("/admin/leads/places?q=yapral", AGENT))).isEqualTo("MAPBOX_CAP_REACHED");
+        String count = redis.opsForValue().get("rl:lead-lookups:" + AGENT);
+        assertThat(count == null ? 0 : Integer.parseInt(count)).isZero();
+        // The hourly limit: 30 look-ups per person
+        jdbc.update("DELETE FROM mapbox_usage");
+        redis.opsForValue().set("rl:lead-lookups:" + AGENT, "30", java.time.Duration.ofMinutes(30));
+        Reply limited = get("/admin/leads/places?q=yapral", AGENT);
+        assertThat(code(limited)).isEqualTo("TOO_MANY_REQUESTS");
+    }
+
+    @Test
+    void aPlaceNameOurListLacksIsLookedUpOnTheMap() {
+        List<Map<String, Object>> found = items(get("/admin/leads/places?q=yapral", AGENT));
+        // Two Mapbox answers in the same pincode: offered once; the one without a pincode is skipped
+        assertThat(found).singleElement().satisfies(d -> assertThat(d).containsEntry("kind", "CITY")
+                .containsEntry("district", "Hyderabad").containsEntry("pincode", "500087")
+                .containsEntry("matched", "Yapral (500087)"));
+        assertThat(CALLS.get()).isEqualTo(1);
+        String month = LocalDate.now(INDIA).format(DateTimeFormatter.ofPattern("yyyy-MM"));
+        assertThat(jdbc.queryForObject("SELECT requests FROM mapbox_usage WHERE month = ?", Long.class, month))
+                .isEqualTo(1);
+        assertThat(items(get("/admin/leads/places?q=zzzq", AGENT))).isEmpty();
+        assertThat(code(get("/admin/leads/places?q=ya", AGENT))).isEqualTo("VALIDATION_FAILED");
+        assertThat(code(get("/admin/leads/places?q=500087", AGENT))).isEqualTo("VALIDATION_FAILED");
+        assertThat(get("/admin/leads/places?q=yapral", SUPPORT).status()).isEqualTo(404);
+        // Capped: the month's cap counts look-ups too
+        jdbc.update("UPDATE mapbox_usage SET requests = 100000 WHERE month = ?", month);
+        assertThat(code(get("/admin/leads/places?q=yapral", AGENT))).isEqualTo("MAPBOX_CAP_REACHED");
+    }
+
+    @Test
+    void aCityListsTheAreasOfAllItsDistricts() {
+        Reply r = get("/admin/leads/areas?kind=CITY&district=Hyderabad&state=Telangana", AGENT);
+        assertThat(r.status()).isEqualTo(200);
+        assertThat(map(r.body())).containsEntry("kind", "CITY")
+                .containsEntry("districts", List.of("Hyderabad", "Medchal Malkajgiri", "Ranga Reddy", "Sangareddy"));
+        List<Map<String, Object>> areas = list(r.body(), "areas");
+        assertThat(areas).hasSize(169);
+        assertThat(areas.getFirst()).containsEntry("district", "Hyderabad");
+        assertThat(areas).anySatisfy(a -> assertThat(a).containsEntry("pincode", "500087")
+                .containsEntry("district", "Medchal Malkajgiri"));
+        // Patancheru, Ameenpur, Tellapur: filed under Sangareddy, part of the city
+        assertThat(areas).anySatisfy(a -> assertThat(a).containsEntry("pincode", "502032")
+                .containsEntry("district", "Sangareddy"));
+        assertThat(areas).anySatisfy(a -> assertThat(a).containsEntry("pincode", PIN).containsEntry("mine", true));
+        assertThat(code(get("/admin/leads/areas?kind=TOWN&district=Hyderabad&state=Telangana", AGENT)))
+                .isEqualTo("VALIDATION_FAILED");
+        assertThat(code(get("/admin/leads/areas?kind=CITY&district=Saharsa&state=Bihar", AGENT)))
+                .isEqualTo("DISTRICT_NOT_FOUND");
+        assertThat(map(get("/admin/leads/funnel?kind=CITY&district=Hyderabad&state=Telangana", BOSS).body()))
+                .containsEntry("kind", "CITY").containsEntry("district", "Hyderabad");
     }
 
     @Test

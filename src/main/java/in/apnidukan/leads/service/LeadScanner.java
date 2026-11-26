@@ -156,6 +156,28 @@ public class LeadScanner {
         }
     }
 
+    /**
+     * Mapbox's localities for what was typed (see {@link MapboxSearch#localities}): one request, counted against the
+     * month's cap like a scan's, waiting at most 5 s for a turn. MAPBOX_OFF, MAPBOX_CAP_REACHED, MAPBOX_REFUSED,
+     * MAPBOX_UNAVAILABLE (also when no turn came: retry in a few seconds).
+     */
+    public List<MapboxSearch.Locality> localities(String typed) {
+        if (mapbox == null) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "MAPBOX_OFF",
+                    "Searching the map isn't set up yet (MAPBOX_TOKEN).");
+        }
+        Run r = new Run(month(), System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
+        Optional<List<MapboxSearch.Locality>> found = r.call(() -> mapbox.localities(typed));
+        if (r.capReached.get()) {
+            throw capReached();
+        }
+        if (r.refused.get()) {
+            throw refused();
+        }
+        return found.orElseThrow(() -> new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "MAPBOX_UNAVAILABLE",
+                "The map isn't answering right now. Try again in a moment.").retryAfter(5));
+    }
+
     private Found run(Pin pin) {
         String month = month();
         long deadline = System.nanoTime() + SCAN_TIMEOUT.toNanos();
@@ -188,12 +210,12 @@ public class LeadScanner {
             level = next;
         }
         if (r.refused.get()) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "MAPBOX_REFUSED",
-                    "Mapbox refused the access token. Check MAPBOX_TOKEN.");
+            throw refused();
         }
         List<Poi> kept = new ArrayList<>();
         for (Poi p : found.values()) {
-            if ((p.postcode() == null || p.postcode().equals(pin.pincode())) && PoiKinds.relevant(p)) {
+            boolean inArea = p.postcode() == null ? !r.strict.get() : p.postcode().equals(pin.pincode());
+            if (inArea && PoiKinds.relevant(p)) {
                 kept.add(p);
             }
         }
@@ -205,8 +227,7 @@ public class LeadScanner {
     private Box area(Pin pin, Run r) {
         Optional<MapboxSearch.Postcode> postcode = r.call(() -> mapbox.postcode(pin.pincode())).flatMap(o -> o);
         if (r.refused.get()) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "MAPBOX_REFUSED",
-                    "Mapbox refused the access token. Check MAPBOX_TOKEN.");
+            throw refused();
         }
         if (r.capReached.get()) {
             throw capReached();
@@ -222,6 +243,8 @@ public class LeadScanner {
             return Box.around(p.latitude(), p.longitude(), usable ? 8000 : Math.max(2000, pin.radiusM()));
         }
         if (pin.latitude() != null) {
+            // India Post's point may be wrong (doubtful): then only businesses that say this pincode are kept
+            r.strict.set(pin.doubtful());
             return Box.around(pin.latitude(), pin.longitude(), pin.radiusM());
         }
         if (r.failed.get() > 0) {
@@ -281,6 +304,11 @@ public class LeadScanner {
         }
     }
 
+    private static ApiException refused() {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "MAPBOX_REFUSED",
+                "Mapbox refused the access token. Check MAPBOX_TOKEN.");
+    }
+
     private ApiException capReached() {
         return new ApiException(HttpStatus.TOO_MANY_REQUESTS, "MAPBOX_CAP_REACHED",
                 "This month's map searches are used up (" + monthlyCap + "). Raise MAPBOX_MONTHLY_CAP or wait for next month.");
@@ -299,6 +327,8 @@ public class LeadScanner {
         final AtomicBoolean refused = new AtomicBoolean();
         final AtomicBoolean timedOut = new AtomicBoolean();
         final AtomicBoolean truncated = new AtomicBoolean();
+        /** Searched around a doubtful India Post point: keep only businesses that give this pincode. */
+        final AtomicBoolean strict = new AtomicBoolean();
         final long deadline;
 
         Run(String month, long deadline) {
