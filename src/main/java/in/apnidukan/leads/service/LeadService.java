@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -109,10 +110,13 @@ public class LeadService {
      * @param phone     10 digits when it is an Indian mobile number, else as Mapbox gives it; null if none
      * @param lead      the team's work on it, null if none yet
      * @param clozest   the Clozest salon it is, null if it isn't on Clozest
+     * @param matchKey  proof that {@code phone} is this business's own (sent back on a refresh; {@link LeadMatchKeys}),
+     *                  null without a mobile number
      */
     public record ShopView(String mapboxId, String name, String address, double latitude, double longitude,
                            String pincode, boolean onMapbox, String kind, boolean chain, int score, String priority,
-                           String phone, String website, HoursView hours, LeadView lead, ClozestView clozest) {
+                           String phone, String website, HoursView hours, LeadView lead, ClozestView clozest,
+                           String matchKey) {
     }
 
     /** A Clozest salon in the area that no business found on the map matched (so "On Clozest" lists every salon). */
@@ -130,12 +134,85 @@ public class LeadService {
      */
     public record ScanView(String pincode, String places, String district, String state, List<ShopView> shops,
                            List<SalonView> clozestOnly, int requests, boolean partial, boolean capReached,
-                           UsageView usage) {
+                           UsageView usage, Instant asOf) {
         public ScanView {
             shops = List.copyOf(shops);
             clozestOnly = List.copyOf(clozestOnly);
         }
     }
+
+    // ---- Keeping a searched area up to date (no map requests) -----------------------------------------------------
+
+    /**
+     * An area the page watches (a searched area, or the pincode of a business shown in one), and the {@code asOf} of
+     * the last scan, refresh or check that brought it up to date.
+     */
+    public record AreaSince(String pincode, Instant since) {
+    }
+
+    public record ChangesRequest(List<AreaSince> areas) {
+        public ChangesRequest {
+            // A copy that keeps nulls: a null in the list is refused as 400 areas, not a 500
+            areas = areas == null ? null : Collections.unmodifiableList(new ArrayList<>(areas));
+        }
+    }
+
+    /** An area where something changed after its {@code since}: the time of the last change there. */
+    public record ChangeView(String pincode, Instant changedAt) {
+    }
+
+    /**
+     * Which areas changed. {@code asOf}: the {@code since} to send next time for every area not listed (a little
+     * before now: a change being saved this moment is still found next time).
+     */
+    public record ChangesView(Instant asOf, List<ChangeView> areas) {
+        public ChangesView {
+            areas = List.copyOf(areas);
+        }
+    }
+
+    /**
+     * A business the page shows in the area (from its scan), to be matched against the Clozest salons again. Its
+     * {@code phone} counts only with the {@code matchKey} the scan gave for it.
+     */
+    public record SeenShop(String mapboxId, String name, Double latitude, Double longitude, String phone,
+                           String matchKey) {
+    }
+
+    public record RefreshRequest(List<SeenShop> shops) {
+        public RefreshRequest {
+            shops = shops == null ? null : Collections.unmodifiableList(new ArrayList<>(shops));
+        }
+    }
+
+    /** One business as it is now: the team's work on it and the Clozest salon it is (each null if none). */
+    public record ShopStatusView(String mapboxId, LeadView lead, ClozestView clozest) {
+    }
+
+    /**
+     * An area's leads and Clozest salons as they are now, for the businesses the page sent ({@code shops}, in the order
+     * sent), plus contacted leads there the page doesn't show yet ({@code saved}, as a scan lists them) and the salons no
+     * business matched ({@code clozestOnly}). {@code asOf}: the area's next {@code since}.
+     */
+    public record AreaStatusView(String pincode, List<ShopStatusView> shops, List<ShopView> saved,
+                                 List<SalonView> clozestOnly, Instant asOf) {
+        public AreaStatusView {
+            shops = List.copyOf(shops);
+            saved = List.copyOf(saved);
+            clozestOnly = List.copyOf(clozestOnly);
+        }
+    }
+
+    /**
+     * How far before now {@code asOf} is: a change stamped a while before it is committed (a save waiting for a lock,
+     * the matching job's batch) or by a server whose clock is a little behind is still found next time. A change in
+     * that window may be listed once more (one extra refresh).
+     */
+    static final Duration SETTLE = Duration.ofSeconds(30);
+    /** At most this many areas a check (more than all of Hyderabad's 169). */
+    static final int MAX_AREAS = 300;
+    /** At most this many businesses a refresh (far more than a scan of one area finds). */
+    static final int MAX_SEEN = 3000;
 
     public record EventView(Instant at, PersonView by, String field, String oldValue, String newValue) {
     }
@@ -180,22 +257,30 @@ public class LeadService {
     private final LeadScanner scanner;
     private final UserDirectory users;
     private final RateLimiter limits;
+    private final LeadMatchKeys keys;
     private final Clock clock;
     private final int scansPerHour;
     private final int lookupsPerHour;
+    private final int checksPerMinute;
+    private final int refreshesPerMinute;
 
     public LeadService(PincodeDirectory pincodes, LeadStore store, LeadScanner scanner, UserDirectory users,
-                       RateLimiter limits, Clock clock,
+                       RateLimiter limits, LeadMatchKeys keys, Clock clock,
                        @Value("${app.leads.scans-per-hour:60}") int scansPerHour,
-                       @Value("${app.leads.lookups-per-hour:30}") int lookupsPerHour) {
+                       @Value("${app.leads.lookups-per-hour:30}") int lookupsPerHour,
+                       @Value("${app.leads.checks-per-minute:6}") int checksPerMinute,
+                       @Value("${app.leads.refreshes-per-minute:60}") int refreshesPerMinute) {
         this.pincodes = pincodes;
         this.store = store;
         this.scanner = scanner;
         this.users = users;
         this.limits = limits;
+        this.keys = keys;
         this.clock = clock;
         this.scansPerHour = scansPerHour;
         this.lookupsPerHour = lookupsPerHour;
+        this.checksPerMinute = checksPerMinute;
+        this.refreshesPerMinute = refreshesPerMinute;
     }
 
     // ---- Districts and areas ---------------------------------------------------------------------------------------
@@ -320,24 +405,54 @@ public class LeadService {
             throw refused;
         }
 
+        Instant asOf = clock.instant().minus(SETTLE);
         List<Poi> pois = found.pois();
-        Map<String, Lead> leads = store.leads(pois.stream().map(Poi::mapboxId).toList());
-        List<Lead> saved = store.contactedIn(List.of(pin.pincode())).stream()
+        List<ClozestMatch.Candidate> seen = new ArrayList<>();
+        for (Poi p : pois) {
+            seen.add(new ClozestMatch.Candidate(p.mapboxId(), p.name(), p.latitude(), p.longitude(), p.phone()));
+        }
+        Joined j = join(pin.pincode(), seen, true);
+        Map<UUID, PersonView> people = people(j.leads().values());
+        boolean admin = role == TeamRole.SUPER_ADMIN;
+
+        List<ShopView> shops = new ArrayList<>();
+        for (Poi p : pois) {
+            shops.add(shop(p, j.leads().get(p.mapboxId()), j.matched().get(p.mapboxId()), people, admin,
+                    pin.pincode()));
+        }
+        shops.addAll(savedShops(j, people, admin));
+        shops.sort(Comparator.comparingInt(ShopView::score).reversed().thenComparing(ShopView::name));
+        return new ScanView(pin.pincode(), pin.places(), pin.district(), pin.state(), shops, clozestOnly(j, admin),
+                found.requests(), found.partial(), found.capReached(), usageView(), asOf);
+    }
+
+    /**
+     * An area's leads and salons joined to the businesses shown there. {@code leads}: the saved leads among them and
+     * the contacted leads of the area (as they are after linking); {@code saved}: those contacted leads that aren't
+     * among the businesses shown; {@code matched}: the salon each business or saved lead is.
+     */
+    private record Joined(Map<String, Lead> leads, List<Lead> saved, List<Salon> salons, Map<String, Salon> matched) {
+    }
+
+    /**
+     * Joins the area's leads and Clozest salons to the businesses shown ({@code seen}): a lead already tied to a salon
+     * keeps that salon, the rest are matched ({@link ClozestMatch}) against the salons still free. With {@code link},
+     * contacted leads matched for the first time are tied to their salon (only from Mapbox's own details: a scan).
+     */
+    private Joined join(String pincode, List<ClozestMatch.Candidate> seen, boolean link) {
+        Map<String, Lead> leads = store.leads(seen.stream().map(ClozestMatch.Candidate::id).toList());
+        List<Lead> saved = store.contactedIn(List.of(pincode)).stream()
                 .filter(l -> !leads.containsKey(l.mapboxId()))
                 .toList();
-        List<Salon> salons = store.salonsIn(List.of(pin.pincode()));
+        List<Salon> salons = store.salonsIn(List.of(pincode));
 
-        List<ClozestMatch.Candidate> candidates = new ArrayList<>();
-        for (Poi p : pois) {
-            candidates.add(new ClozestMatch.Candidate(p.mapboxId(), p.name(), p.latitude(), p.longitude(), p.phone()));
-        }
+        List<ClozestMatch.Candidate> candidates = new ArrayList<>(seen);
         for (Lead l : saved) {
             if (l.latitude() != null) {
                 candidates.add(new ClozestMatch.Candidate(l.mapboxId(), l.name(), l.latitude(), l.longitude(),
                         l.phone()));
             }
         }
-        // A lead already tied to a salon keeps that salon; the rest are matched against the salons still free
         Map<UUID, Salon> byId = new HashMap<>();
         salons.forEach(s -> byId.put(s.shopId(), s));
         Map<String, Salon> matched = new HashMap<>();
@@ -351,28 +466,146 @@ public class LeadService {
         List<Salon> free = salons.stream().filter(s -> !tied.contains(s.shopId())).toList();
         List<ClozestMatch.Candidate> open = candidates.stream().filter(c -> !matched.containsKey(c.id())).toList();
         ClozestMatch.match(open, free).forEach(matched::put);
-        linkContacted(concat(leads.values(), saved), matched);
-
-        Map<String, Lead> fresh = refreshed(leads, saved, matched);
-        Map<UUID, PersonView> people = people(fresh.values());
-        boolean admin = role == TeamRole.SUPER_ADMIN;
-
-        List<ShopView> shops = new ArrayList<>();
-        for (Poi p : pois) {
-            shops.add(shop(p, fresh.get(p.mapboxId()), matched.get(p.mapboxId()), people, admin, pin.pincode()));
+        Map<String, Lead> all;
+        if (link) {
+            linkContacted(concat(leads.values(), saved), matched);
+            all = refreshed(leads, saved, matched);
+        } else {
+            all = new LinkedHashMap<>(leads);
+            saved.forEach(l -> all.put(l.mapboxId(), l));
         }
-        for (Lead l : saved) {
-            shops.add(savedShop(fresh.getOrDefault(l.mapboxId(), l), matched.get(l.mapboxId()), people, admin));
+        return new Joined(all, saved, salons, matched);
+    }
+
+    /** The contacted leads Mapbox didn't list, shown from their saved details. */
+    private List<ShopView> savedShops(Joined j, Map<UUID, PersonView> people, boolean admin) {
+        List<ShopView> out = new ArrayList<>();
+        for (Lead l : j.saved()) {
+            out.add(savedShop(j.leads().getOrDefault(l.mapboxId(), l), j.matched().get(l.mapboxId()), people, admin));
         }
-        shops.sort(Comparator.comparingInt(ShopView::score).reversed().thenComparing(ShopView::name));
+        return out;
+    }
+
+    /** The area's Clozest salons no business matched (so "On Clozest" lists every salon). */
+    private static List<SalonView> clozestOnly(Joined j, boolean admin) {
         Set<UUID> shown = new HashSet<>();
-        matched.values().forEach(s -> shown.add(s.shopId()));
-        List<SalonView> clozestOnly = salons.stream()
+        j.matched().values().forEach(s -> shown.add(s.shopId()));
+        return j.salons().stream()
                 .filter(s -> !shown.contains(s.shopId()))
                 .map(s -> new SalonView(admin ? s.shopId() : null, s.name(), s.status(), s.latitude(), s.longitude()))
                 .toList();
-        return new ScanView(pin.pincode(), pin.places(), pin.district(), pin.state(), shops, clozestOnly,
-                found.requests(), found.partial(), found.capReached(), usageView());
+    }
+
+    // ---- Keeping a searched area up to date ------------------------------------------------------------------------
+
+    /**
+     * Which of the page's areas changed since the page last brought each up to date (a lead saved or signed up, a
+     * Clozest salon registered or changed status): the page then refreshes those ({@link #refresh}). Our own database
+     * only: no map requests. At most {@link #MAX_AREAS} areas, each a pincode with a time (400 areas); a pincode no
+     * longer in the list (the list was updated) is just never listed, so one old area can't stop the others; a time in
+     * the future counts as now. At most app.leads.checks-per-minute (6) per person (429 TOO_MANY_REQUESTS; the page
+     * checks every 30 seconds and just skips one); if Redis doesn't answer, the check goes ahead (it costs nothing).
+     * Not in a transaction: one query, and a slow Redis never holds a database connection.
+     */
+    public ChangesView changes(UUID caller, ChangesRequest body) {
+        requireTeam(caller);
+        List<AreaSince> areas = body == null ? null : body.areas();
+        if (areas == null || areas.size() > MAX_AREAS) {
+            throw invalid("areas");
+        }
+        Instant now = clock.instant();
+        Map<String, Instant> since = new LinkedHashMap<>();
+        for (AreaSince a : areas) {
+            String pin = a == null ? null : text(a.pincode());
+            if (pin == null || pin.length() > 6 || a.since() == null) {
+                throw invalid("areas");
+            }
+            if (pincodes.pin(pin).isPresent()) {
+                Instant at = a.since().isAfter(now) ? now : a.since();
+                since.merge(pin, at, (x, y) -> x.isBefore(y) ? x : y);
+            }
+        }
+        Instant asOf = now.minus(SETTLE);
+        if (since.isEmpty()) {
+            return new ChangesView(asOf, List.of());
+        }
+        requireWithin("lead-checks:" + caller, checksPerMinute, "Checking for changes too often. It goes on shortly.");
+        List<ChangeView> changed = store.changedSince(since).entrySet().stream()
+                .map(e -> new ChangeView(e.getKey(), e.getValue()))
+                .toList();
+        return new ChangesView(asOf, changed);
+    }
+
+    /**
+     * One area's leads and Clozest salons as they are now, for the businesses the page shows there ({@code shops},
+     * from its scan): matched against the salons as a scan matches them, from our own database only (no map requests).
+     * The details sent come from the page, so nothing is saved: a lead is tied to the salon it became only by a scan
+     * or the matching job ({@link LeadMatchJob}). A phone counts only as the lead's saved phone or with the scan's
+     * {@code matchKey} for it ({@link LeadMatchKeys}): made-up numbers never match. 404 AREA_NOT_FOUND; 400 shops
+     * (more than {@link #MAX_SEEN}, or a business without an id or with one over 200 characters, a name over 300, or
+     * half a point or one outside India). At most app.leads.refreshes-per-minute (60) per person (429
+     * TOO_MANY_REQUESTS); if Redis doesn't answer, it goes ahead. Not in a transaction (read-only, like a scan's
+     * reads), so a slow Redis never holds a database connection.
+     */
+    public AreaStatusView refresh(UUID caller, String pincode, RefreshRequest body) {
+        TeamRole role = requireTeam(caller);
+        Pin pin = pincodes.pin(text(pincode)).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,
+                "AREA_NOT_FOUND", "That pincode isn't in the list."));
+        List<SeenShop> sent = body == null ? null : body.shops();
+        if (sent == null || sent.size() > MAX_SEEN) {
+            throw invalid("shops");
+        }
+        Map<String, SeenShop> seen = new LinkedHashMap<>();
+        for (SeenShop s : sent) {
+            String id = s == null ? null : text(s.mapboxId());
+            if (id == null || id.length() > 200 || (s.name() != null && s.name().length() > 300)
+                    || (s.latitude() == null) != (s.longitude() == null)
+                    || (s.latitude() != null && (s.latitude() < 6 || s.latitude() > 37.6 || s.longitude() < 68
+                    || s.longitude() > 97.5))) {
+                throw invalid("shops");
+            }
+            seen.putIfAbsent(id, s);
+        }
+        requireWithin("lead-refreshes:" + caller, refreshesPerMinute,
+                "Too many areas brought up to date this minute. It goes on shortly.");
+        Instant asOf = clock.instant().minus(SETTLE);
+        Map<String, Lead> known = store.leads(seen.keySet());
+        List<ClozestMatch.Candidate> candidates = new ArrayList<>();
+        seen.forEach((id, s) -> {
+            Lead l = known.get(id);
+            String sent10 = ClozestMatch.phone10(s.phone());
+            // The lead's saved phone, else the map's own phone for it (with its key); never a made-up number
+            String phone = l != null && l.phone() != null ? l.phone()
+                    : sent10 != null && keys.valid(id, sent10, s.matchKey()) ? sent10 : null;
+            // Without a point only the phone can match (a point far from any salon)
+            candidates.add(new ClozestMatch.Candidate(id, s.name() == null ? "" : s.name(),
+                    s.latitude() == null ? 0 : s.latitude(), s.longitude() == null ? 0 : s.longitude(), phone));
+        });
+        Joined j = join(pin.pincode(), candidates, false);
+        Map<UUID, PersonView> people = people(j.leads().values());
+        boolean admin = role == TeamRole.SUPER_ADMIN;
+        List<ShopStatusView> shops = new ArrayList<>();
+        for (String id : seen.keySet()) {
+            Lead l = j.leads().get(id);
+            shops.add(new ShopStatusView(id, l == null ? null : leadView(l, people), clozest(j.matched().get(id), admin)));
+        }
+        return new AreaStatusView(pin.pincode(), shops, savedShops(j, people, admin), clozestOnly(j, admin), asOf);
+    }
+
+    /**
+     * 429 TOO_MANY_REQUESTS (with Retry-After) past {@code max} in a minute for this key. These read only our own
+     * database, so if Redis doesn't answer they go ahead.
+     */
+    private void requireWithin(String key, int max, String message) {
+        try {
+            if (!limits.tryHit(key, max, Duration.ofMinutes(1))) {
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS", message)
+                        .retryAfter(limits.secondsLeft(key));
+            }
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer the count for {} ({}); letting it through", key.substring(0, key.indexOf(':')),
+                    redisDown.getClass().getSimpleName());
+        }
     }
 
     /** Contacted leads matched to a salon for the first time are tied to it (once; LeadStore.link has the rules). */
@@ -409,7 +642,7 @@ public class LeadService {
                 p.postcode() == null ? pincode : p.postcode(), true, PoiKinds.kind(p).name(), PoiKinds.chain(p),
                 score, priority(score), phone != null ? phone : p.phone(), p.website(),
                 h == null ? null : new HoursView(h.days(), h.opens(), h.closes(), h.late()),
-                lead == null ? null : leadView(lead, people), clozest(salon, admin));
+                lead == null ? null : leadView(lead, people), clozest(salon, admin), keys.of(p.mapboxId(), phone));
     }
 
     private ShopView savedShop(Lead l, Salon salon, Map<UUID, PersonView> people, boolean admin) {
@@ -419,7 +652,7 @@ public class LeadService {
         int score = PoiKinds.score(p);
         return new ShopView(l.mapboxId(), p.name(), null, p.latitude(), p.longitude(), l.pincode(), false,
                 PoiKinds.kind(p).name(), PoiKinds.chain(p), score, priority(score), l.phone(), null, null,
-                leadView(l, people), clozest(salon, admin));
+                leadView(l, people), clozest(salon, admin), keys.of(l.mapboxId(), l.phone()));
     }
 
     private static ClozestView clozest(Salon s, boolean admin) {
