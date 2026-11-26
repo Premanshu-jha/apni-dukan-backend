@@ -1,0 +1,70 @@
+city,state,other_names,districts
+Hyderabad,Telangana,Secunderabad;Cyberabad;Greater Hyderabad;GHMC;HMDA,Hyderabad/Telangana;Medchal Malkajgiri/Telangana;Ranga Reddy/Telangana;Sangareddy/Telangana
+Bengaluru,Karnataka,Bangalore;Bengaluru City,Bengaluru Urban/Karnataka;Bengaluru Rural/Karnataka
+Delhi,Delhi,New Delhi;Dilli,Central/Delhi;East/Delhi;New Delhi/Delhi;North/Delhi;North East/Delhi;North West/Delhi;Shahdara/Delhi;South/Delhi;South East/Delhi;South West/Delhi;West/Delhi
+Delhi NCR,Delhi,NCR;National Capital Region,Central/Delhi;East/Delhi;New Delhi/Delhi;North/Delhi;North East/Delhi;North West/Delhi;Shahdara/Delhi;South/Delhi;South East/Delhi;South West/Delhi;West/Delhi;Gurugram/Haryana;Faridabad/Haryana;Gautam Buddha Nagar/Uttar Pradesh;Ghaziabad/Uttar Pradesh
+Gurugram,Haryana,Gurgaon,Gurugram/Haryana
+Noida,Uttar Pradesh,Greater Noida;Gautam Buddh Nagar,Gautam Buddha Nagar/Uttar Pradesh
+Mumbai,Maharashtra,Bombay;Navi Mumbai;Thane City;Mumbai Metropolitan Region;MMR,Mumbai/Maharashtra;Mumbai Suburban/Maharashtra;Thane/Maharashtra;Palghar/Maharashtra;Raigad/Maharashtra
+Pune,Maharashtra,Poona;Pimpri Chinchwad;Pimpri-Chinchwad,Pune/Maharashtra
+Chennai,Tamil Nadu,Madras,Chennai/Tamil Nadu;Chengalpattu/Tamil Nadu;Kanchipuram/Tamil Nadu;Thiruvallur/Tamil Nadu
+Kolkata,West Bengal,Calcutta;Howrah City;Salt Lake;Bidhannagar,Kolkata/West Bengal;Howrah/West Bengal;24 Paraganas North/West Bengal;24 Paraganas South/West Bengal;Hooghly/West Bengal
+Ahmedabad,Gujarat,Amdavad;Ahmadabad;Gandhinagar City,Ahmadabad/Gujarat;Gandhinagar/Gujarat
+Surat,Gujarat,,Surat/Gujarat
+Vadodara,Gujarat,Baroda,Vadodara/Gujarat
+Rajkot,Gujarat,,Rajkot/Gujarat
+Jaipur,Rajasthan,Pink City,Jaipur/Rajasthan
+Lucknow,Uttar Pradesh,,Lucknow/Uttar Pradesh
+Kanpur,Uttar Pradesh,Cawnpore,Kanpur Nagar/Uttar Pradesh;Kanpur Dehat/Uttar Pradesh
+Varanasi,Uttar Pradesh,Banaras;Benares;Kashi,Varanasi/Uttar Pradesh
+Prayagraj,Uttar Pradesh,Allahabad,Prayagraj/Uttar Pradesh
+Agra,Uttar Pradesh,,Agra/Uttar Pradesh
+Meerut,Uttar Pradesh,,Meerut/Uttar Pradesh
+Ghaziabad,Uttar Pradesh,,Ghaziabad/Uttar Pradesh
+Faridabad,Haryana,,Faridabad/Haryana
+Chandigarh Tricity,Chandigarh,Chandigarh;Tricity;Mohali;Panchkula;SAS Nagar,Chandigarh/Chandigarh;S.A.S Nagar/Punjab;Panchkula/Haryana
+Ludhiana,Punjab,,Ludhiana/Punjab
+Amritsar,Punjab,,Amritsar/Punjab
+Jalandhar,Punjab,Jullundur,Jalandhar/Punjab
+Dehradun,Uttarakhand,Dehra Dun,Dehradun/Uttarakhand
+Jammu,Jammu and Kashmir,,Jammu/Jammu and Kashmir
+Srinagar,Jammu and Kashmir,,Srinagar/Jammu and Kashmir
+Nagpur,Maharashtra,,Nagpur/Maharashtra
+Nashik,Maharashtra,Nasik,Nashik/Maharashtra
+Aurangabad,Maharashtra,Chhatrapati Sambhajinagar;Sambhajinagar,Aurangabad/Maharashtra
+Kolhapur,Maharashtra,,Kolhapur/Maharashtra
+Solapur,Maharashtra,Sholapur,Solapur/Maharashtra
+Indore,Madhya Pradesh,,Indore/Madhya Pradesh
+Bhopal,Madhya Pradesh,,Bhopal/Madhya Pradesh
+Jabalpur,Madhya Pradesh,,Jabalpur/Madhya Pradesh
+Gwalior,Madhya Pradesh,,Gwalior/Madhya Pradesh
+Raipur,Chhattisgarh,Bhilai;Durg-Bhilai,Raipur/Chhattisgarh;Durg/Chhattisgarh
+Patna,Bihar,,Patna/Bihar
+Ranchi,Jharkhand,,Ranchi/Jharkhand
+Jamshedpur,Jharkhand,Tatanagar,East Singhbum/Jharkhand
+Dhanbad,Jharkhand,,Dhanbad/Jharkhand
+Bhubaneswar,Odisha,Bhubaneshwar;Twin City,Khordha/Odisha;Cuttack/Odisha
+Guwahati,Assam,Gauhati,Kamrup Metro/Assam;Kamrup/Assam
+Visakhapatnam,Andhra Pradesh,Vizag;Vishakhapatnam;Waltair,Visakhapatanam/Andhra Pradesh
+Vijayawada,Andhra Pradesh,Bezawada,Krishna/Andhra Pradesh
+Guntur,Andhra Pradesh,Amaravati,Guntur/Andhra Pradesh
+Nellore,Andhra Pradesh,,Spsr Nellore/Andhra Pradesh
+Kadapa,Andhra Pradesh,Cuddapah;YSR Kadapa,Y.S.R./Andhra Pradesh
+Tirupati,Andhra Pradesh,Tirupathi,Chittoor/Andhra Pradesh
+Warangal,Telangana,Hanamkonda;Kazipet,Warangal Urban/Telangana;Warangal Rural/Telangana
+Kochi,Kerala,Cochin;Ernakulam City,Ernakulam/Kerala
+Thiruvananthapuram,Kerala,Trivandrum,Thiruvananthapuram/Kerala
+Kozhikode,Kerala,Calicut,Kozhikode/Kerala
+Thrissur,Kerala,Trichur,Thrissur/Kerala
+Coimbatore,Tamil Nadu,Kovai,Coimbatore/Tamil Nadu
+Madurai,Tamil Nadu,,Madurai/Tamil Nadu
+Tiruchirappalli,Tamil Nadu,Trichy;Tiruchi,Tiruchirappalli/Tamil Nadu
+Salem,Tamil Nadu,,Salem/Tamil Nadu
+Mysuru,Karnataka,Mysore,Mysuru/Karnataka
+Mangaluru,Karnataka,Mangalore,Dakshina Kannada/Karnataka
+Hubballi-Dharwad,Karnataka,Hubli;Hubballi;Dharwad City,Dharwad/Karnataka
+Belagavi,Karnataka,Belgaum,Belagavi/Karnataka
+Kalaburagi,Karnataka,Gulbarga,Kalaburagi/Karnataka
+Goa,Goa,Panaji;Panjim;Margao;Vasco da Gama,North Goa/Goa;South Goa/Goa
+Puducherry,Puducherry,Pondicherry;Pondy,Pondicherry/Puducherry
+Asansol,West Bengal,Durgapur,Paschim Bardhaman/West Bengal
