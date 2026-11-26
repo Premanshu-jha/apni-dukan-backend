@@ -59,7 +59,16 @@ public class LeadService {
     public record PersonView(UUID id, String name) {
     }
 
-    public record DistrictView(String district, String state, int pincodes, String matched) {
+    /**
+     * A city or district the search found. {@code district} is its name (a city's too: "Hyderabad");
+     * {@code districts}: a city's districts; {@code matched}: what matched when not its name ("Bangalore",
+     * "500087 · JJ Nagar Colony", "Yapral (500087)"); {@code pincode}: the area to tick when it's picked.
+     */
+    public record DistrictView(PincodeDirectory.Kind kind, String district, String state, int pincodes,
+                               List<String> districts, String matched, String pincode) {
+        public DistrictView {
+            districts = List.copyOf(districts);
+        }
     }
 
     /**
@@ -67,12 +76,14 @@ public class LeadService {
      * area without one may still be scannable: Mapbox may know it). The rest are counts of saved leads and of Clozest
      * salons there.
      */
-    public record AreaView(String pincode, String places, boolean mine, boolean onMap, int contacted, int interested,
-                           int signedUp, int onClozest) {
+    public record AreaView(String pincode, String places, String district, boolean mine, boolean onMap, int contacted,
+                           int interested, int signedUp, int onClozest) {
     }
 
-    public record AreasView(String district, String state, List<AreaView> areas) {
+    public record AreasView(PincodeDirectory.Kind kind, String district, String state, List<String> districts,
+                            List<AreaView> areas) {
         public AreasView {
+            districts = List.copyOf(districts);
             areas = List.copyOf(areas);
         }
     }
@@ -145,7 +156,8 @@ public class LeadService {
     public record FunnelPerson(PersonView person, int assigned, int contacted, int interested, int signedUp) {
     }
 
-    public record FunnelView(String district, String state, List<FunnelArea> areas, List<FunnelPerson> people) {
+    public record FunnelView(PincodeDirectory.Kind kind, String district, String state, List<FunnelArea> areas,
+                             List<FunnelPerson> people) {
         public FunnelView {
             areas = List.copyOf(areas);
             people = List.copyOf(people);
@@ -170,10 +182,12 @@ public class LeadService {
     private final RateLimiter limits;
     private final Clock clock;
     private final int scansPerHour;
+    private final int lookupsPerHour;
 
     public LeadService(PincodeDirectory pincodes, LeadStore store, LeadScanner scanner, UserDirectory users,
                        RateLimiter limits, Clock clock,
-                       @Value("${app.leads.scans-per-hour:60}") int scansPerHour) {
+                       @Value("${app.leads.scans-per-hour:60}") int scansPerHour,
+                       @Value("${app.leads.lookups-per-hour:30}") int lookupsPerHour) {
         this.pincodes = pincodes;
         this.store = store;
         this.scanner = scanner;
@@ -181,39 +195,106 @@ public class LeadService {
         this.limits = limits;
         this.clock = clock;
         this.scansPerHour = scansPerHour;
+        this.lookupsPerHour = lookupsPerHour;
     }
 
     // ---- Districts and areas ---------------------------------------------------------------------------------------
 
-    /** Districts for what was typed (2 to 60 characters; shorter answers an empty list), at most 15. */
-    public List<DistrictView> districts(UUID caller, String typed) {
+    /**
+     * Cities and districts for what was typed (2 to 60 characters; shorter answers an empty list), at most 15: by
+     * name, another name, a pincode or a post office (see {@link PincodeDirectory#search}). Free: our own list.
+     */
+    public List<DistrictView> districts(UUID caller, String typed, boolean cities) {
         requireTeam(caller);
         if (typed == null || typed.strip().length() > 60) {
             throw invalid("q");
         }
-        return pincodes.search(typed, 15).stream()
-                .map(h -> new DistrictView(h.district(), h.state(), h.pincodes(), h.matched()))
-                .toList();
+        return pincodes.search(typed, 15, cities).stream().map(LeadService::view).toList();
     }
 
-    /** A district's areas, in pincode order, with each area's counts. 404 DISTRICT_NOT_FOUND. */
-    @Transactional(readOnly = true)
-    public AreasView areas(UUID caller, String district, String state) {
+    /**
+     * What people call a place ("Yapral", "HITEC City"), when our own list has no match: Mapbox's localities for it
+     * (one map request, counted against the month's cap), each offered as the city or district its pincode is in, with
+     * that area to tick. 3 to 60 characters with a letter (400 q). At most app.leads.lookups-per-hour (30) per person (429
+     * TOO_MANY_REQUESTS); the scanner's MAPBOX_* answers. Nothing Mapbox answers is kept.
+     */
+    public List<DistrictView> places(UUID caller, String typed) {
         requireTeam(caller);
-        PincodeDirectory.District d = pincodes.district(text(district), text(state))
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "DISTRICT_NOT_FOUND",
-                        "That district isn't in the list."));
+        String q = typed == null ? "" : typed.strip();
+        if (q.length() < 3 || q.length() > 60 || q.chars().noneMatch(Character::isLetter)) {
+            throw invalid("q");
+        }
+        String key = "lead-lookups:" + caller;
+        try {
+            if (!limits.tryHit(key, lookupsPerHour, Duration.ofHours(1))) {
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS",
+                        "Too many place look-ups this hour. Wait a while and try again.")
+                        .retryAfter(limits.secondsLeft(key));
+            }
+        } catch (DataAccessException redisDown) {
+            log.warn("Redis didn't answer the look-up count ({}); letting it through",
+                    redisDown.getClass().getSimpleName());
+        }
+        List<MapboxSearch.Locality> found;
+        try {
+            found = scanner.localities(q);
+        } catch (ApiException refused) {
+            // Not looked up (map off, cap, busy): it doesn't use the hourly allowance
+            try {
+                limits.giveBack(key);
+            } catch (DataAccessException redisDown) {
+                log.warn("Redis didn't take the look-up back ({})", redisDown.getClass().getSimpleName());
+            }
+            throw refused;
+        }
+        Map<String, DistrictView> out = new LinkedHashMap<>();
+        for (MapboxSearch.Locality l : found) {
+            pincodes.pin(l.pincode()).ifPresent(pin -> pincodes.placeOf(pin).ifPresent(place ->
+                    out.putIfAbsent(pin.pincode(), view(new PincodeDirectory.Hit(place,
+                            l.name() + " (" + pin.pincode() + ")", pin.pincode())))));
+        }
+        return List.copyOf(out.values());
+    }
+
+    private static DistrictView view(PincodeDirectory.Hit h) {
+        PincodeDirectory.Place p = h.place();
+        return new DistrictView(p.kind(), p.name(), p.state(), p.pins().size(), p.districts(), h.matched(),
+                h.pincode());
+    }
+
+    /**
+     * A city's or district's areas with each area's counts: a district's in pincode order; a city's district by
+     * district, its own first. 404 DISTRICT_NOT_FOUND.
+     */
+    @Transactional(readOnly = true)
+    public AreasView areas(UUID caller, String kind, String district, String state) {
+        requireTeam(caller);
+        PincodeDirectory.Place d = place(kind, district, state);
         Set<String> mine = new HashSet<>(store.coveredBy(caller));
         List<String> codes = d.pins().stream().map(Pin::pincode).toList();
         Map<String, LeadStore.AreaCount> counts = store.areaCounts(codes);
         List<AreaView> areas = new ArrayList<>();
         for (Pin p : d.pins()) {
             LeadStore.AreaCount c = counts.get(p.pincode());
-            areas.add(new AreaView(p.pincode(), p.places(), mine.contains(p.pincode()), p.latitude() != null,
-                    c == null ? 0 : c.contacted(), c == null ? 0 : c.interested(), c == null ? 0 : c.signedUp(),
-                    c == null ? 0 : c.salons()));
+            areas.add(new AreaView(p.pincode(), p.places(), p.district(), mine.contains(p.pincode()),
+                    p.latitude() != null, c == null ? 0 : c.contacted(), c == null ? 0 : c.interested(),
+                    c == null ? 0 : c.signedUp(), c == null ? 0 : c.salons()));
         }
-        return new AreasView(d.name(), d.state(), areas);
+        return new AreasView(d.kind(), d.name(), d.state(), d.districts(), areas);
+    }
+
+    /** A city or district (kind CITY or DISTRICT, the default): 400 kind for anything else, 404 DISTRICT_NOT_FOUND. */
+    private PincodeDirectory.Place place(String kind, String name, String state) {
+        PincodeDirectory.Kind k;
+        try {
+            k = kind == null || kind.isBlank() ? PincodeDirectory.Kind.DISTRICT
+                    : PincodeDirectory.Kind.valueOf(kind.strip());
+        } catch (IllegalArgumentException e) {
+            throw invalid("kind");
+        }
+        return pincodes.place(k, text(name), text(state))
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "DISTRICT_NOT_FOUND",
+                        "That city or district isn't in the list."));
     }
 
     // ---- Scanning --------------------------------------------------------------------------------------------------
@@ -571,13 +652,11 @@ public class LeadService {
 
     /** A district's funnel per area and per person (super admins only: 403 SUPER_ADMIN_ONLY). */
     @Transactional(readOnly = true)
-    public FunnelView funnel(UUID caller, String district, String state) {
+    public FunnelView funnel(UUID caller, String kind, String district, String state) {
         if (requireTeam(caller) != TeamRole.SUPER_ADMIN) {
             throw superAdminOnly();
         }
-        PincodeDirectory.District d = pincodes.district(text(district), text(state))
-                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "DISTRICT_NOT_FOUND",
-                        "That district isn't in the list."));
+        PincodeDirectory.Place d = place(kind, district, state);
         List<String> codes = d.pins().stream().map(Pin::pincode).toList();
         Map<String, String> places = new HashMap<>();
         d.pins().forEach(p -> places.put(p.pincode(), p.places()));
@@ -591,7 +670,7 @@ public class LeadService {
                 .map(r -> new FunnelPerson(names.getOrDefault(r.userId(), new PersonView(r.userId(), null)),
                         r.assigned(), r.contacted(), r.interested(), r.signedUp()))
                 .toList();
-        return new FunnelView(d.name(), d.state(), areas, people);
+        return new FunnelView(d.kind(), d.name(), d.state(), areas, people);
     }
 
     /** This month's Mapbox requests and the cap (anyone on the field team: the scan shows it too). */

@@ -39,17 +39,28 @@ public class AdminLeadsController {
         this.currentUser = currentUser;
     }
 
-    /** Districts for what was typed: {@code /districts?q=kuk}. */
+    /**
+     * Cities and districts for what was typed: {@code /districts?q=kuk&cities=true}, {@code ?q=500087&cities=true}.
+     * Free (our own list). Without {@code cities=true}: districts only, as the admin website before cities expects.
+     */
     @GetMapping("/districts")
-    public List<DistrictView> districts(@RequestParam(defaultValue = "") String q) {
-        return leads.districts(caller(), q);
+    public List<DistrictView> districts(@RequestParam(defaultValue = "") String q,
+                                        @RequestParam(defaultValue = "false") boolean cities) {
+        return leads.districts(caller(), q, cities);
     }
 
-    /** A district's areas: {@code /areas?district=Medchal Malkajgiri&state=Telangana}. */
+    /** What people call a place, looked up on Mapbox: {@code /places?q=yapral}. One map request each. */
+    @GetMapping("/places")
+    public List<DistrictView> places(@RequestParam(defaultValue = "") String q) {
+        return leads.places(caller(), q);
+    }
+
+    /** A city's or district's areas: {@code /areas?kind=CITY&district=Hyderabad&state=Telangana}. */
     @GetMapping("/areas")
-    public AreasView areas(@RequestParam(required = false) String district,
+    public AreasView areas(@RequestParam(required = false) String kind,
+                           @RequestParam(required = false) String district,
                            @RequestParam(required = false) String state) {
-        return leads.areas(caller(), district, state);
+        return leads.areas(caller(), kind, district, state);
     }
 
     /** Searches one area live on the map. A POST: each scan makes paid Mapbox requests (never prefetched or cached). */
@@ -81,11 +92,12 @@ public class AdminLeadsController {
         return leads.mine(caller(), everyone);
     }
 
-    /** A district's funnel (super admins). */
+    /** A city's or district's funnel (super admins). */
     @GetMapping("/funnel")
-    public FunnelView funnel(@RequestParam(required = false) String district,
+    public FunnelView funnel(@RequestParam(required = false) String kind,
+                             @RequestParam(required = false) String district,
                              @RequestParam(required = false) String state) {
-        return leads.funnel(caller(), district, state);
+        return leads.funnel(caller(), kind, district, state);
     }
 
     @GetMapping("/usage")
